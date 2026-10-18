@@ -18,6 +18,8 @@ pub mod select;
 pub mod cli;
 #[cfg(feature = "history")]
 pub mod history;
+#[cfg(feature = "pg")]
+pub mod pg;
 
 pub use devkit_macros::test;
 pub use run::{Diagnostic, Failed, Nextest, Run, Stage, TestOutcome, TestStatus, Tree};

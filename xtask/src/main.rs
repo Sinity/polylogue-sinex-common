@@ -35,6 +35,7 @@ fn check(run: &mut Run) -> devkit::Result {
             "--locked",
             "--workspace",
             "--all-targets",
+            "--all-features",
             "--",
             "-D",
             "warnings",
@@ -43,7 +44,7 @@ fn check(run: &mut Run) -> devkit::Result {
     run.nextest(
         "test",
         &Nextest {
-            args: vec!["--workspace".into()],
+            args: vec!["--workspace".into(), "--all-features".into()],
             ..Nextest::default()
         },
     )

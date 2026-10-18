@@ -12,6 +12,9 @@ publish.workspace = true
 default = ["cli"]
 # The clap commands each project's xtask flattens into its own.
 cli = ["dep:clap", "history"]
+# PostgreSQL schema databases and per-test clones, through the PostgreSQL
+# client tools; links no database library.
+pg = []
 # The machine-wide SQLite history of runs, tests and diagnostics.
 history = ["dep:rusqlite", "dep:zstd"]
 

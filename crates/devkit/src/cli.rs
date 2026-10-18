@@ -12,6 +12,9 @@ use std::{
     process::{Command as Process, ExitCode},
 };
 
+#[cfg(feature = "pg")]
+pub mod db;
+
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
     /// Failing tests and compiler errors from this checkout's last run.

@@ -7,4 +7,4 @@ publish.workspace = true
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-devkit = { path = "../crates/devkit" }
+devkit = { path = "../crates/devkit", features = ["pg"] }
