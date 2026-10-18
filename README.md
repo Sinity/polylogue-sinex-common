@@ -30,3 +30,11 @@ store at `$XDG_STATE_HOME/devkit/history.db`:
 
 Passing tests keep no output and each diagnostic text is stored once, so the
 store stays small without deleting anything.
+
+With the `pg` feature, devkit also provides PostgreSQL for projects with
+compile-time-checked SQL. The server is the per-user service on the socket in
+`$XDG_RUNTIME_DIR/devkit/pg` (Sinnix's `devkit-pg`), or a throwaway cluster on
+tmpfs when it is not running. Each schema version, named by a hash of the
+schema sources, is built once into a template database and copied to the
+read-only database `DATABASE_URL` points at; every test clones the template.
+`xtask db ensure|url|psql|exec|drop-unused|ready` drives it.
