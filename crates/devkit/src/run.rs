@@ -19,6 +19,12 @@ impl fmt::Display for Failed {
     }
 }
 
+impl From<Failed> for String {
+    fn from(failed: Failed) -> Self {
+        failed.0
+    }
+}
+
 impl From<String> for Failed {
     fn from(message: String) -> Self {
         Self(message)
@@ -137,6 +143,9 @@ pub struct Nextest {
     pub tmpfs: bool,
     /// Extra environment for the build and the tests.
     pub env: Vec<(String, String)>,
+    /// Succeed when the arguments select no tests. By default that fails,
+    /// so a typo in a filter cannot pass silently.
+    pub allow_no_tests: bool,
 }
 
 /// One xtask invocation: its steps, test outcomes and diagnostics.
@@ -268,7 +277,7 @@ impl Run {
 
     /// Builds the tests (stage `<name> build`), then runs them under nextest
     /// (stage `<name>`), keeping each test's outcome. Every selected test runs:
-    /// there is no fail-fast, and selecting no tests is a failure.
+    /// there is no fail-fast, and selecting no tests fails unless allowed.
     pub fn nextest(&mut self, name: &str, options: &Nextest) -> Result {
         let temp = if options.tmpfs {
             Some(RunTemp::new(&self.project)?)
@@ -313,16 +322,16 @@ impl Run {
         )
         .map_err(|e| format!("{}: {e}", config.display()))?;
         let mut test = Command::new("cargo");
-        test.args([
-            "nextest",
-            "run",
-            "--no-fail-fast",
-            "--no-tests=fail",
-            "--tool-config-file",
-        ])
-        .arg(format!("devkit:{}", config.display()))
-        .args(&args)
-        .envs(env.iter().cloned());
+        test.args(["nextest", "run", "--no-fail-fast"])
+            .arg(if options.allow_no_tests {
+                "--no-tests=pass"
+            } else {
+                "--no-tests=fail"
+            })
+            .arg("--tool-config-file")
+            .arg(format!("devkit:{}", config.display()))
+            .args(&args)
+            .envs(env.iter().cloned());
         let result = self.step(name, |run| {
             test.current_dir(&run.root);
             status(&mut test)
