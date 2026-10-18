@@ -38,3 +38,9 @@ tmpfs when it is not running. Each schema version, named by a hash of the
 schema sources, is built once into a template database and copied to the
 read-only database `DATABASE_URL` points at; every test clones the template.
 `xtask db ensure|url|psql|exec|drop-unused|ready` drives it.
+
+With the `nats` feature, devkit starts a throwaway `nats-server` with
+JetStream on a free loopback port. A project's xtask starts one per test run
+and passes its URL through `DEVKIT_NATS_URL`; `devkit::nats::test_nats()`
+gives each test that server and a unique subject prefix, or a server of its
+own when run outside xtask.

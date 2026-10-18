@@ -15,6 +15,9 @@ cli = ["dep:clap", "history"]
 # PostgreSQL schema databases and per-test clones, through the PostgreSQL
 # client tools; links no database library.
 pg = []
+# A throwaway nats-server with JetStream per run, and a subject prefix per
+# test; links no NATS client.
+nats = []
 # The machine-wide SQLite history of runs, tests and diagnostics.
 history = ["dep:rusqlite", "dep:zstd"]
 
