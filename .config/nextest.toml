@@ -1,0 +1,5 @@
+[profile.default]
+# A test still running after two minutes is hung: report it at 30 s and
+# terminate it after four periods.
+slow-timeout = { period = "30s", terminate-after = 4 }
+fail-fast = false

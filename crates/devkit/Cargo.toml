@@ -1,0 +1,28 @@
+[package]
+name = "devkit"
+description = "Development commands shared by Polylogue and Sinex: test and check runs, their recorded history, changed-package selection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = ["cli"]
+# The clap commands each project's xtask flattens into its own.
+cli = ["dep:clap", "history"]
+# The machine-wide SQLite history of runs, tests and diagnostics.
+history = ["dep:rusqlite", "dep:zstd"]
+
+[dependencies]
+blake3 = "1"
+devkit-macros = { path = "../devkit-macros", version = "0.1.0" }
+clap = { version = "4", features = ["derive"], optional = true }
+quick-xml = "0.38"
+rusqlite = { version = "0.40.2", features = ["bundled"], optional = true }
+serde_json = "1"
+zstd = { version = "0.13", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
