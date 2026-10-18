@@ -21,7 +21,11 @@ fn dir_bytes(p: &std::path::Path) -> u64 {
     let mut n = 0;
     for e in std::fs::read_dir(p).unwrap().flatten() {
         let m = e.metadata().unwrap();
-        n += if m.is_dir() { dir_bytes(&e.path()) } else { m.len() };
+        n += if m.is_dir() {
+            dir_bytes(&e.path())
+        } else {
+            m.len()
+        };
     }
     n
 }
@@ -29,7 +33,12 @@ fn dir_bytes(p: &std::path::Path) -> u64 {
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let (root, list, level) = (&a[1], &a[2], a[3].parse::<i32>().unwrap());
-    let files: Vec<String> = std::fs::read_to_string(list).unwrap().lines().filter(|l| !l.is_empty()).map(String::from).collect();
+    let files: Vec<String> = std::fs::read_to_string(list)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect();
     let store = Store::open(root, vec![], 0o600).unwrap();
     let (t0, c0) = (Instant::now(), cpu_s());
     let mut input = 0u64;
@@ -60,14 +69,29 @@ fn main() {
     let (wall, cpu) = (t0.elapsed().as_secs_f64(), cpu_s() - c0);
     let stored = dir_bytes(&std::path::Path::new(root).join("blobs"));
     let gib = input as f64 / (1u64 << 30) as f64;
-    println!("files {}  mode {}  input {:.2} GiB  stored {:.2} GiB ({:.1}%)  level {}", files.len(), mode, gib, stored as f64 / (1u64 << 30) as f64, 100.0 * stored as f64 / input as f64, level);
-    println!("put: {:.1} s wall, {:.0} MiB/s, {:.1} CPU s per GiB", wall, input as f64 / wall / (1u64 << 20) as f64, cpu / gib);
+    println!(
+        "files {}  mode {}  input {:.2} GiB  stored {:.2} GiB ({:.1}%)  level {}",
+        files.len(),
+        mode,
+        gib,
+        stored as f64 / (1u64 << 30) as f64,
+        100.0 * stored as f64 / input as f64,
+        level
+    );
+    println!(
+        "put: {:.1} s wall, {:.0} MiB/s, {:.1} CPU s per GiB",
+        wall,
+        input as f64 / wall / (1u64 << 20) as f64,
+        cpu / gib
+    );
 
     let (size, h) = biggest.unwrap();
     let mut lat = Vec::new();
     let mut x: u64 = 0x9E3779B97F4A7C15;
     for _ in 0..200 {
-        x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
         let off = x % size.saturating_sub(65536).max(1);
         let t = Instant::now();
         let b = store.read_range(&h, off, 65536.min(size)).unwrap();
@@ -79,7 +103,12 @@ fn main() {
              size as f64 / (1u64 << 30) as f64, lat[100], lat[198], lat[199]);
     let (t1, c1) = (Instant::now(), cpu_s());
     let v = store.verify(&h).unwrap();
-    println!("verify of the largest blob: {:?} in {:.1} s ({:.0} MiB/s, {:.1} CPU s)", v, t1.elapsed().as_secs_f64(),
-             size as f64 / t1.elapsed().as_secs_f64() / (1u64 << 20) as f64, cpu_s() - c1);
+    println!(
+        "verify of the largest blob: {:?} in {:.1} s ({:.0} MiB/s, {:.1} CPU s)",
+        v,
+        t1.elapsed().as_secs_f64(),
+        size as f64 / t1.elapsed().as_secs_f64() / (1u64 << 20) as f64,
+        cpu_s() - c1
+    );
     assert_eq!(v, Verified::Intact);
 }

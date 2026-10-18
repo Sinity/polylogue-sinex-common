@@ -4,7 +4,7 @@ version = "0.1.1"
 edition = "2021"
 rust-version = "1.98.1"
 license-file = "../../LICENSE"
-repository = "https://github.com/Sinity/polylogue"
+repository = "https://github.com/Sinity/polylogue-sinex-common"
 description = "Content-addressed files with checked range reads, deltas and sealed encodings"
 publish = false
 
@@ -18,3 +18,7 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+
+[lints.clippy]
+# The sealed frame helpers take the frame's full context explicitly.
+too_many_arguments = "allow"

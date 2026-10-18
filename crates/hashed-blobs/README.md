@@ -1,6 +1,6 @@
 # hashed-blobs
 
-A content-addressed file store for Unix, shared by Polylogue and Sinex (joint #11, #12, #14, #19, #23, #24). It follows Polylogue's API (`polylogue-spec/spec/storage/blobs.md`) and Sinex's sealed design (`sinex-spec/decisions/privacy.md`). It needs stable Rust 1.98.1 or newer and a C compiler for zstd. Releases are Git tags (`hashed-blobs-v0.1.0`, `hashed-blobs-v0.1.1`); see `docs/shared-file-layer-release.md` in the Polylogue repository.
+A content-addressed file store for Unix, shared by Polylogue and Sinex (joint #11, #12, #14, #19, #23, #24). It follows Polylogue's API (`polylogue-spec/spec/storage/blobs.md`) and Sinex's sealed design (`sinex-spec/decisions/privacy.md`). It needs stable Rust 1.98.1 or newer and a C compiler for zstd. Releases are tags of this repository; see its README.
 
 The crate holds no policy. Inline-versus-file size, when to use a delta, snapshots, page maps, joining, the excision rewrite, privacy classes and key management belong to the caller.
 
