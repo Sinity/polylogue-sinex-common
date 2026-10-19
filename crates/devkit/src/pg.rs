@@ -83,6 +83,12 @@ impl Server {
         } else {
             env::temp_dir()
         };
+        // Clusters left by killed runs whose watchdog died too.
+        crate::owner::sweep(
+            &base,
+            "devkit-pg",
+            r#"pg_ctl -D "$1/data" -m immediate -w stop; rm -rf "$1""#,
+        );
         // A short path: Unix socket paths are limited to about 100 bytes.
         let root = base.join(format!("devkit-pg-{}-{}", std::process::id(), unique()));
         let data = root.join("data");
@@ -125,6 +131,15 @@ impl Server {
             .arg("-l")
             .arg(root.join("postgres.log"))
             .args(["-o", &server_options, "-w", "start"]))?;
+        // pg_ctl daemonizes the server, so it would survive a killed test;
+        // the watchdog stops it once this process is gone.
+        let quoted_data = crate::owner::shell_quote(&data.display().to_string());
+        let quoted_root = crate::owner::shell_quote(&root.display().to_string());
+        crate::owner::watch(
+            std::process::id(),
+            &root,
+            &format!("pg_ctl -D {quoted_data} -m immediate -w stop; rm -rf {quoted_root}"),
+        );
         Ok(server)
     }
 
