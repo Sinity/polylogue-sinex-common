@@ -25,10 +25,6 @@ pub enum Command {
     /// Read the recorded runs.
     #[command(subcommand)]
     History(History),
-    /// Recorded bench runs, and a run against the previous quiet run.
-    #[cfg(feature = "bench")]
-    #[command(subcommand)]
-    Bench(Bench),
     /// The nextest filterset for packages changed since the merge base.
     Changed {
         #[arg(long, default_value = "origin/master")]
@@ -76,17 +72,12 @@ pub enum Bench {
     Compare { run: Option<i64> },
 }
 
-pub fn execute(project: &str, command: Command) -> ExitCode {
-    let root = checkout_root();
+/// Runs a [`Bench`] command; a project embeds [`Bench`] in its own `bench`
+/// command next to its sample and run commands.
+#[cfg(feature = "bench")]
+pub fn bench(project: &str, command: Bench) -> ExitCode {
     let result = match command {
-        Command::Changed { base } => {
-            select::changed(&root, &base).map(|selection| match selection.filterset() {
-                Some(filter) => println!("{filter}"),
-                None => println!("all()"),
-            })
-        }
-        #[cfg(feature = "bench")]
-        Command::Bench(Bench::Runs { limit }) => with_store(|store| {
+        Bench::Runs { limit } => with_store(|store| {
             for r in crate::bench::runs(store, project, limit).map_err(|e| e.to_string())? {
                 println!(
                     "{}",
@@ -97,8 +88,7 @@ pub fn execute(project: &str, command: Command) -> ExitCode {
             }
             Ok(())
         }),
-        #[cfg(feature = "bench")]
-        Command::Bench(Bench::Compare { run }) => with_store(|store| {
+        Bench::Compare { run } => with_store(|store| {
             let id = match run {
                 Some(id) => id,
                 None => crate::bench::runs(store, project, 1)
@@ -111,6 +101,25 @@ pub fn execute(project: &str, command: Command) -> ExitCode {
             println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
             Ok(())
         }),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+pub fn execute(project: &str, command: Command) -> ExitCode {
+    let root = checkout_root();
+    let result = match command {
+        Command::Changed { base } => {
+            select::changed(&root, &base).map(|selection| match selection.filterset() {
+                Some(filter) => println!("{filter}"),
+                None => println!("all()"),
+            })
+        }
         Command::Status { json } => with_store(|store| status(store, project, &root, json)),
         Command::History(History::Runs { limit, json }) => with_store(|store| {
             let runs = store
