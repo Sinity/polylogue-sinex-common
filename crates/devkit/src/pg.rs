@@ -262,13 +262,18 @@ impl Server {
                 )?;
             }
         }
-        // Mark both as used now, for `drop_unused`.
+        // Mark both as used now, for `reap`.
         let now = now_secs();
         for name in [&databases.template, &databases.schema] {
             self.sql(
                 "postgres",
                 &format!("COMMENT ON DATABASE {name} IS 'devkit used {now}'"),
             )?;
+        }
+        // Every run starts here, so leftovers from earlier runs are cleared
+        // here too. A failure to clean up must not fail the run.
+        if let Err(error) = self.reap(&Reap::default()) {
+            eprintln!("devkit: could not drop unused databases: {error}");
         }
         Ok(databases)
     }
@@ -293,42 +298,93 @@ impl Server {
         .map(drop)
     }
 
-    /// Drops schema and template databases not used for `days`, and test
-    /// databases left over from runs older than a day. Returns their names.
-    pub fn drop_unused(&self, days: u64) -> Result<Vec<String>> {
+    /// Drops databases nothing will use again, never one with a connection:
+    /// - test databases whose test process has exited, except failed ones,
+    ///   of which the newest [`Reap::failed`] are kept for inspection;
+    /// - test databases from runs more than a day old;
+    /// - abandoned half-built templates;
+    /// - schema versions beyond the newest [`Reap::schemas`] per project, or
+    ///   unused for [`Reap::days`].
+    ///
+    /// Returns the dropped names.
+    pub fn reap(&self, policy: &Reap) -> Result<Vec<String>> {
         let now = now_secs();
         let rows = self.sql(
             "postgres",
-            "SELECT d.datname, coalesce(shobj_description(d.oid, 'pg_database'), '')
-             FROM pg_database d WHERE d.datname ~ '_(schema|template|building)_' OR d.datname LIKE 't\\_%'",
+            "SELECT d.datname, coalesce(shobj_description(d.oid, 'pg_database'), ''),
+                    (SELECT count(*) FROM pg_stat_activity a WHERE a.datname = d.datname)
+             FROM pg_database d
+             WHERE d.datname ~ '_(schema|template|building)_' OR d.datname LIKE 't\\_%'",
         )?;
-        let mut dropped = Vec::new();
+        let mut drop = Vec::new();
+        let mut failed = Vec::new();
+        let mut versions: std::collections::BTreeMap<(String, String), u64> = Default::default();
         for line in rows.lines() {
-            let Some((name, comment)) = line.split_once('|') else {
+            let mut fields = line.splitn(3, '|');
+            let (Some(name), Some(comment), Some(connections)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
                 continue;
             };
-            let used = comment
-                .strip_prefix("devkit used ")
-                .and_then(|s| s.trim().parse::<u64>().ok());
-            let stale = if let Some(test) = name.strip_prefix("t_") {
-                test.split('_')
-                    .nth(1)
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .is_some_and(|t| now > t + 86_400)
-            } else if name.contains("_building_") {
-                true
-            } else {
-                used.is_none_or(|t| now > t + days * 86_400)
-            };
-            if stale {
-                if name.contains("_template_") {
-                    let _ = self.sql(
-                        "postgres",
-                        &format!("ALTER DATABASE {name} WITH IS_TEMPLATE false"),
-                    );
+            if connections.trim() != "0" {
+                continue;
+            }
+            if let Some(test) = TestName::parse(name) {
+                if let Some(at) = comment.strip_prefix("devkit failed ") {
+                    failed.push((at.trim().parse::<u64>().unwrap_or(0), name.to_owned()));
+                } else if !pid_alive(test.pid) || now > test.created + 86_400 {
+                    drop.push(name.to_owned());
                 }
-                self.drop_database(name)?;
-                dropped.push(name.to_owned());
+            } else if name.contains("_building_") {
+                drop.push(name.to_owned());
+            } else if let Some((project, hash)) = name
+                .split_once("_schema_")
+                .or_else(|| name.split_once("_template_"))
+            {
+                let used = comment
+                    .strip_prefix("devkit used ")
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    .unwrap_or(0);
+                let last = versions
+                    .entry((project.to_owned(), hash.to_owned()))
+                    .or_default();
+                *last = (*last).max(used);
+            }
+        }
+        // Failed test databases: the newest are kept, the rest go.
+        failed.sort_by(|a, b| b.cmp(a));
+        drop.extend(failed.into_iter().skip(policy.failed).map(|(_, name)| name));
+        // Schema versions, newest first per project; a version's schema and
+        // template database go together.
+        let mut by_project: std::collections::BTreeMap<String, Vec<(u64, String)>> =
+            Default::default();
+        for ((project, hash), used) in versions {
+            by_project.entry(project).or_default().push((used, hash));
+        }
+        for (project, mut list) in by_project {
+            list.sort_by(|a, b| b.cmp(a));
+            for (rank, (used, hash)) in list.into_iter().enumerate() {
+                if rank >= policy.schemas || now > used + policy.days * 86_400 {
+                    drop.push(format!("{project}_schema_{hash}"));
+                    drop.push(format!("{project}_template_{hash}"));
+                }
+            }
+        }
+        let mut dropped = Vec::new();
+        for name in drop {
+            if name.contains("_template_") {
+                let _ = self.sql(
+                    "postgres",
+                    &format!("ALTER DATABASE {name} WITH IS_TEMPLATE false"),
+                );
+            }
+            // Only databases without connections were chosen; one that gained
+            // a connection since is refused by DROP without FORCE and kept.
+            if self
+                .sql("postgres", &format!("DROP DATABASE IF EXISTS {name}"))
+                .is_ok()
+            {
+                dropped.push(name);
             }
         }
         Ok(dropped)
@@ -363,6 +419,49 @@ impl Drop for Server {
             let _ = fs::remove_dir_all(&self.socket);
         }
     }
+}
+
+/// What [`Server::reap`] keeps.
+#[derive(Debug, Clone)]
+pub struct Reap {
+    /// Schema versions kept per project, newest by last use.
+    pub schemas: usize,
+    /// Schema versions unused for this many days are dropped regardless.
+    pub days: u64,
+    /// Failed test databases kept for inspection, newest first.
+    pub failed: usize,
+}
+
+impl Default for Reap {
+    fn default() -> Self {
+        Self {
+            schemas: 8,
+            days: 14,
+            failed: 5,
+        }
+    }
+}
+
+/// A test database name, `t_<pid>_<created>_<unique>`.
+struct TestName {
+    pid: u32,
+    created: u64,
+}
+
+impl TestName {
+    fn parse(name: &str) -> Option<Self> {
+        let mut parts = name.strip_prefix("t_")?.split('_');
+        Some(Self {
+            pid: parts.next()?.parse().ok()?,
+            created: parts.next()?.parse().ok()?,
+        })
+    }
+}
+
+/// Whether a process with this pid exists on this host. A reused pid only
+/// delays reaping until the one-day limit.
+fn pid_alive(pid: u32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
 }
 
 /// How a project builds its schema into an empty database.
@@ -434,8 +533,10 @@ fn collect(path: &Path, files: &mut Vec<PathBuf>) -> Result {
 
 /// A database for one test, cloned from the template named in the
 /// environment that [`Server::test_env`] produced. It is dropped when the
-/// value is, unless the test is panicking: then it is kept for inspection
-/// and its name printed.
+/// value is, unless the test is panicking: then it is kept for inspection,
+/// marked failed and its name printed. [`Server::reap`] keeps only the
+/// newest few failed ones, and drops those of tests killed before they
+/// could drop their own.
 pub struct TestDatabase {
     socket: PathBuf,
     pub name: String,
@@ -469,6 +570,15 @@ impl TestDatabase {
 impl Drop for TestDatabase {
     fn drop(&mut self) {
         if std::thread::panicking() {
+            let _ = sql_at(
+                &self.socket,
+                "postgres",
+                &format!(
+                    "COMMENT ON DATABASE {} IS 'devkit failed {}'",
+                    self.name,
+                    now_secs()
+                ),
+            );
             eprintln!(
                 "devkit: kept test database {} at {}",
                 self.name,
@@ -607,21 +717,172 @@ mod tests {
         drop(one);
         assert!(!server.database_exists(&name).unwrap());
 
-        // Unused schema versions go; a fresh one stays.
-        assert!(server.drop_unused(30).unwrap().is_empty());
+        // Unused schema versions go, schema and template together; a fresh
+        // one stays.
+        assert!(server.reap(&Reap::default()).unwrap().is_empty());
+        for name in [&databases.schema, &databases.template] {
+            server
+                .sql(
+                    "postgres",
+                    &format!("COMMENT ON DATABASE {name} IS 'devkit used 1'"),
+                )
+                .unwrap();
+        }
+        let mut dropped = server.reap(&Reap::default()).unwrap();
+        dropped.sort();
+        assert_eq!(
+            dropped,
+            vec![databases.schema.clone(), databases.template.clone()]
+        );
+    }
+
+    fn demo_schema(server: &Server, project: &str, hash: &str) -> SchemaDatabases {
+        let bootstrap = |server: &Server, database: &str| -> Result {
+            server
+                .sql(database, "CREATE TABLE t (id integer)")
+                .map(drop)
+        };
         server
+            .ensure_schema(&Schema {
+                project,
+                hash: hash.into(),
+                bootstrap: &bootstrap,
+            })
+            .unwrap()
+    }
+
+    /// A pid no process has: exited tests look like this.
+    fn dead_pid() -> u32 {
+        (4_000_000..4_194_304)
+            .find(|pid| !pid_alive(*pid))
+            .expect("a free pid")
+    }
+
+    #[test]
+    fn reap_drops_test_databases_of_exited_tests() {
+        let server = Server::start(&ClusterOptions::default()).unwrap();
+        let databases = demo_schema(&server, "reap", "abc");
+        let now = now_secs();
+        let dead = dead_pid();
+        let exited = format!("t_{dead}_{now}_1");
+        let running = format!("t_{}_{now}_2", std::process::id());
+        let ancient = format!("t_{}_1_3", std::process::id());
+        for name in [&exited, &running, &ancient] {
+            server.clone_database(&databases.template, name).unwrap();
+        }
+        // Seven failed ones from exited tests: the newest five stay.
+        let failed: Vec<String> = (0..7)
+            .map(|i| format!("t_{dead}_{now}_{}", 10 + i))
+            .collect();
+        for (i, name) in failed.iter().enumerate() {
+            server.clone_database(&databases.template, name).unwrap();
+            server
+                .sql(
+                    "postgres",
+                    &format!("COMMENT ON DATABASE {name} IS 'devkit failed {i}'"),
+                )
+                .unwrap();
+        }
+        // An exited test's database that something is still connected to stays.
+        let connected = format!("t_{dead}_{now}_4");
+        server
+            .clone_database(&databases.template, &connected)
+            .unwrap();
+        let mut holder = Command::new("psql")
+            .args(["-X", "-q", "-h"])
+            .arg(server.socket())
+            .args(["-d", &connected, "-c", "SELECT pg_sleep(60)"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        while server
+            .sql(
+                "postgres",
+                &format!("SELECT count(*) FROM pg_stat_activity WHERE datname = '{connected}'"),
+            )
+            .unwrap()
+            .trim()
+            == "0"
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let mut dropped = server.reap(&Reap::default()).unwrap();
+        dropped.sort();
+        let mut expected = vec![exited, ancient, failed[0].clone(), failed[1].clone()];
+        expected.sort();
+        assert_eq!(dropped, expected);
+        assert!(server.database_exists(&running).unwrap());
+        assert!(server.database_exists(&connected).unwrap());
+        for name in &failed[2..] {
+            assert!(server.database_exists(name).unwrap());
+        }
+        let _ = holder.kill();
+        let _ = holder.wait();
+    }
+
+    #[test]
+    fn reap_keeps_the_newest_schema_versions() {
+        let server = Server::start(&ClusterOptions::default()).unwrap();
+        let now = now_secs();
+        for i in 0..5u64 {
+            let databases = demo_schema(&server, "keep", &format!("h{i}"));
+            for name in [&databases.schema, &databases.template] {
+                server
+                    .sql(
+                        "postgres",
+                        &format!(
+                            "COMMENT ON DATABASE {name} IS 'devkit used {}'",
+                            now - 10 + i
+                        ),
+                    )
+                    .unwrap();
+            }
+        }
+        // Another project's versions are counted separately.
+        demo_schema(&server, "other", "x");
+        let policy = Reap {
+            schemas: 3,
+            ..Reap::default()
+        };
+        let mut dropped = server.reap(&policy).unwrap();
+        dropped.sort();
+        assert_eq!(
+            dropped,
+            vec![
+                "keep_schema_h0",
+                "keep_schema_h1",
+                "keep_template_h0",
+                "keep_template_h1"
+            ]
+        );
+        assert!(server.database_exists("keep_schema_h2").unwrap());
+        assert!(server.database_exists("other_schema_x").unwrap());
+    }
+
+    #[test]
+    fn a_failed_test_keeps_its_database_marked_failed() {
+        let server = Server::start(&ClusterOptions::default()).unwrap();
+        let databases = demo_schema(&server, "fail", "abc");
+        let name = format!("t_{}_{}_9", std::process::id(), now_secs());
+        server.clone_database(&databases.template, &name).unwrap();
+        let socket = server.socket().to_owned();
+        let kept = name.clone();
+        let outcome = std::panic::catch_unwind(move || {
+            let _db = TestDatabase { socket, name: kept };
+            panic!("the test failed");
+        });
+        assert!(outcome.is_err());
+        let comment = server
             .sql(
                 "postgres",
                 &format!(
-                    "COMMENT ON DATABASE {} IS 'devkit used 1'",
-                    databases.schema
+                    "SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = '{name}'"
                 ),
             )
             .unwrap();
-        assert_eq!(
-            server.drop_unused(30).unwrap(),
-            vec![databases.schema.clone()]
-        );
+        assert!(comment.starts_with("devkit failed "), "{comment}");
     }
 
     #[test]
