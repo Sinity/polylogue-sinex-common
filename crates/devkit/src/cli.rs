@@ -25,6 +25,10 @@ pub enum Command {
     /// Read the recorded runs.
     #[command(subcommand)]
     History(History),
+    /// Recorded bench runs, and a run against the previous quiet run.
+    #[cfg(feature = "bench")]
+    #[command(subcommand)]
+    Bench(Bench),
     /// The nextest filterset for packages changed since the merge base.
     Changed {
         #[arg(long, default_value = "origin/master")]
@@ -59,6 +63,19 @@ pub enum History {
     },
 }
 
+#[cfg(feature = "bench")]
+#[derive(Debug, clap::Subcommand)]
+pub enum Bench {
+    /// Recent bench runs of this project, newest first.
+    Runs {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// A run against the previous quiet run on the same sample and storage
+    /// (default: the latest run).
+    Compare { run: Option<i64> },
+}
+
 pub fn execute(project: &str, command: Command) -> ExitCode {
     let root = checkout_root();
     let result = match command {
@@ -68,6 +85,32 @@ pub fn execute(project: &str, command: Command) -> ExitCode {
                 None => println!("all()"),
             })
         }
+        #[cfg(feature = "bench")]
+        Command::Bench(Bench::Runs { limit }) => with_store(|store| {
+            for r in crate::bench::runs(store, project, limit).map_err(|e| e.to_string())? {
+                println!(
+                    "{}",
+                    json!({"id": r.id, "bench": r.bench, "sample": r.sample,
+                           "storage": r.storage, "head": r.head, "quiet": r.quiet,
+                           "load": r.load, "metrics": r.metrics})
+                );
+            }
+            Ok(())
+        }),
+        #[cfg(feature = "bench")]
+        Command::Bench(Bench::Compare { run }) => with_store(|store| {
+            let id = match run {
+                Some(id) => id,
+                None => crate::bench::runs(store, project, 1)
+                    .map_err(|e| e.to_string())?
+                    .first()
+                    .map(|r| r.id)
+                    .ok_or("no bench runs recorded")?,
+            };
+            let out = crate::bench::compare(store, id).map_err(|e| e.to_string())?;
+            println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+            Ok(())
+        }),
         Command::Status { json } => with_store(|store| status(store, project, &root, json)),
         Command::History(History::Runs { limit, json }) => with_store(|store| {
             let runs = store

@@ -118,6 +118,11 @@ impl Store {
         state.join("devkit").join("history.db")
     }
 
+    /// The open database, for modules that keep their own tables here.
+    pub fn connection(&self) -> &Connection {
+        &self.conn
+    }
+
     pub fn open() -> rusqlite::Result<Self> {
         let path = Self::path();
         if let Some(dir) = path.parent()
