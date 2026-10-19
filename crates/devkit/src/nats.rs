@@ -77,6 +77,12 @@ impl Server {
         } else {
             env::temp_dir()
         };
+        // Servers left by killed runs whose watchdog died too.
+        crate::owner::sweep(
+            &base,
+            "devkit-nats",
+            r#"pkill -KILL -f "$1/nats.conf"; rm -rf "$1""#,
+        );
         let dir = base.join(format!("devkit-nats-{}-{}", std::process::id(), unique()));
         fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let port = free_port()?;
@@ -102,6 +108,16 @@ impl Server {
             .process_group(0)
             .spawn()
             .map_err(|e| format!("nats-server: {e}"))?;
+        // The server has its own process group, led by itself.
+        crate::owner::watch(
+            std::process::id(),
+            &dir,
+            &format!(
+                "kill -KILL -- -{}; rm -rf {}",
+                child.id(),
+                crate::owner::shell_quote(&dir.display().to_string())
+            ),
+        );
         let server = Self {
             url: format!("nats://127.0.0.1:{port}"),
             port,

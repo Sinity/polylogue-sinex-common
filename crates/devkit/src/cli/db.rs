@@ -1,5 +1,5 @@
 //! `xtask db …`, for projects that use the `pg` feature.
-use crate::pg::{ClusterOptions, Schema, SchemaDatabases, Server};
+use crate::pg::{ClusterOptions, Reap, Schema, SchemaDatabases, Server};
 use std::process::{Command as Process, ExitCode};
 
 #[derive(Debug, clap::Subcommand)]
@@ -16,11 +16,16 @@ pub enum Db {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
     },
-    /// Drop schema versions unused for `--days`, and test databases left by
-    /// runs more than a day old.
+    /// Drop databases nothing will use again: test databases of exited
+    /// tests (keeping the newest `--failed` failed ones), and schema versions
+    /// beyond the newest `--keep` per project or unused for `--days`.
     DropUnused {
-        #[arg(long, default_value_t = 14)]
+        #[arg(long, default_value_t = Reap::default().days)]
         days: u64,
+        #[arg(long, default_value_t = Reap::default().schemas)]
+        keep: usize,
+        #[arg(long, default_value_t = Reap::default().failed)]
+        failed: usize,
     },
     /// Exit 0 if the per-user service accepts connections.
     Ready,
@@ -79,8 +84,13 @@ fn run(command: Db, options: &ClusterOptions, schema: &Schema<'_>) -> Result<(),
                     .envs(server.test_env(&names.template)),
             )
         }
-        Db::DropUnused { days } => {
-            for name in service()?.drop_unused(days)? {
+        Db::DropUnused { days, keep, failed } => {
+            let policy = Reap {
+                schemas: keep,
+                days,
+                failed,
+            };
+            for name in service()?.reap(&policy)? {
                 println!("dropped {name}");
             }
             Ok(())
