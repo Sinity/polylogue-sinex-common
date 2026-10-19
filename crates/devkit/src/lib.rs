@@ -14,6 +14,8 @@ mod junit;
 mod run;
 pub mod select;
 
+#[cfg(feature = "bench")]
+pub mod bench;
 #[cfg(feature = "cli")]
 pub mod cli;
 #[cfg(feature = "history")]

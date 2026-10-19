@@ -20,6 +20,9 @@ pg = []
 nats = []
 # The machine-wide SQLite history of runs, tests and diagnostics.
 history = ["dep:rusqlite", "dep:zstd"]
+# Representative benchmarks: a frozen stratified sample of a corpus, runs
+# recorded with the host's load, comparison and full-corpus prediction.
+bench = ["history"]
 
 [dependencies]
 blake3 = "1"
