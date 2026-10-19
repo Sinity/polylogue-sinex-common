@@ -195,3 +195,13 @@ fn predicts_linearly_per_stage() {
     assert_eq!(p["seconds"], json!(1200.0));
     assert_eq!(p["stages"]["parse"], json!(200.0));
 }
+
+#[test]
+fn never_takes_a_file_bigger_than_its_strata_share() {
+    let mut all = corpus();
+    all.push(cand("db", "db/huge", 50_000_000));
+    all.push(cand("db", "db/small", 1_000));
+    let chosen = select(&all, 1_000_000, 2);
+    assert!(!chosen.iter().any(|c| c.rel == Path::new("db/huge")));
+    assert!(chosen.iter().any(|c| c.stratum == "db"));
+}

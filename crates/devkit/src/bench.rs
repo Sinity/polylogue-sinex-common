@@ -137,6 +137,12 @@ pub fn select(all: &[Candidate], target: u64, seed: u64) -> Vec<Candidate> {
             continue;
         }
         files.sort_by_key(|c| c.size);
+        if files.first().is_some_and(|c| c.size > share) {
+            // Nothing in this stratum fits its share: its smallest file
+            // still represents it.
+            chosen.push((*files[0]).clone());
+            continue;
+        }
         let mut used = 0u64;
         if let Some(largest) = files.last()
             && largest.size <= share / 2
@@ -159,6 +165,12 @@ pub fn select(all: &[Candidate], target: u64, seed: u64) -> Vec<Candidate> {
             for c in order {
                 if got >= quota {
                     break;
+                }
+                // A file bigger than the stratum's whole share would swamp
+                // the sample; such files are reported by the
+                // representativeness check instead.
+                if c.size > share {
+                    continue;
                 }
                 // Keep the band's quota within one file of its target.
                 if got > 0 && got + c.size > quota + quota / 2 {
