@@ -243,6 +243,25 @@ impl Server {
                 created?;
             }
         }
+        // Schema and template databases are only prepared against and copied,
+        // so TimescaleDB need not load in them; otherwise every one starts a
+        // background scheduler and they exhaust the server's worker limit.
+        // Database settings are not copied to clones, so test databases load
+        // it as usual.
+        // The template is checked through its copy: a session on the template
+        // would make concurrent clones of it fail.
+        let installed = self.sql(
+            &databases.schema,
+            "SELECT 1 FROM pg_extension WHERE extname = 'timescaledb'",
+        )?;
+        if installed.trim() == "1" {
+            for name in [&databases.template, &databases.schema] {
+                self.sql(
+                    "postgres",
+                    &format!("ALTER DATABASE {name} SET timescaledb.disable_load = on"),
+                )?;
+            }
+        }
         // Mark both as used now, for `drop_unused`.
         let now = now_secs();
         for name in [&databases.template, &databases.schema] {
