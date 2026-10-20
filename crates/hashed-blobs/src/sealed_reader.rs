@@ -149,6 +149,7 @@ impl SealedReader {
             });
         }
         reader.unchanged()?;
+        (reader.check)()?;
         reader.frame = 0;
         reader.offset = 0;
         reader.plain_start = 0;
@@ -178,6 +179,7 @@ impl SealedReader {
             None,
         )?;
         self.unchanged()?;
+        (self.check)()?;
         if self.bytes.len() as u64 != u64::from(expected) {
             return Err(Error::Corrupt {
                 blob: self.hash,
