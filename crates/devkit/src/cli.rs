@@ -67,8 +67,8 @@ pub enum Bench {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
-    /// A run against the previous quiet run on the same sample and storage
-    /// (default: the latest run).
+    /// Descriptive differences from a prior run on the same sample and storage
+    /// whose periodic load checks passed (default: the latest run).
     Compare { run: Option<i64> },
 }
 
@@ -82,7 +82,7 @@ pub fn bench(project: &str, command: Bench) -> ExitCode {
                 println!(
                     "{}",
                     json!({"id": r.id, "bench": r.bench, "sample": r.sample,
-                           "storage": r.storage, "head": r.head, "quiet": r.quiet,
+                           "storage": r.storage, "head": r.head, "load_checks_passed": r.load_checks_passed,
                            "load": r.load, "metrics": r.metrics})
                 );
             }

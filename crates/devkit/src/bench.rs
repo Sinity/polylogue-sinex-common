@@ -8,10 +8,10 @@
 //! sample is frozen as a [`Manifest`] (paths, sizes, BLAKE3), materialized
 //! once into a bench directory, and reused until the manifest changes.
 //!
-//! A bench run records its metrics with the host's load at the start in the
-//! history store; [`compare`] shows a run against the previous run on the
-//! same sample and storage, and refuses to compare runs made on a loaded
-//! host. [`predict`] scales the sample's per-stage times to the full corpus.
+//! A bench run records periodic host-load observations with its metrics.
+//! [`compare`] reports descriptive differences on the same sample and storage,
+//! with the observation limits visible. [`linear_estimate`] states its
+//! uncalibrated input-byte assumption instead of claiming every stage is linear.
 use crate::history::Store;
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
@@ -454,71 +454,8 @@ fn line_boundary_before(path: &Path, at: u64) -> io::Result<Option<u64>> {
         .filter(|cut| *cut > 0))
 }
 
-/// Host load when a run starts: a run on a loaded host measures the host,
-/// not the code.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct HostLoad {
-    pub load1: Option<f64>,
-    pub cpus: Option<usize>,
-    /// `full avg60` of /proc/pressure/io and /proc/pressure/memory.
-    pub io_full: Option<f64>,
-    pub memory_full: Option<f64>,
-}
-
-impl HostLoad {
-    pub fn now() -> HostLoad {
-        Self::from_readings(
-            fs::read_to_string("/proc/loadavg").ok().as_deref(),
-            std::thread::available_parallelism().ok().map(|n| n.get()),
-            fs::read_to_string("/proc/pressure/io").ok().as_deref(),
-            fs::read_to_string("/proc/pressure/memory").ok().as_deref(),
-        )
-    }
-
-    fn from_readings(
-        load: Option<&str>,
-        cpus: Option<usize>,
-        io: Option<&str>,
-        memory: Option<&str>,
-    ) -> Self {
-        let number = |s: &str| s.parse::<f64>().ok().filter(|v| v.is_finite() && *v >= 0.0);
-        let full = |s: &str| {
-            let line = s.lines().find(|l| l.starts_with("full "))?;
-            number(
-                line.split_whitespace()
-                    .find_map(|w| w.strip_prefix("avg60="))?,
-            )
-        };
-        Self {
-            load1: load.and_then(|s| number(s.split_whitespace().next()?)),
-            cpus: cpus.filter(|n| *n > 0),
-            io_full: io.and_then(full),
-            memory_full: memory.and_then(full),
-        }
-    }
-
-    /// Quiet enough that timings mean something. Missing readings are
-    /// unknown, never evidence of an idle host.
-    pub fn quiet(&self) -> bool {
-        let (Some(load), Some(cpus), Some(io), Some(memory)) =
-            (self.load1, self.cpus, self.io_full, self.memory_full)
-        else {
-            return false;
-        };
-        cpus > 0
-            && [load, io, memory]
-                .iter()
-                .all(|v| v.is_finite() && *v >= 0.0)
-            && io < 10.0
-            && memory < 5.0
-            && load < cpus as f64 / 2.0
-    }
-
-    fn to_json(self) -> Value {
-        json!({"load1": self.load1, "cpus": self.cpus, "io_full": self.io_full,
-               "memory_full": self.memory_full, "quiet": self.quiet()})
-    }
-}
+mod load;
+pub use load::{HostLoad, LoadInterval, LoadMonitor};
 
 /// Where a bench run kept its output: on the production disk, or in memory
 /// (which measures the pipeline alone).
@@ -570,7 +507,7 @@ pub struct BenchRun {
     pub head: Option<String>,
     pub started_ms: i64,
     pub load: Value,
-    pub quiet: bool,
+    pub load_checks_passed: bool,
     pub metrics: Value,
 }
 
@@ -584,7 +521,7 @@ pub fn record(
     bench: &str,
     sample: &str,
     output_dir: &Path,
-    load: HostLoad,
+    load: &LoadInterval,
     metrics: &Value,
 ) -> rusqlite::Result<i64> {
     let conn = store.connection();
@@ -607,7 +544,7 @@ pub fn record(
             tree.dirty,
             now,
             load.to_json().to_string(),
-            load.quiet(),
+            load.checks_passed(),
             metrics.to_string(),
         ],
     )?;
@@ -629,6 +566,8 @@ pub fn runs(store: &Store, project: &str, limit: usize) -> rusqlite::Result<Vec<
 
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BenchRun> {
     let parse = |s: String| serde_json::from_str(&s).unwrap_or(Value::Null);
+    let load = parse(r.get(7)?);
+    let load_checks_passed = r.get::<_, bool>(8)? && load::checks_passed_json(&load);
     Ok(BenchRun {
         id: r.get(0)?,
         project: r.get(1)?,
@@ -637,15 +576,15 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BenchRun> {
         storage: r.get(4)?,
         head: r.get(5)?,
         started_ms: r.get(6)?,
-        load: parse(r.get(7)?),
-        quiet: r.get(8)?,
+        load,
+        load_checks_passed,
         metrics: parse(r.get(9)?),
     })
 }
 
-/// A run against the previous quiet run of the same bench, sample and
-/// storage. A run made on a loaded host is reported as unreliable instead
-/// of being compared.
+/// Descriptive timing differences from a prior run on the same sample and
+/// storage. Load samples screen obvious contention; they do not establish
+/// that a code change caused the difference.
 pub fn compare(store: &Store, run: i64) -> rusqlite::Result<Value> {
     let conn = store.connection();
     conn.execute_batch(SCHEMA)?;
@@ -658,37 +597,56 @@ pub fn compare(store: &Store, run: i64) -> rusqlite::Result<Value> {
     else {
         return Ok(json!({"error": format!("no bench run {run}")}));
     };
-    if !this.quiet {
-        return Ok(json!({"run": run, "reliable": false, "load": this.load,
-            "note": "the host was loaded or its load was unknown when this run started; its timings are not compared"}));
+    if !this.load_checks_passed {
+        return Ok(
+            json!({"run": run, "status": "not_compared", "load_checks_passed": false,
+            "load": this.load,
+            "note": "Periodic load checks are missing, unknown, delayed or above their thresholds. A start-only reading does not cover the run."}),
+        );
     }
-    let before = conn
-        .query_row(
-            &format!(
-                "{select} WHERE project = ?1 AND bench = ?2 AND sample = ?3 AND storage = ?4
-                 AND quiet = 1 AND id < ?5 ORDER BY id DESC LIMIT 1"
-            ),
-            params![this.project, this.bench, this.sample, this.storage, run],
-            row,
-        )
-        .optional()?;
+    let mut statement = conn.prepare(&format!(
+        "{select} WHERE project = ?1 AND bench = ?2 AND sample = ?3 AND storage = ?4
+         AND quiet = 1 AND id < ?5 ORDER BY id DESC"
+    ))?;
+    let mut rows = statement.query(params![
+        this.project,
+        this.bench,
+        this.sample,
+        this.storage,
+        run
+    ])?;
+    let mut before = None;
+    while let Some(found) = rows.next()? {
+        let candidate = row(found)?;
+        if candidate.load_checks_passed {
+            before = Some(candidate);
+            break;
+        }
+    }
     let Some(before) = before else {
-        return Ok(json!({"run": run, "reliable": true,
-            "note": "no earlier quiet run on this sample and storage"}));
+        return Ok(
+            json!({"run": run, "status": "no_previous_run", "load_checks_passed": true,
+            "load": this.load,
+            "note": "No earlier run passed periodic load checks on this sample and storage."}),
+        );
     };
+    let old = flatten(&before.metrics);
     let mut changes = serde_json::Map::new();
-    for (k, v) in flatten(&this.metrics) {
-        if let Some(old) = flatten(&before.metrics).get(&k)
-            && *old != 0.0
-        {
+    for (key, value) in flatten(&this.metrics) {
+        if let Some(old) = old.get(&key) {
             changes.insert(
-                k,
-                json!({"before": old, "after": v, "change": (v - old) / old}),
+                key,
+                json!({"before": old, "after": value,
+                "change": (*old != 0.0).then(|| (value - old) / old)}),
             );
         }
     }
-    Ok(json!({"run": run, "against": before.id, "reliable": true,
-              "head": this.head, "against_head": before.head, "changes": changes}))
+    Ok(
+        json!({"run": run, "against": before.id, "status": "compared",
+        "load_checks_passed": true, "load": this.load, "against_load": before.load,
+        "head": this.head, "against_head": before.head, "changes": changes,
+        "interpretation": "Observed differences on the same sample and storage; load between samples and causes of timing differences remain unverified."}),
+    )
 }
 
 fn flatten(v: &Value) -> BTreeMap<String, f64> {
@@ -717,16 +675,42 @@ fn flatten(v: &Value) -> BTreeMap<String, f64> {
     out
 }
 
-/// Scales a sample run's time to the full corpus. The model is linear in
-/// input bytes, per stage: every stage of these pipelines does work in
-/// proportion to the bytes it is given, and the sample keeps each
-/// stratum's share and size spread, so bytes are the right unit. `seconds`
-/// is the sample run's wall time; `stages` its per-stage seconds.
-pub fn predict(seconds: f64, stages: &BTreeMap<String, f64>, scale: f64) -> Value {
+/// An explicitly uncalibrated estimate under a linear input-byte assumption.
+/// A single sample does not establish this relationship for any stage.
+pub fn linear_estimate(
+    seconds: Option<f64>,
+    stages: &BTreeMap<String, f64>,
+    scale: Option<f64>,
+) -> Value {
+    let valid_time = |value: f64| value.is_finite() && value >= 0.0;
+    let valid = seconds.is_some_and(valid_time)
+        && scale.is_some_and(|value| value.is_finite() && value > 0.0)
+        && stages.values().copied().all(valid_time);
+    let estimate = if valid {
+        let factor = scale.expect("validated scale");
+        let total = seconds.expect("validated seconds") * factor;
+        let stages: serde_json::Map<_, _> = stages
+            .iter()
+            .map(|(name, value)| (name.clone(), json!(value * factor)))
+            .collect();
+        (total.is_finite()
+            && stages
+                .values()
+                .all(|value| value.as_f64().is_some_and(f64::is_finite)))
+        .then(|| json!({"seconds": total, "stages": stages}))
+    } else {
+        None
+    };
     json!({
-        "scale": scale,
-        "seconds": seconds * scale,
-        "stages": stages.iter().map(|(k, v)| (k.clone(), json!(v * scale))).collect::<serde_json::Map<_, _>>(),
+        "method": "linear_in_input_bytes", "calibrated": false,
+        "observed_seconds": seconds, "observed_stage_seconds": stages,
+        "scale": scale, "estimate": estimate,
+        "reason": estimate.is_none().then_some("Missing, invalid or overflowing time/scale; no estimate is available."),
+        "assumptions": [
+            "The full run performs equivalent work per input byte to this sample.",
+            "Fixed costs, caching, decompression expansion and nonlinear work are not modeled."
+        ],
+        "calibration": "Not established by this single sample."
     })
 }
 
