@@ -37,7 +37,11 @@ compile-time-checked SQL. The server is the per-user service on the socket in
 tmpfs when it is not running. Each schema version, named by a hash of the
 schema sources, is built once into a template database and copied to the
 read-only database `DATABASE_URL` points at; every test clones the template.
-`xtask db ensure|url|psql|exec|drop-unused|ready` drives it.
+`xtask db ensure|url|psql|exec|drop-unused|ready` drives it. Half-built
+schema names include their owner PID: cleanup preserves live bootstraps even
+while they compile without a database connection, and removes them after the
+owner exits. PID reuse can delay cleanup. Older half-built names have no owner
+evidence and are preserved rather than guessed abandoned.
 
 With the `nats` feature, devkit starts a throwaway `nats-server` with
 JetStream on a free loopback port. A project's xtask starts one per test run
