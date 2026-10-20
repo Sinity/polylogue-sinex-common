@@ -316,9 +316,12 @@ impl Run {
             .join("devkit-junit.xml");
         let _ = fs::remove_file(&junit);
         let config = target.join("devkit-nextest.toml");
+        // Nextest's default store is workspace-relative, independent of
+        // CARGO_TARGET_DIR. Give it the exact absolute report path we read.
+        let report_path = serde_json::to_string(&junit).map_err(|e| format!("JUnit path: {e}"))?;
         fs::write(
             &config,
-            "[profile.default.junit]\npath = \"devkit-junit.xml\"\nstore-success-output = false\nstore-failure-output = true\n",
+            format!("[profile.default.junit]\npath = {report_path}\nstore-success-output = false\nstore-failure-output = true\n"),
         )
         .map_err(|e| format!("{}: {e}", config.display()))?;
         let mut test = crate::cargo_command();
@@ -684,3 +687,7 @@ mod tests {
         assert!(diagnostic(&note).is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "run/nextest_tests.rs"]
+mod nextest_tests;
