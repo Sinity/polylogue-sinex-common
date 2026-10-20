@@ -83,7 +83,7 @@ impl fmt::Display for Hash {
 #[derive(Debug)]
 pub enum Error {
     Io(io::Error),
-    /// No root holds this blob.
+    /// The requested roots do not hold this blob. Deletion checks only the write root.
     Missing(Hash),
     /// The bytes on disk do not match: a name mismatch, a frame checksum or an AEAD tag.
     Corrupt {
@@ -774,6 +774,17 @@ impl Store {
             mode,
             frame: DEFAULT_FRAME,
         })
+    }
+
+    /// The same writer configuration with reads restricted to the write root.
+    /// Use when a successful put must leave a local copy, rather than reuse backing bytes.
+    pub fn primary_only(&self) -> Store {
+        Store {
+            write_root: self.write_root.clone(),
+            roots: vec![self.write_root.clone()],
+            mode: self.mode,
+            frame: self.frame,
+        }
     }
 
     /// Frame size for new plain and sealed blobs (4 MiB by default; smaller in tests).
@@ -1900,11 +1911,19 @@ impl Store {
         })
     }
 
-    /// Delete a blob's file. The caller checks references (a delta's base included).
+    /// Delete only the file in the write root. Extra roots are never changed.
+    /// Missing means no local copy, even if an extra root still makes the blob readable.
+    /// The caller checks references (a delta's base included).
     pub fn delete(&self, h: &Hash) -> Result<()> {
-        let p = self.locate(h).ok_or(Error::Missing(*h))?;
-        fs::remove_file(&p)?;
-        fsync_dir(p.parent().unwrap())?;
+        let path = Self::path_in(&self.write_root, h);
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(Error::Missing(*h))
+            }
+            Err(error) => return Err(Error::Io(error)),
+        }
+        fsync_dir(path.parent().unwrap())?;
         Ok(())
     }
 }
