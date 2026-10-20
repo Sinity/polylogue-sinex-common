@@ -21,7 +21,7 @@ nats = []
 # The machine-wide SQLite history of runs, tests and diagnostics.
 history = ["dep:rusqlite", "dep:zstd"]
 # Representative benchmarks: a frozen stratified sample of a corpus, runs
-# recorded with the host's load, comparison and full-corpus prediction.
+# recorded with the host's load, comparison and explicitly assumed linear estimates.
 bench = ["history"]
 
 [dependencies]
