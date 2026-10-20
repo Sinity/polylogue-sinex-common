@@ -1,9 +1,9 @@
-//! Verified sequential sealed reads with an explicit authenticated-frame bound.
+//! Verified frame-cached sealed reads with an explicit authenticated-frame bound.
 use super::{
     DataKey, Error, Generation, Hash, Result, SealedFooter, Store, VerificationStats, View,
     SEAL_TRAILER,
 };
-use std::io::{self, Read};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::Arc;
 
 /// Evaluation budgets checked before allocating a frame or its index. These are
@@ -16,6 +16,8 @@ pub struct SealedReadLimits {
 
 /// Holds one authenticated frame, never the whole material. The initial proof checks
 /// ciphertext, frame authentication, lengths and the complete keyed name before output.
+/// Random reads retain one decoded frame; repeated reads within that frame do not
+/// decode it again. Seeking away can require another decode on return.
 /// A failure fuses the reader. Callers retain authority over key lifetime through `check`.
 pub struct SealedReader {
     view: Arc<View>,
@@ -23,6 +25,8 @@ pub struct SealedReader {
     hash: Hash,
     footer: SealedFooter,
     key: DataKey,
+    starts: Vec<(u64, u64)>,
+    cursor: u64,
     frame: usize,
     offset: u64,
     plain_start: u64,
@@ -82,7 +86,9 @@ impl SealedReader {
                 .ok_or_else(|| Error::Refused("sealed frame limit overflows".into()))?;
         let mut ciphertext_len = 0u64;
         let mut plain_len = 0u64;
+        let mut starts = Vec::with_capacity(footer.frames.len());
         for &(compressed, plain) in &footer.frames {
+            starts.push((ciphertext_len, plain_len));
             if plain as u64 > limits.frame_bytes as u64
                 || compressed as u64 > compressed_limit as u64
             {
@@ -124,6 +130,8 @@ impl SealedReader {
             hash,
             footer,
             key: key.clone(),
+            starts,
+            cursor: 0,
             frame: 0,
             offset: 0,
             plain_start: 0,
@@ -202,15 +210,20 @@ impl SealedReader {
     fn next(&mut self, out: &mut [u8]) -> Result<usize> {
         (self.check)()?;
         self.unchanged()?;
+        if self.cursor >= self.footer.plain_len && self.footer.plain_len != 0 {
+            return Ok(0);
+        }
         while self.position == self.bytes.len() {
             if self.frame == self.footer.frames.len() {
                 return Ok(0);
             }
             self.next_frame()?;
+            self.position = (self.cursor - (self.plain_start - self.bytes.len() as u64)) as usize;
         }
         let n = out.len().min(self.bytes.len() - self.position);
         out[..n].copy_from_slice(&self.bytes[self.position..self.position + n]);
         self.position += n;
+        self.cursor += n as u64;
         Ok(n)
     }
 }
@@ -237,3 +250,54 @@ impl Read for SealedReader {
 
 #[cfg(test)]
 mod tests;
+
+impl Seek for SealedReader {
+    fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+        if self.failed {
+            return Err(io::Error::other(
+                "sealed reader stopped after a failed operation",
+            ));
+        }
+        let result = (|| -> Result<u64> {
+            (self.check)()?;
+            self.unchanged()?;
+            let target = match from {
+                SeekFrom::Start(n) => i128::from(n),
+                SeekFrom::Current(n) => i128::from(self.cursor) + i128::from(n),
+                SeekFrom::End(n) => i128::from(self.footer.plain_len) + i128::from(n),
+            };
+            let target = u64::try_from(target).map_err(|_| {
+                Error::Refused("seek position is outside the addressable range".into())
+            })?;
+            let cache_start = self.plain_start - self.bytes.len() as u64;
+            if !self.bytes.is_empty() && target >= cache_start && target < self.plain_start {
+                self.position = (target - cache_start) as usize;
+            } else {
+                self.bytes.clear();
+                self.position = 0;
+                self.frame = if target >= self.footer.plain_len {
+                    self.footer.frames.len()
+                } else {
+                    self.starts
+                        .partition_point(|&(_, plain)| plain <= target)
+                        .saturating_sub(1)
+                };
+                (self.offset, self.plain_start) = self
+                    .starts
+                    .get(self.frame)
+                    .copied()
+                    .unwrap_or((0, self.footer.plain_len));
+            }
+            self.cursor = target;
+            Ok(target)
+        })();
+        match result {
+            Ok(position) => Ok(position),
+            Err(error) => {
+                self.failed = true;
+                self.bytes.clear();
+                Err(io::Error::other(error))
+            }
+        }
+    }
+}

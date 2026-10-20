@@ -173,3 +173,90 @@ fn larger_legal_frames_work_when_the_caller_grants_a_sufficient_budget() {
         Err(Error::Refused(_))
     ));
 }
+
+#[test]
+fn seeks_match_cursor_and_cache_one_frame() {
+    let (_dir, store, key, bytes, hash) = fixture(65536, 3 * 65536 + 17);
+    let mut reader = store
+        .read_sealed(&hash, None, &key, limits(65536), || Ok(()))
+        .unwrap();
+    let mut oracle = Cursor::new(&bytes);
+    for position in [
+        0,
+        99,
+        65535,
+        65536,
+        131000,
+        196608,
+        bytes.len() as u64,
+        bytes.len() as u64 + 7,
+        50,
+    ] {
+        assert_eq!(
+            reader.seek(SeekFrom::Start(position)).unwrap(),
+            oracle.seek(SeekFrom::Start(position)).unwrap()
+        );
+        let mut actual = [0; 101];
+        let mut expected = [0; 101];
+        for _ in 0..3 {
+            let a = reader.read(&mut actual).unwrap();
+            oracle.read_exact(&mut expected[..a]).unwrap();
+            assert_eq!(&actual[..a], &expected[..a]);
+            if a == 0 {
+                assert!(oracle.position() >= bytes.len() as u64);
+            }
+        }
+    }
+    reader.seek(SeekFrom::Start(100)).unwrap();
+    reader.read_exact(&mut [0; 1]).unwrap();
+    let before = reader.stats();
+    for position in 100..1000 {
+        reader.seek(SeekFrom::Start(position)).unwrap();
+        reader.read_exact(&mut [0; 1]).unwrap();
+    }
+    assert_eq!(reader.stats().decoded_bytes, before.decoded_bytes);
+    assert_eq!(
+        reader.seek(SeekFrom::End(-17)).unwrap(),
+        bytes.len() as u64 - 17
+    );
+    let mut tail = Vec::new();
+    reader.read_to_end(&mut tail).unwrap();
+    assert_eq!(tail, &bytes[bytes.len() - 17..]);
+    assert_eq!(
+        reader.seek(SeekFrom::Current(-1)).unwrap(),
+        bytes.len() as u64 - 1
+    );
+    assert!(reader.seek(SeekFrom::Start(0)).is_ok());
+    assert!(reader.seek(SeekFrom::Current(-1)).is_err());
+    assert!(reader.read(&mut [0; 1]).is_err());
+}
+
+#[test]
+fn seek_checks_authority_and_generation_even_on_cached_bytes() {
+    let (dir, store, key, _bytes, hash) = fixture(65536, 100000);
+    let stop = Arc::new(AtomicBool::new(false));
+    let check = Arc::clone(&stop);
+    let mut reader = store
+        .read_sealed(&hash, None, &key, limits(65536), move || {
+            if check.load(Ordering::Relaxed) {
+                Err(Error::Refused("revoked".into()))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap();
+    reader.read_exact(&mut [0; 1]).unwrap();
+    stop.store(true, Ordering::Relaxed);
+    assert!(reader.seek(SeekFrom::Start(0)).is_err());
+    let mut reader = store
+        .read_sealed(&hash, None, &key, limits(65536), || Ok(()))
+        .unwrap();
+    reader.read_exact(&mut [0; 1]).unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(Store::path_in(dir.path(), &hash))
+        .unwrap();
+    file.write_all(&[3]).unwrap();
+    file.sync_all().unwrap();
+    assert!(reader.seek(SeekFrom::Start(0)).is_err());
+}
