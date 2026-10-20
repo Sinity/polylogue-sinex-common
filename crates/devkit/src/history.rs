@@ -45,10 +45,10 @@ CREATE TABLE IF NOT EXISTS tests (
     run INTEGER NOT NULL REFERENCES runs (id),
     binary TEXT NOT NULL,
     name TEXT NOT NULL,
-    -- passed, failed, flaky or skipped
+    -- passed, failed, flaky, ignored, filtered or skipped
     status TEXT NOT NULL,
     duration_ms INTEGER NOT NULL,
-    -- zstd-compressed, only for tests that failed or were flaky
+    -- zstd-compressed failure output or skipped-test reason
     output BLOB
 );
 CREATE INDEX IF NOT EXISTS tests_by_run ON tests (run);
