@@ -138,16 +138,23 @@ fn materializes_once_cuts_growing_files_and_grows_them_back() {
 fn compares_only_quiet_runs_on_the_same_sample() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open_at(&dir.path().join("h.db")).unwrap();
-    let quiet = HostLoad {
+    let quiet_reading = HostLoad {
         load1: Some(0.1),
         cpus: Some(16),
         io_full: Some(0.0),
         memory_full: Some(0.0),
     };
-    let loaded = HostLoad {
-        io_full: Some(60.0),
-        ..quiet
-    };
+    let mut quiet = load::LoadInterval::new(quiet_reading);
+    quiet.observe(std::time::Duration::from_millis(1), quiet_reading);
+    let mut loaded = load::LoadInterval::new(quiet_reading);
+    loaded.observe(
+        std::time::Duration::from_secs(1),
+        HostLoad {
+            io_full: Some(60.0),
+            ..quiet_reading
+        },
+    );
+    loaded.observe(std::time::Duration::from_secs(2), quiet_reading);
     let out = dir.path();
     let a = record(
         &store,
@@ -156,7 +163,7 @@ fn compares_only_quiet_runs_on_the_same_sample() {
         "build",
         "s1",
         out,
-        quiet,
+        &quiet,
         &json!({"seconds": 100.0}),
     )
     .unwrap();
@@ -167,7 +174,7 @@ fn compares_only_quiet_runs_on_the_same_sample() {
         "build",
         "s1",
         out,
-        quiet,
+        &quiet,
         &json!({"seconds": 80.0}),
     )
     .unwrap();
@@ -178,22 +185,48 @@ fn compares_only_quiet_runs_on_the_same_sample() {
         "build",
         "s1",
         out,
-        loaded,
+        &loaded,
         &json!({"seconds": 300.0}),
     )
     .unwrap();
     let cmp = compare(&store, b).unwrap();
     assert_eq!(cmp["against"], json!(a));
     assert!((cmp["changes"]["seconds"]["change"].as_f64().unwrap() + 0.2).abs() < 1e-9);
-    assert_eq!(compare(&store, c).unwrap()["reliable"], json!(false));
+    assert_eq!(compare(&store, c).unwrap()["status"], "not_compared");
+    assert_eq!(cmp["status"], "compared");
+    assert!(cmp.get("reliable").is_none());
+    // Legacy rows claimed quiet from a single reading. Keep them readable,
+    // but do not select one as the comparison baseline.
+    store
+        .connection()
+        .execute(
+            "UPDATE bench_runs SET load = ?1 WHERE id = ?2",
+            params![quiet_reading.to_json().to_string(), b],
+        )
+        .unwrap();
+    assert_eq!(compare(&store, b).unwrap()["status"], "not_compared");
+    let d = record(
+        &store,
+        out,
+        "p",
+        "build",
+        "s1",
+        out,
+        &quiet,
+        &json!({"seconds": 70.0}),
+    )
+    .unwrap();
+    assert_eq!(compare(&store, d).unwrap()["against"], a);
 }
 
 #[test]
-fn predicts_linearly_per_stage() {
+fn labels_linear_estimates_as_uncalibrated() {
     let stages = BTreeMap::from([("parse".to_owned(), 10.0)]);
-    let p = predict(60.0, &stages, 20.0);
-    assert_eq!(p["seconds"], json!(1200.0));
-    assert_eq!(p["stages"]["parse"], json!(200.0));
+    let p = linear_estimate(Some(60.0), &stages, Some(20.0));
+    assert_eq!(p["estimate"]["seconds"], json!(1200.0));
+    assert_eq!(p["calibrated"], false);
+    assert_eq!(p["method"], "linear_in_input_bytes");
+    assert_eq!(p["estimate"]["stages"]["parse"], json!(200.0));
 }
 
 #[test]
@@ -207,26 +240,20 @@ fn never_takes_a_file_bigger_than_its_strata_share() {
 }
 
 #[test]
-fn missing_or_invalid_host_readings_are_not_quiet() {
-    let psi = "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n";
-    let quiet = HostLoad::from_readings(Some("0.1 0.2 0.3 1/2 3"), Some(16), Some(psi), Some(psi));
-    assert!(quiet.quiet());
-    for unknown in [
-        HostLoad::from_readings(None, Some(16), Some(psi), Some(psi)),
-        HostLoad::from_readings(Some("0.1"), None, Some(psi), Some(psi)),
-        HostLoad::from_readings(Some("0.1"), Some(16), None, Some(psi)),
-        HostLoad::from_readings(Some("0.1"), Some(16), Some(psi), Some("some avg60=0")),
-        HostLoad::from_readings(Some("NaN"), Some(16), Some(psi), Some(psi)),
-        HostLoad::from_readings(Some("-1"), Some(16), Some(psi), Some(psi)),
-        HostLoad::from_readings(Some("0.1"), Some(0), Some(psi), Some(psi)),
-        HostLoad::from_readings(Some("0.1"), Some(16), Some("full avg60=inf"), Some(psi)),
+fn missing_invalid_or_overflowing_values_have_no_estimate() {
+    for (seconds, scale) in [
+        (None, Some(2.0)),
+        (Some(1.0), None),
+        (Some(-1.0), Some(2.0)),
+        (Some(1.0), Some(0.0)),
+        (Some(f64::INFINITY), Some(2.0)),
+        (Some(f64::MAX), Some(2.0)),
     ] {
-        assert!(!unknown.quiet(), "{unknown:?}");
-        let json = unknown.to_json();
-        let encoded = serde_json::to_string(&json).unwrap();
-        let decoded: Value = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(decoded, json);
-        assert_eq!(decoded["quiet"], false);
-        assert!(decoded.as_object().unwrap().values().any(Value::is_null));
+        let value = linear_estimate(seconds, &BTreeMap::new(), scale);
+        assert!(value["estimate"].is_null(), "{value}");
+        assert_eq!(value["calibrated"], false);
+        assert!(value["reason"].is_string());
     }
+    let stages = BTreeMap::from([("decode".into(), -1.0)]);
+    assert!(linear_estimate(Some(1.0), &stages, Some(2.0))["estimate"].is_null());
 }

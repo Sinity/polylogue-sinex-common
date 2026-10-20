@@ -65,5 +65,18 @@ under `/dev/shm` when available, regardless of inherited job-scratch depth.
 Dropping the run removes that directory, never the caller's scratch root. Tests
 of real filesystem durability use `TEST_DURABLE_TMPDIR` instead.
 
-Benchmark host readings that cannot be acquired are stored as `null`; such a
-run is not classified as quiet and is not used for timing comparisons.
+## Benchmark reports
+
+`LoadMonitor` samples host load once per second and at the beginning and end,
+keeping a constant-size summary. Reports show missing readings, observed busy
+samples, peaks and the largest sampling gap. Comparisons decline runs with
+unknown/busy readings or gaps above two seconds, including older start-only
+records. Passing those checks permits descriptive differences on the same
+sample and storage; it does not establish reliable timing or its cause.
+
+`linear_estimate` labels the input-byte assumption and `calibrated: false`.
+Missing or invalid times/scales leave the estimate unknown. One sample cannot
+establish how fixed costs, caching, decompression or nonlinear stages scale.
+Recorded input bytes, reported material bytes, physical I/O and final storage
+size keep their own units; none is a substitute for another. Decoded or hashed
+byte totals remain unmeasured where a runner provides no such counter.
