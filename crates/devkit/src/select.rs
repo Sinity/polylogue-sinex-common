@@ -82,7 +82,7 @@ fn select(root: &Path, files: &[String], packages: &[(String, PathBuf)]) -> Sele
 }
 
 fn packages(root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
-    let output = Command::new("cargo")
+    let output = crate::cargo_command()
         .args(["metadata", "--format-version", "1", "--no-deps"])
         .current_dir(root)
         .output()

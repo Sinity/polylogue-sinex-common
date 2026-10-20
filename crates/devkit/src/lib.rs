@@ -10,6 +10,7 @@
 //! History is data, never a gate: a store that cannot be opened is reported
 //! and the run continues.
 
+mod cargo;
 mod junit;
 #[cfg(any(feature = "nats", feature = "pg"))]
 mod owner;
@@ -27,6 +28,7 @@ pub mod nats;
 #[cfg(feature = "pg")]
 pub mod pg;
 
+pub use cargo::cargo_command;
 pub use devkit_macros::test;
 pub use run::{Diagnostic, Failed, Nextest, Run, Stage, TestOutcome, TestStatus, Tree};
 

@@ -263,7 +263,7 @@ impl Run {
 
     pub fn cargo_with(&mut self, name: &str, args: &[&str], env: &[(String, String)]) -> Result {
         let (subcommand, rest) = args.split_first().ok_or("cargo needs a subcommand")?;
-        let mut command = Command::new("cargo");
+        let mut command = crate::cargo_command();
         command
             .arg(subcommand)
             .arg("--message-format=json-diagnostic-rendered-ansi")
@@ -293,7 +293,7 @@ impl Run {
         }
         let args: Vec<&str> = options.args.iter().map(String::as_str).collect();
 
-        let mut build = Command::new("cargo");
+        let mut build = crate::cargo_command();
         build
             .args([
                 "nextest",
@@ -321,7 +321,7 @@ impl Run {
             "[profile.default.junit]\npath = \"devkit-junit.xml\"\nstore-success-output = false\nstore-failure-output = true\n",
         )
         .map_err(|e| format!("{}: {e}", config.display()))?;
-        let mut test = Command::new("cargo");
+        let mut test = crate::cargo_command();
         test.args(["nextest", "run", "--no-fail-fast"])
             .arg(if options.allow_no_tests {
                 "--no-tests=pass"
@@ -355,7 +355,7 @@ impl Run {
         if let Some(target) = &self.target {
             return Ok(target.clone());
         }
-        let output = Command::new("cargo")
+        let output = crate::cargo_command()
             .args(["metadata", "--format-version", "1", "--no-deps"])
             .current_dir(&self.root)
             .output()

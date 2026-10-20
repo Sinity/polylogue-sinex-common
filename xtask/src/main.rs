@@ -1,7 +1,7 @@
 //! `cargo xtask check` for this repository, plus devkit's shared commands.
 use clap::Parser;
 use devkit::{Nextest, Run};
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 
 #[derive(Parser)]
 #[command(name = "xtask")]
@@ -26,7 +26,7 @@ fn main() -> ExitCode {
 fn check(run: &mut Run) -> devkit::Result {
     run.command(
         "fmt",
-        Command::new("cargo").args(["fmt", "--all", "--", "--check"]),
+        devkit::cargo_command().args(["fmt", "--all", "--", "--check"]),
     )?;
     run.cargo(
         "clippy",

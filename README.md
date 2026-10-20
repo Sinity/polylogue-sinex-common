@@ -80,3 +80,9 @@ establish how fixed costs, caching, decompression or nonlinear stages scale.
 Recorded input bytes, reported material bytes, physical I/O and final storage
 size keep their own units; none is a substitute for another. Decoded or hashed
 byte totals remain unmeasured where a runner provides no such counter.
+
+Nested Cargo commands use `devkit::cargo_command()` to drop inherited
+`CARGO_MANIFEST_DIR`, `CARGO_MANIFEST_PATH` and `CARGO_PKG_*` package metadata.
+Compiler, toolchain, target and job configuration remain inherited. This avoids
+parent-checkout changes invalidating build-script environment fingerprints; it
+does not eliminate other reasons Cargo rebuilds a dependency.

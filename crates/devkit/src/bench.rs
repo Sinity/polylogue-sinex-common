@@ -505,7 +505,8 @@ pub struct BenchRun {
     pub sample: String,
     pub storage: String,
     pub head: Option<String>,
-    pub started_ms: i64,
+    /// Wall-clock recording time. The historical SQL column is named started_ms.
+    pub recorded_ms: i64,
     pub load: Value,
     pub load_checks_passed: bool,
     pub metrics: Value,
@@ -575,7 +576,7 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BenchRun> {
         sample: r.get(3)?,
         storage: r.get(4)?,
         head: r.get(5)?,
-        started_ms: r.get(6)?,
+        recorded_ms: r.get(6)?,
         load,
         load_checks_passed,
         metrics: parse(r.get(9)?),
