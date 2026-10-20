@@ -24,6 +24,9 @@
 //! Integrity never relies on the filesystem (Polylogue's archive is No_COW on btrfs, so btrfs
 //! checksums are off): full reads check the name, range reads check frame checksums or AEAD tags.
 
+mod sealed_reader;
+pub use sealed_reader::{SealedReadLimits, SealedReader};
+
 mod plain_reader;
 pub use plain_reader::PlainReader;
 
@@ -1567,6 +1570,21 @@ impl Store {
     ) -> Result<PlainReader> {
         let (plain, _) = self.open_plain(hash, expected_len, |_| check())?;
         Ok(PlainReader::new(plain, Box::new(check)))
+    }
+
+    /// Verify and open a sequential, non-delta sealed blob under one authorized key.
+    /// The key reference must match. Authentication requires a whole compressed frame;
+    /// the caller's budgets bound decoded frames, compressed envelopes and frame metadata before
+    /// allocation. Larger legacy frames are refused explicitly. Memory never holds a blob.
+    pub fn read_sealed(
+        &self,
+        hash: &Hash,
+        expected_len: Option<u64>,
+        key: &DataKey,
+        limits: SealedReadLimits,
+        check: impl FnMut() -> Result<()> + Send + 'static,
+    ) -> Result<SealedReader> {
+        SealedReader::open(self, *hash, expected_len, key, limits, Box::new(check))
     }
 
     /// The whole content, checked against its name. Sealed blobs need `read_with`.
