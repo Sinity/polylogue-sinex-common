@@ -1,0 +1,30 @@
+schema = 1
+[project]
+id = "polylogue_sinex_common"
+display_name = "Polylogue and Sinex shared tooling"
+root_markers = ["Cargo.toml", "flake.nix", "xtask"]
+
+[environment]
+kind = "nix-develop"
+command = ["nix", "develop", "--command"]
+inherit = ["HOME", "USER", "PATH", "LANG", "XDG_RUNTIME_DIR"]
+unset = ["DATABASE_URL", "PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "SQLX_OFFLINE"]
+
+[operations.check]
+description = "Formatting, clippy and every test, with build and test timings"
+exec = ["cargo", "xtask", "check"]
+pool = "bulk"
+result = "exit"
+timeout_seconds = 1800
+scratch = "nvme"
+cache = "none"
+
+[operations.exec]
+description = "Run an explicit focused command in the shared development shell"
+exec = ["env"]
+arguments = "required"
+pool = "bulk"
+result = "exit"
+timeout_seconds = 1800
+scratch = "nvme"
+cache = "none"

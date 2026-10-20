@@ -139,13 +139,13 @@ fn compares_only_quiet_runs_on_the_same_sample() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open_at(&dir.path().join("h.db")).unwrap();
     let quiet = HostLoad {
-        load1: 0.1,
-        cpus: 16,
-        io_full: 0.0,
-        memory_full: 0.0,
+        load1: Some(0.1),
+        cpus: Some(16),
+        io_full: Some(0.0),
+        memory_full: Some(0.0),
     };
     let loaded = HostLoad {
-        io_full: 60.0,
+        io_full: Some(60.0),
         ..quiet
     };
     let out = dir.path();
@@ -204,4 +204,29 @@ fn never_takes_a_file_bigger_than_its_strata_share() {
     let chosen = select(&all, 1_000_000, 2);
     assert!(!chosen.iter().any(|c| c.rel == Path::new("db/huge")));
     assert!(chosen.iter().any(|c| c.stratum == "db"));
+}
+
+#[test]
+fn missing_or_invalid_host_readings_are_not_quiet() {
+    let psi = "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n";
+    let quiet = HostLoad::from_readings(Some("0.1 0.2 0.3 1/2 3"), Some(16), Some(psi), Some(psi));
+    assert!(quiet.quiet());
+    for unknown in [
+        HostLoad::from_readings(None, Some(16), Some(psi), Some(psi)),
+        HostLoad::from_readings(Some("0.1"), None, Some(psi), Some(psi)),
+        HostLoad::from_readings(Some("0.1"), Some(16), None, Some(psi)),
+        HostLoad::from_readings(Some("0.1"), Some(16), Some(psi), Some("some avg60=0")),
+        HostLoad::from_readings(Some("NaN"), Some(16), Some(psi), Some(psi)),
+        HostLoad::from_readings(Some("-1"), Some(16), Some(psi), Some(psi)),
+        HostLoad::from_readings(Some("0.1"), Some(0), Some(psi), Some(psi)),
+        HostLoad::from_readings(Some("0.1"), Some(16), Some("full avg60=inf"), Some(psi)),
+    ] {
+        assert!(!unknown.quiet(), "{unknown:?}");
+        let json = unknown.to_json();
+        let encoded = serde_json::to_string(&json).unwrap();
+        let decoded: Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, json);
+        assert_eq!(decoded["quiet"], false);
+        assert!(decoded.as_object().unwrap().values().any(Value::is_null));
+    }
 }

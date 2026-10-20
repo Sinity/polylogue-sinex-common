@@ -44,3 +44,26 @@ JetStream on a free loopback port. A project's xtask starts one per test run
 and passes its URL through `DEVKIT_NATS_URL`; `devkit::nats::test_nats()`
 gives each test that server and a unique subject prefix, or a server of its
 own when run outside xtask.
+
+## Development runs
+
+Use the shared repository's declared operations for queued work:
+
+```sh
+agentctl job start /path/to/checkout check
+agentctl job start /path/to/checkout exec -- cargo nextest run --locked -p devkit --all-features
+```
+
+The check summary separates compiler time from test execution. Compare those
+stages before accepting a slow suite as normal; a test process waiting for a
+server or a saturated disk needs diagnosis, not a larger timeout. Focused checks
+stay cheap, and full checks belong to coherent batches. Tests selecting no cases
+fail. Keep extended runs in the queue while continuing independent work.
+
+`Nextest { tmpfs: true, .. }` gives tests a short, exclusively owned directory
+under `/dev/shm` when available, regardless of inherited job-scratch depth.
+Dropping the run removes that directory, never the caller's scratch root. Tests
+of real filesystem durability use `TEST_DURABLE_TMPDIR` instead.
+
+Benchmark host readings that cannot be acquired are stored as `null`; such a
+run is not classified as quiet and is not used for timing comparisons.

@@ -458,40 +458,60 @@ fn line_boundary_before(path: &Path, at: u64) -> io::Result<Option<u64>> {
 /// not the code.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HostLoad {
-    pub load1: f64,
-    pub cpus: usize,
+    pub load1: Option<f64>,
+    pub cpus: Option<usize>,
     /// `full avg60` of /proc/pressure/io and /proc/pressure/memory.
-    pub io_full: f64,
-    pub memory_full: f64,
+    pub io_full: Option<f64>,
+    pub memory_full: Option<f64>,
 }
 
 impl HostLoad {
     pub fn now() -> HostLoad {
-        let load1 = fs::read_to_string("/proc/loadavg")
-            .ok()
-            .and_then(|s| s.split_whitespace().next()?.parse().ok())
-            .unwrap_or(0.0);
-        let full = |path: &str| -> f64 {
-            fs::read_to_string(path)
-                .ok()
-                .and_then(|s| {
-                    let line = s.lines().find(|l| l.starts_with("full"))?;
-                    let v = line.split_whitespace().find(|w| w.starts_with("avg60="))?;
-                    v.trim_start_matches("avg60=").parse().ok()
-                })
-                .unwrap_or(0.0)
+        Self::from_readings(
+            fs::read_to_string("/proc/loadavg").ok().as_deref(),
+            std::thread::available_parallelism().ok().map(|n| n.get()),
+            fs::read_to_string("/proc/pressure/io").ok().as_deref(),
+            fs::read_to_string("/proc/pressure/memory").ok().as_deref(),
+        )
+    }
+
+    fn from_readings(
+        load: Option<&str>,
+        cpus: Option<usize>,
+        io: Option<&str>,
+        memory: Option<&str>,
+    ) -> Self {
+        let number = |s: &str| s.parse::<f64>().ok().filter(|v| v.is_finite() && *v >= 0.0);
+        let full = |s: &str| {
+            let line = s.lines().find(|l| l.starts_with("full "))?;
+            number(
+                line.split_whitespace()
+                    .find_map(|w| w.strip_prefix("avg60="))?,
+            )
         };
-        HostLoad {
-            load1,
-            cpus: std::thread::available_parallelism().map_or(1, |n| n.get()),
-            io_full: full("/proc/pressure/io"),
-            memory_full: full("/proc/pressure/memory"),
+        Self {
+            load1: load.and_then(|s| number(s.split_whitespace().next()?)),
+            cpus: cpus.filter(|n| *n > 0),
+            io_full: io.and_then(full),
+            memory_full: memory.and_then(full),
         }
     }
 
-    /// Quiet enough that timings mean something.
+    /// Quiet enough that timings mean something. Missing readings are
+    /// unknown, never evidence of an idle host.
     pub fn quiet(&self) -> bool {
-        self.io_full < 10.0 && self.memory_full < 5.0 && self.load1 < self.cpus as f64 / 2.0
+        let (Some(load), Some(cpus), Some(io), Some(memory)) =
+            (self.load1, self.cpus, self.io_full, self.memory_full)
+        else {
+            return false;
+        };
+        cpus > 0
+            && [load, io, memory]
+                .iter()
+                .all(|v| v.is_finite() && *v >= 0.0)
+            && io < 10.0
+            && memory < 5.0
+            && load < cpus as f64 / 2.0
     }
 
     fn to_json(self) -> Value {
@@ -640,7 +660,7 @@ pub fn compare(store: &Store, run: i64) -> rusqlite::Result<Value> {
     };
     if !this.quiet {
         return Ok(json!({"run": run, "reliable": false, "load": this.load,
-            "note": "the host was loaded when this run started; its timings are not compared"}));
+            "note": "the host was loaded or its load was unknown when this run started; its timings are not compared"}));
     }
     let before = conn
         .query_row(

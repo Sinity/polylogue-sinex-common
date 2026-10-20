@@ -280,7 +280,7 @@ impl Run {
     /// there is no fail-fast, and selecting no tests fails unless allowed.
     pub fn nextest(&mut self, name: &str, options: &Nextest) -> Result {
         let temp = if options.tmpfs {
-            Some(RunTemp::new(&self.project)?)
+            Some(RunTemp::new()?)
         } else {
             None
         };
@@ -571,22 +571,38 @@ pub(crate) fn strip_ansi(text: &str) -> String {
     out
 }
 
-/// A per-run temporary directory on tmpfs, removed when dropped. Tests that
-/// fsync spend most of their time syncing on the btrfs work disk. Under an
-/// existing tmpfs `TMPDIR` (an AgentCTL tmpfs scratch) it nests inside that.
+/// A per-run temporary directory on tmpfs, removed when dropped. Keep the
+/// root short: tests create archives and Unix sockets below it, and Linux
+/// socket paths have a fixed length limit even on tmpfs.
 struct RunTemp(PathBuf);
 
 impl RunTemp {
-    fn new(project: &str) -> Result<Self> {
-        let inherited = env::temp_dir();
-        let base = if inherited.starts_with("/dev/shm") || !Path::new("/dev/shm").is_dir() {
-            inherited
+    fn new() -> Result<Self> {
+        Self::with_temp_dir(&env::temp_dir())
+    }
+
+    fn with_temp_dir(inherited: &Path) -> Result<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        // Do not nest under an already-tmpfs AgentCTL scratch root. Its
+        // length can exhaust the socket path budget before a test starts.
+        let base = if Path::new("/dev/shm").is_dir() {
+            Path::new("/dev/shm")
         } else {
-            PathBuf::from("/dev/shm")
+            inherited
         };
-        let path = base.join(format!("{project}-test-{}", process::id()));
-        fs::create_dir_all(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        Ok(Self(path))
+        loop {
+            let path = base.join(format!(
+                "dk-{}-{}",
+                process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(format!("{}: {error}", path.display()).into()),
+            }
+        }
     }
 }
 
@@ -601,6 +617,29 @@ impl Drop for RunTemp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn tmpfs_root_stays_short_under_nested_job_scratch() {
+        use std::os::unix::net::UnixListener;
+        let parent = tempfile::tempdir_in("/dev/shm").unwrap();
+        let inherited = parent.path().join("agentctl").join("job-".repeat(25));
+        fs::create_dir_all(&inherited).unwrap();
+        let one = RunTemp::with_temp_dir(&inherited).unwrap();
+        let two = RunTemp::with_temp_dir(&inherited).unwrap();
+        assert_ne!(one.0, two.0);
+        let archive = tempfile::tempdir_in(&one.0).unwrap();
+        let socket = archive.path().join("archive/run/daemon.sock");
+        fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        let listener = UnixListener::bind(&socket).unwrap();
+        drop(listener);
+        drop(archive);
+        let removed = one.0.clone();
+        drop(one);
+        assert!(!removed.exists());
+        assert!(two.0.exists());
+        assert!(inherited.exists());
+    }
 
     #[test]
     fn package_names_from_ids() {
