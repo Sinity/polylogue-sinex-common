@@ -28,3 +28,21 @@ result = "exit"
 timeout_seconds = 1800
 scratch = "nvme"
 cache = "none"
+
+[operations.focused]
+description = "Selected shared-crate tests in the normal development queue"
+exec = ["cargo", "nextest", "run", "--locked"]
+arguments = "required"
+pool = "normal"
+result = "exit"
+timeout_seconds = 1800
+cache = "none"
+
+[operations.compile]
+description = "Selected package or target compilation in the normal development queue"
+exec = ["cargo", "check", "--locked"]
+arguments = "required"
+pool = "normal"
+result = "exit"
+timeout_seconds = 1800
+cache = "none"

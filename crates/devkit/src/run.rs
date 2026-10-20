@@ -63,6 +63,12 @@ pub enum TestStatus {
     Failed,
     /// Failed, then passed on a retry.
     Flaky,
+    /// Excluded by nextest's run-ignored selection (also non-ignored tests
+    /// when `--run-ignored only` is selected).
+    Ignored,
+    /// Excluded by a filter, default filter, or partition.
+    Filtered,
+    /// Another or unrecognized skip reason; the supplied reason is retained.
     Skipped,
 }
 
@@ -72,6 +78,8 @@ impl TestStatus {
             Self::Passed => "passed",
             Self::Failed => "failed",
             Self::Flaky => "flaky",
+            Self::Ignored => "ignored",
+            Self::Filtered => "filtered",
             Self::Skipped => "skipped",
         }
     }
@@ -162,6 +170,7 @@ pub struct Run {
     pub failure: Option<String>,
     clock: Instant,
     target: Option<PathBuf>,
+    test_reported: bool,
     #[cfg(feature = "history")]
     record: Option<(crate::history::Store, i64)>,
 }
@@ -216,6 +225,7 @@ impl Run {
             failure: None,
             clock: Instant::now(),
             target: None,
+            test_reported: false,
             #[cfg(feature = "history")]
             record: None,
         }
@@ -321,7 +331,7 @@ impl Run {
         let report_path = serde_json::to_string(&junit).map_err(|e| format!("JUnit path: {e}"))?;
         fs::write(
             &config,
-            format!("[profile.default.junit]\npath = {report_path}\nstore-success-output = false\nstore-failure-output = true\n"),
+            format!("nextest-version = \"0.9.143\"\n[profile.default.junit]\npath = {report_path}\nstore-success-output = false\nstore-failure-output = true\nreport-skipped = \"all\"\n"),
         )
         .map_err(|e| format!("{}: {e}", config.display()))?;
         let mut test = crate::cargo_command();
@@ -339,18 +349,17 @@ impl Run {
             test.current_dir(&run.root);
             status(&mut test)
         });
-        match fs::read_to_string(&junit) {
-            Ok(xml) => match junit::outcomes(&xml) {
-                Ok(outcomes) => self.tests.extend(outcomes),
-                Err(error) => eprintln!("devkit: could not read {}: {error}", junit.display()),
-            },
-            Err(error) if result.is_ok() => {
-                eprintln!("devkit: no test report at {}: {error}", junit.display())
-            }
-            Err(_) => {}
-        }
+        let report = self.step(&format!("{name} report"), |run| {
+            let xml = fs::read_to_string(&junit)
+                .map_err(|error| format!("no test report at {}: {error}", junit.display()))?;
+            let outcomes = junit::outcomes(&xml)
+                .map_err(|error| format!("invalid test report at {}: {error}", junit.display()))?;
+            run.tests.extend(outcomes);
+            run.test_reported = true;
+            Ok(())
+        });
         drop(temp);
-        result
+        result.and(report)
     }
 
     /// The workspace's cargo target directory.
@@ -467,12 +476,19 @@ impl Run {
         );
         if !self.tests.is_empty() {
             out += &format!(
-                "\n  tests: {} passed, {} failed, {} flaky, {} skipped",
+                "\n  reported tests: {} passed, {} failed, {} flaky, {} skipped ({} by ignore selection, {} filtered)",
                 count(TestStatus::Passed),
                 count(TestStatus::Failed),
                 count(TestStatus::Flaky),
                 count(TestStatus::Skipped)
+                    + count(TestStatus::Ignored)
+                    + count(TestStatus::Filtered),
+                count(TestStatus::Ignored),
+                count(TestStatus::Filtered)
             );
+        }
+        if self.test_reported && self.tests.is_empty() {
+            out += "\n  tests: no outcomes reported; unlisted binaries are not counted";
         }
         if errors + warnings > 0 {
             out += &format!("\n  diagnostics: {errors} errors, {warnings} warnings");

@@ -51,8 +51,18 @@ Use the shared repository's declared operations for queued work:
 
 ```sh
 agentctl job start /path/to/checkout check
-agentctl job start /path/to/checkout exec -- cargo nextest run --locked -p devkit --all-features
+agentctl job start /path/to/checkout focused -- -p devkit --all-features
+agentctl job start /path/to/checkout compile -- -p devkit --all-features
 ```
+
+Nextest 0.9.143 or newer is required for JUnit skipped-case reporting. Devkit
+requests all skipped cases, records ignore-selection exclusions separately from
+filters, and retains the emitted reason. Under `--run-ignored only`, ordinary
+tests are excluded by the ignore selection too. Unrecognized reasons remain
+`skipped`; missing, truncated or inconsistent reports fail a reporting step.
+Counts cover reported test cases across each invocation. A filter can exclude
+an entire binary before nextest lists its tests; an empty report does not prove
+that binary contained zero ignored tests. Historical reports are not backfilled.
 
 The check summary separates compiler time from test execution. Compare those
 stages before accepting a slow suite as normal; a test process waiting for a
