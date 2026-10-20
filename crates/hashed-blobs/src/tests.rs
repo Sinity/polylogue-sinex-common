@@ -1319,3 +1319,84 @@ fn assembled_extents_refuse_arithmetic_overflow() {
 
 mod acquisition;
 mod decoder_cancellation;
+
+#[test]
+fn deleting_an_external_only_blob_refuses_without_touching_backing_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let backing = dir.path().join("backing");
+    let external = Store::open(&backing, vec![], 0o600).unwrap();
+    let bytes = data(97, 1024);
+    let hash = external.put(bytes.as_slice(), 1).unwrap();
+    let path = Store::path_in(&backing, &hash);
+    let encoded = fs::read(&path).unwrap();
+    let combined = Store::open(dir.path().join("primary"), vec![backing], 0o600).unwrap();
+    assert!(combined.contains(&hash));
+    assert!(matches!(combined.delete(&hash),Err(Error::Missing(h)) if h==hash));
+    assert_eq!(fs::read(&path).unwrap(), encoded);
+    assert_eq!(read_all(combined.read(&hash).unwrap()), bytes);
+}
+
+#[test]
+fn deleting_a_local_copy_keeps_external_fallback_and_repeated_delete_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let primary = dir.path().join("primary");
+    let backing = dir.path().join("backing");
+    let local = Store::open(&primary, vec![], 0o600).unwrap();
+    let external = Store::open(&backing, vec![], 0o600).unwrap();
+    let bytes = data(98, 1024);
+    let hash = local.put(bytes.as_slice(), 1).unwrap();
+    assert_eq!(external.put(bytes.as_slice(), 1).unwrap(), hash);
+    let path = Store::path_in(&backing, &hash);
+    let encoded = fs::read(&path).unwrap();
+    let combined = Store::open(&primary, vec![backing], 0o600).unwrap();
+    combined.delete(&hash).unwrap();
+    assert!(!Store::path_in(&primary, &hash).exists());
+    assert!(combined.contains(&hash));
+    assert_eq!(read_all(combined.read(&hash).unwrap()), bytes);
+    assert!(matches!(combined.delete(&hash),Err(Error::Missing(h)) if h==hash));
+    assert_eq!(fs::read(&path).unwrap(), encoded);
+}
+
+#[test]
+fn primary_only_keeps_write_policy_and_requires_local_custody() {
+    let dir = tempfile::tempdir().unwrap();
+    let primary = dir.path().join("primary");
+    let backing = dir.path().join("backing");
+    let external = Store::open(&backing, vec![], 0o600).unwrap();
+    let bytes = data(99, 3 * FRAME + 7);
+    let hash = external.put(bytes.as_slice(), 1).unwrap();
+    let external_path = Store::path_in(&backing, &hash);
+    let encoded = fs::read(&external_path).unwrap();
+    let combined = Store::open(&primary, vec![backing], 0o400)
+        .unwrap()
+        .with_frame_size(FRAME);
+    let local = combined.primary_only();
+    assert!(!local.contains(&hash));
+    assert!(matches!(local.read(&hash),Err(Error::Missing(h)) if h==hash));
+    assert!(matches!(local.put_delta(&hash,bytes.as_slice(),1),Err(Error::Missing(h)) if h==hash));
+    assert_eq!(combined.put(bytes.as_slice(), 1).unwrap(), hash);
+    assert!(
+        !local.contains(&hash),
+        "ordinary put may reuse an external copy"
+    );
+    assert_eq!(local.put(bytes.as_slice(), 1).unwrap(), hash);
+    let path = Store::path_in(&primary, &hash);
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o400
+    );
+    let mut reader = local
+        .read_plain(&hash, Some(bytes.len() as u64), || Ok(()))
+        .unwrap();
+    assert_eq!(
+        reader.stats().frames,
+        4,
+        "configured frame size is preserved"
+    );
+    assert_eq!(read_all(&mut reader), bytes);
+    assert_eq!(fs::read(&external_path).unwrap(), encoded);
+    local.delete(&hash).unwrap();
+    assert!(!local.contains(&hash));
+    assert_eq!(read_all(combined.read(&hash).unwrap()), bytes);
+    assert_eq!(fs::read(&external_path).unwrap(), encoded);
+}
