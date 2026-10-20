@@ -24,6 +24,9 @@
 //! Integrity never relies on the filesystem (Polylogue's archive is No_COW on btrfs, so btrfs
 //! checksums are off): full reads check the name, range reads check frame checksums or AEAD tags.
 
+mod plain_reader;
+pub use plain_reader::PlainReader;
+
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
@@ -184,6 +187,18 @@ impl Reader {
         )
     }
 
+    /// Verify a plain blob, then read its retained representation sequentially with bounded
+    /// memory. An optional length is checked along with the content hash. `check` runs during verification and before each read, so the caller can cancel.
+    /// Delta and sealed blobs are refused; their existing read/key contracts are unchanged.
+    pub fn read_plain(
+        &self,
+        hash: &Hash,
+        expected_len: Option<u64>,
+        check: impl FnMut() -> Result<()> + Send + 'static,
+    ) -> Result<PlainReader> {
+        self.0.read_plain(hash, expected_len, check)
+    }
+
     /// The whole content, checked against its name.
     pub fn read(&self, hash: &Hash) -> Result<impl Read> {
         self.0.read(hash)
@@ -197,7 +212,7 @@ impl Reader {
     /// first read of a blob verifies its whole name, later reads reuse the open file. Each
     /// concurrent call may hold its own blob and frame, so the caller limits concurrency. The
     /// lock is not held during IO or callbacks. A change to the open file is refused; replacing
-    /// the path does not affect the open file.
+    /// the path never switches the open file, though metadata changes can make it refuse.
     pub fn read_range_checked<E: From<Error>>(
         &self,
         hash: &Hash,
@@ -1537,6 +1552,21 @@ impl Store {
                 Ok(out)
             }
         }
+    }
+
+    /// Verify a plain blob before exposing bytes, then decode each frame once as it is read.
+    /// Keeps the verified file open and refuses in-place changes. Memory holds the seek table,
+    /// decoder window and fixed buffers, including for frames larger than the range cache.
+    /// An optional length is checked along with the content hash. `check` runs throughout verification and before each read. Delta and sealed blobs need
+    /// their existing read/key APIs and are refused here.
+    pub fn read_plain(
+        &self,
+        hash: &Hash,
+        expected_len: Option<u64>,
+        mut check: impl FnMut() -> Result<()> + Send + 'static,
+    ) -> Result<PlainReader> {
+        let (plain, _) = self.open_plain(hash, expected_len, |_| check())?;
+        Ok(PlainReader::new(plain, Box::new(check)))
     }
 
     /// The whole content, checked against its name. Sealed blobs need `read_with`.
