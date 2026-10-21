@@ -1400,3 +1400,68 @@ fn primary_only_keeps_write_policy_and_requires_local_custody() {
     assert_eq!(read_all(combined.read(&hash).unwrap()), bytes);
     assert_eq!(fs::read(&external_path).unwrap(), encoded);
 }
+
+#[test]
+fn deleting_retry_syncs_even_when_unlink_already_succeeded() {
+    let (_dir, store) = store();
+    let hash = store.put(b"synthetic deletion".as_slice(), 1).unwrap();
+    let parent = Store::path_in(&store.write_root, &hash)
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let error = store
+        .delete_with_sync(&hash, |_| {
+            Err(io::Error::other("synthetic directory sync failure"))
+        })
+        .unwrap_err();
+    assert!(matches!(error, Error::Io(_)));
+    assert!(!store.contains(&hash));
+    let mut synced = Vec::new();
+    let missing = store.delete_with_sync(&hash, |path| {
+        synced.push(path.to_path_buf());
+        fsync_dir(path)
+    });
+    assert!(matches!(missing, Err(Error::Missing(h)) if h == hash));
+    assert_eq!(
+        synced,
+        [parent],
+        "Missing must follow a successful retry of the directory sync"
+    );
+    assert!(
+        matches!(
+            store.delete_with_sync(&hash, |_| Err(io::Error::other("still failing"))),
+            Err(Error::Io(_))
+        ),
+        "a missing file must not hide a repeated sync error"
+    );
+}
+
+#[test]
+fn deleting_missing_without_a_shard_syncs_the_nearest_existing_local_parent() {
+    let (_dir, store) = store();
+    let hash = Hash::of(b"never stored locally");
+    let mut attempts = Vec::new();
+    let result = store.delete_with_sync(&hash, |directory| {
+        attempts.push(directory.to_path_buf());
+        fsync_dir(directory)
+    });
+    assert!(matches!(result, Err(Error::Missing(h)) if h == hash));
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts.last().unwrap(), &store.write_root.join("blobs"));
+}
+
+#[test]
+fn deleting_missing_does_not_escape_a_removed_write_root_or_hide_its_error() {
+    let (_dir, store) = store();
+    fs::remove_dir_all(&store.write_root).unwrap();
+    let mut attempts = Vec::new();
+    let result = store.delete_with_sync(&Hash::of(b"missing root"), |directory| {
+        attempts.push(directory.to_path_buf());
+        fsync_dir(directory)
+    });
+    assert!(matches!(result, Err(Error::Io(e)) if e.kind() == io::ErrorKind::NotFound));
+    assert_eq!(attempts.last().unwrap(), &store.write_root);
+    assert!(attempts
+        .iter()
+        .all(|directory| directory.starts_with(&store.write_root)));
+}

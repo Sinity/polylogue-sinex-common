@@ -1913,18 +1913,42 @@ impl Store {
 
     /// Delete only the file in the write root. Extra roots are never changed.
     /// Missing means no local copy, even if an extra root still makes the blob readable.
+    /// Success and Missing both follow a local directory sync; other sync errors propagate.
     /// The caller checks references (a delta's base included).
     pub fn delete(&self, h: &Hash) -> Result<()> {
+        self.delete_with_sync(h, fsync_dir)
+    }
+
+    fn delete_with_sync(
+        &self,
+        h: &Hash,
+        mut sync: impl FnMut(&Path) -> io::Result<()>,
+    ) -> Result<()> {
         let path = Self::path_in(&self.write_root, h);
-        match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Err(Error::Missing(*h))
-            }
+        let removed = match fs::remove_file(&path) {
+            Ok(()) => true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
             Err(error) => return Err(Error::Io(error)),
+        };
+        // A previous unlink may have succeeded before its directory sync failed.
+        // If its shard disappeared too, sync the nearest existing local parent.
+        let mut directory = path.parent().unwrap();
+        loop {
+            match sync(directory) {
+                Ok(()) => break,
+                Err(error)
+                    if error.kind() == io::ErrorKind::NotFound && directory != self.write_root =>
+                {
+                    directory = directory.parent().ok_or(error)?;
+                }
+                Err(error) => return Err(Error::Io(error)),
+            }
         }
-        fsync_dir(path.parent().unwrap())?;
-        Ok(())
+        if removed {
+            Ok(())
+        } else {
+            Err(Error::Missing(*h))
+        }
     }
 }
 
