@@ -41,8 +41,8 @@ evicted blobs are verified again before returning bytes. Alternating sources can
 still decode their selected frames repeatedly. Extent/start arrays scale with the
 supplied extents, and seek-table memory with the retained frame counts; decoder
 windows and each returned range (up to 1 MiB) are separate costs. Delta assembly
-keeps its legacy whole-delta read and sealed assembly still requires its existing
-key API. No plaintext output is staged or cached globally.
+keeps its legacy whole-delta read; sealed blobs require the separate keyed
+read APIs. No plaintext output is staged or cached globally.
 
 ## Measurements
 

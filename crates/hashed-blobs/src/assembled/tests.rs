@@ -84,11 +84,17 @@ fn alternating_extents_verify_each_retained_blob_once() {
         expected.extend_from_slice(&base[n as usize * 128..(n as usize + 1) * 128]);
         expected.extend_from_slice(&patch);
     }
-    let (actual, work) = measured(|| {
+    let ((actual, decoded), work) = measured(|| {
         let mut assembled = s.assemble(&extents).unwrap();
         let mut actual = Vec::new();
         assembled.read_to_end(&mut actual).unwrap();
-        actual
+        let decoded = assembled
+            .opened
+            .iter()
+            .map(|p| p.stats.decoded_bytes)
+            .sum::<u64>();
+        cache_bound(&assembled);
+        (actual, decoded)
     });
     assert_eq!(actual, expected);
     eprintln!(
@@ -100,6 +106,16 @@ fn alternating_extents_verify_each_retained_blob_once() {
         "whole verification must follow retained blob identity, not extent switches"
     );
     assert_eq!(work.decoded, (base.len() + patch.len()) as u64);
+    // One frame shared between alternating sources still decodes the base
+    // frame on every return, and the patch frame after its first use.
+    assert_eq!(
+        decoded,
+        work.decoded + 32 * (16 << 10) + 31 * patch.len() as u64
+    );
+    eprintln!(
+        "ASSEMBLED all_decoded={decoded} postverification_decoded={}",
+        decoded - work.decoded
+    );
 }
 
 fn cache_bound(assembled: &Assembled<'_>) {
