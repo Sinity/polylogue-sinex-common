@@ -1465,3 +1465,5 @@ fn deleting_missing_does_not_escape_a_removed_write_root_or_hide_its_error() {
         .iter()
         .all(|directory| directory.starts_with(&store.write_root)));
 }
+
+pub(super) mod assembled;

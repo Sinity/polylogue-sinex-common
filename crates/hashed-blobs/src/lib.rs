@@ -1819,6 +1819,8 @@ impl Store {
         if Generation::of(&v.file).map_err(Error::Io)? != generation {
             return Err(corrupt("opened representation changed during verification").into());
         }
+        #[cfg(test)]
+        tests::assembled::record_verification(stats);
         Ok((
             PlainRead {
                 view: v,
