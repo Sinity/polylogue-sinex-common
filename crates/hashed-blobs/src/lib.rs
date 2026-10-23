@@ -27,6 +27,9 @@
 mod sealed_reader;
 pub use sealed_reader::{SealedReadLimits, SealedReader};
 
+mod assembled;
+pub use assembled::Assembled;
+
 mod plain_reader;
 pub use plain_reader::PlainReader;
 
@@ -1702,27 +1705,12 @@ impl Store {
     }
 
     /// A revision's bytes from extents, as one seekable stream. Extents over a delta blob read the
-    /// whole delta (only the raw view of an old revision does that).
+    /// whole delta (only the raw view of an old revision does that). Plain reads retain at most
+    /// four verified open files and their seek tables, with one decoded frame shared between
+    /// them. Evicted files are fully verified again; alternating sources can still re-decode
+    /// frames. Memory also includes the supplied extent list and a returned range (up to 1 MiB).
     pub fn assemble(&self, extents: &[Extent]) -> Result<Assembled<'_>> {
-        let mut starts = Vec::with_capacity(extents.len());
-        let mut total = 0u64;
-        for e in extents {
-            if !self.contains(&e.blob) {
-                return Err(Error::Missing(e.blob));
-            }
-            starts.push(total);
-            total = total
-                .checked_add(e.len)
-                .ok_or_else(|| Error::Refused("assembled length overflow".into()))?;
-        }
-        Ok(Assembled {
-            store: self,
-            reader: Reader::new(&self.write_root, self.roots[1..].to_vec()),
-            extents: extents.to_vec(),
-            starts,
-            total,
-            pos: 0,
-        })
+        Assembled::new(self, extents)
     }
 
     fn range_any(&self, reader: &Reader, h: &Hash, offset: u64, len: u64) -> Result<Vec<u8>> {
@@ -1819,6 +1807,8 @@ impl Store {
         if Generation::of(&v.file).map_err(Error::Io)? != generation {
             return Err(corrupt("opened representation changed during verification").into());
         }
+        #[cfg(test)]
+        assembled::tests::record_verification(stats);
         Ok((
             PlainRead {
                 view: v,
@@ -2045,67 +2035,6 @@ impl Batch<'_> {
             Durability::Filesystem => syncfs(&root)?,
         }
         Ok(out)
-    }
-}
-
-pub struct Assembled<'a> {
-    store: &'a Store,
-    reader: Reader,
-    extents: Vec<Extent>,
-    starts: Vec<u64>,
-    total: u64,
-    pos: u64,
-}
-
-impl Read for Assembled<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.pos >= self.total || buf.is_empty() {
-            return Ok(0);
-        }
-        let i = match self.starts.binary_search(&self.pos) {
-            Ok(i) => {
-                // several zero-length extents may share a start; take the last one that has bytes
-                let mut j = i;
-                while j + 1 < self.starts.len() && self.starts[j + 1] == self.pos {
-                    j += 1;
-                }
-                j
-            }
-            Err(i) => i - 1,
-        };
-        let e = self.extents[i];
-        let within = self.pos - self.starts[i];
-        let take = (buf.len() as u64).min(e.len - within).min(1 << 20);
-        let offset = e
-            .offset
-            .checked_add(within)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "extent offset overflow"))?;
-        let data = self
-            .store
-            .range_any(&self.reader, &e.blob, offset, take)
-            .map_err(io::Error::other)?;
-        buf[..data.len()].copy_from_slice(&data);
-        self.pos += data.len() as u64;
-        Ok(data.len())
-    }
-}
-
-impl Seek for Assembled<'_> {
-    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
-        let p = match to {
-            SeekFrom::Start(p) => p as i128,
-            SeekFrom::End(d) => self.total as i128 + d as i128,
-            SeekFrom::Current(d) => self.pos as i128 + d as i128,
-        };
-        if p < 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "seek before the start",
-            ));
-        }
-        self.pos = u64::try_from(p)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "seek position overflow"))?;
-        Ok(self.pos)
     }
 }
 

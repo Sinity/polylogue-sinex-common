@@ -33,6 +33,17 @@ The file is ciphertext frames followed by a footer: `HBSEAL2\0` (8 bytes), salt 
 
 Each frame's AAD is the footer up to the total decoded length, then the keyed name (32), frame index (u32 LE), frame count (u32 LE), last-frame flag (u8), the frame's ciphertext and decoded lengths (u32 LE each) and its decoded start offset (u64 LE). Changing any table entry or earlier length therefore fails authentication, while a range read still reads only the footer and the frames it needs. Version 1 files are refused; there is no migration.
 
+`Store::assemble` exposes extents in their original order through `Read + Seek`.
+It retains at most four verified plain representations (four file descriptors and
+their seek tables) in recent-use order, with one decoded frame of at most 4 MiB
+shared across them. A return to a retained base reuses whole-name verification;
+evicted blobs are verified again before returning bytes. Alternating sources can
+still decode their selected frames repeatedly. Extent/start arrays scale with the
+supplied extents, and seek-table memory with the retained frame counts; decoder
+windows and each returned range (up to 1 MiB) are separate costs. Delta assembly
+keeps its legacy whole-delta read; sealed blobs require the separate keyed
+read APIs. No plaintext output is staged or cached globally.
+
 ## Measurements
 
 Deltas need the patch-from parameters (2026-10-12, synthetic text, a 100-byte change). A raw-content dictionary saved nothing from a 4 MiB base up. `zstd --patch-from` settings gave 441 B at 4 MiB, 7 KB at 64 MiB, 29 KB at 256 MiB and 123 KB at 1 GiB. Decoding needs about twice the base in memory (0.5 GB at 256 MiB), so the caller limits base size; Polylogue's limit is 640 MiB. The test `delta_against_a_large_base_stays_small` fails if the window is capped at zstd's default.
