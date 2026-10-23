@@ -323,3 +323,70 @@ fn changed_retained_or_corrupt_first_later_and_evicted_representations_expose_no
     assert!(assembled.read(&mut untouched).is_err());
     assert_eq!(untouched, [0x77; 4]);
 }
+
+#[test]
+fn delta_assembly_keeps_legacy_bytes_and_sealed_assembly_still_requires_a_key() {
+    use crate::DataKey;
+    let d = tempfile::tempdir().unwrap();
+    let s = Store::open(d.path(), vec![], 0o600)
+        .unwrap()
+        .with_frame_size(64 << 10);
+    let base = data(600, 3 * 64 * 1024);
+    let mut next = base.clone();
+    next[65536..65576].fill(b'x');
+    next.extend_from_slice(b"synthetic tail");
+    let a = s.put(&base[..], 3).unwrap();
+    let delta = s.put_delta(&a, &next[..], 3).unwrap();
+    assert_eq!(s.base_of(&delta).unwrap(), Some(a));
+    let extents = [
+        Extent {
+            blob: a,
+            offset: 0,
+            len: 8,
+        },
+        Extent {
+            blob: delta,
+            offset: 65534,
+            len: 80,
+        },
+        Extent {
+            blob: a,
+            offset: 32,
+            len: 8,
+        },
+    ];
+    let mut expected = base[..8].to_vec();
+    expected.extend_from_slice(&next[65534..65614]);
+    expected.extend_from_slice(&base[32..40]);
+    let mut assembled = s.assemble(&extents).unwrap();
+    let mut actual = Vec::new();
+    assembled.read_to_end(&mut actual).unwrap();
+    assert_eq!(actual, expected);
+    cache_bound(&assembled);
+    assembled.seek(SeekFrom::Start(9)).unwrap();
+    let mut part = [0; 12];
+    assembled.read_exact(&mut part).unwrap();
+    assert_eq!(part, &expected[9..21]);
+    let key = DataKey {
+        key_ref: "synthetic-key".into(),
+        key: [7; 32],
+    };
+    let sealed = s
+        .put_sealed(&b"synthetic sealed bytes"[..], 1, &key)
+        .unwrap();
+    let mut assembled = s
+        .assemble(&[Extent {
+            blob: sealed,
+            offset: 0,
+            len: 4,
+        }])
+        .unwrap();
+    let mut untouched = [0x88; 4];
+    let error = assembled.read(&mut untouched).unwrap_err();
+    assert!(
+        matches!(error.get_ref().and_then(|e|e.downcast_ref::<Error>()),Some(Error::Locked(h)) if *h==sealed)
+    );
+    assert_eq!(untouched, [0x88; 4]);
+    assert!(assembled.opened.is_empty());
+    assert!(assembled.frame.is_none());
+}
