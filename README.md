@@ -74,10 +74,17 @@ server or a saturated disk needs diagnosis, not a larger timeout. Focused checks
 stay cheap, and full checks belong to coherent batches. Tests selecting no cases
 fail. Keep extended runs in the queue while continuing independent work.
 
-`Nextest { tmpfs: true, .. }` gives tests a short, exclusively owned directory
-under `/dev/shm` when available, regardless of inherited job-scratch depth.
-Dropping the run removes that directory, never the caller's scratch root. Tests
-of real filesystem durability use `TEST_DURABLE_TMPDIR` instead.
+`Nextest { tmpfs: true, .. }` creates an exclusive child of `AGENTCTL_SCRATCH`
+when the native job supplies it. Declare `scratch = "tmpfs"` on test operations:
+the existing AgentCTL owner then removes retained test files after normal exit,
+cancellation or a killed process. Devkit never adopts or removes the parent.
+For long Linux paths, a held directory descriptor exposes a short `/proc` path
+for Unix sockets; the files still live inside the job-owned directory.
+
+Outside a managed job, the fallback is an exclusive child under `/dev/shm`
+when available, otherwise the inherited temporary directory. Normal Drop removes
+only that child; standalone abrupt death has no external cleanup guarantee.
+Tests of real filesystem durability still use `TEST_DURABLE_TMPDIR`.
 
 ## Benchmark reports
 

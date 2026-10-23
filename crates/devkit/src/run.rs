@@ -145,8 +145,8 @@ impl Tree {
 pub struct Nextest {
     /// Arguments after `cargo nextest run`: packages, filtersets, test names.
     pub args: Vec<String>,
-    /// Put `TMPDIR` on a per-run tmpfs directory, removed afterwards, and give
-    /// tests that check durability a real-filesystem directory in
+    /// Put `TMPDIR` in job-owned scratch, or a standalone tmpfs child,
+    /// removed afterwards. Give durability tests a real-filesystem directory in
     /// `TEST_DURABLE_TMPDIR`.
     pub tmpfs: bool,
     /// Extra environment for the build and the tests.
@@ -298,7 +298,7 @@ impl Run {
         if let Some(temp) = &temp {
             let durable = self.target_dir()?.join("tmp");
             fs::create_dir_all(&durable).map_err(|e| format!("{}: {e}", durable.display()))?;
-            env.push(("TMPDIR".into(), temp.0.display().to_string()));
+            env.push(("TMPDIR".into(), temp.path().display().to_string()));
             env.push(("TEST_DURABLE_TMPDIR".into(), durable.display().to_string()));
         }
         let args: Vec<&str> = options.args.iter().map(String::as_str).collect();
@@ -590,22 +590,34 @@ pub(crate) fn strip_ansi(text: &str) -> String {
     out
 }
 
-/// A per-run temporary directory on tmpfs, removed when dropped. Keep the
-/// root short: tests create archives and Unix sockets below it, and Linux
-/// socket paths have a fixed length limit even on tmpfs.
-struct RunTemp(PathBuf);
+/// Owns only its exclusive child, never the inherited job scratch parent.
+/// AgentCTL can remove that child after native cancellation without Rust Drop.
+struct RunTemp {
+    directory: PathBuf,
+    visible: PathBuf,
+    // Linux socket paths can use this short directory view while the run lives.
+    _socket_root: Option<fs::File>,
+}
 
 impl RunTemp {
     fn new() -> Result<Self> {
-        Self::with_temp_dir(&env::temp_dir())
+        Self::with_roots(
+            &env::temp_dir(),
+            env::var_os("AGENTCTL_SCRATCH").as_deref().map(Path::new),
+        )
     }
 
-    fn with_temp_dir(inherited: &Path) -> Result<Self> {
+    fn with_roots(inherited: &Path, job: Option<&Path>) -> Result<Self> {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        // Do not nest under an already-tmpfs AgentCTL scratch root. Its
-        // length can exhaust the socket path budget before a test starts.
-        let base = if Path::new("/dev/shm").is_dir() {
+        let base = if let Some(job) = job {
+            let metadata = fs::symlink_metadata(job)
+                .map_err(|error| format!("job scratch {}: {error}", job.display()))?;
+            if !job.is_absolute() || !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return Err("AGENTCTL_SCRATCH must name an existing absolute directory".into());
+            }
+            job
+        } else if Path::new("/dev/shm").is_dir() {
             Path::new("/dev/shm")
         } else {
             inherited
@@ -616,49 +628,65 @@ impl RunTemp {
                 process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
-            match fs::create_dir(&path) {
-                Ok(()) => return Ok(Self(path)),
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&path) {
+                Ok(()) => {
+                    let mut temp = Self {
+                        directory: path.clone(),
+                        visible: path,
+                        _socket_root: None,
+                    };
+                    #[cfg(target_os = "linux")]
+                    if temp.visible.as_os_str().len() > 40 {
+                        use std::os::fd::AsRawFd;
+                        let directory = fs::File::open(&temp.directory).map_err(|error| {
+                            format!("test scratch {}: {error}", temp.directory.display())
+                        })?;
+                        let visible = PathBuf::from(format!(
+                            "/proc/{}/fd/{}",
+                            process::id(),
+                            directory.as_raw_fd()
+                        ));
+                        if !visible.is_dir() {
+                            return Err(
+                                "short test socket path is unavailable through /proc".into()
+                            );
+                        }
+                        temp.visible = visible;
+                        temp._socket_root = Some(directory);
+                    }
+                    return Ok(temp);
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(format!("{}: {error}", path.display()).into()),
             }
         }
     }
+
+    fn path(&self) -> &Path {
+        &self.visible
+    }
 }
 
 impl Drop for RunTemp {
     fn drop(&mut self) {
-        if let Err(error) = fs::remove_dir_all(&self.0) {
-            eprintln!("devkit: {}: {error}", self.0.display());
+        if let Err(error) = fs::remove_dir_all(&self.directory) {
+            eprintln!("devkit: {}: {error}", self.directory.display());
         }
     }
 }
 
 #[cfg(test)]
+mod temp_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn tmpfs_root_stays_short_under_nested_job_scratch() {
-        use std::os::unix::net::UnixListener;
-        let parent = tempfile::tempdir_in("/dev/shm").unwrap();
-        let inherited = parent.path().join("agentctl").join("job-".repeat(25));
-        fs::create_dir_all(&inherited).unwrap();
-        let one = RunTemp::with_temp_dir(&inherited).unwrap();
-        let two = RunTemp::with_temp_dir(&inherited).unwrap();
-        assert_ne!(one.0, two.0);
-        let archive = tempfile::tempdir_in(&one.0).unwrap();
-        let socket = archive.path().join("archive/run/daemon.sock");
-        fs::create_dir_all(socket.parent().unwrap()).unwrap();
-        let listener = UnixListener::bind(&socket).unwrap();
-        drop(listener);
-        drop(archive);
-        let removed = one.0.clone();
-        drop(one);
-        assert!(!removed.exists());
-        assert!(two.0.exists());
-        assert!(inherited.exists());
-    }
 
     #[test]
     fn package_names_from_ids() {
