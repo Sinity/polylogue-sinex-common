@@ -1,4 +1,4 @@
-//! Streaming masking for the fixed `credential-output-v1` catalog.
+//! Streaming masking for the fixed `credential-output-v2` catalog.
 //!
 //! Text that might still become a credential is held back, up to 512 UTF-8
 //! bytes. When an undecided match outgrows that window it is forced: its held
@@ -647,45 +647,27 @@ impl Masker {
         }
     }
 
-    /// Records the masked region of finished matches.
-    ///
-    /// Within a family the earliest match wins, as with Python `re.finditer`,
-    /// so a later match waits while an earlier one can still complete.
+    /// Records every independently valid match, including starts inside an
+    /// earlier match of the same family. Only the masked regions are merged;
+    /// a covered label does not imply its following secret is covered.
     fn commit_candidates(&mut self) {
+        let mut spans = Vec::new();
         for family in 0..FAMILIES {
-            loop {
-                let earliest = self
-                    .candidates
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, c)| {
-                        self.patterns[c.pattern].family == family
-                            && (c.alive || c.accepted.is_some())
-                    })
-                    .min_by_key(|(_, c)| c.start)
-                    .map(|(i, _)| i);
-                let Some(i) = earliest else {
-                    break;
-                };
-                let c = &self.candidates[i];
-                let Some(end) = c.accepted else {
-                    break;
-                };
-                let (start, secret, kind, alive) =
-                    (c.start, c.secret, self.patterns[c.pattern].kind, c.alive);
-                self.cover(secret, end, kind);
-                self.candidates[i].committed = true;
-                self.candidates.retain(|c| {
-                    self.patterns[c.pattern].family != family
-                        || c.start >= end
-                        || c.start == start && c.committed && c.alive
-                });
-                if alive {
-                    break;
+            for c in &mut self.candidates {
+                let p = &self.patterns[c.pattern];
+                if p.family != family {
+                    continue;
+                }
+                if let Some(end) = c.accepted {
+                    spans.push((c.secret, end, p.kind));
+                    c.committed = true;
                 }
             }
         }
-        self.candidates.retain(|c| c.alive || c.accepted.is_some());
+        for (secret, end, kind) in spans {
+            self.cover(secret, end, kind);
+        }
+        self.candidates.retain(|c| c.alive);
     }
 
     fn step(&mut self, c: char, sink: &mut impl Write) -> io::Result<()> {
@@ -743,9 +725,7 @@ impl Masker {
             if c.holds() && c.start == start {
                 let p = &self.patterns[c.pattern];
                 let from = c.force(p);
-                // A finished match waiting behind an earlier one of its family.
-                let end = if c.alive { None } else { c.accepted };
-                spans.push((from, end.unwrap_or(self.position), p.kind));
+                spans.push((from, self.position, p.kind));
             }
         }
         for u in &mut self.urls {
@@ -765,15 +745,22 @@ impl Masker {
         }
     }
 
-    /// Extends the masks of forced matches over the character just read, and
-    /// drops matches whose whole span a forced match already masks.
+    /// Extends forced masks over the character just read and drops candidates
+    /// whose consumed bytes and future continuation are already covered.
     fn mask_forced(&mut self) {
         let mut spans = Vec::new();
-        let mut forced = Vec::new();
+        let mut covering = Vec::new();
         for c in &self.candidates {
             if let (Some(from), true) = (c.forced, c.alive) {
                 spans.push((from, self.patterns[c.pattern].kind));
-                forced.push((c.pattern, c.part, c.count, c.start, from));
+            }
+            if c.alive {
+                let covered_from = c.forced.or_else(|| {
+                    (c.committed && c.accepted == Some(self.position)).then_some(c.secret)
+                });
+                if let Some(from) = covered_from {
+                    covering.push((c.pattern, c.part, c.count, c.start, from));
+                }
             }
         }
         spans.extend(
@@ -791,17 +778,18 @@ impl Masker {
         for (from, kind) in spans {
             self.cover(from, self.position, kind);
         }
-        // A forced match has masked everything since `from` and masks
-        // everything it reads until it dies. A later match that started inside
-        // that span and has either finished or reached the same state (so it
-        // will die at the same character) adds nothing. Dropping these keeps
-        // the number of forced matches bounded.
-        if !forced.is_empty() {
+        // A live forced or accepted match covers everything since `from`.
+        // A later candidate of the same pattern in the same state will consume
+        // exactly the same future characters, so it cannot extend that mask.
+        // Matching only its label position would discard crossing secrets.
+        if !covering.is_empty() {
             self.candidates.retain(|b| {
-                !forced.iter().any(|&(pattern, part, count, start, from)| {
+                !covering.iter().any(|&(pattern, part, count, start, from)| {
                     b.start > start
                         && b.start >= from
-                        && (!b.alive || b.pattern == pattern && b.part == part && b.count == count)
+                        && b.pattern == pattern
+                        && b.part == part
+                        && b.count == count
                 })
             });
         }
@@ -876,15 +864,7 @@ impl Masker {
                 Boundary::Word => self.previous.is_none_or(|x| !is_word_char(x)),
                 Boundary::Space => self.previous.is_none_or(whitespace),
             };
-            // A committed match of the same family that is still growing here
-            // blocks a new one from starting inside it.
-            let inside_match = self.candidates.iter().any(|s| {
-                s.committed
-                    && s.alive
-                    && self.patterns[s.pattern].family == p.family
-                    && s.accepted == Some(self.position)
-            });
-            if !at_boundary || inside_match || !p.parts[0].class.accepts(c) {
+            if !at_boundary || !p.parts[0].class.accepts(c) {
                 continue;
             }
             let mut candidate = Candidate {

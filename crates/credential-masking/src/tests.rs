@@ -52,13 +52,13 @@ fn byte_chunks(input: &str, chunks: &[usize]) -> String {
 #[test]
 fn conformance_cases_mask_the_same_at_every_split() {
     let corpus: serde_json::Value = serde_json::from_str(include_str!(
-        "../tests/fixtures/credential-output-v1/conformance.json"
+        "../tests/fixtures/credential-output-v2/conformance.json"
     ))
     .unwrap();
-    assert_eq!(corpus["catalog_version"], "credential-output-v1");
+    assert_eq!(corpus["catalog_version"], "credential-output-v2");
     assert_eq!(corpus["fixture_encoding"], "text-parts-v1");
     let cases = corpus["cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 132);
+    assert_eq!(cases.len(), 138);
     for case in cases {
         let text: String = case["text_parts"]
             .as_array()
@@ -116,6 +116,28 @@ fn word_boundaries_follow_python_letters_digits_and_whitespace() {
             normalized(&masked(&[&format!("{prefix}--secret=x")])),
             format!("{prefix}--secret=<masked>")
         );
+    }
+}
+#[test]
+fn quoted_secret_labels_inside_earlier_values_do_not_hide_later_secrets() {
+    for quote in ['"', '\''] {
+        let input =
+            format!("--secret={quote}unfinished --token={quote}synthetic-later-value{quote} tail");
+        let expected = "--secret=<masked> tail";
+        for cut in 0..=input.len() {
+            assert_eq!(
+                normalized(&byte_chunks(&input, &[cut, input.len() - cut])),
+                expected,
+                "quote {quote}, cut {cut}"
+            );
+        }
+        for width in 1..=8 {
+            let chunks: Vec<_> = (0..input.len())
+                .step_by(width)
+                .map(|i| width.min(input.len() - i))
+                .collect();
+            assert_eq!(normalized(&byte_chunks(&input, &chunks)), expected);
+        }
     }
 }
 #[test]
@@ -298,6 +320,36 @@ fn long_pem_label_masks_to_the_end_of_the_string() {
     assert_eq!(normalized(&masked(&[&input])), "<masked>----- after");
 }
 #[test]
+fn independently_started_matches_keep_bounded_continuation_state() {
+    let mut m = Masker::new();
+    let mut out = Vec::new();
+    for _ in 0..2_000 {
+        m.push("xoxb-A-", &mut out).unwrap();
+        assert!(m.candidates.len() <= 64, "{}", m.candidates.len());
+        assert!(m.pending.len() <= CARRY + 1);
+    }
+    m.finish(&mut out).unwrap();
+    assert_eq!(normalized(std::str::from_utf8(&out).unwrap()), "<masked>");
+
+    for quote in ['"', '\''] {
+        let input = format!(
+            "--secret={quote}{} --token={quote}synthetic-later-value{quote} tail",
+            "é".repeat(CARRY)
+        );
+        for width in [1, 2, 3, 7, CARRY - 1, CARRY, CARRY + 1] {
+            let chunks: Vec<_> = (0..input.len())
+                .step_by(width)
+                .map(|i| width.min(input.len() - i))
+                .collect();
+            assert_eq!(
+                normalized(&byte_chunks(&input, &chunks)),
+                "--secret=<masked> tail",
+                "quote {quote}, chunk width {width}"
+            );
+        }
+    }
+}
+#[test]
 fn forced_matches_stay_bounded() {
     let mut m = Masker::new();
     let mut out = Vec::new();
@@ -401,13 +453,9 @@ fn embedded_credentials_never_leak() {
             3 => format!("--secret=\"{secret} with spaces\""),
             _ => format!("Bearer {secret}"),
         };
-        // An unclosed quote before the credential can end at its opening
-        // quote, as in the catalog's reference matcher, so quotes in the
-        // surrounding text are only allowed across a line break.
         let (before, after) = (random_text(&mut rng), random_text(&mut rng));
         let text = if rng.below(2) == 0 {
-            let unquoted = |s: &str| s.replace(['"', '\''], "");
-            format!("{} {credential} {}", unquoted(&before), unquoted(&after))
+            format!("{before} {credential} {after}")
         } else {
             format!("{before}\n{credential}\n{after}")
         };
