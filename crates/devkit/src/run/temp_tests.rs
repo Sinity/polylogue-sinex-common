@@ -82,9 +82,6 @@ fn socket_child() {
 #[test]
 #[ignore = "synthetic native cancellation control; run explicitly under AgentCTL"]
 fn native_cancellation_fixture() {
-    if env::var_os("DEVKIT_TEST_NATIVE_CANCEL").is_none() {
-        return;
-    }
     let owner = PathBuf::from(env::var_os("AGENTCTL_SCRATCH").expect("job-owned scratch required"));
     let temp = RunTemp::new().unwrap();
     assert_eq!(temp.directory.parent(), Some(owner.as_path()));
@@ -97,7 +94,12 @@ fn native_cancellation_fixture() {
         .to_string(),
     )
     .unwrap();
+    let started = Instant::now();
     loop {
-        std::thread::sleep(Duration::from_secs(1));
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "native control was not canceled within 30 seconds"
+        );
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
