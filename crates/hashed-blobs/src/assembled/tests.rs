@@ -119,6 +119,7 @@ fn alternating_extents_verify_each_retained_blob_once() {
 }
 
 fn cache_bound(assembled: &Assembled<'_>) {
+    assert!(assembled.reader.slot().unwrap().is_none());
     assert!(assembled.opened.len() <= OPEN_PLAIN);
     assert!(assembled.opened.iter().all(|p| p.current.is_none()));
     assert!(assembled
@@ -388,7 +389,11 @@ fn delta_assembly_keeps_legacy_bytes_and_sealed_assembly_still_requires_a_key() 
         key: [7; 32],
     };
     let sealed = s
-        .put_sealed(&b"synthetic sealed bytes"[..], 1, &key)
+        .put_sealed(
+            std::io::Cursor::new(&b"synthetic sealed bytes"[..]),
+            1,
+            &key,
+        )
         .unwrap();
     let mut assembled = s
         .assemble(&[Extent {
