@@ -257,3 +257,62 @@ fn missing_invalid_or_overflowing_values_have_no_estimate() {
     let stages = BTreeMap::from([("decode".into(), -1.0)]);
     assert!(linear_estimate(Some(1.0), &stages, Some(2.0))["estimate"].is_null());
 }
+
+#[test]
+fn incomplete_source_observation_keeps_bench_revision_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=Synthetic",
+            "-c",
+            "user.email=synthetic@example.invalid",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "synthetic",
+        ],
+    ] {
+        assert!(
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+    fs::write(root.join(".git/index"), b"not a Git index").unwrap();
+    let observed = crate::Tree::observe(root);
+    assert!(observed.head.is_some());
+    assert!(observed.observation_error.is_some());
+    let store = Store::open_at(&root.join("history.db")).unwrap();
+    let load = load::LoadInterval::new(HostLoad {
+        load1: None,
+        cpus: None,
+        io_full: None,
+        memory_full: None,
+    });
+    let id = record(
+        &store,
+        root,
+        "demo",
+        "build",
+        "sample",
+        root,
+        &load,
+        &json!({"seconds":1}),
+    )
+    .unwrap();
+    let head: Option<String> = store
+        .connection()
+        .query_row("SELECT head FROM bench_runs WHERE id=?1", [id], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(head.is_none());
+}

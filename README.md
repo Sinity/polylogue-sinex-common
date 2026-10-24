@@ -31,6 +31,8 @@ store at `$XDG_STATE_HOME/devkit/history.db`:
 Passing tests keep no output and each diagnostic text is stored once, so the
 store stays small without deleting anything.
 
+Aggregate [history queries](docs/history.md) find contradictory outcomes at the same recorded Git tree, the first recorded failing version, descriptive command/stage durations, and equal compiler messages across explicitly selected worktrees. They retain unknown identity, excluded samples and observed statuses rather than deriving success from absent rows.
+
 With the `pg` feature, devkit also provides PostgreSQL for projects with
 compile-time-checked SQL. The server is the per-user service on the socket in
 `$XDG_RUNTIME_DIR/devkit/pg` (Sinnix's `devkit-pg`), or a throwaway cluster on
