@@ -509,3 +509,61 @@ fn sink_errors_are_returned_unchanged_and_close_the_stream() {
         assert_eq!(sink.calls, 1);
     }
 }
+
+#[test]
+fn cloned_stream_preserves_pending_matches_and_pem_tail() {
+    for (prefix, suffix, boundary) in [
+        (
+            "ghp_AAAAA",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA visible",
+            false,
+        ),
+        (
+            "-----BEGIN VENDOR PRIVATE KEY-----body-----END VEND",
+            "OR PRIVATE KEY----- visible",
+            true,
+        ),
+    ] {
+        let mut original = Masker::new();
+        let mut prefix_output = Vec::new();
+        original.push(prefix, &mut prefix_output).unwrap();
+        if boundary {
+            original.block_boundary(&mut prefix_output).unwrap();
+        }
+        let mut cloned = original.clone();
+        let mut expected = Vec::new();
+        original.push(suffix, &mut expected).unwrap();
+        original.finish(&mut expected).unwrap();
+        let mut actual = Vec::new();
+        cloned.push(suffix, &mut actual).unwrap();
+        cloned.finish(&mut actual).unwrap();
+        assert_eq!(actual, expected);
+        prefix_output.extend(actual);
+        let text = std::str::from_utf8(&prefix_output).unwrap();
+        assert!(text.ends_with(" visible"));
+        assert!(!text.contains("AAAAA") && !text.contains("VENDOR"));
+    }
+}
+
+#[test]
+fn cloned_closed_and_failed_streams_remain_fused() {
+    for failed in [false, true] {
+        let mut original = Masker::new();
+        if failed {
+            original.push("visible ", &mut std::io::sink()).unwrap();
+            let mut full = std::io::Cursor::new(&mut [0u8; 0][..]);
+            assert!(original.push("more visible ", &mut full).is_err());
+        } else {
+            original.finish(&mut Vec::new()).unwrap();
+        }
+        let mut cloned = original.clone();
+        let mut out = Vec::new();
+        assert_eq!(
+            cloned.push("later", &mut out).unwrap_err().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+        assert!(cloned.block_boundary(&mut out).is_err());
+        assert!(cloned.finish(&mut out).is_err());
+        assert!(out.is_empty());
+    }
+}
