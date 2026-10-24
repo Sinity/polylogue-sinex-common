@@ -57,6 +57,86 @@ pub enum History {
         #[arg(long)]
         json: bool,
     },
+    /// Passed and failed observations across runs at equal recorded Git trees.
+    Intermittent {
+        #[command(flatten)]
+        scope: HistoryScope,
+        /// Resolve legacy HEADs against this explicit repository, read-only.
+        #[arg(long)]
+        repository: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// First recorded failure of an exact binary/test identity, without causal attribution.
+    FirstFailing {
+        binary: String,
+        name: String,
+        #[command(flatten)]
+        scope: HistoryScope,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Descriptive duration samples for an exact command and argument selection.
+    Durations {
+        command: String,
+        /// Exact recorded argument array; omitted means the empty selection.
+        #[arg(long, default_value = "[]")]
+        args_json: String,
+        /// Select one recorded stage instead of the whole invocation.
+        #[arg(long)]
+        stage: Option<String>,
+        #[command(flatten)]
+        scope: HistoryScope,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Equal recorded compiler messages across explicit worktrees in this project.
+    DiagnosticGroups {
+        #[arg(long, default_value = "warning", value_parser = ["warning", "error"])]
+        level: String,
+        #[command(flatten)]
+        scope: HistoryScope,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Every aggregate stays within the invoking project and explicit checkout population.
+#[derive(Debug, clap::Args)]
+pub struct HistoryScope {
+    /// Historical absolute checkout path, repeatable. Default: this checkout only.
+    #[arg(long = "checkout")]
+    checkouts: Vec<PathBuf>,
+}
+
+impl HistoryScope {
+    fn paths(&self, root: &Path) -> Result<Vec<String>, String> {
+        let mut selected = if self.checkouts.is_empty() {
+            vec![root.to_path_buf()]
+        } else {
+            self.checkouts.clone()
+        };
+        if selected.iter().any(|path| !path.is_absolute()) {
+            return Err("--checkout requires an absolute historical path".into());
+        }
+        selected.sort();
+        selected.dedup();
+        Ok(selected
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect())
+    }
+}
+
+fn query_output(value: serde_json::Value, json: bool) -> Result<(), String> {
+    let output = if json {
+        serde_json::to_string(&value)
+    } else {
+        serde_json::to_string_pretty(&value)
+    }
+    .map_err(|error| error.to_string())?;
+    println!("{output}");
+    Ok(())
 }
 
 #[cfg(feature = "bench")]
@@ -121,6 +201,59 @@ pub fn execute(project: &str, command: Command) -> ExitCode {
             })
         }
         Command::Status { json } => with_store(|store| status(store, project, &root, json)),
+        Command::History(History::Intermittent {
+            scope,
+            repository,
+            json,
+        }) => with_store(|store| {
+            let paths = scope.paths(&root)?;
+            query_output(
+                store
+                    .intermittent(project, &paths, repository.as_deref())
+                    .map_err(|e| e.to_string())?,
+                json,
+            )
+        }),
+        Command::History(History::FirstFailing {
+            binary,
+            name,
+            scope,
+            json,
+        }) => with_store(|store| {
+            let paths = scope.paths(&root)?;
+            query_output(
+                store
+                    .first_failing(project, &paths, &binary, &name)
+                    .map_err(|e| e.to_string())?,
+                json,
+            )
+        }),
+        Command::History(History::Durations {
+            command,
+            args_json,
+            stage,
+            scope,
+            json,
+        }) => with_store(|store| {
+            let paths = scope.paths(&root)?;
+            let args: Vec<String> = serde_json::from_str(&args_json)
+                .map_err(|e| format!("--args-json must be an array of strings: {e}"))?;
+            query_output(
+                store
+                    .durations(project, &paths, &command, &args, stage.as_deref())
+                    .map_err(|e| e.to_string())?,
+                json,
+            )
+        }),
+        Command::History(History::DiagnosticGroups { level, scope, json }) => with_store(|store| {
+            let paths = scope.paths(&root)?;
+            query_output(
+                store
+                    .diagnostic_groups(project, &paths, &level)
+                    .map_err(|e| e.to_string())?,
+                json,
+            )
+        }),
         Command::History(History::Runs { limit, json }) => with_store(|store| {
             let runs = store
                 .runs(project, &root.display().to_string(), limit)
@@ -275,7 +408,13 @@ fn run_line(run: &RunRow) -> String {
     let head = run.head.as_deref().map_or("no commit".into(), |h| {
         h.chars().take(10).collect::<String>()
     });
-    let dirty = if run.dirty { "+changes" } else { "" };
+    let dirty = if run.observation_error.is_some() {
+        "+unobserved"
+    } else if run.dirty {
+        "+changes"
+    } else {
+        ""
+    };
     let mut line = format!(
         "run {}: {} {} at {head}{dirty}{duration}",
         run.id, run.command, run.status
@@ -289,7 +428,8 @@ fn run_line(run: &RunRow) -> String {
 fn run_json(run: &RunRow) -> serde_json::Value {
     json!({
         "id": run.id, "project": run.project, "checkout": run.checkout, "command": run.command,
-        "args": run.args, "head": run.head, "dirty": run.dirty, "started_ms": run.started_ms,
+        "args": run.args, "head": run.head, "dirty": run.dirty,
+        "git_tree": run.git_tree, "observation_error": run.observation_error, "started_ms": run.started_ms,
         "duration_ms": run.duration_ms, "status": run.status, "failure": run.failure,
     })
 }
@@ -309,3 +449,6 @@ fn checkout_root() -> PathBuf {
         .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()))
         .unwrap_or(cwd)
 }
+
+#[cfg(test)]
+mod tests;

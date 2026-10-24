@@ -102,41 +102,89 @@ pub struct TestOutcome {
 pub struct Tree {
     pub head: Option<String>,
     pub dirty: Option<String>,
+    /// The committed Git tree object, separate from uncommitted content.
+    pub git_tree: Option<String>,
+    /// Observation failed; neither a missing dirty hash nor HEAD proves clean content.
+    pub observation_error: Option<String>,
 }
 
 impl Tree {
     pub fn observe(root: &Path) -> Self {
-        let git = |args: &[&str]| -> Option<Vec<u8>> {
+        use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
+        let git = |args: &[&str]| -> std::result::Result<Vec<u8>, String> {
             let output = Command::new("git")
                 .args(args)
                 .current_dir(root)
                 .stderr(Stdio::null())
                 .output()
-                .ok()?;
-            output.status.success().then_some(output.stdout)
-        };
-        let head =
-            git(&["rev-parse", "HEAD"]).map(|out| String::from_utf8_lossy(&out).trim().to_owned());
-        let diff = git(&["diff", "HEAD", "--binary"]).unwrap_or_default();
-        let untracked =
-            git(&["ls-files", "--others", "--exclude-standard", "-z"]).unwrap_or_default();
-        if diff.is_empty() && untracked.is_empty() {
-            return Self { head, dirty: None };
-        }
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&diff);
-        for name in untracked.split(|b| *b == 0).filter(|n| !n.is_empty()) {
-            hasher.update(name);
-            hasher.update(&[0]);
-            let path = root.join(String::from_utf8_lossy(name).as_ref());
-            if let Ok(bytes) = fs::read(path) {
-                hasher.update(&bytes);
+                .map_err(|_| format!("git {} unavailable", args[0]))?;
+            if !output.status.success() {
+                return Err(format!("git {} failed", args[0]));
             }
+            Ok(output.stdout)
+        };
+        let mut observed = Self {
+            head: None,
+            dirty: None,
+            git_tree: None,
+            observation_error: None,
+        };
+        let result = (|| -> std::result::Result<(), String> {
+            observed.head = Some(
+                String::from_utf8_lossy(&git(&["rev-parse", "HEAD"])?)
+                    .trim()
+                    .to_owned(),
+            );
+            let tree = String::from_utf8_lossy(&git(&["rev-parse", "HEAD^{tree}"])?)
+                .trim()
+                .to_owned();
+            let diff = git(&["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--binary"])?;
+            let untracked = git(&["ls-files", "--others", "--exclude-standard", "-z"])?;
+            if !diff.is_empty() || !untracked.is_empty() {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(&(diff.len() as u64).to_le_bytes());
+                hasher.update(&diff);
+                for name in untracked.split(|b| *b == 0).filter(|n| !n.is_empty()) {
+                    hasher.update(&(name.len() as u64).to_le_bytes());
+                    hasher.update(name);
+                    let path = root.join(std::ffi::OsStr::from_bytes(name));
+                    let metadata =
+                        fs::symlink_metadata(&path).map_err(|_| "untracked metadata unreadable")?;
+                    if metadata.file_type().is_symlink() {
+                        hasher.update(b"symlink\0");
+                        let target =
+                            fs::read_link(&path).map_err(|_| "untracked symlink unreadable")?;
+                        let bytes = target.as_os_str().as_bytes();
+                        hasher.update(&(bytes.len() as u64).to_le_bytes());
+                        hasher.update(bytes);
+                    } else if metadata.is_file() {
+                        hasher.update(b"file\0");
+                        hasher.update(&(metadata.permissions().mode() & 0o111).to_le_bytes());
+                        let bytes = fs::read(&path).map_err(|_| "untracked file unreadable")?;
+                        hasher.update(&(bytes.len() as u64).to_le_bytes());
+                        hasher.update(&bytes);
+                    } else {
+                        return Err("untracked entry is not a file or symlink".into());
+                    }
+                    hasher.update(&[0]);
+                }
+                observed.dirty = Some(format!("v2:{}", hasher.finalize().to_hex()));
+            }
+            // Detect a commit change while observing the worktree as unavailable.
+            let head = String::from_utf8_lossy(&git(&["rev-parse", "HEAD"])?)
+                .trim()
+                .to_owned();
+            if observed.head.as_deref() != Some(&head) {
+                return Err("HEAD changed during observation".into());
+            }
+            observed.git_tree = Some(tree);
+            Ok(())
+        })();
+        if let Err(error) = result {
+            observed.git_tree = None;
+            observed.observation_error = Some(error);
         }
-        Self {
-            head,
-            dirty: Some(hasher.finalize().to_hex().to_string()),
-        }
+        observed
     }
 }
 
@@ -424,10 +472,10 @@ impl Run {
     /// records it, prints a summary and returns the exit code.
     pub fn finish(mut self) -> ExitCode {
         if Tree::observe(&self.root) != self.tree {
-            self.failure.get_or_insert_with(|| {
-                "the checkout changed during the run, so the results describe neither version"
-                    .to_owned()
-            });
+            let reason = "checkout changed or could not be observed consistently during the run";
+            self.tree.git_tree = None;
+            self.tree.observation_error = Some(reason.into());
+            self.failure.get_or_insert_with(|| reason.into());
         }
         let elapsed = self.clock.elapsed();
         let id = self.id();
@@ -735,3 +783,6 @@ mod tests {
 #[cfg(test)]
 #[path = "run/nextest_tests.rs"]
 mod nextest_tests;
+
+#[cfg(test)]
+mod tree_tests;

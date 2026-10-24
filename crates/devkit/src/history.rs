@@ -4,6 +4,8 @@
 //! Rows are never deleted; the store stays small because passing tests keep
 //! no output and each distinct diagnostic text is stored once. Other programs
 //! may read it; the tables below are its interface.
+mod queries;
+
 use crate::Run;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{
@@ -79,6 +81,8 @@ pub struct RunRow {
     pub args: String,
     pub head: Option<String>,
     pub dirty: bool,
+    pub git_tree: Option<String>,
+    pub observation_error: Option<String>,
     pub started_ms: i64,
     pub duration_ms: Option<i64>,
     /// passed, failed, running or interrupted
@@ -144,6 +148,20 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.execute_batch(SCHEMA)?;
+        // Existing stores predate complete tree observation. NULL stays legacy/unknown.
+        let migration =
+            rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)?;
+        for column in ["git_tree", "observation_error"] {
+            let present: bool = migration.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('runs') WHERE name = ?1)",
+                [column],
+                |row| row.get(0),
+            )?;
+            if !present {
+                migration.execute_batch(&format!("ALTER TABLE runs ADD COLUMN {column} TEXT"))?;
+            }
+        }
+        migration.commit()?;
         Ok(Self { conn })
     }
 
@@ -158,8 +176,8 @@ impl Store {
             .map(|h| h.trim().to_owned());
         self.conn.execute(
             "INSERT INTO runs (project, checkout, command, args, head, dirty, toolchain, host,
-                               pid, agentctl_job, started_ms, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'running')",
+                               pid, agentctl_job, started_ms, status, git_tree, observation_error)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'running', ?12, ?13)",
             params![
                 run.project,
                 run.root.display().to_string(),
@@ -172,6 +190,8 @@ impl Store {
                 std::process::id(),
                 env::var("AGENTCTL_JOB_ID").ok(),
                 millis(run.started),
+                run.tree.git_tree,
+                run.tree.observation_error,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -180,7 +200,8 @@ impl Store {
     pub(crate) fn finish(&self, id: i64, run: &Run, elapsed: Duration) -> rusqlite::Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
-            "UPDATE runs SET duration_ms = ?2, status = ?3, failure = ?4 WHERE id = ?1",
+            "UPDATE runs SET duration_ms = ?2, status = ?3, failure = ?4,
+                 git_tree = ?5, observation_error = ?6 WHERE id = ?1",
             params![
                 id,
                 elapsed.as_millis() as i64,
@@ -190,6 +211,8 @@ impl Store {
                     "passed"
                 },
                 run.failure,
+                run.tree.git_tree,
+                run.tree.observation_error,
             ],
         )?;
         for (position, stage) in run.stages.iter().enumerate() {
@@ -334,7 +357,7 @@ impl Store {
 }
 
 const RUN_SELECT: &str = "SELECT id, project, checkout, command, args, head, dirty, started_ms,
-                                 duration_ms, status, failure, pid FROM runs";
+                                 duration_ms, status, failure, pid, git_tree, observation_error FROM runs";
 
 fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
     let mut status: String = row.get(9)?;
@@ -350,6 +373,8 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
         args: row.get(4)?,
         head: row.get(5)?,
         dirty: row.get::<_, Option<String>>(6)?.is_some(),
+        git_tree: row.get(12)?,
+        observation_error: row.get(13)?,
         started_ms: row.get(7)?,
         duration_ms: row.get(8)?,
         status,
@@ -375,6 +400,8 @@ mod tests {
         run.tree = Tree {
             head: Some("abc".into()),
             dirty: None,
+            git_tree: Some("synthetic-tree".into()),
+            observation_error: None,
         };
         let id = store.begin(&run).unwrap();
         run.stages.push(Stage {

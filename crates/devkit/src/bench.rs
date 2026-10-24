@@ -541,7 +541,11 @@ pub fn record(
             sample,
             storage_of(output_dir),
             output_dir.display().to_string(),
-            tree.head,
+            if tree.observation_error.is_none() {
+                tree.head
+            } else {
+                None
+            },
             tree.dirty,
             now,
             load.to_json().to_string(),
