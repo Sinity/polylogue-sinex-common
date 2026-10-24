@@ -50,15 +50,27 @@ fn selected_report_retains_skip_reasons() {
     fs::write(root.join("src/lib.rs"), "#[test] fn selected() {}\n#[test] fn excluded() {}\n#[test] #[ignore] fn ignored_case() {}\n").unwrap();
     let mut run = Run::unrecorded("devkit-selection-probe", "test", &[]);
     run.root = root.into();
+    // Nested fixture builds must not inherit the enclosing job's selected cache.
+    let target = root.join("selected target \"quoted\"");
+    run.target = Some(target.clone());
+    let target_env = vec![("CARGO_TARGET_DIR".into(), target.display().to_string())];
     run.nextest(
         "test",
         &Nextest {
             args: vec!["--offline".into(), "-E".into(), "test(selected)".into()],
+            env: target_env.clone(),
             ..Nextest::default()
         },
     )
     .unwrap();
-    let report = root.join("target/nextest/default/devkit-junit.xml");
+    let report = target.join("nextest/default/devkit-junit.xml");
+    assert!(
+        target.join("debug").is_dir(),
+        "the fixture compiles in its own selected cache"
+    );
+    // Nextest may create workspace-relative store metadata, but Cargo's build
+    // artifacts must stay under this fixture's selected target.
+    assert!(!root.join("target/debug").exists());
     assert!(
         fs::read_to_string(report)
             .unwrap()
@@ -92,6 +104,7 @@ fn selected_report_retains_skip_reasons() {
         "ignored only",
         &Nextest {
             args: vec!["--offline".into(), "--run-ignored".into(), "only".into()],
+            env: target_env.clone(),
             ..Nextest::default()
         },
     )
@@ -105,6 +118,7 @@ fn selected_report_retains_skip_reasons() {
         &Nextest {
             args: vec!["--offline".into(), "-E".into(), "none()".into()],
             allow_no_tests: true,
+            env: target_env.clone(),
             ..Nextest::default()
         },
     )

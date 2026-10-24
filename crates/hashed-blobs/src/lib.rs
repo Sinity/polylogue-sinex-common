@@ -228,6 +228,60 @@ impl Drop for PreparedPlain {
     }
 }
 
+/// An encrypted encoding staged by its originating store, without publishing a new CAS name.
+///
+/// Reserve caller-owned custody from `hash` and `decoded_len` before installation.
+/// The handle owns its original store configuration and a copy of the data key for
+/// authenticated deduplication, so the source reader and caller's key may be released.
+/// Dropping it removes only its own stage, best effort. Preparation is not
+/// crash-durable or reopenable; process death may leave an unpublished tmp file.
+/// An install error can happen after publication, so retain custody until reconciled.
+#[must_use = "reserve custody, then install the prepared blob, or drop it to discard its encrypted stage"]
+pub struct PreparedSealed {
+    store: Store,
+    tmp: Option<TmpFile>,
+    key: DataKey,
+    hash: Hash,
+    decoded_len: u64,
+}
+
+impl PreparedSealed {
+    pub fn hash(&self) -> Hash {
+        self.hash
+    }
+
+    pub fn decoded_len(&self) -> u64 {
+        self.decoded_len
+    }
+
+    /// Publish with the original key's authenticated existing-object policy.
+    /// Errors discard this stage only; an already published CAS name is retained.
+    pub fn install(mut self) -> Result<Hash> {
+        let tmp = self.tmp.take().unwrap();
+        let _cleanup = StageCleanup(Some(tmp.path.clone()));
+        self.store.install_sealed(tmp, self.hash, &self.key)
+    }
+
+    /// Check once before installation, allowing the caller to refuse publication.
+    /// Encoding has already finished; sync, hard-link and authenticated deduplication
+    /// are not interrupted or polled by this method.
+    pub fn install_checked<E: From<Error>>(
+        self,
+        check: impl FnOnce() -> std::result::Result<(), E>,
+    ) -> std::result::Result<Hash, E> {
+        check()?;
+        self.install().map_err(E::from)
+    }
+}
+
+impl Drop for PreparedSealed {
+    fn drop(&mut self) {
+        if let Some(tmp) = &self.tmp {
+            let _ = fs::remove_file(&tmp.path);
+        }
+    }
+}
+
 // Owns only a newly created stage, never a CAS destination.
 struct StageCleanup(Option<PathBuf>);
 impl Drop for StageCleanup {
@@ -1466,10 +1520,42 @@ impl Store {
         Ok(tmp)
     }
 
-    /// Seal bytes under a data key. Two passes (the name keys the frames), so the input must seek;
-    /// no plaintext is written to disk.
+    /// Seal bytes under a data key. The input starts at offset zero and stays stable across
+    /// two passes (the name keys the frames), so it must seek; no plaintext is written to disk.
     pub fn put_sealed(&self, bytes: impl Read + Seek, level: i32, key: &DataKey) -> Result<Hash> {
-        let (tmp, name) = self.write_sealed(bytes, level, key)?;
+        let mut prepared = self.prepare_sealed(bytes, level, key)?;
+        // Legacy puts retain their stage on an installation/verification failure.
+        let tmp = prepared.tmp.take().unwrap();
+        prepared
+            .store
+            .install_sealed(tmp, prepared.hash, &prepared.key)
+    }
+
+    /// Stream an encrypted encoding into this store's staging directory, without
+    /// publishing a new CAS name. The input starts at offset zero and stays stable across
+    /// two passes (naming then encryption), as for `put_sealed`; no plaintext is staged on disk.
+    pub fn prepare_sealed(
+        &self,
+        bytes: impl Read + Seek,
+        level: i32,
+        key: &DataKey,
+    ) -> Result<PreparedSealed> {
+        let (tmp, hash, decoded_len) = self.write_sealed(bytes, level, key)?;
+        Ok(PreparedSealed {
+            store: Store {
+                write_root: self.write_root.clone(),
+                roots: self.roots.clone(),
+                mode: self.mode,
+                frame: self.frame,
+            },
+            tmp: Some(tmp),
+            key: key.clone(),
+            hash,
+            decoded_len,
+        })
+    }
+
+    fn install_sealed(&self, tmp: TmpFile, name: Hash, key: &DataKey) -> Result<Hash> {
         self.install(
             tmp,
             name,
@@ -1488,7 +1574,7 @@ impl Store {
         mut bytes: impl Read + Seek,
         level: i32,
         key: &DataKey,
-    ) -> Result<(TmpFile, Hash)> {
+    ) -> Result<(TmpFile, Hash, u64)> {
         self.check_frame_size()?;
         let mut namer = blake3::Hasher::new_keyed(&Self::name_key(key));
         let mut buf = vec![0u8; self.frame];
@@ -1506,6 +1592,7 @@ impl Store {
         let count = (total.div_ceil(self.frame as u64)).max(1) as u32;
         let frame = self.frame;
         let mut tmp = self.tmp()?;
+        let mut cleanup = StageCleanup(Some(tmp.path.clone()));
         let mut next = |out: &mut Vec<u8>| -> Result<usize> {
             out.resize(frame, 0);
             let n = read_full(&mut bytes, out)?;
@@ -1514,7 +1601,9 @@ impl Store {
         };
         let mut footer = SealedFooter::new(key, None, total, count)?;
         self.seal_frames(&mut tmp, &mut next, &mut footer, &name, key, level, None)?;
-        Ok((Self::finish_sealed(tmp, footer)?, name))
+        let tmp = Self::finish_sealed(tmp, footer)?;
+        cleanup.0 = None;
+        Ok((tmp, name, total))
     }
 
     /// A sealed delta: one sealed frame, compressed with the base's content as dictionary. The base
