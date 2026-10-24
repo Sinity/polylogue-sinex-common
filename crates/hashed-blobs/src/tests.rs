@@ -746,6 +746,7 @@ fn encoding_salt_has_independent_hkdf_vectors_and_attempts_survive_dedup() {
             s.write_delta_sealed(&base, &bytes[..], level, &k)
         } else {
             s.write_sealed(Cursor::new(&bytes), level, &k)
+                .map(|(tmp, hash, _)| (tmp, hash))
         }
         .unwrap();
         assert_eq!(h, expected);
