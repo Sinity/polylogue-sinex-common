@@ -109,6 +109,7 @@ enum Boundary {
     Space,
 }
 
+#[derive(Clone)]
 struct Pattern {
     family: usize,
     kind: &'static str,
@@ -312,6 +313,7 @@ fn patterns() -> Vec<Pattern> {
 }
 
 /// One in-progress match of one pattern.
+#[derive(Clone)]
 struct Candidate {
     pattern: usize,
     start: usize,
@@ -385,6 +387,7 @@ struct Region {
 }
 
 /// A held-back character.
+#[derive(Clone)]
 struct Cell {
     pos: usize,
     c: char,
@@ -392,7 +395,7 @@ struct Cell {
 }
 
 /// A possible `scheme://user:password@host` match; masks `user:password`.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Url {
     /// Offset after `//`.
     authority: Option<usize>,
@@ -442,7 +445,7 @@ impl Url {
 }
 
 /// A possible `-----BEGIN ... PRIVATE KEY-----` line.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct PemHeader {
     start: usize,
     /// Characters of `-----BEGIN ` seen.
@@ -501,6 +504,7 @@ impl PemHeader {
 
 /// An open PEM block; everything is masked until `end` is seen, or to the end
 /// of the string when `end` is `None`.
+#[derive(Clone)]
 struct Pem {
     start: usize,
     end: Option<String>,
@@ -514,9 +518,14 @@ struct Pem {
 /// but keeps an open PEM block. `finish` ends the string. After any error the
 /// stream is closed and later calls return `BrokenPipe` without writing.
 ///
+/// Cloning copies private stream state, including pending source characters and
+/// an open PEM tail. Keep clones private; they are not public continuation tokens.
+/// Closed and failed streams remain closed in every clone.
+///
 /// Each character and each complete marker reaches the sink in one
 /// `write_all` call, so a sink that fits output to a display size can refuse
 /// a whole marker rather than cut it.
+#[derive(Clone)]
 pub struct Masker {
     patterns: Vec<Pattern>,
     candidates: Vec<Candidate>,
