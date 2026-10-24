@@ -20,7 +20,7 @@ pg = []
 nats = []
 # The machine-wide SQLite history of runs, tests and diagnostics.
 history = ["dep:rusqlite", "dep:zstd"]
-# Representative benchmarks: a frozen stratified sample of a corpus, runs
+# Representative benchmarks: a stratified sample of a corpus drawn once, runs
 # recorded with the host's load, comparison and explicitly assumed linear estimates.
 bench = ["history"]
 
@@ -35,3 +35,4 @@ zstd = { version = "0.13", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["rt", "time"] }

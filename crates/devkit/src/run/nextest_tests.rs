@@ -6,7 +6,7 @@ fn overridden_target_records_this_runs_outcomes_and_leaves_stale_xml_alone() {
     let root = fixture.path();
     fs::create_dir(root.join("src")).unwrap();
     fs::write(root.join("Cargo.toml"), "[package]\nname = \"devkit-report-probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n").unwrap();
-    fs::write(root.join("src/lib.rs"), "#[test] fn fresh_pass() {}\n#[test] fn fresh_failure() { panic!(\"expected witness failure\"); }\n#[test] #[ignore] fn ignored_case() {}\n").unwrap();
+    fs::write(root.join("src/lib.rs"), "#[test] fn fresh_pass() {}\n#[test] fn fresh_failure() { panic!(\"expected failure\"); }\n#[test] #[ignore] fn ignored_case() {}\n").unwrap();
     let stale_path = root.join("target/nextest/default/devkit-junit.xml");
     fs::create_dir_all(stale_path.parent().unwrap()).unwrap();
     let stale = "<testsuites><testsuite name=\"stale\"><testcase name=\"stale_test\" classname=\"stale\" time=\"0\"/></testsuite></testsuites>";
@@ -42,7 +42,7 @@ fn overridden_target_records_this_runs_outcomes_and_leaves_stale_xml_alone() {
 }
 
 #[test]
-fn selected_report_retains_skip_reasons() {
+fn selected_report_keeps_skip_reasons() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path();
     fs::create_dir(root.join("src")).unwrap();

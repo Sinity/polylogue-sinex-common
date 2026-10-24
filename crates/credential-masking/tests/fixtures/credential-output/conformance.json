@@ -1,5 +1,5 @@
 {
-  "catalog_version": "credential-output-v1",
+  "catalog_version": "credential-output",
   "cases": [
     {
       "id": "github_token-threshold",
@@ -2581,7 +2581,147 @@
         "\u001c--secre",
         "t=x"
       ]
+    },
+    {
+      "id": "flag-crossing-double",
+      "covers": [
+        "cli_secret_flag"
+      ],
+      "regions_utf8": [
+        [
+          9,
+          52
+        ]
+      ],
+      "cuts": "all",
+      "text_parts": [
+        "--secret",
+        "=\"unfini",
+        "shed --t",
+        "oken=\"sy",
+        "nthetic-",
+        "later-va",
+        "lue\" tai",
+        "l"
+      ]
+    },
+    {
+      "id": "flag-crossing-double-utf8",
+      "covers": [
+        "cli_secret_flag"
+      ],
+      "regions_utf8": [
+        [
+          13,
+          56
+        ]
+      ],
+      "cuts": "all",
+      "text_parts": [
+        "雪 --secr",
+        "et=\"unfi",
+        "nished -",
+        "-token=\"",
+        "syntheti",
+        "c-later-",
+        "value\" t",
+        "ail"
+      ]
+    },
+    {
+      "id": "credentials-crossing-double",
+      "covers": [
+        "basic_auth_cli"
+      ],
+      "regions_utf8": [
+        [
+          7,
+          61
+        ]
+      ],
+      "cuts": "all",
+      "text_parts": [
+        "--user=\"",
+        "unfinish",
+        "ed:prefi",
+        "x --user",
+        "=\"iris:s",
+        "ynthetic",
+        "-later-v",
+        "alue\" ta",
+        "il"
+      ]
+    },
+    {
+      "id": "flag-crossing-single",
+      "covers": [
+        "cli_secret_flag"
+      ],
+      "regions_utf8": [
+        [
+          9,
+          52
+        ]
+      ],
+      "cuts": "all",
+      "text_parts": [
+        "--secret",
+        "='unfini",
+        "shed --t",
+        "oken='sy",
+        "nthetic-",
+        "later-va",
+        "lue' tai",
+        "l"
+      ]
+    },
+    {
+      "id": "flag-crossing-single-utf8",
+      "covers": [
+        "cli_secret_flag"
+      ],
+      "regions_utf8": [
+        [
+          13,
+          56
+        ]
+      ],
+      "cuts": "all",
+      "text_parts": [
+        "雪 --secr",
+        "et='unfi",
+        "nished -",
+        "-token='",
+        "syntheti",
+        "c-later-",
+        "value' t",
+        "ail"
+      ]
+    },
+    {
+      "id": "credentials-crossing-single",
+      "covers": [
+        "basic_auth_cli"
+      ],
+      "regions_utf8": [
+        [
+          7,
+          61
+        ]
+      ],
+      "cuts": "all",
+      "text_parts": [
+        "--user='",
+        "unfinish",
+        "ed:prefi",
+        "x --user",
+        "='iris:s",
+        "ynthetic",
+        "-later-v",
+        "alue' ta",
+        "il"
+      ]
     }
   ],
-  "fixture_encoding": "text-parts-v1"
+  "fixture_encoding": "text-parts"
 }

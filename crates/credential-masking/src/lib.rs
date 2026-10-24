@@ -1,4 +1,4 @@
-//! Streaming masking for the fixed `credential-output-v2` catalog.
+//! Streaming masking for the fixed `credential-output` catalog.
 //!
 //! Text that might still become a credential is held back, up to 512 UTF-8
 //! bytes. When an undecided match outgrows that window it is forced: its held
@@ -397,14 +397,14 @@ struct Cell {
 /// A possible `scheme://user:password@host` match; masks `user:password`.
 #[derive(Clone, Default)]
 struct Url {
-    /// Offset after `//`.
-    authority: Option<usize>,
-    /// 0: scheme, 1: after `:`, 2: after first `/`, 3: authority.
+    /// Offset after `//`, where `user:password@host` starts.
+    host_part: Option<usize>,
+    /// 0: scheme, 1: after `:`, 2: after first `/`, 3: after `//`.
     stage: u8,
     colon: Option<usize>,
-    /// Last `@` in the authority.
+    /// Last `@` after `//`.
     at: Option<usize>,
-    /// The whole authority is masked while it lasts.
+    /// Everything after `//` is masked while the match lasts.
     forced: bool,
 }
 
@@ -420,7 +420,7 @@ impl Url {
             1 | 2 if c == '/' => {
                 self.stage += 1;
                 if self.stage == 3 {
-                    self.authority = Some(pos + 1);
+                    self.host_part = Some(pos + 1);
                 }
                 true
             }
@@ -437,7 +437,7 @@ impl Url {
         }
     }
     fn region(&self) -> Option<(usize, usize)> {
-        let start = self.authority?;
+        let start = self.host_part?;
         let colon = self.colon?;
         let at = self.at?;
         (colon > start && at > colon + 1).then_some((start, at))
@@ -720,7 +720,7 @@ impl Masker {
                 self.urls
                     .iter()
                     .filter(|u| !u.forced)
-                    .filter_map(|u| u.authority),
+                    .filter_map(|u| u.host_part),
             )
             .chain(self.headers.iter().filter(|h| !h.forced).map(|h| h.start))
             .min()
@@ -738,7 +738,7 @@ impl Masker {
             }
         }
         for u in &mut self.urls {
-            if !u.forced && u.authority == Some(start) {
+            if !u.forced && u.host_part == Some(start) {
                 u.forced = true;
                 spans.push((start, self.position, "URL credentials"));
             }
@@ -776,7 +776,7 @@ impl Masker {
             self.urls
                 .iter()
                 .filter(|u| u.forced)
-                .filter_map(|u| Some((u.authority?, "URL credentials"))),
+                .filter_map(|u| Some((u.host_part?, "URL credentials"))),
         );
         spans.extend(
             self.headers

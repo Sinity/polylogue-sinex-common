@@ -92,11 +92,11 @@ fn duplicate_plain_acquisition_polls_cancellation_after_input_eof() {
     );
     assert_eq!(interrupted_polls, 64);
     assert!(interrupted_polls < completed_polls);
-    let elapsed = sent.unwrap().elapsed();
+    assert!(sent.is_some());
     assert_eq!(fs::read(&path).unwrap(), original);
     assert_eq!(
         fs::read_dir(dir.path().join("blobs/tmp")).unwrap().count(),
-        before + 1
+        before,
+        "a cancelled put removes its temporary file"
     );
-    eprintln!("CANCELLABLE_DEDUP input={} completed_after_eof_polls={completed_polls} cancelled_after_eof_polls={interrupted_polls} cancel_to_return_us={} candidate_kept=true", bytes.len(), elapsed.as_micros());
 }

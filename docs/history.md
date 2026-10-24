@@ -1,47 +1,39 @@
-# Recorded development history
+# Queries across recorded runs
 
-`cargo xtask history` reads the existing machine-wide SQLite store at `$XDG_STATE_HOME/devkit/history.db`. `runs`, `failures` and `diagnostics` retain their checkout/run queries. The aggregate commands below default to the invoking project's current checkout. Repeat `--checkout /absolute/historical/path` to select several worktrees explicitly; another project's rows remain excluded. Historical checkouts need not still exist. Reports print formatted JSON by default and one JSON value with `--json`.
+`cargo xtask history` reads the machine-wide store at `$XDG_STATE_HOME/devkit/history.db`. `runs`, `failures` and `diagnostics` read one checkout's runs. The commands below read the current checkout by default; repeat `--checkout /absolute/path` to read several worktrees of the same project, including ones that no longer exist. Other projects' runs are never included. Output is formatted JSON, or one line with `--json`.
 
-## Outcomes at the same tree
+Each run records its HEAD, the Git tree object of that commit, and a hash of its uncommitted changes (tracked diffs and untracked files). If Git fails, an untracked file cannot be read, or the checkout changes during the run, the run records why in `observation_error` and has no tree.
 
-```sh
-cargo xtask history intermittent --checkout /work/project-a --checkout /work/project-b --json
-```
-
-A result requires the same binary ID and test name to have recorded `passed` and `failed` outcomes in different runs at equal committed Git tree objects and equal dirty-content hashes. Distinct commits with identical committed trees can therefore share a group. Every group's observed statuses, run IDs, HEADs, checkouts, command/arguments, toolchain and host remain visible. `flaky` means nextest recorded a failure followed by a successful retry; that status alone does not establish this across-run criterion. Ignored, filtered and skipped observations stay visible within qualifying groups. An absent test row supplies no outcome.
-
-New runs record the committed Git tree object separately from their dirty hash. The corrected dirty-content encoding uses a `v2:` prefix, so it is not equated with older unversioned dirty observations. Failed Git commands or unreadable untracked content make observation unknown, rather than clean; such observations cannot supply equal-tree evidence. A checkout that changes or becomes unobservable during a run also invalidates that run's source identity. A tree object plus a dirty hash is recorded source identity, not proof that toolchains, test selections or runtime environments matched. `unknown_tree_observations` counts test rows excluded for unavailable identity.
-
-Legacy runs have no recorded tree object. By default they remain unknown. `--repository /absolute/repository` permits read-only resolution of their recorded HEAD objects in that explicitly selected repository. Resolved groups mark each such observation `resolved legacy HEAD`. This verifies the committed object, not the completeness of the older dirty-content observer. Missing objects and explicitly failed observations remain excluded.
-
-## First recorded failure
+## Intermittent tests
 
 ```sh
-cargo xtask history first-failing suite-id exact-test-name --json
+cargo xtask history intermittent --checkout /work/project-a --checkout /work/project-b
 ```
 
-This returns the earliest recorded `failed` or retry-`flaky` observation for the exact binary/test identity, ordered by recorded run start time and then run ID. All selected observations remain visible, including passed, ignored, filtered and skipped rows. Dirty changes and failed observation are explicit; an unknown or dirty version is not attributed to a clean revision. No recorded failure returns null. This is a chronological history query, not a bisect result or evidence that a revision caused the failure.
+Lists tests that passed in one run and failed in another at the same Git tree and the same uncommitted-changes hash. Different commits with the same tree group together. Each group lists every run with its statuses, checkout, command, toolchain and host. A `flaky` status (failed, then passed on retry) is shown but does not count as a pass or a failure. `results_without_tree` counts the test results left out because their run has no tree.
 
-## Duration samples
+## First failure
 
 ```sh
-cargo xtask history durations check --json
-cargo xtask history durations check --stage 'test build' --json
-cargo xtask history durations test --args-json '["-p","example"]' --stage test --json
+cargo xtask history first-failing suite-id exact-test-name
 ```
 
-Selection matches the exact recorded command and argument array; omitted `--args-json` means `[]`. Stage names are exact. Without `--stage`, samples describe whole invocations. With a stage, each recorded stage occurrence has its position and duration, so build, setup and execution can be inspected separately without adding them twice.
+Lists every recorded result of one test in run start order, and the first that failed or was flaky. `revision` says whether that run was at a clean HEAD, had uncommitted changes, or is unknown. This is the order runs happened in, not a bisection.
 
-Reports show the project/checkouts, selection, selected run count, sample count, start times, statuses, toolchain, host, dirty identity and each included or excluded observation. Min/median/max use passed runs only, and successful recorded stages when a stage is selected. Failed/running runs, missing stages and missing/invalid durations have explicit exclusion reasons; they are never zero-duration samples. Empty populations return null summaries. These are descriptive samples, with no calibration for current load or cache state and no promise of completion time.
+## Durations
+
+```sh
+cargo xtask history durations check
+cargo xtask history durations check --stage 'test build'
+cargo xtask history durations test --args-json '["-p","example"]' --stage test
+```
+
+Selects runs of the command with exactly these arguments (default: none). The minimum, median and maximum cover passed runs, or the successful stage when `--stage` is given. Every selected run is listed; one left out of the summary says why (`run not passed`, `stage not recorded`, `stage failed`, `duration not recorded`). Load and cache state at the time are not recorded.
 
 ## Compiler messages across worktrees
 
 ```sh
-cargo xtask history diagnostic-groups --checkout /work/project-a --checkout /work/project-b --level error --json
+cargo xtask history diagnostic-groups --checkout /work/project-a --checkout /work/project-b --level error
 ```
 
-Messages group by their recorded text hash. Each occurrence retains run, checkout, HEAD, dirty hash, command, argument selection, package, level and location. `--level warning` includes warnings and errors; `error` includes errors only. An empty report means no matching messages were recorded, not that compilation succeeded.
-
-## Storage compatibility
-
-The existing `runs` table gains nullable `git_tree` and `observation_error` columns through an additive migration; old rows remain unverified until explicitly resolved. The existing run/test/stage/diagnostic tables and output storage remain the query sources. The connected benchmark recorder also retains an unknown revision when source observation fails, using its existing nullable HEAD column. These commands add no scheduler, performance gate, history database or versioned SQL views. The wider shared-tooling task still owns view contracts, gate replacement and measured affected-test selection.
+Groups recorded compiler messages by text. Each occurrence lists its run, checkout, HEAD, command, package and location. `--level warning` includes warnings and errors.

@@ -23,7 +23,7 @@ fn stages(root: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
-fn metadata_precedes_publication_then_normal_and_range_reads_match() {
+fn hash_and_length_are_known_before_install_then_reads_match() {
     let temp = tempfile::tempdir().unwrap();
     let s = store(temp.path());
     for bytes in [&b""[..], &b"synthetic body crossing several frames"[..]] {
@@ -83,9 +83,7 @@ fn dropping_or_cancelling_a_stage_preserves_unrelated_stages_and_shared_cas() {
     let hash = s.put(&bytes[..], 1).unwrap();
     let path = destination(temp.path(), hash);
     let before = fs::read(&path).unwrap();
-    let unrelated = s
-        .prepare_plain(&b"other unpublished candidate"[..], 1)
-        .unwrap();
+    let unrelated = s.prepare_plain(&b"other uninstalled bytes"[..], 1).unwrap();
     let aborted = s.prepare_plain(&bytes[..], 1).unwrap();
     drop(aborted);
     assert_eq!(stages(temp.path()).len(), 1);
@@ -142,7 +140,7 @@ fn preparation_read_fault_and_midstream_cancellation_clean_only_their_stage() {
 fn corrupt_existing_cas_is_refused_and_preserved_while_stage_is_discarded() {
     let temp = tempfile::tempdir().unwrap();
     let s = store(temp.path());
-    let bytes = b"candidate with damaged existing destination";
+    let bytes = b"bytes with a damaged existing copy";
     let hash = s.put(&bytes[..], 1).unwrap();
     let path = destination(temp.path(), hash);
     fs::write(&path, b"corrupt synthetic file").unwrap();
@@ -157,12 +155,12 @@ fn corrupt_existing_cas_is_refused_and_preserved_while_stage_is_discarded() {
 }
 
 #[test]
-fn install_error_after_link_keeps_published_body_for_custody_reconciliation() {
+fn a_sync_error_after_linking_keeps_the_installed_blob() {
     // The declared checks run as an unprivileged user: write/search allows the
     // hard link, while lack of directory read permission faults its later fsync.
     let temp = tempfile::tempdir().unwrap();
     let s = store(temp.path());
-    let bytes = b"published before directory sync failure";
+    let bytes = b"linked before a directory sync failure";
     let prepared = s.prepare_plain(&bytes[..], 1).unwrap();
     let hash = prepared.hash();
     let path = destination(temp.path(), hash);

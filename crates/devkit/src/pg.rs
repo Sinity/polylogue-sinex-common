@@ -213,7 +213,7 @@ impl Server {
                 );
                 return Err(format!("schema bootstrap: {error}"));
             }
-            // Renaming publishes the template only once it is complete. If
+            // Renaming installs the template only once it is complete. If
             // another process finished first, its copy is used.
             if self
                 .sql(
@@ -227,7 +227,7 @@ impl Server {
                     &format!("DROP DATABASE IF EXISTS {building} WITH (FORCE)"),
                 );
                 if !self.database_exists(&databases.template)? {
-                    return Err(format!("could not publish {}", databases.template));
+                    return Err(format!("could not install {}", databases.template));
                 }
             } else {
                 self.sql(
@@ -332,7 +332,8 @@ impl Server {
             "SELECT d.datname, coalesce(shobj_description(d.oid, 'pg_database'), ''),
                     (SELECT count(*) FROM pg_stat_activity a WHERE a.datname = d.datname)
              FROM pg_database d
-             WHERE d.datname ~ '_(schema|template|building)_' OR d.datname LIKE 't\\_%'",
+             WHERE d.datname ~ '_(schema|template)_' OR d.datname LIKE 't\\_%'
+                OR d.datname LIKE 'devkit\\_building\\_%'",
         )?;
         let mut drop = Vec::new();
         let mut failed = Vec::new();
@@ -353,10 +354,10 @@ impl Server {
                 } else if !pid_alive(test.pid) || now > test.created + 86_400 {
                     drop.push(name.to_owned());
                 }
-            } else if name.contains("_building_") {
-                // Older names carry no owner. A disconnected database alone
-                // is not evidence that its bootstrap has stopped.
-                if building_owner(name).is_some_and(|pid| !pid_alive(pid)) {
+            } else if let Some(owner) = building_owner(name) {
+                // A bootstrap may compile for minutes without a connection;
+                // only its owner's exit means it was abandoned.
+                if !pid_alive(owner) {
                     drop.push(name.to_owned());
                 }
             } else if let Some((project, hash)) = name
@@ -480,8 +481,9 @@ impl TestName {
     }
 }
 
-/// New bootstrap names are short enough for PostgreSQL's identifier limit,
-/// independent of the project's name. Legacy names have no usable owner.
+/// The owner pid in a half-built template's name,
+/// `devkit_building_<pid>_<unique>`: short enough for PostgreSQL's identifier
+/// limit whatever the project's name.
 fn building_owner(name: &str) -> Option<u32> {
     let mut parts = name.strip_prefix("devkit_building_")?.split('_');
     let pid = parts.next()?.parse().ok()?;
@@ -586,6 +588,13 @@ pub fn test_database() -> Result<TestDatabase> {
         &format!("CREATE DATABASE {name} TEMPLATE {template} STRATEGY FILE_COPY"),
     )?;
     Ok(TestDatabase { socket, name })
+}
+
+/// `#[devkit::test] fn name(db: TestDatabase)` clones a fresh database.
+impl crate::Fixture for TestDatabase {
+    fn create() -> Result<Self> {
+        test_database()
+    }
 }
 
 impl TestDatabase {

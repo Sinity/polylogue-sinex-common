@@ -34,3 +34,24 @@ pub use run::{Diagnostic, Failed, Nextest, Run, Stage, TestOutcome, TestStatus, 
 
 /// The result of one step of a run.
 pub type Result<T = ()> = std::result::Result<T, Failed>;
+
+/// A value [`test`] creates for each test parameter of this type, before the
+/// test body runs. An error fails the test with the fixture's type name.
+///
+/// ```
+/// struct Scratch(std::path::PathBuf);
+///
+/// impl devkit::Fixture for Scratch {
+///     fn create() -> std::result::Result<Self, String> {
+///         Ok(Scratch(std::env::temp_dir()))
+///     }
+/// }
+///
+/// #[devkit::test]
+/// fn uses_scratch(scratch: Scratch) {
+///     assert!(scratch.0.is_absolute());
+/// }
+/// ```
+pub trait Fixture: Sized {
+    fn create() -> std::result::Result<Self, String>;
+}

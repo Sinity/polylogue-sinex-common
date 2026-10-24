@@ -57,17 +57,14 @@ pub enum History {
         #[arg(long)]
         json: bool,
     },
-    /// Passed and failed observations across runs at equal recorded Git trees.
+    /// Tests that passed in one run and failed in another at the same Git tree.
     Intermittent {
         #[command(flatten)]
         scope: HistoryScope,
-        /// Resolve legacy HEADs against this explicit repository, read-only.
-        #[arg(long)]
-        repository: Option<PathBuf>,
         #[arg(long)]
         json: bool,
     },
-    /// First recorded failure of an exact binary/test identity, without causal attribution.
+    /// Every recorded result of one test, and the first failure.
     FirstFailing {
         binary: String,
         name: String,
@@ -76,13 +73,13 @@ pub enum History {
         #[arg(long)]
         json: bool,
     },
-    /// Descriptive duration samples for an exact command and argument selection.
+    /// Durations of passed runs of a command with exact arguments.
     Durations {
         command: String,
-        /// Exact recorded argument array; omitted means the empty selection.
+        /// The exact argument list as a JSON array; default: no arguments.
         #[arg(long, default_value = "[]")]
         args_json: String,
-        /// Select one recorded stage instead of the whole invocation.
+        /// One stage instead of the whole run.
         #[arg(long)]
         stage: Option<String>,
         #[command(flatten)]
@@ -90,7 +87,7 @@ pub enum History {
         #[arg(long)]
         json: bool,
     },
-    /// Equal recorded compiler messages across explicit worktrees in this project.
+    /// Equal compiler messages across this project's checkouts.
     DiagnosticGroups {
         #[arg(long, default_value = "warning", value_parser = ["warning", "error"])]
         level: String,
@@ -101,10 +98,11 @@ pub enum History {
     },
 }
 
-/// Every aggregate stays within the invoking project and explicit checkout population.
+/// Which checkouts of the invoking project a query reads.
 #[derive(Debug, clap::Args)]
 pub struct HistoryScope {
-    /// Historical absolute checkout path, repeatable. Default: this checkout only.
+    /// Absolute checkout path, repeatable; the checkout need not still exist.
+    /// Default: this checkout.
     #[arg(long = "checkout")]
     checkouts: Vec<PathBuf>,
 }
@@ -117,7 +115,7 @@ impl HistoryScope {
             self.checkouts.clone()
         };
         if selected.iter().any(|path| !path.is_absolute()) {
-            return Err("--checkout requires an absolute historical path".into());
+            return Err("--checkout needs an absolute path".into());
         }
         selected.sort();
         selected.dedup();
@@ -147,8 +145,8 @@ pub enum Bench {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
-    /// Descriptive differences from a prior run on the same sample and storage
-    /// whose periodic load checks passed (default: the latest run).
+    /// Metric changes against the previous quiet run on the same sample and
+    /// storage (default: the latest run).
     Compare { run: Option<i64> },
 }
 
@@ -201,15 +199,11 @@ pub fn execute(project: &str, command: Command) -> ExitCode {
             })
         }
         Command::Status { json } => with_store(|store| status(store, project, &root, json)),
-        Command::History(History::Intermittent {
-            scope,
-            repository,
-            json,
-        }) => with_store(|store| {
+        Command::History(History::Intermittent { scope, json }) => with_store(|store| {
             let paths = scope.paths(&root)?;
             query_output(
                 store
-                    .intermittent(project, &paths, repository.as_deref())
+                    .intermittent(project, &paths)
                     .map_err(|e| e.to_string())?,
                 json,
             )

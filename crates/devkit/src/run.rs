@@ -68,7 +68,7 @@ pub enum TestStatus {
     Ignored,
     /// Excluded by a filter, default filter, or partition.
     Filtered,
-    /// Another or unrecognized skip reason; the supplied reason is retained.
+    /// Another or unrecognized skip reason; the reason is kept.
     Skipped,
 }
 
@@ -104,7 +104,7 @@ pub struct Tree {
     pub dirty: Option<String>,
     /// The committed Git tree object, separate from uncommitted content.
     pub git_tree: Option<String>,
-    /// Observation failed; neither a missing dirty hash nor HEAD proves clean content.
+    /// Why the checkout could not be read; a missing dirty hash then says nothing.
     pub observation_error: Option<String>,
 }
 
@@ -168,9 +168,9 @@ impl Tree {
                     }
                     hasher.update(&[0]);
                 }
-                observed.dirty = Some(format!("v2:{}", hasher.finalize().to_hex()));
+                observed.dirty = Some(hasher.finalize().to_hex().to_string());
             }
-            // Detect a commit change while observing the worktree as unavailable.
+            // A commit made while reading the worktree makes the reading unusable.
             let head = String::from_utf8_lossy(&git(&["rev-parse", "HEAD"])?)
                 .trim()
                 .to_owned();
@@ -733,55 +733,9 @@ impl Drop for RunTemp {
 mod temp_tests;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn package_names_from_ids() {
-        assert_eq!(package_name("path+file:///x/xtask#0.1.0"), "xtask");
-        assert_eq!(
-            package_name("path+file:///x/crates/model#polylogue-model@0.1.0"),
-            "polylogue-model"
-        );
-        assert_eq!(
-            package_name("registry+https://example.org/index#serde@1.0.0"),
-            "serde"
-        );
-    }
-
-    #[test]
-    fn ansi_is_stripped() {
-        assert_eq!(
-            strip_ansi("\u{1b}[1m\u{1b}[91merror\u{1b}[0m: x"),
-            "error: x"
-        );
-    }
-
-    #[test]
-    fn diagnostics_keep_warnings_and_errors_only() {
-        let message: Value = serde_json::json!({
-            "reason": "compiler-message",
-            "package_id": "path+file:///x/crates/a#a@0.1.0",
-            "message": {
-                "level": "warning",
-                "code": {"code": "unused_variables"},
-                "rendered": "warning: unused",
-                "spans": [{"is_primary": true, "file_name": "src/lib.rs", "line_start": 3}]
-            }
-        });
-        let d = diagnostic(&message).unwrap();
-        assert_eq!(
-            (d.package.as_str(), d.line, d.code.as_deref()),
-            ("a", Some(3), Some("unused_variables"))
-        );
-        let mut note = message.clone();
-        note["message"]["level"] = "note".into();
-        assert!(diagnostic(&note).is_none());
-    }
-}
+mod tests;
 
 #[cfg(test)]
-#[path = "run/nextest_tests.rs"]
 mod nextest_tests;
 
 #[cfg(test)]

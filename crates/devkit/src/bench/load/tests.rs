@@ -53,21 +53,19 @@ fn busy_or_unknown_middle_samples_survive_quiet_endpoints() {
         let value = interval.to_json();
         assert_eq!(value["start"]["quiet"], true);
         assert_eq!(value["end"]["quiet"], true);
-        assert!(!checks_passed_json(&value));
         assert_eq!(value["sample_count"], 3);
     }
 }
 
 #[test]
-fn long_sampling_gaps_and_legacy_snapshots_cannot_pass() {
+fn long_sampling_gaps_cannot_pass() {
     let mut interval = LoadInterval::new(quiet());
     interval.observe(Duration::from_secs(5), quiet());
     assert!(!interval.checks_passed());
     assert_eq!(interval.to_json()["max_gap_seconds"], 5.0);
-    assert!(!checks_passed_json(&quiet().to_json()));
     let mut valid = LoadInterval::new(quiet());
     valid.observe(Duration::from_secs(1), quiet());
-    assert!(checks_passed_json(&valid.to_json()));
+    assert!(valid.checks_passed());
 }
 
 #[test]

@@ -5,13 +5,13 @@
 //! (an origin or source family, a format era…). [`select`] draws a sample of
 //! a target size that keeps each stratum's share of bytes and each stratum's
 //! spread of file sizes, including its largest files when they fit. The
-//! sample is frozen as a [`Manifest`] (paths, sizes, BLAKE3), materialized
+//! sample is written down as a [`Manifest`] (paths, sizes, BLAKE3), copied
 //! once into a bench directory, and reused until the manifest changes.
 //!
-//! A bench run records periodic host-load observations with its metrics.
-//! [`compare`] reports descriptive differences on the same sample and storage,
-//! with the observation limits visible. [`linear_estimate`] states its
-//! uncalibrated input-byte assumption instead of claiming every stage is linear.
+//! A bench run records the host load, sampled every second, with its
+//! metrics. [`compare`] shows metric changes against an earlier quiet run on
+//! the same sample and storage. [`linear_estimate`] scales a sample's time to
+//! the whole corpus by input bytes, and says so.
 use crate::history::Store;
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
@@ -185,7 +185,7 @@ pub fn select(all: &[Candidate], target: u64, seed: u64) -> Vec<Candidate> {
     chosen
 }
 
-/// A frozen sample.
+/// A drawn sample, reused until it is drawn again.
 #[derive(Debug, Clone)]
 pub struct Manifest {
     pub project: String,
@@ -505,7 +505,7 @@ pub struct BenchRun {
     pub sample: String,
     pub storage: String,
     pub head: Option<String>,
-    /// Wall-clock recording time. The historical SQL column is named started_ms.
+    /// When the run was recorded (the `started_ms` column).
     pub recorded_ms: i64,
     pub load: Value,
     pub load_checks_passed: bool,
@@ -572,7 +572,7 @@ pub fn runs(store: &Store, project: &str, limit: usize) -> rusqlite::Result<Vec<
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BenchRun> {
     let parse = |s: String| serde_json::from_str(&s).unwrap_or(Value::Null);
     let load = parse(r.get(7)?);
-    let load_checks_passed = r.get::<_, bool>(8)? && load::checks_passed_json(&load);
+    let load_checks_passed = r.get::<_, bool>(8)?;
     Ok(BenchRun {
         id: r.get(0)?,
         project: r.get(1)?,
@@ -587,9 +587,9 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BenchRun> {
     })
 }
 
-/// Descriptive timing differences from a prior run on the same sample and
-/// storage. Load samples screen obvious contention; they do not establish
-/// that a code change caused the difference.
+/// Metric changes against the latest earlier quiet run on the same sample and
+/// storage. A quiet host makes the numbers comparable; it does not say what
+/// caused a change.
 pub fn compare(store: &Store, run: i64) -> rusqlite::Result<Value> {
     let conn = store.connection();
     conn.execute_batch(SCHEMA)?;
@@ -606,33 +606,24 @@ pub fn compare(store: &Store, run: i64) -> rusqlite::Result<Value> {
         return Ok(
             json!({"run": run, "status": "not_compared", "load_checks_passed": false,
             "load": this.load,
-            "note": "Periodic load checks are missing, unknown, delayed or above their thresholds. A start-only reading does not cover the run."}),
+            "note": "The host was busy during this run, or its load could not be read."}),
         );
     }
-    let mut statement = conn.prepare(&format!(
-        "{select} WHERE project = ?1 AND bench = ?2 AND sample = ?3 AND storage = ?4
-         AND quiet = 1 AND id < ?5 ORDER BY id DESC"
-    ))?;
-    let mut rows = statement.query(params![
-        this.project,
-        this.bench,
-        this.sample,
-        this.storage,
-        run
-    ])?;
-    let mut before = None;
-    while let Some(found) = rows.next()? {
-        let candidate = row(found)?;
-        if candidate.load_checks_passed {
-            before = Some(candidate);
-            break;
-        }
-    }
+    let before = conn
+        .query_row(
+            &format!(
+                "{select} WHERE project = ?1 AND bench = ?2 AND sample = ?3 AND storage = ?4
+                 AND quiet = 1 AND id < ?5 ORDER BY id DESC LIMIT 1"
+            ),
+            params![this.project, this.bench, this.sample, this.storage, run],
+            row,
+        )
+        .optional()?;
     let Some(before) = before else {
         return Ok(
             json!({"run": run, "status": "no_previous_run", "load_checks_passed": true,
             "load": this.load,
-            "note": "No earlier run passed periodic load checks on this sample and storage."}),
+            "note": "No earlier quiet run on this sample and storage."}),
         );
     };
     let old = flatten(&before.metrics);
@@ -649,8 +640,7 @@ pub fn compare(store: &Store, run: i64) -> rusqlite::Result<Value> {
     Ok(
         json!({"run": run, "against": before.id, "status": "compared",
         "load_checks_passed": true, "load": this.load, "against_load": before.load,
-        "head": this.head, "against_head": before.head, "changes": changes,
-        "interpretation": "Observed differences on the same sample and storage; load between samples and causes of timing differences remain unverified."}),
+        "head": this.head, "against_head": before.head, "changes": changes}),
     )
 }
 

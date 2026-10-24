@@ -52,11 +52,11 @@ fn byte_chunks(input: &str, chunks: &[usize]) -> String {
 #[test]
 fn conformance_cases_mask_the_same_at_every_split() {
     let corpus: serde_json::Value = serde_json::from_str(include_str!(
-        "../tests/fixtures/credential-output-v2/conformance.json"
+        "../tests/fixtures/credential-output/conformance.json"
     ))
     .unwrap();
-    assert_eq!(corpus["catalog_version"], "credential-output-v2");
-    assert_eq!(corpus["fixture_encoding"], "text-parts-v1");
+    assert_eq!(corpus["catalog_version"], "credential-output");
+    assert_eq!(corpus["fixture_encoding"], "text-parts");
     let cases = corpus["cases"].as_array().unwrap();
     assert_eq!(cases.len(), 138);
     for case in cases {

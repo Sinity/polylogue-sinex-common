@@ -3,12 +3,14 @@
 //! A test with no parameters costs nothing beyond a plain `#[test]`. An
 //! `async fn` test runs on a current-thread tokio runtime (the test crate
 //! depends on tokio with the `rt` and `time` features), optionally under
-//! `timeout = "30s"`. Test fixtures such as a cloned database arrive as
-//! parameters once devkit provides them; until then a parameter is a compile
-//! error.
+//! `timeout = "30s"`.
+//!
+//! Each parameter is a fixture: its type implements `devkit::Fixture`, and
+//! the test creates it with `Fixture::create()` before the body runs, in
+//! parameter order. The test crate depends on `devkit` under that name.
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{ItemFn, LitStr, parse_macro_input, spanned::Spanned};
+use syn::{FnArg, ItemFn, LitStr, parse_macro_input, punctuated::Punctuated, spanned::Spanned};
 
 #[proc_macro_attribute]
 pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -30,12 +32,6 @@ pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn expand(function: ItemFn, timeout: Option<LitStr>) -> syn::Result<proc_macro2::TokenStream> {
-    if let Some(input) = function.sig.inputs.first() {
-        return Err(syn::Error::new(
-            input.span(),
-            "devkit::test takes no parameters yet; fixtures are not available",
-        ));
-    }
     let millis = timeout.as_ref().map(parse_duration).transpose()?;
     let ItemFn {
         attrs,
@@ -43,6 +39,21 @@ fn expand(function: ItemFn, timeout: Option<LitStr>) -> syn::Result<proc_macro2:
         mut sig,
         block,
     } = function;
+    let mut fixtures = Vec::new();
+    for input in std::mem::replace(&mut sig.inputs, Punctuated::new()) {
+        let FnArg::Typed(parameter) = input else {
+            return Err(syn::Error::new(
+                input.span(),
+                "a test has no receiver; parameters are fixtures",
+            ));
+        };
+        let (pattern, kind) = (&parameter.pat, &parameter.ty);
+        fixtures.push(quote! {
+            let #pattern: #kind = <#kind as ::devkit::Fixture>::create().unwrap_or_else(|error| {
+                panic!("fixture {}: {}", ::core::stringify!(#kind), error)
+            });
+        });
+    }
     if sig.asyncness.is_none() {
         if let Some(t) = &timeout {
             return Err(syn::Error::new(
@@ -50,7 +61,17 @@ fn expand(function: ItemFn, timeout: Option<LitStr>) -> syn::Result<proc_macro2:
                 "timeout applies to async tests; nextest's slow-timeout covers the rest",
             ));
         }
-        return Ok(quote! { #[::core::prelude::v1::test] #(#attrs)* #vis #sig #block });
+        if fixtures.is_empty() {
+            return Ok(quote! { #[::core::prelude::v1::test] #(#attrs)* #vis #sig #block });
+        }
+        return Ok(quote! {
+            #[::core::prelude::v1::test]
+            #(#attrs)*
+            #vis #sig {
+                #(#fixtures)*
+                #block
+            }
+        });
     }
     sig.asyncness = None;
     let body = match millis {
@@ -65,6 +86,7 @@ fn expand(function: ItemFn, timeout: Option<LitStr>) -> syn::Result<proc_macro2:
         #[::core::prelude::v1::test]
         #(#attrs)*
         #vis #sig {
+            #(#fixtures)*
             ::tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()

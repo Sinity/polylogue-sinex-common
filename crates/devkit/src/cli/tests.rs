@@ -8,7 +8,7 @@ struct Cli {
 }
 
 #[test]
-fn history_queries_parse_exact_identity_selection_and_explicit_population() {
+fn history_queries_parse_test_names_and_checkouts() {
     let parsed = Cli::try_parse_from([
         "xtask",
         "history",

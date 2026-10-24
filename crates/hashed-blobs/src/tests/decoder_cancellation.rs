@@ -49,5 +49,4 @@ fn zero_output_blocks_poll_input_and_preserve_the_callers_typed_stop() {
     }
     assert_eq!(polls, 8);
     assert!(reader.slot().unwrap().is_none());
-    eprintln!("ZERO_OUTPUT_CANCEL compressed_padding={padding} decoded=0 callback_polls={polls} no_retained_proof=true");
 }

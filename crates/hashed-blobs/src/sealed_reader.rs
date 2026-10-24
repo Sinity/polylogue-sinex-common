@@ -1,4 +1,4 @@
-//! Verified frame-cached sealed reads with an explicit authenticated-frame bound.
+//! Sequential reads of a sealed blob, verified first, one frame in memory at a time.
 use super::{
     DataKey, Error, Generation, Hash, Result, SealedFooter, Store, VerificationStats, View,
     SEAL_TRAILER,
@@ -6,19 +6,20 @@ use super::{
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::Arc;
 
-/// Evaluation budgets checked before allocating a frame or its index. These are
-/// caller choices, not validity restrictions on the encoded sealed format.
+/// Size limits checked before a frame or the frame table is allocated. They
+/// are the caller's choice; a blob over them is valid but refused.
 #[derive(Clone, Copy, Debug)]
 pub struct SealedReadLimits {
     pub frame_bytes: usize,
     pub index_bytes: usize,
 }
 
-/// Holds one authenticated frame, never the whole material. The initial proof checks
-/// ciphertext, frame authentication, lengths and the complete keyed name before output.
-/// Random reads retain one decoded frame; repeated reads within that frame do not
-/// decode it again. Seeking away can require another decode on return.
-/// A failure fuses the reader. Callers retain authority over key lifetime through `check`.
+/// Holds one authenticated frame, never the whole blob. Opening checks the
+/// ciphertext hash, every frame's authentication, the lengths and the keyed name
+/// before any byte is returned. Reads keep one decoded frame, so repeated reads
+/// within it do not decode it again; seeking away and back decodes it again.
+/// After a failure every read fails. `check` runs before each read, so the
+/// caller can stop reads when its key is locked.
 pub struct SealedReader {
     view: Arc<View>,
     generation: Generation,
@@ -109,16 +110,16 @@ impl SealedReader {
                 what: "sealed frame lengths differ from body or total".into(),
             });
         }
-        let mut proof = blake3::Hasher::new();
+        let mut ciphertext = blake3::Hasher::new();
         let mut at = 0;
         while at < start {
             check()?;
             let n = (start - at).min(65536);
-            proof.update(&view.at(at, n)?);
+            ciphertext.update(&view.at(at, n)?);
             at += n;
         }
-        proof.update(&footer.body());
-        if Hash(*proof.finalize().as_bytes()) != footer.cipher_hash {
+        ciphertext.update(&footer.body());
+        if Hash(*ciphertext.finalize().as_bytes()) != footer.cipher_hash {
             return Err(Error::Corrupt {
                 blob: hash,
                 what: "sealed ciphertext checksum differs".into(),
@@ -141,7 +142,7 @@ impl SealedReader {
             stats: VerificationStats::default(),
             failed: false,
         };
-        // Ciphertext hash verification read the body once; authenticated name proof follows.
+        // The ciphertext hash read the body once; now decrypt every frame to check the name.
         reader.stats.compressed_bytes = start;
         reader.stats.metadata_bytes = 16 + reader.view.len - start;
         let mut naming = blake3::Hasher::new_keyed(&Store::name_key(key));
@@ -203,7 +204,7 @@ impl SealedReader {
         self.stats.decoded_bytes += self.bytes.len() as u64;
         Ok(())
     }
-    /// Actual frame decode and ciphertext read work, including the initial proof.
+    /// Frames decoded and bytes read so far, including the checks when opening.
     pub fn stats(&self) -> VerificationStats {
         self.stats
     }

@@ -1,10 +1,10 @@
 # Streaming credential masking
 
-`crates/credential-masking` masks the 22 credential families of the shared `credential-output-v2` catalog in streamed UTF-8 text, through `Masker::new`, `push`, `block_boundary` and `finish`. It changes display bytes only; stored content is untouched.
+`crates/credential-masking` masks the 22 credential families of the shared `credential-output` catalog in streamed UTF-8 text, through `Masker::new`, `push`, `block_boundary` and `finish`. It changes display bytes only; stored content is untouched.
 
 A credential becomes `[credential: KIND, masked]`, with no preview. Labels such as `--secret=` or `Authorization: Basic` stay visible unless they lie inside another secret. URL masking keeps the scheme, the last `@` before the host, the host and the path. PEM masking covers any uppercase label ending in `PRIVATE KEY`, through the matching END line or the end of the string. Overlapping matches merge into one marker; adjacent matches keep separate markers.
 
-Version 2 recognizes each valid start independently, including starts inside an earlier match of the same family. In `--secret="unfinished --token="synthetic-later-value" tail`, the first quoted value ends at the later value's opening quote. Both matches contribute their secret ranges, so the later value is masked too. Pattern definitions and the original 132 case extents are unchanged; the immutable version-1 fixtures remain alongside the version-2 corpus.
+Each valid start is recognized on its own, including a start inside an earlier match of the same family. In `--secret="unfinished --token="synthetic-later-value" tail`, the first quoted value ends at the later value's opening quote. Both matches contribute their secret ranges, so the later value is masked too; the six `*-crossing-*` cases in the catalog test this.
 
 `push` pieces never end a match. `block_boundary` ends token matches and writes unfinished prefixes as plain text, but an open PEM block stays masked. `finish` ends the string. Masking never refuses input; the only errors come from the sink.
 
@@ -14,4 +14,4 @@ Left word boundaries use a Unicode 16.0.0 table of Python `str.isalnum` plus und
 
 A sink error is returned unchanged and closes the stream; later calls return `BrokenPipe` without writing. `finish` also closes the stream. The masker never calls `flush`.
 
-The tests run all 138 catalog cases at every byte split and at chunk widths 1 to 8, plus overlap, block boundary, Unicode boundary, long-credential and sink-error cases, and randomized checks that output does not depend on chunking and that embedded credentials never appear in it. The catalog and its provenance are in `crates/credential-masking/tests/fixtures/credential-output-v2`.
+The tests run all 138 catalog cases at every byte split and at chunk widths 1 to 8, plus overlap, block boundary, Unicode boundary, long-credential and sink-error cases, and randomized checks that output does not depend on chunking and that embedded credentials never appear in it. The catalog and its provenance are in `crates/credential-masking/tests/fixtures/credential-output`.

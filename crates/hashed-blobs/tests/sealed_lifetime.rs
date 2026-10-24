@@ -143,7 +143,7 @@ fn fixture() -> (tempfile::TempDir, Arc<Store>, Hash, Arc<Owner>) {
 #[derive(Clone, Copy)]
 enum Pause {
     AfterUnwrap,
-    BeforePublication,
+    BeforeCaching,
 }
 #[derive(Clone, Copy)]
 enum Transition {
@@ -171,7 +171,7 @@ fn revoked_schedule(pause: Pause, transition: Transition, fence: bool) -> (bool,
         };
         // The real sealed range read, not a mock.
         let bytes = store.read_range_with(&blob, 0, 23, &unwrap).unwrap();
-        if matches!(pause, Pause::BeforePublication) {
+        if matches!(pause, Pause::BeforeCaching) {
             e.wait();
             r.wait();
         }
@@ -190,19 +190,19 @@ fn revoked_schedule(pause: Pause, transition: Transition, fence: bool) -> (bool,
     // Revocation has finished and the cache is empty before the paused read resumes.
     assert_eq!(owner.counts(), (0, 0));
     resume.wait();
-    let published = worker.join().unwrap();
+    let delivered = worker.join().unwrap();
     let (cache, outputs) = owner.counts();
-    (published, cache, outputs)
+    (delivered, cache, outputs)
 }
 
 #[test]
-fn late_publication_negative_control_and_guarded_schedules() {
+fn a_lock_during_a_read_stops_it_from_caching_or_returning_plaintext() {
     assert_eq!(
-        revoked_schedule(Pause::BeforePublication, Transition::Lock, false),
+        revoked_schedule(Pause::BeforeCaching, Transition::Lock, false),
         (true, 1, 1),
-        "disabled fence must reproduce a late plaintext cache refill and output handoff"
+        "without the fence, a late read refills the cache and returns plaintext"
     );
-    for pause in [Pause::AfterUnwrap, Pause::BeforePublication] {
+    for pause in [Pause::AfterUnwrap, Pause::BeforeCaching] {
         for transition in [
             Transition::Lock,
             Transition::Expire,
@@ -212,11 +212,10 @@ fn late_publication_negative_control_and_guarded_schedules() {
             assert_eq!(revoked_schedule(pause, transition, true), (false, 0, 0));
         }
     }
-    println!("unsafe late refill reproduced; fenced lock/expiry/ABA/purge refuse after unwrap and before publication");
 }
 
 #[test]
-fn cache_authorization_reunlock_and_previously_disclosed_bytes() {
+fn the_cache_is_per_session_and_bytes_already_returned_stay_returned() {
     let (_d, store, blob, owner) = fixture();
     owner.unlock(10);
     let t = owner.begin(Principal::Operator).unwrap();
@@ -249,7 +248,7 @@ fn cache_authorization_reunlock_and_previously_disclosed_bytes() {
 }
 
 #[test]
-fn publication_handoff_precedes_lock_acknowledgement_when_it_wins_guard() {
+fn a_read_holding_the_guard_finishes_before_a_lock_returns() {
     let (_d, store, blob, owner) = fixture();
     owner.unlock(10);
     let t = owner.begin(Principal::Operator).unwrap();
@@ -259,13 +258,13 @@ fn publication_handoff_precedes_lock_acknowledgement_when_it_wins_guard() {
     let entered = Arc::new(Barrier::new(2));
     let resume = Arc::new(Barrier::new(2));
     let (o, e, r) = (owner.clone(), entered.clone(), resume.clone());
-    let publisher = thread::spawn(move || {
+    let reader = thread::spawn(move || {
         o.finish(t, bytes, true, || {
             e.wait();
             r.wait();
         })
     });
-    entered.wait(); // The publisher holds the same guard required by lock.
+    entered.wait(); // The reader holds the guard that lock needs.
     let (started_tx, started_rx) = std::sync::mpsc::channel();
     let (ack_tx, ack_rx) = std::sync::mpsc::channel();
     let o = owner.clone();
@@ -280,7 +279,7 @@ fn publication_handoff_precedes_lock_acknowledgement_when_it_wins_guard() {
         Err(std::sync::mpsc::TryRecvError::Empty)
     ));
     resume.wait();
-    assert!(publisher.join().unwrap());
+    assert!(reader.join().unwrap());
     ack_rx.recv().unwrap();
     locker.join().unwrap();
     assert_eq!(
