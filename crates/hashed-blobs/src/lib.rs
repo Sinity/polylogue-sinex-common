@@ -169,6 +169,75 @@ pub struct Store {
     frame: usize,
 }
 
+/// A plain encoding staged by its originating store, with no new CAS name published.
+///
+/// Reserve caller-owned custody from `hash` and `decoded_len` before consuming this
+/// handle with `install`. Dropping it removes only its temporary file (best effort).
+/// Process death can leave that file in `blobs/tmp/`; handles cannot be reopened.
+/// Preparation does not promise crash-durable staging. An install error can occur
+/// after publication, so callers must retain custody until they reconcile the result.
+#[must_use = "reserve custody, then install the prepared blob, or drop it to discard its stage"]
+pub struct PreparedPlain {
+    store: Store,
+    tmp: Option<TmpFile>,
+    hash: Hash,
+    decoded_len: u64,
+}
+
+impl PreparedPlain {
+    pub fn hash(&self) -> Hash {
+        self.hash
+    }
+
+    pub fn decoded_len(&self) -> u64 {
+        self.decoded_len
+    }
+
+    /// Publish using the store's verified deduplication and durable installation.
+    /// An existing representation follows `Store::put`'s verification policy.
+    /// Errors discard this stage only; an already published CAS name is retained.
+    pub fn install(mut self) -> Result<Hash> {
+        let tmp = self.tmp.take().unwrap();
+        let _cleanup = StageCleanup(Some(tmp.path.clone()));
+        self.store.install(tmp, self.hash, None)
+    }
+
+    /// Like `install`, with cancellation before publication and while verifying
+    /// an existing plain copy. Existing delta and sealed copies are refused,
+    /// matching `Store::put_plain_checked`. Sync and hard-link calls are not interrupted.
+    pub fn install_checked<E: From<Error>>(
+        mut self,
+        mut check: impl FnMut() -> std::result::Result<(), E>,
+    ) -> std::result::Result<Hash, E> {
+        check()?;
+        let tmp = self.tmp.take().unwrap();
+        let _cleanup = StageCleanup(Some(tmp.path.clone()));
+        self.store.install_plain_checked(tmp, self.hash, &mut check)
+    }
+
+    fn into_tmp(mut self) -> TmpFile {
+        self.tmp.take().unwrap()
+    }
+}
+
+impl Drop for PreparedPlain {
+    fn drop(&mut self) {
+        if let Some(tmp) = &self.tmp {
+            let _ = fs::remove_file(&tmp.path);
+        }
+    }
+}
+
+// Owns only a newly created stage, never a CAS destination.
+struct StageCleanup(Option<PathBuf>);
+impl Drop for StageCleanup {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 /// Read-only access to existing roots. Never writes, not even to create a root.
 ///
 /// ```compile_fail
@@ -973,8 +1042,9 @@ impl Store {
     /// Store bytes as a plain seekable blob named by their BLAKE3; durable when it returns.
     /// Cannot be cancelled; use `put_plain_checked` for that.
     pub fn put(&self, bytes: impl Read, level: i32) -> Result<Hash> {
-        let (tmp, h) = self.write_plain(bytes, level)?;
-        self.install(tmp, h, None)
+        let prepared = self.prepare_plain(bytes, level)?;
+        let h = prepared.hash();
+        self.install(prepared.into_tmp(), h, None)
     }
 
     /// Like `put`, but calls `check` between input reads, around each frame compression and
@@ -988,8 +1058,46 @@ impl Store {
         level: i32,
         mut check: impl FnMut() -> std::result::Result<(), E>,
     ) -> std::result::Result<Hash, E> {
-        let (tmp, h) = self.write_plain_checked(bytes, level, &mut check)?;
+        let prepared = self.prepare_plain_checked(bytes, level, &mut check)?;
+        let h = prepared.hash();
         check()?;
+        self.install_plain_checked(prepared.into_tmp(), h, &mut check)
+    }
+
+    /// Stream a plain encoding into this store's staging directory, without
+    /// publishing a new CAS name. Metadata is available before caller admission.
+    pub fn prepare_plain(&self, bytes: impl Read, level: i32) -> Result<PreparedPlain> {
+        self.prepare_plain_checked::<Error>(bytes, level, || Ok(()))
+    }
+
+    /// Like `prepare_plain`, polling `check` between reads and around compression.
+    /// Failure or cancellation removes only this operation's stage (best effort).
+    pub fn prepare_plain_checked<E: From<Error>>(
+        &self,
+        bytes: impl Read,
+        level: i32,
+        check: impl FnMut() -> std::result::Result<(), E>,
+    ) -> std::result::Result<PreparedPlain, E> {
+        let (tmp, hash, decoded_len) = self.write_plain_checked(bytes, level, check)?;
+        Ok(PreparedPlain {
+            store: Store {
+                write_root: self.write_root.clone(),
+                roots: self.roots.clone(),
+                mode: self.mode,
+                frame: self.frame,
+            },
+            tmp: Some(tmp),
+            hash,
+            decoded_len,
+        })
+    }
+
+    fn install_plain_checked<E: From<Error>>(
+        &self,
+        tmp: TmpFile,
+        h: Hash,
+        mut check: impl FnMut() -> std::result::Result<(), E>,
+    ) -> std::result::Result<Hash, E> {
         self.install_with(tmp, h, |h| {
             self.open_plain(&h, None, |_| check())?;
             self.sync_existing(h)?;
@@ -1008,6 +1116,7 @@ impl Store {
 
     fn write_plain(&self, bytes: impl Read, level: i32) -> Result<(TmpFile, Hash)> {
         self.write_plain_checked::<Error>(bytes, level, || Ok(()))
+            .map(|(tmp, hash, _)| (tmp, hash))
     }
 
     fn write_plain_checked<E: From<Error>>(
@@ -1015,10 +1124,12 @@ impl Store {
         mut bytes: impl Read,
         level: i32,
         mut check: impl FnMut() -> std::result::Result<(), E>,
-    ) -> std::result::Result<(TmpFile, Hash), E> {
+    ) -> std::result::Result<(TmpFile, Hash, u64), E> {
         check()?;
         self.check_frame_size()?;
         let mut tmp = self.tmp()?;
+        let mut cleanup = StageCleanup(Some(tmp.path.clone()));
+        let mut decoded_len = 0u64;
         let mut name = blake3::Hasher::new();
         let mut table: Vec<(u32, u32)> = Vec::new();
         let mut buf = vec![0u8; self.frame];
@@ -1035,6 +1146,9 @@ impl Store {
             if n == 0 && !table.is_empty() {
                 break;
             }
+            decoded_len = decoded_len
+                .checked_add(n as u64)
+                .ok_or_else(|| Error::Refused("decoded length exceeds u64".into()))?;
             name.update(&buf[..n]);
             check()?;
             let c = comp.compress(&buf[..n]).map_err(Error::Io)?;
@@ -1069,7 +1183,8 @@ impl Store {
         st.push(0); // descriptor: no per-frame checksum entries; each frame carries its own
         st.extend_from_slice(&SEEKABLE_MAGIC.to_le_bytes());
         tmp.write(&st).map_err(Error::Io)?;
-        Ok((tmp, Hash(*name.finalize().as_bytes())))
+        cleanup.0 = None;
+        Ok((tmp, Hash(*name.finalize().as_bytes()), decoded_len))
     }
 
     /// Check the seek table layout and every frame header it lists. Decoded lengths and
