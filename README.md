@@ -61,6 +61,13 @@ agentctl job start /path/to/checkout focused -- -p devkit --all-features
 agentctl job start /path/to/checkout compile -- -p devkit --all-features
 ```
 
+AgentCTL snapshots an explicit `CARGO_TARGET_DIR` from the caller when queuing a job. Select an absolute target with exclusive writer ownership; omitting it keeps the existing Cargo default.
+
+```sh
+CARGO_TARGET_DIR=/realm/worktree/leased-build/target \
+  agentctl job start /path/to/checkout focused -- -p devkit --all-features
+```
+
 Nextest 0.9.143 or newer is required for JUnit skipped-case reporting. Devkit
 requests all skipped cases, records ignore-selection exclusions separately from
 filters, and retains the emitted reason. Under `--run-ignored only`, ordinary
