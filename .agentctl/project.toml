@@ -46,4 +46,5 @@ arguments = "required"
 pool = "normal"
 result = "exit"
 timeout_seconds = 1800
+scratch = "nvme"
 cache = "none"
