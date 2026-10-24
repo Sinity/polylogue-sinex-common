@@ -1,5 +1,5 @@
 {
-  "catalog_version": "credential-output-v1",
+  "catalog_version": "credential-output",
   "source": {
     "repository": "Sinex",
     "commit": "c997df89764aa47d624355ae04fbe65e6f9a2bfa",

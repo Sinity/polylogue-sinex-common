@@ -10,7 +10,7 @@ use std::{
 const PERIOD: Duration = Duration::from_secs(1);
 const MAX_GAP_SECONDS: f64 = 2.0;
 
-/// One host-load reading. It describes its observation, not an entire run.
+/// One host-load reading.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HostLoad {
     pub load1: Option<f64>,
@@ -75,7 +75,7 @@ impl HostLoad {
     }
 }
 
-/// Sampled load over a run. Even frequent samples leave unobserved gaps.
+/// Host load sampled over a run, kept as a fixed-size summary.
 #[derive(Debug, Clone)]
 pub struct LoadInterval {
     start: HostLoad,
@@ -129,8 +129,8 @@ impl LoadInterval {
         self.peak.memory_full = maximum(self.peak.memory_full, reading.memory_full);
     }
 
-    /// All captured readings passed the thresholds and the sampler kept its
-    /// cadence within one extra period. This does not prove a controlled run.
+    /// Every reading was below the thresholds and no gap between readings
+    /// exceeded two periods.
     pub fn checks_passed(&self) -> bool {
         self.samples >= 2
             && self.unknown == 0
@@ -149,24 +149,8 @@ impl LoadInterval {
             "start": self.start.to_json(), "end": self.end.to_json(),
             "peak": {"load1": self.peak.load1, "io_full": self.peak.io_full,
                      "memory_full": self.peak.memory_full},
-            "limitation": "Load between samples is unobserved; passing these checks does not establish timing reliability."
         })
     }
-}
-
-/// Old start-only rows remain readable, but cannot pass interval checks.
-pub(super) fn checks_passed_json(value: &Value) -> bool {
-    value["sampling"] == "periodic"
-        && value["checks_passed"] == true
-        && value["sample_count"].as_u64().is_some_and(|n| n >= 2)
-        && value["unknown_samples"].as_u64() == Some(0)
-        && value["busy_samples"].as_u64() == Some(0)
-        && value["max_gap_seconds"]
-            .as_f64()
-            .is_some_and(|v| v.is_finite() && (0.0..=MAX_GAP_SECONDS).contains(&v))
-        && value["elapsed_seconds"]
-            .as_f64()
-            .is_some_and(|v| v.is_finite() && v >= 0.0)
 }
 
 /// One short-lived sampler owned by a benchmark. Finish it after the measured

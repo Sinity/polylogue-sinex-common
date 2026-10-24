@@ -195,16 +195,7 @@ fn compares_only_quiet_runs_on_the_same_sample() {
     assert_eq!(compare(&store, c).unwrap()["status"], "not_compared");
     assert_eq!(cmp["status"], "compared");
     assert!(cmp.get("reliable").is_none());
-    // Legacy rows claimed quiet from a single reading. Keep them readable,
-    // but do not select one as the comparison baseline.
-    store
-        .connection()
-        .execute(
-            "UPDATE bench_runs SET load = ?1 WHERE id = ?2",
-            params![quiet_reading.to_json().to_string(), b],
-        )
-        .unwrap();
-    assert_eq!(compare(&store, b).unwrap()["status"], "not_compared");
+    // A busy run is never the baseline.
     let d = record(
         &store,
         out,
@@ -216,7 +207,7 @@ fn compares_only_quiet_runs_on_the_same_sample() {
         &json!({"seconds": 70.0}),
     )
     .unwrap();
-    assert_eq!(compare(&store, d).unwrap()["against"], a);
+    assert_eq!(compare(&store, d).unwrap()["against"], b);
 }
 
 #[test]

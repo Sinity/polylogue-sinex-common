@@ -30,8 +30,8 @@ fn tiny_reads_decode_each_authenticated_frame_once_per_pass() {
         let mut reader = store
             .read_sealed(&hash, Some(size as u64), &key, limits(65536), || Ok(()))
             .unwrap();
-        let proof = reader.stats();
-        assert_eq!(proof.decoded_bytes, size as u64);
+        let opened = reader.stats();
+        assert_eq!(opened.decoded_bytes, size as u64);
         let mut got = Vec::new();
         let mut chunk = [0u8; 37];
         loop {
@@ -43,7 +43,7 @@ fn tiny_reads_decode_each_authenticated_frame_once_per_pass() {
         }
         assert_eq!(got, bytes);
         assert_eq!(reader.stats().decoded_bytes, size as u64 * 2);
-        assert_eq!(reader.stats().frames, proof.frames * 2);
+        assert_eq!(reader.stats().frames, opened.frames * 2);
     }
 }
 
@@ -135,10 +135,10 @@ fn ciphertext_corruption_and_forged_frame_extents_are_not_exposed() {
     let (mut footer, start) = Store::sealed_footer(&view, hash).unwrap();
     footer.frames[0].1 += 1;
     footer.plain_len += 1;
-    let mut proof = blake3::Hasher::new();
-    proof.update(&view.at(0, start).unwrap());
-    proof.update(&footer.body());
-    footer.cipher_hash = Hash(*proof.finalize().as_bytes());
+    let mut ciphertext = blake3::Hasher::new();
+    ciphertext.update(&view.at(0, start).unwrap());
+    ciphertext.update(&footer.body());
+    footer.cipher_hash = Hash(*ciphertext.finalize().as_bytes());
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .open(Store::path_in(_dir.path(), &hash))
@@ -232,7 +232,7 @@ fn seeks_match_cursor_and_cache_one_frame() {
 }
 
 #[test]
-fn seek_checks_authority_and_generation_even_on_cached_bytes() {
+fn seek_runs_the_check_and_detects_file_changes_even_on_cached_bytes() {
     let (dir, store, key, _bytes, hash) = fixture(65536, 100000);
     let stop = Arc::new(AtomicBool::new(false));
     let check = Arc::clone(&stop);

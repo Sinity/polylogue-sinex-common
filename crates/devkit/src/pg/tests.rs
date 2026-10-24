@@ -254,15 +254,12 @@ fn hash_covers_contents_and_extras() {
 }
 
 #[test]
-fn reap_preserves_live_disconnected_bootstrap_and_removes_dead_owner() {
+fn reap_keeps_a_live_disconnected_bootstrap_and_drops_a_dead_owners() {
     let server = Server::start(&ClusterOptions::default()).unwrap();
     let dead = format!("devkit_building_{}_1", dead_pid());
-    let legacy = "demo_template_old_building_123";
-    for name in [&dead, legacy] {
-        server
-            .sql("postgres", &format!("CREATE DATABASE {name}"))
-            .unwrap();
-    }
+    server
+        .sql("postgres", &format!("CREATE DATABASE {dead}"))
+        .unwrap();
     let bootstrap = |server: &Server, database: &str| -> Result {
         assert_eq!(building_owner(database), Some(std::process::id()));
         assert!(database.len() <= 63);
@@ -280,9 +277,8 @@ fn reap_preserves_live_disconnected_bootstrap_and_removes_dead_owner() {
         let dropped = server.reap(&Reap::default())?;
         assert!(dropped.contains(&dead));
         assert!(!dropped.contains(&database.to_owned()));
-        assert!(server.database_exists(legacy)?);
         server
-            .sql(database, "CREATE TABLE witness (id integer)")
+            .sql(database, "CREATE TABLE marker (id integer)")
             .map(drop)
     };
     let databases = server
@@ -294,7 +290,7 @@ fn reap_preserves_live_disconnected_bootstrap_and_removes_dead_owner() {
         .unwrap();
     assert_eq!(
         server
-            .sql(&databases.schema, "SELECT count(*) FROM witness")
+            .sql(&databases.schema, "SELECT count(*) FROM marker")
             .unwrap()
             .trim(),
         "0"

@@ -1,11 +1,11 @@
-//! Sequential reads of one verified plain representation.
+//! Sequential reads of one verified plain blob.
 use super::{Error, PlainRead, Result, VerificationStats, View};
 use std::io::{self, BufReader, Read};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// A plain blob verified before its first byte is returned. Reads retain the same open
-/// representation and decode each frame once, regardless of the caller's buffer size.
+/// A plain blob verified before its first byte is returned. Reads use the file opened for
+/// verification and decode each frame once, whatever the caller's buffer size.
 /// It does not seek. A failed read stops this reader; create another reader to retry.
 pub struct PlainReader {
     plain: PlainRead,

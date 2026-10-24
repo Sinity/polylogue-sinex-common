@@ -47,7 +47,7 @@ fn read(s: &Store, hash: Hash, key: &DataKey) -> Vec<u8> {
 }
 
 #[test]
-fn encrypted_stage_exposes_metadata_before_publication_then_keyed_reads_match() {
+fn hash_and_length_are_known_before_install_then_keyed_reads_match() {
     let temp = tempfile::tempdir().unwrap();
     let s = store(temp.path());
     let key = key();
@@ -165,10 +165,10 @@ fn drop_and_preinstall_refusal_discard_only_their_own_stage() {
         .unwrap();
     let before = fs::read(destination(temp.path(), good)).unwrap();
     let unrelated = s
-        .prepare_sealed(Cursor::new(b"another owner's candidate"), 1, &key)
+        .prepare_sealed(Cursor::new(b"another writer's bytes"), 1, &key)
         .unwrap();
     let aborted = s
-        .prepare_sealed(Cursor::new(b"discarded candidate"), 1, &key)
+        .prepare_sealed(Cursor::new(b"discarded bytes"), 1, &key)
         .unwrap();
     let aborted_hash = aborted.hash();
     drop(aborted);
@@ -192,11 +192,11 @@ fn drop_and_preinstall_refusal_discard_only_their_own_stage() {
     drop(unrelated);
     assert!(stages(temp.path()).is_empty());
     assert_eq!(
-        s.prepare_sealed(Cursor::new(b"accepted candidate"), 1, &key)
+        s.prepare_sealed(Cursor::new(b"accepted bytes"), 1, &key)
             .unwrap()
             .install_checked::<Error>(|| Ok(()))
             .unwrap(),
-        Store::sealed_name(&key, b"accepted candidate")
+        Store::sealed_name(&key, b"accepted bytes")
     );
 }
 
@@ -246,7 +246,7 @@ fn source_errors_before_and_after_encrypted_frame_creation_remove_only_the_stage
     )
     .unwrap();
     let good = s
-        .put_sealed(Cursor::new(b"good retained body"), 1, &key)
+        .put_sealed(Cursor::new(b"good existing body"), 1, &key)
         .unwrap();
     let encoded = fs::read(destination(temp.path(), good)).unwrap();
     for fault in [Fault::NamingRead, Fault::Rewind, Fault::EncryptionRead] {
@@ -276,7 +276,7 @@ fn different_key_reference_is_refused_even_when_keyed_name_matches() {
     let temp = tempfile::tempdir().unwrap();
     let s = store(temp.path());
     let original = key();
-    let bytes = b"one retained key reference";
+    let bytes = b"one key reference";
     let hash = s.put_sealed(Cursor::new(&bytes[..]), 1, &original).unwrap();
     let path = destination(temp.path(), hash);
     let before = fs::read(&path).unwrap();
@@ -297,7 +297,7 @@ fn corrupt_sealed_destination_is_preserved_without_installing_over_it() {
     let temp = tempfile::tempdir().unwrap();
     let s = store(temp.path());
     let key = key();
-    let bytes = b"damaged retained sealed body";
+    let bytes = b"damaged existing sealed body";
     let hash = s.put_sealed(Cursor::new(&bytes[..]), 1, &key).unwrap();
     let path = destination(temp.path(), hash);
     let mut corrupt = fs::read(&path).unwrap();
@@ -311,20 +311,16 @@ fn corrupt_sealed_destination_is_preserved_without_installing_over_it() {
     assert!(stages(temp.path()).is_empty());
     assert_eq!(fs::read(&path).unwrap(), corrupt);
     assert!(s.put_sealed(Cursor::new(&bytes[..]), 1, &key).is_err());
-    assert_eq!(
-        stages(temp.path()).len(),
-        1,
-        "legacy put retains its failed installation stage"
-    );
+    assert!(stages(temp.path()).is_empty());
     assert_eq!(fs::read(path).unwrap(), corrupt);
 }
 
 #[test]
-fn postpublication_sync_error_keeps_sealed_cas_for_reservation_reconciliation() {
+fn a_sync_error_after_linking_keeps_the_installed_sealed_blob() {
     let temp = tempfile::tempdir().unwrap();
     let s = store(temp.path());
     let key = key();
-    let bytes = b"sealed publication before sync failure";
+    let bytes = b"sealed blob linked before a sync failure";
     let prepared = s.prepare_sealed(Cursor::new(&bytes[..]), 1, &key).unwrap();
     let hash = prepared.hash();
     let path = destination(temp.path(), hash);

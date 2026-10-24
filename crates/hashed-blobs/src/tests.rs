@@ -302,7 +302,7 @@ fn excision_primitives() {
     assert_eq!(read_all(&mut r), b);
 }
 
-// ---- sealed (#19, #23, #24) ----
+// ---- sealed ----
 
 fn unwrapper(keys: &[DataKey]) -> impl Fn(&str) -> std::result::Result<[u8; 32], String> + '_ {
     move |r: &str| {
@@ -331,7 +331,7 @@ fn sealed_round_trip_and_names() {
     assert_ne!(
         h1,
         Hash::of(&b),
-        "#24: a sealed name is not the plaintext BLAKE3"
+        "a sealed name is not the plaintext BLAKE3"
     );
     let h2 = s.put_sealed(Cursor::new(&b), 3, &k2).unwrap();
     let hp = s.put(&b[..], 3).unwrap();
@@ -507,7 +507,7 @@ fn no_nonce_reuse_across_blobs_under_one_key() {
     assert_ne!(
         frame_key(&k.key, &n1, &[1; 32]),
         frame_key(&k.key, &n2, &[1; 32]),
-        "#23: distinct frame keys, so (key, nonce) never repeats"
+        "distinct frame keys, so (key, nonce) never repeats"
     );
 }
 
@@ -770,11 +770,11 @@ fn encoding_salt_has_independent_hkdf_vectors_and_attempts_survive_dedup() {
         let temporary_path = tmp.path.clone();
         s.install(tmp, h, Some(&|_| Ok(k.key))).unwrap();
         assert!(!temporary_path.exists());
-        let retained = fs::read(file_of(&s, &h)).unwrap();
+        let stored = fs::read(file_of(&s, &h)).unwrap();
         if let Some(first) = &installed {
-            assert_eq!(&retained, first, "dedup keeps the installed encoding");
+            assert_eq!(&stored, first, "dedup keeps the installed encoding");
         } else {
-            installed = Some(retained);
+            installed = Some(stored);
         }
     }
     let keys = [k];
@@ -826,14 +826,6 @@ fn sealed_encoding_metadata_is_authenticated_even_with_a_forged_cipher_hash() {
             );
         }
     }
-    let mut obsolete = original;
-    let n = obsolete.len();
-    obsolete[n - 4..].copy_from_slice(b"HBS1");
-    fs::write(&path, obsolete).unwrap();
-    assert!(
-        matches!(s.kind(&h), Err(Error::Corrupt { .. })),
-        "v1 has no compatibility reader"
-    );
 }
 
 #[test]
@@ -908,7 +900,7 @@ fn seek_metadata_refuses_one_bit_and_merged_unselected_frames() {
     }
     assert!(matches!(s.verify(&h), Ok(Verified::Corrupt(_))));
     assert!(s.verify_plain::<Error>(&h, 24, |_| Ok(())).is_err());
-    // Merge the first two compressed extents, retain frame one's declared logical size,
+    // Merge the first two compressed extents, keep frame one's declared logical size,
     // and remove entry two. Header-only checks would accept displaced frame-three bytes.
     let mut bad = original.clone();
     let merged = u32_at(&bad, table + 8) + u32_at(&bad, table + 16);
@@ -925,7 +917,7 @@ fn seek_metadata_refuses_one_bit_and_merged_unselected_frames() {
 #[test]
 fn corrupt_destinations_refuse_single_and_batch_without_repair() {
     let (_d, s) = store();
-    let bytes = b"known correct new candidate";
+    let bytes = b"known correct new bytes";
     let h = s.put(&bytes[..], 1).unwrap();
     let path = file_of(&s, &h);
     fs::write(&path, b"corrupt destination").unwrap();
@@ -938,15 +930,16 @@ fn corrupt_destinations_refuse_single_and_batch_without_repair() {
         fs::read_dir(s.write_root.join("blobs/tmp"))
             .unwrap()
             .count(),
-        2
+        0,
+        "failed writes remove their temporary files"
     );
 }
 
 #[test]
 fn partial_batch_can_be_retried_without_rollback_or_false_success() {
     let (_d, s) = store();
-    let first = b"first retained dependency";
-    let mut second = b"second retained dependency".to_vec();
+    let first = b"first dependency";
+    let mut second = b"second dependency".to_vec();
     while Hash::of(first).hex()[..2] == Hash::of(&second).hex()[..2] {
         second.push(b'x');
     }
@@ -1001,7 +994,7 @@ fn sequential_verification_decodes_once_and_checks_identity_and_length() {
         .is_err());
     let other = s.put(&b"other valid object"[..], 1).unwrap();
     fs::copy(file_of(&s, &other), file_of(&s, &h)).unwrap();
-    assert_eq!(s.read_range(&h, 0, 1).unwrap(), b"o"); // Stateless range proof boundary.
+    assert_eq!(s.read_range(&h, 0, 1).unwrap(), b"o"); // A range read checks frames, not the name.
     assert!(Reader::new(d.path(), vec![]).read_range(&h, 0, 1).is_err());
     assert!(s.verify_plain::<Error>(&h, 18, |_| Ok(())).is_err());
     let empty = s.put(&b""[..], 1).unwrap();
@@ -1048,7 +1041,7 @@ fn verification_callback_cancels_and_enforces_expired_deadline() {
 }
 
 #[test]
-fn finite_valid_ranges_and_structural_negative_controls() {
+fn valid_ranges_read_and_malformed_layouts_are_refused() {
     let temp = tempfile::tempdir().unwrap();
     let mut cases = 0;
     for frame in [1usize, 2, 7, 8, 31, 64] {
@@ -1186,9 +1179,9 @@ fn one_verified_representation_reuses_bounded_frames_for_sequential_ranges() {
             bytes[offset..offset + 65536]
         );
     }
-    let retained = reader.slot().unwrap();
-    let retained = retained.as_ref().unwrap();
-    let after = retained.stats;
+    let open = reader.slot().unwrap();
+    let open = open.as_ref().unwrap();
+    let after = open.stats;
     assert_eq!(initial.frames, 2);
     assert_eq!(after.frames - initial.frames, 2);
     assert_eq!(
@@ -1200,15 +1193,14 @@ fn one_verified_representation_reuses_bounded_frames_for_sequential_ranges() {
         initial.compressed_bytes
     );
     assert_eq!(after.metadata_bytes, initial.metadata_bytes);
-    let Some(CachedFrame { bytes: cached, .. }) = &retained.current else {
-        panic!("frame not retained")
+    let Some(CachedFrame { bytes: cached, .. }) = &open.current else {
+        panic!("frame not cached")
     };
     assert_eq!(cached.len(), DEFAULT_FRAME);
-    eprintln!("SCOPED_RANGES validation_decoded={} validation_compressed={} metadata={} ranges=128 subsequent_decoded={} subsequent_compressed={} subsequent_metadata={} frame_cache_bytes={}", initial.decoded_bytes, initial.compressed_bytes, initial.metadata_bytes, after.decoded_bytes-initial.decoded_bytes, after.compressed_bytes-initial.compressed_bytes, after.metadata_bytes-initial.metadata_bytes, cached.len());
 }
 
 #[test]
-fn scoped_reader_refuses_mutation_and_cancellation_without_publishing_a_cache() {
+fn scoped_reader_refuses_mutation_and_cancellation_without_caching_a_frame() {
     let d = tempfile::tempdir().unwrap();
     let s = Store::open(d.path(), vec![], 0o600).unwrap();
     let bytes = data(21, 5 << 20);
@@ -1322,15 +1314,15 @@ mod acquisition;
 mod decoder_cancellation;
 
 #[test]
-fn deleting_an_external_only_blob_refuses_without_touching_backing_bytes() {
+fn deleting_a_blob_only_in_an_extra_root_refuses_and_leaves_it() {
     let dir = tempfile::tempdir().unwrap();
-    let backing = dir.path().join("backing");
-    let external = Store::open(&backing, vec![], 0o600).unwrap();
+    let extra = dir.path().join("extra");
+    let external = Store::open(&extra, vec![], 0o600).unwrap();
     let bytes = data(97, 1024);
     let hash = external.put(bytes.as_slice(), 1).unwrap();
-    let path = Store::path_in(&backing, &hash);
+    let path = Store::path_in(&extra, &hash);
     let encoded = fs::read(&path).unwrap();
-    let combined = Store::open(dir.path().join("primary"), vec![backing], 0o600).unwrap();
+    let combined = Store::open(dir.path().join("primary"), vec![extra], 0o600).unwrap();
     assert!(combined.contains(&hash));
     assert!(matches!(combined.delete(&hash),Err(Error::Missing(h)) if h==hash));
     assert_eq!(fs::read(&path).unwrap(), encoded);
@@ -1341,15 +1333,15 @@ fn deleting_an_external_only_blob_refuses_without_touching_backing_bytes() {
 fn deleting_a_local_copy_keeps_external_fallback_and_repeated_delete_refuses() {
     let dir = tempfile::tempdir().unwrap();
     let primary = dir.path().join("primary");
-    let backing = dir.path().join("backing");
+    let extra = dir.path().join("extra");
     let local = Store::open(&primary, vec![], 0o600).unwrap();
-    let external = Store::open(&backing, vec![], 0o600).unwrap();
+    let external = Store::open(&extra, vec![], 0o600).unwrap();
     let bytes = data(98, 1024);
     let hash = local.put(bytes.as_slice(), 1).unwrap();
     assert_eq!(external.put(bytes.as_slice(), 1).unwrap(), hash);
-    let path = Store::path_in(&backing, &hash);
+    let path = Store::path_in(&extra, &hash);
     let encoded = fs::read(&path).unwrap();
-    let combined = Store::open(&primary, vec![backing], 0o600).unwrap();
+    let combined = Store::open(&primary, vec![extra], 0o600).unwrap();
     combined.delete(&hash).unwrap();
     assert!(!Store::path_in(&primary, &hash).exists());
     assert!(combined.contains(&hash));
@@ -1359,16 +1351,16 @@ fn deleting_a_local_copy_keeps_external_fallback_and_repeated_delete_refuses() {
 }
 
 #[test]
-fn primary_only_keeps_write_policy_and_requires_local_custody() {
+fn primary_only_keeps_write_settings_and_reads_only_the_write_root() {
     let dir = tempfile::tempdir().unwrap();
     let primary = dir.path().join("primary");
-    let backing = dir.path().join("backing");
-    let external = Store::open(&backing, vec![], 0o600).unwrap();
+    let extra = dir.path().join("extra");
+    let external = Store::open(&extra, vec![], 0o600).unwrap();
     let bytes = data(99, 3 * FRAME + 7);
     let hash = external.put(bytes.as_slice(), 1).unwrap();
-    let external_path = Store::path_in(&backing, &hash);
+    let external_path = Store::path_in(&extra, &hash);
     let encoded = fs::read(&external_path).unwrap();
-    let combined = Store::open(&primary, vec![backing], 0o400)
+    let combined = Store::open(&primary, vec![extra], 0o400)
         .unwrap()
         .with_frame_size(FRAME);
     let local = combined.primary_only();

@@ -1,18 +1,18 @@
-//! Seekable assembly with a bounded set of verified plain representations.
+//! Seekable reads over extents, keeping a few verified plain blobs open.
 use super::{CachedFrame, Error, Extent, Hash, PlainRead, Reader, Result, Store};
 use std::collections::VecDeque;
 use std::io::{self, Read, Seek, SeekFrom};
 
-// A hot base and a few patch sources stay open without growing descriptors
-// with every distinct blob in a wide assembly. Eviction preserves valid inputs
-// by reverifying later uses, rather than imposing a new extent/blob limit.
+// A frequently used base and a few others stay open, without one descriptor per
+// distinct blob in a wide assembly. A closed blob is verified again when it is
+// used again, so there is no limit on extents or blobs.
 const OPEN_PLAIN: usize = 4;
 
 pub struct Assembled<'a> {
     store: &'a Store,
     reader: Reader,
     // Least recently used first. Each entry owns one FD and its complete seek
-    // table; every entry's decoded-frame slot is empty while retained here.
+    // table; its decoded-frame slot is empty while it waits here.
     opened: VecDeque<PlainRead>,
     frame: Option<(Hash, CachedFrame)>,
     extents: Vec<Extent>,
@@ -56,8 +56,8 @@ impl<'a> Assembled<'a> {
                     .and_then(|(cached, frame)| (cached == *hash).then_some(frame));
                 plain
             } else {
-                // Whole verification itself retains one frame. Release the prior
-                // cache before it starts, so a blob switch never multiplies frames.
+                // Verifying a whole blob holds one frame. Drop the cached frame
+                // first, so switching blobs never holds two.
                 self.frame = None;
                 if self.opened.len() == OPEN_PLAIN {
                     self.opened.pop_front();
@@ -72,8 +72,7 @@ impl<'a> Assembled<'a> {
             self.frame = plain.current.take().map(|frame| (*hash, frame));
             self.opened.push_back(plain);
         } else {
-            // Like Reader's existing range contract, failure does not retain a
-            // partially decoded or changed representation for a later retry.
+            // As in Reader, a failed read keeps nothing for a retry.
             self.frame = None;
         }
         result

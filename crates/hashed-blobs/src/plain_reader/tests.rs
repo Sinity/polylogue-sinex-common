@@ -106,7 +106,7 @@ fn opened_generation_changes_are_refused_without_switching_to_a_replacement() {
     std::fs::rename(&path, &held).unwrap();
     std::fs::write(&path, b"unrelated replacement").unwrap();
     assert!(reader.read(&mut [0; 19]).is_err());
-    // A fresh read of the retained old pathname independently detects in-place mutation.
+    // A fresh read of the original path detects the in-place change on its own.
     std::fs::remove_file(&path).unwrap();
     std::fs::rename(&held, &path).unwrap();
     let mut reader = readonly.read_plain(&hash, None, || Ok(())).unwrap();

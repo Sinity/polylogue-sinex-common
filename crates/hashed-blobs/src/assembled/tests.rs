@@ -1,5 +1,4 @@
-//! Synthetic work controls for assembled reads. Counters describe completed
-//! whole-name verification, not elapsed time, RSS or physical disk IO.
+//! Assembled reads, counted in whole-blob verifications and decoded bytes.
 use super::*;
 use crate::VerificationStats;
 use std::cell::RefCell;
@@ -59,7 +58,7 @@ fn data(seed: u64, len: usize) -> Vec<u8> {
 }
 
 #[test]
-fn alternating_extents_verify_each_retained_blob_once() {
+fn alternating_extents_verify_each_open_blob_once() {
     let d = tempfile::tempdir().unwrap();
     let s = Store::open(d.path(), vec![], 0o600)
         .unwrap()
@@ -103,7 +102,7 @@ fn alternating_extents_verify_each_retained_blob_once() {
     );
     assert_eq!(
         work.opens, 2,
-        "whole verification must follow retained blob identity, not extent switches"
+        "each open blob is verified once, however often extents switch"
     );
     assert_eq!(work.decoded, (base.len() + patch.len()) as u64);
     // One frame shared between alternating sources still decodes the base
@@ -231,7 +230,7 @@ fn wide_repeated_cycles_reverify_evicted_blobs_and_preserve_seek_bytes() {
 }
 
 #[test]
-fn changed_retained_or_corrupt_first_later_and_evicted_representations_expose_no_bad_bytes() {
+fn changed_corrupt_or_evicted_blobs_return_no_bad_bytes() {
     let d = tempfile::tempdir().unwrap();
     let s = Store::open(d.path(), vec![], 0o600)
         .unwrap()
@@ -342,7 +341,7 @@ fn changed_retained_or_corrupt_first_later_and_evicted_representations_expose_no
 }
 
 #[test]
-fn delta_assembly_keeps_legacy_bytes_and_sealed_assembly_still_requires_a_key() {
+fn delta_assembly_reads_the_whole_delta_and_sealed_assembly_requires_a_key() {
     use crate::DataKey;
     let d = tempfile::tempdir().unwrap();
     let s = Store::open(d.path(), vec![], 0o600)

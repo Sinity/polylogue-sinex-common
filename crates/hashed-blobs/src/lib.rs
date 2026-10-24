@@ -1,7 +1,6 @@
 //! `hashed-blobs`: bytes by BLAKE3 hash, plain or as a delta, sealed or not.
 //!
-//! The shared content-store crate of Polylogue and Sinex (joint decisions #11, #12, #14, #19, #23,
-//! #24). It holds no policy: inline-versus-file size, when to use a delta, snapshots, page maps,
+//! The content store Polylogue and Sinex share. It holds no policy: inline-versus-file size, when to use a delta, snapshots, page maps,
 //! joining, excision rewrites, privacy classes and key management all belong to the caller.
 //!
 //! Files live at `<root>/blobs/<first byte hex>/<name hex>.zst`, written to `<root>/blobs/tmp/`,
@@ -15,10 +14,10 @@
 //!   `zstd --patch-from` makes one (the base as prefix, a window over base and content,
 //!   long-distance matching). The base is always plain, so a read decompresses at most two
 //!   blobs. Not seekable.
-//! - **sealed**: each compressed frame encrypted with ChaCha20-Poly1305 under a fresh per-encoding frame key
-//!   (#23), then a footer with the key reference, the frame table and a BLAKE3 of the ciphertext
-//!   so `verify` can check integrity without the key (#19b). Named by a BLAKE3 keyed hash of the
-//!   content under a naming key derived from the data key (#24). A sealed delta is one sealed
+//! - **sealed**: each compressed frame encrypted with ChaCha20-Poly1305 under a fresh per-encoding frame key,
+//!   then a footer with the key reference, the frame table and a BLAKE3 of the ciphertext
+//!   so `verify` can check integrity without the key. Named by a BLAKE3 keyed hash of the
+//!   content under a naming key derived from the data key. A sealed delta is one sealed
 //!   frame whose base is a sealed blob under the same key.
 //!
 //! Integrity never relies on the filesystem (Polylogue's archive is No_COW on btrfs, so btrfs
@@ -169,17 +168,16 @@ pub struct Store {
     frame: usize,
 }
 
-/// A plain encoding staged by its originating store, with no new CAS name published.
+/// A plain blob written to `blobs/tmp/` and hashed, not yet under its name.
 ///
-/// Reserve caller-owned custody from `hash` and `decoded_len` before consuming this
-/// handle with `install`. Dropping it removes only its temporary file (best effort).
-/// Process death can leave that file in `blobs/tmp/`; handles cannot be reopened.
-/// Preparation does not promise crash-durable staging. An install error can occur
-/// after publication, so callers must retain custody until they reconcile the result.
-#[must_use = "reserve custody, then install the prepared blob, or drop it to discard its stage"]
+/// The hash and length are known before the blob is installed, so a caller can
+/// record its own row for the blob first and then call `install`. Dropping the
+/// handle, or a failed install, removes the temporary file. A crash can leave
+/// it in `blobs/tmp/`; a handle cannot be reopened.
+#[must_use = "install the prepared blob, or drop it to discard its temporary file"]
 pub struct PreparedPlain {
     store: Store,
-    tmp: Option<TmpFile>,
+    tmp: TmpFile,
     hash: Hash,
     decoded_len: u64,
 }
@@ -193,53 +191,37 @@ impl PreparedPlain {
         self.decoded_len
     }
 
-    /// Publish using the store's verified deduplication and durable installation.
-    /// An existing representation follows `Store::put`'s verification policy.
-    /// Errors discard this stage only; an already published CAS name is retained.
-    pub fn install(mut self) -> Result<Hash> {
-        let tmp = self.tmp.take().unwrap();
-        let _cleanup = StageCleanup(Some(tmp.path.clone()));
-        self.store.install(tmp, self.hash, None)
+    /// Install under its name, durably. An existing blob of the same name is
+    /// verified as for `Store::put`. An error after the name was linked leaves
+    /// the installed blob in place.
+    pub fn install(self) -> Result<Hash> {
+        self.store.install(self.tmp, self.hash, None)
     }
 
-    /// Like `install`, with cancellation before publication and while verifying
-    /// an existing plain copy. Existing delta and sealed copies are refused,
-    /// matching `Store::put_plain_checked`. Sync and hard-link calls are not interrupted.
+    /// Like `install`, calling `check` before linking and while verifying an
+    /// existing plain copy, so the caller can cancel. An existing delta or
+    /// sealed blob of the same name is refused, as in `Store::put_plain_checked`.
+    /// Sync and hard-link calls are not interrupted.
     pub fn install_checked<E: From<Error>>(
-        mut self,
+        self,
         mut check: impl FnMut() -> std::result::Result<(), E>,
     ) -> std::result::Result<Hash, E> {
         check()?;
-        let tmp = self.tmp.take().unwrap();
-        let _cleanup = StageCleanup(Some(tmp.path.clone()));
-        self.store.install_plain_checked(tmp, self.hash, &mut check)
-    }
-
-    fn into_tmp(mut self) -> TmpFile {
-        self.tmp.take().unwrap()
+        self.store
+            .install_plain_checked(self.tmp, self.hash, &mut check)
     }
 }
 
-impl Drop for PreparedPlain {
-    fn drop(&mut self) {
-        if let Some(tmp) = &self.tmp {
-            let _ = fs::remove_file(&tmp.path);
-        }
-    }
-}
-
-/// An encrypted encoding staged by its originating store, without publishing a new CAS name.
+/// A sealed blob written to `blobs/tmp/` and named, not yet under its name.
 ///
-/// Reserve caller-owned custody from `hash` and `decoded_len` before installation.
-/// The handle owns its original store configuration and a copy of the data key for
-/// authenticated deduplication, so the source reader and caller's key may be released.
-/// Dropping it removes only its own stage, best effort. Preparation is not
-/// crash-durable or reopenable; process death may leave an unpublished tmp file.
-/// An install error can happen after publication, so retain custody until reconciled.
-#[must_use = "reserve custody, then install the prepared blob, or drop it to discard its encrypted stage"]
+/// As for [`PreparedPlain`], the caller records its row from `hash` and
+/// `decoded_len` before calling `install`. The handle keeps a copy of the data
+/// key to verify an existing blob of the same name, so the caller's reader
+/// and key can be released. No plaintext is written to disk.
+#[must_use = "install the prepared blob, or drop it to discard its temporary file"]
 pub struct PreparedSealed {
     store: Store,
-    tmp: Option<TmpFile>,
+    tmp: TmpFile,
     key: DataKey,
     hash: Hash,
     decoded_len: u64,
@@ -254,41 +236,21 @@ impl PreparedSealed {
         self.decoded_len
     }
 
-    /// Publish with the original key's authenticated existing-object policy.
-    /// Errors discard this stage only; an already published CAS name is retained.
-    pub fn install(mut self) -> Result<Hash> {
-        let tmp = self.tmp.take().unwrap();
-        let _cleanup = StageCleanup(Some(tmp.path.clone()));
-        self.store.install_sealed(tmp, self.hash, &self.key)
+    /// Install under its name, durably. An existing blob of the same name is
+    /// verified with the key. An error after the name was linked leaves the
+    /// installed blob in place.
+    pub fn install(self) -> Result<Hash> {
+        self.store.install_sealed(self.tmp, self.hash, &self.key)
     }
 
-    /// Check once before installation, allowing the caller to refuse publication.
-    /// Encoding has already finished; sync, hard-link and authenticated deduplication
-    /// are not interrupted or polled by this method.
+    /// Calls `check` once, then installs. Encoding has already finished; the
+    /// sync, hard link and verification of an existing copy are not interrupted.
     pub fn install_checked<E: From<Error>>(
         self,
         check: impl FnOnce() -> std::result::Result<(), E>,
     ) -> std::result::Result<Hash, E> {
         check()?;
         self.install().map_err(E::from)
-    }
-}
-
-impl Drop for PreparedSealed {
-    fn drop(&mut self) {
-        if let Some(tmp) = &self.tmp {
-            let _ = fs::remove_file(&tmp.path);
-        }
-    }
-}
-
-// Owns only a newly created stage, never a CAS destination.
-struct StageCleanup(Option<PathBuf>);
-impl Drop for StageCleanup {
-    fn drop(&mut self) {
-        if let Some(path) = &self.0 {
-            let _ = fs::remove_file(path);
-        }
     }
 }
 
@@ -316,9 +278,10 @@ impl Reader {
         )
     }
 
-    /// Verify a plain blob, then read its retained representation sequentially with bounded
-    /// memory. An optional length is checked along with the content hash. `check` runs during verification and before each read, so the caller can cancel.
-    /// Delta and sealed blobs are refused; their existing read/key contracts are unchanged.
+    /// Verify a plain blob, then read it sequentially in bounded memory. An
+    /// expected length is checked along with the hash. `check` runs during
+    /// verification and before each read, so the caller can cancel. Delta and
+    /// sealed blobs are refused; read them with `read` and `read_sealed`.
     pub fn read_plain(
         &self,
         hash: &Hash,
@@ -351,8 +314,8 @@ impl Reader {
         mut check: impl FnMut() -> std::result::Result<(), E>,
     ) -> std::result::Result<Vec<u8>, E> {
         check()?;
-        let retained = self.slot()?.take();
-        let mut plain = match retained {
+        let open = self.slot()?.take();
+        let mut plain = match open {
             Some(plain) if plain.hash == *hash => plain,
             _ => {
                 if self.0.kind(hash)? != Kind::Plain {
@@ -869,11 +832,19 @@ impl PlainRead {
     }
 }
 
-/// An append-only writer for a blob file in `blobs/tmp/`.
+/// An append-only writer for a blob file in `blobs/tmp/`. Dropping it
+/// removes the file, so a temporary file lives exactly as long as its writer.
 struct TmpFile {
     file: File,
     path: PathBuf,
     hasher: blake3::Hasher, // BLAKE3 of the bytes written (the ciphertext hash for sealed blobs)
+}
+
+impl Drop for TmpFile {
+    fn drop(&mut self) {
+        // After a successful install the file is already gone.
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 impl TmpFile {
@@ -902,8 +873,8 @@ impl Store {
         })
     }
 
-    /// The same writer configuration with reads restricted to the write root.
-    /// Use when a successful put must leave a local copy, rather than reuse backing bytes.
+    /// The same store reading only the write root, so a put whose blob exists
+    /// only in an extra root writes a copy into the write root.
     pub fn primary_only(&self) -> Store {
         Store {
             write_root: self.write_root.clone(),
@@ -972,13 +943,12 @@ impl Store {
 
     /// Sync the temporary file and hard-link it into place without replacing anything, syncing
     /// every directory touched. If the name exists, verify the existing file before deleting
-    /// the new one. An invalid existing file is refused and left alone, and the new file stays
-    /// in tmp.
+    /// the new one. An invalid existing file is refused and left alone.
     fn install(&self, tmp: TmpFile, h: Hash, unwrap: Option<Unwrap>) -> Result<Hash> {
         self.install_with(tmp, h, |h| self.validate_existing(h, unwrap))
     }
 
-    // `validate` checks an existing file of the same name; on error the new file stays in tmp.
+    // `validate` checks an existing file of the same name.
     fn install_with<E: From<Error>>(
         &self,
         tmp: TmpFile,
@@ -986,7 +956,6 @@ impl Store {
         mut validate: impl FnMut(Hash) -> std::result::Result<(), E>,
     ) -> std::result::Result<Hash, E> {
         tmp.file.sync_all().map_err(Error::Io)?;
-        drop(tmp.file);
         if self.locate(&h).is_some() {
             validate(h)?;
             fs::remove_file(&tmp.path).map_err(Error::Io)?;
@@ -1057,12 +1026,6 @@ impl Store {
 
     fn kind_of_view(v: &View, h: Hash) -> Result<Kind> {
         let t8 = v.tail(8)?;
-        if t8.len() >= 4 && &t8[t8.len() - 4..] == b"HBS1" {
-            return Err(Error::Corrupt {
-                blob: h,
-                what: "unsupported sealed version 1".into(),
-            });
-        }
         if t8.len() >= 4 && &t8[t8.len() - 4..] == SEAL_TRAILER {
             let (f, _) = Self::sealed_footer(v, h)?;
             return Ok(Kind::Sealed {
@@ -1096,36 +1059,31 @@ impl Store {
     /// Store bytes as a plain seekable blob named by their BLAKE3; durable when it returns.
     /// Cannot be cancelled; use `put_plain_checked` for that.
     pub fn put(&self, bytes: impl Read, level: i32) -> Result<Hash> {
-        let prepared = self.prepare_plain(bytes, level)?;
-        let h = prepared.hash();
-        self.install(prepared.into_tmp(), h, None)
+        self.prepare_plain(bytes, level)?.install()
     }
 
     /// Like `put`, but calls `check` between input reads, around each frame compression and
     /// while verifying an existing copy, so the caller can cancel or enforce a deadline. A
     /// blocking read or one compression call is not interrupted. An existing delta or sealed
-    /// blob of the same name is refused. If the existing copy fails verification, neither it
-    /// nor the new file is removed.
+    /// blob of the same name is refused, and an existing copy that fails verification is left
+    /// alone.
     pub fn put_plain_checked<E: From<Error>>(
         &self,
         bytes: impl Read,
         level: i32,
         mut check: impl FnMut() -> std::result::Result<(), E>,
     ) -> std::result::Result<Hash, E> {
-        let prepared = self.prepare_plain_checked(bytes, level, &mut check)?;
-        let h = prepared.hash();
-        check()?;
-        self.install_plain_checked(prepared.into_tmp(), h, &mut check)
+        self.prepare_plain_checked(bytes, level, &mut check)?
+            .install_checked(check)
     }
 
-    /// Stream a plain encoding into this store's staging directory, without
-    /// publishing a new CAS name. Metadata is available before caller admission.
+    /// Write a plain blob to `blobs/tmp/` and hash it, without installing it.
     pub fn prepare_plain(&self, bytes: impl Read, level: i32) -> Result<PreparedPlain> {
         self.prepare_plain_checked::<Error>(bytes, level, || Ok(()))
     }
 
     /// Like `prepare_plain`, polling `check` between reads and around compression.
-    /// Failure or cancellation removes only this operation's stage (best effort).
+    /// Failure or cancellation removes the temporary file.
     pub fn prepare_plain_checked<E: From<Error>>(
         &self,
         bytes: impl Read,
@@ -1140,7 +1098,7 @@ impl Store {
                 mode: self.mode,
                 frame: self.frame,
             },
-            tmp: Some(tmp),
+            tmp,
             hash,
             decoded_len,
         })
@@ -1182,7 +1140,6 @@ impl Store {
         check()?;
         self.check_frame_size()?;
         let mut tmp = self.tmp()?;
-        let mut cleanup = StageCleanup(Some(tmp.path.clone()));
         let mut decoded_len = 0u64;
         let mut name = blake3::Hasher::new();
         let mut table: Vec<(u32, u32)> = Vec::new();
@@ -1237,7 +1194,6 @@ impl Store {
         st.push(0); // descriptor: no per-frame checksum entries; each frame carries its own
         st.extend_from_slice(&SEEKABLE_MAGIC.to_le_bytes());
         tmp.write(&st).map_err(Error::Io)?;
-        cleanup.0 = None;
         Ok((tmp, Hash(*name.finalize().as_bytes()), decoded_len))
     }
 
@@ -1398,7 +1354,7 @@ impl Store {
     }
 
     /// Store bytes as a zstd delta with a plain base's content as dictionary. Refuses a base that
-    /// is itself a delta (reads stay at two blobs) or sealed (no delta across a key boundary, #19a).
+    /// is itself a delta (reads stay at two blobs) or sealed (no delta across a key boundary).
     pub fn put_delta(&self, base: &Hash, mut bytes: impl Read, level: i32) -> Result<Hash> {
         match self.kind(base)? {
             Kind::Plain => {}
@@ -1409,7 +1365,7 @@ impl Store {
             }
             Kind::Sealed { .. } => {
                 return Err(Error::Refused(format!(
-                    "base {base} is sealed; a plain delta never uses a sealed base (#19a)"
+                    "base {base} is sealed; a plain delta never uses a sealed base"
                 )))
             }
         }
@@ -1463,7 +1419,7 @@ impl Store {
         hkdf32(&key.key, NAME_INFO)
     }
 
-    /// The name a sealed blob of these bytes gets under this key (#24).
+    /// The name a sealed blob of these bytes gets under this key.
     pub fn sealed_name(key: &DataKey, bytes: &[u8]) -> Hash {
         Hash(*blake3::keyed_hash(&Self::name_key(key), bytes).as_bytes())
     }
@@ -1523,17 +1479,13 @@ impl Store {
     /// Seal bytes under a data key. The input starts at offset zero and stays stable across
     /// two passes (the name keys the frames), so it must seek; no plaintext is written to disk.
     pub fn put_sealed(&self, bytes: impl Read + Seek, level: i32, key: &DataKey) -> Result<Hash> {
-        let mut prepared = self.prepare_sealed(bytes, level, key)?;
-        // Legacy puts retain their stage on an installation/verification failure.
-        let tmp = prepared.tmp.take().unwrap();
-        prepared
-            .store
-            .install_sealed(tmp, prepared.hash, &prepared.key)
+        let (tmp, hash, _) = self.write_sealed(bytes, level, key)?;
+        self.install_sealed(tmp, hash, key)
     }
 
-    /// Stream an encrypted encoding into this store's staging directory, without
-    /// publishing a new CAS name. The input starts at offset zero and stays stable across
-    /// two passes (naming then encryption), as for `put_sealed`; no plaintext is staged on disk.
+    /// Write a sealed blob to `blobs/tmp/` and name it, without installing it. The input
+    /// starts at offset zero and stays stable across two passes (naming, then encryption), as
+    /// for `put_sealed`; no plaintext is written to disk.
     pub fn prepare_sealed(
         &self,
         bytes: impl Read + Seek,
@@ -1548,7 +1500,7 @@ impl Store {
                 mode: self.mode,
                 frame: self.frame,
             },
-            tmp: Some(tmp),
+            tmp,
             key: key.clone(),
             hash,
             decoded_len,
@@ -1592,7 +1544,6 @@ impl Store {
         let count = (total.div_ceil(self.frame as u64)).max(1) as u32;
         let frame = self.frame;
         let mut tmp = self.tmp()?;
-        let mut cleanup = StageCleanup(Some(tmp.path.clone()));
         let mut next = |out: &mut Vec<u8>| -> Result<usize> {
             out.resize(frame, 0);
             let n = read_full(&mut bytes, out)?;
@@ -1602,12 +1553,11 @@ impl Store {
         let mut footer = SealedFooter::new(key, None, total, count)?;
         self.seal_frames(&mut tmp, &mut next, &mut footer, &name, key, level, None)?;
         let tmp = Self::finish_sealed(tmp, footer)?;
-        cleanup.0 = None;
         Ok((tmp, name, total))
     }
 
     /// A sealed delta: one sealed frame, compressed with the base's content as dictionary. The base
-    /// must be a sealed, non-delta blob under the same key (#19a).
+    /// must be a sealed, non-delta blob under the same key.
     pub fn put_delta_sealed(
         &self,
         base: &Hash,
@@ -1639,8 +1589,8 @@ impl Store {
         match self.kind(base)? {
             Kind::Sealed { key_ref, base: None } if key_ref == key.key_ref => {}
             Kind::Sealed { base: Some(_), .. } => return Err(Error::Refused(format!("base {base} is a delta; a delta's base is never a delta"))),
-            Kind::Sealed { key_ref, .. } => return Err(Error::Refused(format!("base {base} is sealed under {key_ref}, not {}: a delta never crosses a key boundary (#19a)", key.key_ref))),
-            _ => return Err(Error::Refused(format!("base {base} is plain; a sealed delta never uses a plain base (#19a)"))),
+            Kind::Sealed { key_ref, .. } => return Err(Error::Refused(format!("base {base} is sealed under {key_ref}, not {}: a delta never crosses a key boundary", key.key_ref))),
+            _ => return Err(Error::Refused(format!("base {base} is plain; a sealed delta never uses a plain base"))),
         }
         let k = key.key;
         let unwrap = move |_: &str| -> std::result::Result<[u8; 32], String> { Ok(k) };
@@ -1790,10 +1740,10 @@ impl Store {
         Ok(PlainReader::new(plain, Box::new(check)))
     }
 
-    /// Verify and open a sequential, non-delta sealed blob under one authorized key.
-    /// The key reference must match. Authentication requires a whole compressed frame;
-    /// the caller's budgets bound decoded frames, compressed envelopes and frame metadata before
-    /// allocation. Larger legacy frames are refused explicitly. Memory never holds a blob.
+    /// Verify and open a non-delta sealed blob for sequential reads under its key.
+    /// The key reference must match. Authentication needs a whole compressed frame, so
+    /// `limits` bound the decoded frame, its ciphertext and the frame table before anything
+    /// is allocated; a blob with larger frames is refused. Memory never holds the whole blob.
     pub fn read_sealed(
         &self,
         hash: &Hash,
@@ -1909,7 +1859,7 @@ impl Store {
     }
 
     /// A revision's bytes from extents, as one seekable stream. Extents over a delta blob read the
-    /// whole delta (only the raw view of an old revision does that). Plain reads retain at most
+    /// whole delta (only the raw view of an old revision does that). Plain reads keep at most
     /// four verified open files and their seek tables, with one decoded frame shared between
     /// them. Evicted files are fully verified again; alternating sources can still re-decode
     /// frames. Memory also includes the supplied extent list and a returned range (up to 1 MiB).
@@ -2205,7 +2155,6 @@ impl Batch<'_> {
         let mut dirs = std::collections::BTreeSet::new();
         let mut out = Vec::with_capacity(self.pending.len());
         for (t, h) in self.pending {
-            drop(t.file);
             if s.locate(&h).is_some() {
                 s.validate_existing(h, None)?;
                 fs::remove_file(&t.path)?;
