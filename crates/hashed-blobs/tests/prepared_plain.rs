@@ -160,11 +160,6 @@ fn corrupt_existing_cas_is_refused_and_preserved_while_stage_is_discarded() {
 fn install_error_after_link_keeps_published_body_for_custody_reconciliation() {
     // The declared checks run as an unprivileged user: write/search allows the
     // hard link, while lack of directory read permission faults its later fsync.
-    assert_ne!(
-        unsafe { libc::geteuid() },
-        0,
-        "requires unprivileged filesystem semantics"
-    );
     let temp = tempfile::tempdir().unwrap();
     let s = store(temp.path());
     let bytes = b"published before directory sync failure";
@@ -174,8 +169,10 @@ fn install_error_after_link_keeps_published_body_for_custody_reconciliation() {
     let dir = path.parent().unwrap();
     fs::create_dir(dir).unwrap();
     fs::set_permissions(dir, fs::Permissions::from_mode(0o300)).unwrap();
+    let directory_read = fs::File::open(dir);
     let result = prepared.install();
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(directory_read.is_err(), "requires directory read denial");
     assert!(matches!(result, Err(Error::Io(_))));
     assert!(s.contains(&hash));
     assert_eq!(s.verify(&hash).unwrap(), Verified::Intact);
