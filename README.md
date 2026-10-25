@@ -36,7 +36,9 @@ store stays small without deleting anything.
 
 `#[devkit::test]` marks a test. A sync test without parameters is a plain
 `#[test]`; an `async fn` test runs on a current-thread tokio runtime,
-optionally with `timeout = "30s"`. Each parameter is a fixture whose type
+optionally with `timeout = "30s"`. `multi_thread` gives it a multi-thread
+runtime, for a body that blocks a thread while spawned tasks must keep running;
+the test crate then needs tokio's `rt-multi-thread` feature. Each parameter is a fixture whose type
 implements `devkit::Fixture` and is created before the body runs:
 
 ```rust

@@ -32,6 +32,9 @@ pub use assembled::Assembled;
 mod plain_reader;
 pub use plain_reader::PlainReader;
 
+mod names;
+pub use names::Names;
+
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
@@ -915,6 +918,12 @@ impl Store {
 
     pub fn contains(&self, h: &Hash) -> bool {
         self.locate(h).is_some()
+    }
+
+    /// The names of the blob files in the write root, streamed (see [`Names`]). A caller that
+    /// keeps its own record of blobs uses this to find files its record does not name.
+    pub fn names(&self) -> Result<Names> {
+        Names::open(&self.write_root.join("blobs"))
     }
 
     /// The bytes a blob's file takes on disk (what a caller records as its stored size).

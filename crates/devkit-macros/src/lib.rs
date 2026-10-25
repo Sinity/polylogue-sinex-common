@@ -3,7 +3,10 @@
 //! A test with no parameters costs nothing beyond a plain `#[test]`. An
 //! `async fn` test runs on a current-thread tokio runtime (the test crate
 //! depends on tokio with the `rt` and `time` features), optionally under
-//! `timeout = "30s"`.
+//! `timeout = "30s"`. `multi_thread` runs it on a multi-thread runtime
+//! instead, for a test whose body blocks a thread while other tasks must go
+//! on (the test crate then needs tokio's `rt-multi-thread` feature):
+//! `#[devkit::test(multi_thread, timeout = "30s")]`.
 //!
 //! Each parameter is a fixture: its type implements `devkit::Fixture`, and
 //! the test creates it with `Fixture::create()` before the body runs, in
@@ -16,22 +19,30 @@ use syn::{FnArg, ItemFn, LitStr, parse_macro_input, punctuated::Punctuated, span
 pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {
     let function = parse_macro_input!(item as ItemFn);
     let mut timeout: Option<LitStr> = None;
+    let mut multi_thread: Option<syn::Path> = None;
     let parser = syn::meta::parser(|meta| {
         if meta.path.is_ident("timeout") {
             timeout = Some(meta.value()?.parse()?);
             Ok(())
+        } else if meta.path.is_ident("multi_thread") {
+            multi_thread = Some(meta.path.clone());
+            Ok(())
         } else {
-            Err(meta.error("expected `timeout = \"30s\"`"))
+            Err(meta.error("expected `timeout = \"30s\"` or `multi_thread`"))
         }
     });
     parse_macro_input!(attr with parser);
-    match expand(function, timeout) {
+    match expand(function, timeout, multi_thread) {
         Ok(tokens) => tokens.into(),
         Err(error) => error.to_compile_error().into(),
     }
 }
 
-fn expand(function: ItemFn, timeout: Option<LitStr>) -> syn::Result<proc_macro2::TokenStream> {
+fn expand(
+    function: ItemFn,
+    timeout: Option<LitStr>,
+    multi_thread: Option<syn::Path>,
+) -> syn::Result<proc_macro2::TokenStream> {
     let millis = timeout.as_ref().map(parse_duration).transpose()?;
     let ItemFn {
         attrs,
@@ -61,6 +72,12 @@ fn expand(function: ItemFn, timeout: Option<LitStr>) -> syn::Result<proc_macro2:
                 "timeout applies to async tests; nextest's slow-timeout covers the rest",
             ));
         }
+        if let Some(path) = &multi_thread {
+            return Err(syn::Error::new(
+                path.span(),
+                "multi_thread applies to async tests; a synchronous test has no runtime",
+            ));
+        }
         if fixtures.is_empty() {
             return Ok(quote! { #[::core::prelude::v1::test] #(#attrs)* #vis #sig #block });
         }
@@ -82,12 +99,16 @@ fn expand(function: ItemFn, timeout: Option<LitStr>) -> syn::Result<proc_macro2:
         },
         None => quote! { async move #block.await },
     };
+    let runtime = match multi_thread {
+        Some(_) => quote! { ::tokio::runtime::Builder::new_multi_thread() },
+        None => quote! { ::tokio::runtime::Builder::new_current_thread() },
+    };
     Ok(quote! {
         #[::core::prelude::v1::test]
         #(#attrs)*
         #vis #sig {
             #(#fixtures)*
-            ::tokio::runtime::Builder::new_current_thread()
+            #runtime
                 .enable_all()
                 .build()
                 .expect("test runtime")
