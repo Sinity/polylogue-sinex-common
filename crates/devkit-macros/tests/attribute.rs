@@ -19,3 +19,24 @@ async fn an_async_test_with_a_timeout_returns_its_result() -> Result<(), String>
 async fn a_slow_async_test_times_out() {
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 }
+
+#[devkit_macros::test(multi_thread)]
+async fn a_multi_thread_test_runs_tasks_while_its_body_blocks() {
+    // A blocked body would starve a current-thread runtime; here a worker
+    // thread runs the spawned task and the channel receives its value.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    tokio::spawn(async move { sender.send(7).unwrap() });
+    let value = receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    assert_eq!(value, 7);
+}
+
+#[devkit_macros::test(multi_thread, timeout = "5s")]
+async fn a_multi_thread_test_takes_a_timeout() {
+    let handle = tokio::runtime::Handle::current();
+    assert_eq!(
+        handle.runtime_flavor(),
+        tokio::runtime::RuntimeFlavor::MultiThread
+    );
+}
