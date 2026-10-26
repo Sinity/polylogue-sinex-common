@@ -515,7 +515,9 @@ struct Pem {
 /// Masks one logical UTF-8 string written in pieces.
 ///
 /// Piece boundaries never end a match. `block_boundary` ends token matches
-/// but keeps an open PEM block. `finish` ends the string. After any error the
+/// but keeps an open PEM block. A PEM header and its end line are each
+/// matched within one block, so the only state crossing a block boundary is
+/// whether a PEM block is open and which line ends it. `finish` ends the string. After any error the
 /// stream is closed and later calls return `BrokenPipe` without writing.
 ///
 /// Cloning copies private stream state, including pending source characters and
@@ -610,6 +612,9 @@ impl Masker {
         self.commit_candidates();
         self.candidates.clear();
         self.headers.clear();
+        if let Some(pem) = &mut self.pem {
+            pem.tail.clear();
+        }
         self.previous = None;
         self.drain(usize::MAX, sink)?;
         if self.pem.is_none() {

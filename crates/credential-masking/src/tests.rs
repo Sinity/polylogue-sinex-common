@@ -198,8 +198,16 @@ fn block_boundary_ends_token_matches_but_not_pem_blocks() {
     )
     .unwrap();
     m.block_boundary(&mut out).unwrap();
-    m.push("OR ENCRYPTED PRIVATE KEY----- visible", &mut out)
+    // An end line cut by a block boundary does not end the block; a whole
+    // one in a later block does.
+    m.push("OR ENCRYPTED PRIVATE KEY----- hidden", &mut out)
         .unwrap();
+    m.block_boundary(&mut out).unwrap();
+    m.push(
+        "-----END VENDOR ENCRYPTED PRIVATE KEY----- visible",
+        &mut out,
+    )
+    .unwrap();
     m.finish(&mut out).unwrap();
     assert_eq!(
         normalized(std::str::from_utf8(&out).unwrap()),
@@ -512,24 +520,16 @@ fn sink_errors_are_returned_unchanged_and_close_the_stream() {
 
 #[test]
 fn cloned_stream_preserves_pending_matches_and_pem_tail() {
-    for (prefix, suffix, boundary) in [
-        (
-            "ghp_AAAAA",
-            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA visible",
-            false,
-        ),
+    for (prefix, suffix) in [
+        ("ghp_AAAAA", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA visible"),
         (
             "-----BEGIN VENDOR PRIVATE KEY-----body-----END VEND",
             "OR PRIVATE KEY----- visible",
-            true,
         ),
     ] {
         let mut original = Masker::new();
         let mut prefix_output = Vec::new();
         original.push(prefix, &mut prefix_output).unwrap();
-        if boundary {
-            original.block_boundary(&mut prefix_output).unwrap();
-        }
         let mut cloned = original.clone();
         let mut expected = Vec::new();
         original.push(suffix, &mut expected).unwrap();
