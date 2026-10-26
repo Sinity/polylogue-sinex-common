@@ -649,6 +649,42 @@ fn batch_success_establishes_durability_and_dedup() {
 }
 
 #[test]
+fn prepared_blobs_install_through_a_batch() {
+    let (_d, s) = store_in(durable_tempdir());
+    let items: Vec<Vec<u8>> = (0..6).map(|i| data(60 + i % 3, 3 * FRAME / 2)).collect(); // three distinct, each twice
+    let mut b = s.batch(Durability::PerFile);
+    let mut hs = Vec::new();
+    for (i, x) in items.iter().enumerate() {
+        let prepared = s.prepare_plain(&x[..], 1).unwrap();
+        if i % 2 == 0 {
+            prepared.sync().unwrap();
+        }
+        hs.push(b.add(prepared).unwrap());
+    }
+    assert!(
+        hs.iter().all(|h| !s.contains(h)),
+        "nothing is visible before commit"
+    );
+    assert_eq!(b.commit().unwrap(), hs);
+    for (x, h) in items.iter().zip(&hs) {
+        assert_eq!(read_all(s.read(h).unwrap()), *x);
+    }
+    assert!(
+        fs::read_dir(s.write_root.join("blobs/tmp"))
+            .unwrap()
+            .next()
+            .is_none(),
+        "installed and duplicate temporary files are gone"
+    );
+    let (_other_dir, other) = store();
+    let foreign = other.prepare_plain(&items[0][..], 1).unwrap();
+    assert!(matches!(
+        s.batch(Durability::PerFile).add(foreign),
+        Err(Error::Refused(_))
+    ));
+}
+
+#[test]
 fn put_delta_within_writes_only_under_the_bound() {
     let (_d, s) = store();
     let base = data(11, 3 * FRAME);

@@ -194,6 +194,13 @@ impl PreparedPlain {
         self.decoded_len
     }
 
+    /// Syncs the temporary file's bytes. Installing syncs them anyway; a
+    /// caller that prepares blobs on several threads syncs there, so the
+    /// thread that installs them is left with only directories to sync.
+    pub fn sync(&self) -> Result<()> {
+        self.tmp.file.sync_all().map_err(Error::Io)
+    }
+
     /// Install under its name, durably. An existing blob of the same name is
     /// verified as for `Store::put`. An error after the name was linked leaves
     /// the installed blob in place.
@@ -2139,6 +2146,20 @@ impl Batch<'_> {
         let (tmp, h) = self.store.write_plain(bytes, level)?;
         self.pending.push((tmp, h));
         Ok(h)
+    }
+
+    /// Adds a blob prepared with [`Store::prepare_plain`] on this batch's
+    /// store; `commit` installs it as it does a `put`.
+    pub fn add(&mut self, prepared: PreparedPlain) -> Result<Hash> {
+        if prepared.store.write_root != self.store.write_root {
+            return Err(Error::Refused(format!(
+                "blob {} was prepared for another store",
+                prepared.hash
+            )));
+        }
+        let hash = prepared.hash;
+        self.pending.push((prepared.tmp, hash));
+        Ok(hash)
     }
 
     pub fn len(&self) -> usize {
