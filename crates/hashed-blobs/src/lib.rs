@@ -1078,6 +1078,32 @@ impl Store {
         self.prepare_plain(bytes, level)?.install()
     }
 
+    /// Store a seekable input from its current position to EOF.
+    /// Hashes the input first, then verifies an existing blob or rewinds and compresses it.
+    /// Only compressed bytes reach a temporary file. Cannot be cancelled.
+    pub fn put_seekable(&self, mut bytes: impl Read + Seek, level: i32) -> Result<Hash> {
+        let start = bytes.stream_position()?;
+        let mut name = blake3::Hasher::new();
+        let mut block = [0; 64 << 10];
+        loop {
+            let n = match bytes.read(&mut block) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                result => result?,
+            };
+            if n == 0 {
+                break;
+            }
+            name.update(&block[..n]);
+        }
+        let hash = Hash(*name.finalize().as_bytes());
+        if self.contains(&hash) {
+            self.validate_existing(hash, None)?;
+            return Ok(hash);
+        }
+        bytes.seek(SeekFrom::Start(start))?;
+        self.prepare_plain(bytes, level)?.install()
+    }
+
     /// Like `put`, but calls `check` between input reads, around each frame compression and
     /// while verifying an existing copy, so the caller can cancel or enforce a deadline. A
     /// blocking read or one compression call is not interrupted. An existing delta or sealed
