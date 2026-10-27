@@ -94,7 +94,7 @@ fn fake_report(
                 if [ "$argument" = -- ]; then [ "$no_tests" = yes ] || exit 8; break; fi
             done
             mkdir -p "$CARGO_TARGET_DIR/nextest/default"
-            printf '%s' '<testsuites><testsuite name="coverage"><testcase name="chosen" classname="selected" time="0"/></testsuite></testsuites>' > "$CARGO_TARGET_DIR/nextest/default/devkit-junit.xml"
+            printf '%s' '<testsuites tests="1"><testsuite name="coverage"><testcase name="chosen" classname="selected" time="0"/></testsuite></testsuites>' > "$CARGO_TARGET_DIR/nextest/default/devkit-junit.xml"
             exit 0
         fi
         {script}"#
