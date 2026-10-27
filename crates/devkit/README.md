@@ -49,19 +49,19 @@ A project can implement `Fixture` for its own types, such as a context that
 wraps a database and a connection.
 
 With the `pg` feature, devkit provides PostgreSQL for projects with
-compile-time-checked SQL. The server is the per-user service on the socket in
-`$XDG_RUNTIME_DIR/devkit/pg` (Sinnix's `devkit-pg`), or a throwaway cluster on
-tmpfs when it is not running. Each schema version, named by a hash of the
+compile-time-checked SQL. A project's xtask chooses the per-user service on
+the socket in `$XDG_RUNTIME_DIR/devkit/pg` (Sinnix's `devkit-pg`) or an owned
+throwaway cluster on tmpfs. Each schema version, named by a hash of the
 schema sources, is built once into a template database and copied to the
 read-only database `DATABASE_URL` points at; every test clones the template
 (`TestDatabase`), using PostgreSQL's `FILE_COPY` strategy. The clone benchmark
-compares it with `WAL_LOG` and a background pool before changing this choice. At the start of each
-`Run::nextest` invocation, devkit reaps abandoned databases on the supplied
-server (or the running per-user service). This also runs when no schema is
-built. Failed-test databases follow the existing newest-five policy.
+compares it with `WAL_LOG` and a background pool. Failed-test databases
+follow the newest-five policy.
 `xtask db ensure|url|psql|exec|drop-unused|ready` drives it.
 A half-built template's name carries its builder's PID, and cleanup drops it
 only after that process has exited.
+
+Database cleanup in `Run::nextest` requires `DEVKIT_PG_SOCKET` in that run's explicit environment. A project's xtask chooses the shared service or an owned server and supplies its socket when cleanup is wanted; the library never discovers the live service during a test run. Schema builds and cleanup use the same file lock in the server's socket directory; cleanup skips a busy version. Databases stamped used or failed within the last hour stay regardless of cleanup policy. Missing or unreadable schema stamps count as current use, and cleanup rechecks both timestamps and connections before each drop.
 
 With the `nats` feature, devkit starts a throwaway `nats-server` with
 JetStream on a free loopback port. A project's xtask starts one per test run
@@ -100,8 +100,6 @@ and labels itself uncalibrated.
 `devkit::process` owns development-stack service groups, forwards SIGINT and SIGTERM to them and stops descendants when dropped. It observes child exits without reaping the leader until the final group signal, so an exited leader's id cannot be reused during cleanup. Ordinary `Run` commands stay in the caller's group and receive terminal signals directly. Source-content hashing detects additions, removals and edits while excluding build output. A project supplies service setup, executable arguments and a real readiness probe. AgentCTL's job unit also owns every process on cancellation, including descendants of interrupted build tools.
 
 `devkit::process::development_lock` holds one development stack per checkout. Keep the returned file open until its services stop; the persistent file under the checkout’s ignored `target` directory must stay in place so concurrent processes lock the same inode. The kernel releases ownership when the process exits. `source_hash_excluding` and PostgreSQL schema hashes share the file hashing code; source watches skip symbolic links and select Rust, TOML, JSON and Cargo.lock while schemas follow links in the supplied paths.
-
-Database cleanup in `Run::nextest` requires `DEVKIT_PG_SOCKET` in that run's explicit environment. A project's xtask chooses the shared service or an owned server and supplies its socket when cleanup is wanted; the library never discovers the live service during a test run. Schema builds and cleanup use the same file lock in the server's socket directory; cleanup skips a busy version. Databases stamped used or failed within the last hour stay regardless of cleanup policy. Missing or unreadable schema stamps count as current use, and cleanup rechecks both timestamps and connections before each drop.
 
 ## PostgreSQL clone benchmark
 
