@@ -1,4 +1,16 @@
 use super::*;
+
+#[test]
+fn one_development_stack_owns_each_checkout_until_exit() {
+    let checkout = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let first = development_lock(checkout.path()).unwrap();
+    assert!(development_lock(checkout.path()).is_err());
+    let independent = development_lock(other.path()).unwrap();
+    drop(first);
+    assert!(development_lock(checkout.path()).is_ok());
+    drop(independent);
+}
 #[test]
 fn source_changes_include_new_removed_and_same_length_edits() {
     let dir = tempfile::tempdir().unwrap();

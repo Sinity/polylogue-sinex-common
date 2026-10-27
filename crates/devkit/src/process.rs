@@ -66,6 +66,23 @@ impl Drop for Process {
     }
 }
 
+/// Keep the file in place so every process locks the same inode.
+pub fn development_lock(root: &Path) -> Result<fs::File, String> {
+    let directory = root.join("target");
+    fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+    let path = directory.join("devkit-development.lock");
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|e| format!("development lock {}: {e}", path.display()))?;
+    file.try_lock()
+        .map_err(|e| format!("development stack already running or lock unavailable: {e}"))?;
+    Ok(file)
+}
+
 /// Hash source contents, including additions and removals, without build outputs.
 pub fn source_hash(root: &Path) -> Result<blake3::Hash, String> {
     source_hash_excluding(root, &[])
