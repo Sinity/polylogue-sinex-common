@@ -64,3 +64,18 @@ fn generic_assignments_require_entropy_and_deduplicate_named_patterns() {
     assert_eq!(findings[0].pattern, "Generic credential assignment");
     assert_eq!(findings[1].pattern, "Anthropic key");
 }
+
+#[test]
+fn assignment_labels_follow_word_boundaries_and_restart_after_incomplete_labels() {
+    let value = "Ab3dEf7hIj9kLm2nOp4qRs6t";
+    for (label, count) in [
+        ("épassword", 0),
+        ("-password", 1),
+        ("token token", 1),
+        ("api-key", 1),
+    ] {
+        let mut scan = Scanner::new();
+        scan.push(&format!("{label}={value}")).unwrap();
+        assert_eq!(scan.finish().unwrap().len(), count, "{label}");
+    }
+}

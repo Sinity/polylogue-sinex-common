@@ -4,6 +4,7 @@ use sha2::Digest;
 
 pub(super) struct Assignment {
     label: String,
+    previous_word: bool,
     stage: u8,
     start: usize,
     end: usize,
@@ -29,12 +30,24 @@ const ALPHABET: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123
 
 impl Assignment {
     pub fn step(&mut self, c: char, pos: usize) {
+        self.character(c, pos);
+        self.previous_word = crate::word_ranges::is_word_char(c);
+    }
+
+    fn character(&mut self, c: char, pos: usize) {
         match self.stage {
             0 => {
-                if c.is_ascii_alphanumeric() || "_-".contains(c) {
+                if self.label.is_empty() && self.previous_word {
+                    return;
+                }
+                if crate::word_ranges::is_word_char(c) || c == '-' {
                     self.label.push(c.to_ascii_lowercase());
                     if !LABELS.iter().any(|label| label.starts_with(&self.label)) {
-                        self.stage = 4;
+                        self.stage = if crate::word_ranges::is_word_char(c) {
+                            4
+                        } else {
+                            0
+                        };
                         self.label.clear();
                     }
                 } else if LABELS.contains(&self.label.as_str())
@@ -51,6 +64,7 @@ impl Assignment {
                     self.stage = 2;
                 } else if !c.is_whitespace() {
                     self.reset();
+                    self.character(c, pos);
                 }
             }
             2 => {
@@ -65,7 +79,7 @@ impl Assignment {
             }
             3 => self.value(c, pos),
             _ => {
-                if !(c.is_alphanumeric() || "_-".contains(c)) {
+                if !crate::word_ranges::is_word_char(c) {
                     self.reset();
                 }
             }
@@ -88,6 +102,7 @@ impl Assignment {
     }
 
     pub fn boundary(&mut self) {
+        self.previous_word = false;
         if self.length >= 20 {
             let entropy: f64 = self
                 .counts
@@ -123,6 +138,7 @@ impl Default for Assignment {
     fn default() -> Self {
         Self {
             label: String::new(),
+            previous_word: false,
             stage: 0,
             start: 0,
             end: 0,
