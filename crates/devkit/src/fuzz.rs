@@ -139,6 +139,14 @@ fn execute_with(
         seed_corpus(&run.root.join("fuzz/seeds").join(target), &corpus)?;
     }
     let mut command = cargo();
+    if let Some(extra) = std::env::var_os("DEVKIT_FUZZ_RUSTFLAGS") {
+        let mut flags = std::env::var_os("RUSTFLAGS").unwrap_or_default();
+        if !flags.is_empty() {
+            flags.push(" ");
+        }
+        flags.push(extra);
+        command.env("RUSTFLAGS", flags);
+    }
     // Nix's pinned compiler exposes sanitizer flags through this experiment-only setting.
     command
         .env("RUSTC_BOOTSTRAP", "1")
