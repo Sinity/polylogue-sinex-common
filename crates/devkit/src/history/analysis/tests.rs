@@ -46,7 +46,7 @@ fn comparisons_preserve_scope_and_unknowns() {
     s.conn
         .execute("UPDATE runs SET duration_ms=NULL WHERE id=2", [])
         .unwrap();
-    assert!(s.compare("demo", 1, 2).unwrap()["duration_change"].is_null());
+    assert!(s.compare("demo", 1, 2).unwrap()["duration_change"]["delta_ms"].is_null());
 }
 #[test]
 fn pass_rates_stages_and_overlap_do_not_sum_parallel_test_time() {
@@ -81,12 +81,15 @@ fn daily_comparisons_keep_exact_scope_and_validate_dates() {
     s.conn
         .execute(r#"UPDATE runs SET args='["-p","one"]' WHERE id=2"#, [])
         .unwrap();
+    let different = s
+        .compare_days("demo", "/repo", "1970-01-01", "1970-01-02")
+        .unwrap();
     assert!(
-        s.compare_days("demo", "/repo", "1970-01-01", "1970-01-02")
-            .unwrap()["changes"]
+        different["changes"]
             .as_array()
             .unwrap()
-            .is_empty()
+            .iter()
+            .all(|group| group["change"]["delta_ms"].is_null())
     );
 }
 
@@ -103,4 +106,91 @@ fn interrupted_runs_keep_unknown_duration_and_are_not_duration_baselines() {
     assert_eq!(report["header"]["status"], "interrupted");
     assert!(report["header"]["duration_ms"].is_null());
     assert!(s.compare("demo", 1, 2).is_err());
+}
+
+#[test]
+fn reports_show_source_identity_and_refuse_changed_input() {
+    let store = store();
+    store
+        .conn
+        .execute(
+            "UPDATE runs SET head='revision',git_tree='tree',dirty='changes' WHERE id=1",
+            [],
+        )
+        .unwrap();
+    let report = store.explain("demo", 1).unwrap();
+    assert_eq!(report["header"]["head"], "revision");
+    assert_eq!(report["header"]["checkout"], "/repo");
+    assert_eq!(report["header"]["git_tree"], "tree");
+    assert_eq!(report["header"]["dirty"], true);
+    assert_eq!(report["header"]["dirty_hash"], "changes");
+    store
+        .conn
+        .execute(
+            "UPDATE runs SET observation_error='source changed during run' WHERE id=1",
+            [],
+        )
+        .unwrap();
+    assert!(store.compare("demo", 1, 2).unwrap_err().contains("source"));
+}
+
+#[test]
+fn added_stages_and_daily_setup_costs_stay_visible() {
+    let store = store();
+    store.conn.execute_batch("INSERT INTO stages VALUES(1,0,'database',10,1),(2,0,'database',30,1),(2,1,'cleanup',5,1);UPDATE runs SET started_ms=86400000 WHERE id=2;").unwrap();
+    let compared = store.compare("demo", 1, 2).unwrap();
+    let added = compared["stage_changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|stage| stage["name"] == "cleanup")
+        .unwrap();
+    assert!(added["change"]["before_ms"].is_null());
+    assert_eq!(added["change"]["after_ms"], 5.0);
+    assert!(added["change"]["trend"].is_null());
+    let daily = store
+        .compare_days("demo", "/repo", "1970-01-01", "1970-01-02")
+        .unwrap();
+    let setup = daily["stage_changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|stage| stage["name"] == "database")
+        .unwrap();
+    assert_eq!(setup["change"]["delta_ms"], 20.0);
+    let added = daily["stage_changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|stage| stage["name"] == "cleanup")
+        .unwrap();
+    assert_eq!(added["change"]["after_ms"], 5.0);
+    assert!(added["change"]["delta_ms"].is_null());
+}
+
+#[test]
+fn zero_and_missing_duration_metrics_stay_unknown() {
+    let change = duration_delta(&json!(0), &json!(10));
+    assert!(change["percent"].is_null());
+    assert_eq!(change["delta_ms"], 10.0);
+    let change = duration_delta(&Value::Null, &json!(10));
+    assert_eq!(change["after_ms"], 10.0);
+    assert!(change["delta_ms"].is_null());
+    assert!(change["trend"].is_null());
+}
+
+#[test]
+fn daily_missing_measurements_are_not_zero_durations() {
+    let store = store();
+    store.conn.execute_batch("UPDATE runs SET duration_ms=NULL WHERE id=1;UPDATE runs SET observation_error='changed' WHERE id=2;").unwrap();
+    let report = store
+        .compare_days("demo", "/repo", "1970-01-01", "1970-01-02")
+        .unwrap();
+    assert_eq!(report["groups"][0]["duration_samples"], 0);
+    assert!(report["groups"][0]["mean_passed_ms"].is_null());
+    let report = store
+        .compare_days("other", "/repo", "1970-01-01", "1970-01-02")
+        .unwrap();
+    assert!(report["groups"].as_array().unwrap().is_empty());
+    assert!(report["stage_groups"].as_array().unwrap().is_empty());
 }

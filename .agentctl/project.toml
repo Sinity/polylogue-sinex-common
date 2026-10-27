@@ -25,6 +25,15 @@ scratch = "tmpfs"
 cache = "none"
 cap = "cargo"
 
+[operations.fmt]
+description = "Format the workspace"
+exec = ["cargo", "fmt", "--all"]
+pool = "interactive"
+result = "exit"
+timeout_seconds = 300
+scratch = "nvme"
+cache = "none"
+
 [operations.exec]
 description = "Run an explicit focused command in the shared development shell"
 exec = ["env"]

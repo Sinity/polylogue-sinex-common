@@ -35,11 +35,25 @@ pub enum Command {
 #[derive(Debug, clap::Subcommand)]
 pub enum History {
     /// Compare two passed runs with identical command scope, host and toolchain.
-    Compare { before: i64, after: i64 },
+    Compare {
+        before: i64,
+        after: i64,
+        #[arg(long)]
+        json: bool,
+    },
     /// Stages, slow tests and overlapping recorded runs. Unknown resources stay unknown.
-    Explain { run: i64 },
+    Explain {
+        run: i64,
+        #[arg(long)]
+        json: bool,
+    },
     /// UTC daily totals, grouped by exact command scope, host and toolchain.
-    CompareDays { before: String, after: String },
+    CompareDays {
+        before: String,
+        after: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Recent runs of this checkout, newest first.
     Runs {
         #[arg(long, default_value_t = 20)]
@@ -205,16 +219,22 @@ pub fn execute(project: &str, command: Command) -> ExitCode {
             })
         }
         Command::Status { json } => with_store(|store| status(store, project, &root, json)),
-        Command::History(History::Compare { before, after }) => {
-            with_store(|store| query_output(store.compare(project, before, after)?, true))
+        Command::History(History::Compare {
+            before,
+            after,
+            json,
+        }) => with_store(|store| query_output(store.compare(project, before, after)?, json)),
+        Command::History(History::Explain { run, json }) => {
+            with_store(|store| query_output(store.explain(project, run)?, json))
         }
-        Command::History(History::Explain { run }) => {
-            with_store(|store| query_output(store.explain(project, run)?, true))
-        }
-        Command::History(History::CompareDays { before, after }) => with_store(|store| {
+        Command::History(History::CompareDays {
+            before,
+            after,
+            json,
+        }) => with_store(|store| {
             query_output(
                 store.compare_days(project, &root.display().to_string(), &before, &after)?,
-                true,
+                json,
             )
         }),
         Command::History(History::Intermittent { scope, json }) => with_store(|store| {
