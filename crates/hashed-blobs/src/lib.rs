@@ -1074,8 +1074,28 @@ impl Store {
 
     /// Store bytes as a plain seekable blob named by their BLAKE3; durable when it returns.
     /// Cannot be cancelled; use `put_plain_checked` for that.
-    pub fn put(&self, bytes: impl Read, level: i32) -> Result<Hash> {
-        self.prepare_plain(bytes, level)?.install()
+    pub fn put(&self, mut bytes: impl Read, level: i32) -> Result<Hash> {
+        // A streaming input cannot be rewound. Keep one temporary copy while
+        // hashing, so repeats never enter the compressor.
+        let mut input = self.tmp()?;
+        let mut block = [0; 64 << 10];
+        loop {
+            let n = match bytes.read(&mut block) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                result => result?,
+            };
+            if n == 0 {
+                break;
+            }
+            input.write(&block[..n])?;
+        }
+        let hash = Hash(*input.hasher.finalize().as_bytes());
+        if self.contains(&hash) {
+            self.validate_existing(hash, None)?;
+            return Ok(hash);
+        }
+        self.prepare_plain(File::open(&input.path)?, level)?
+            .install()
     }
 
     /// Like `put`, but calls `check` between input reads, around each frame compression and
