@@ -83,9 +83,16 @@ impl Server {
         } else {
             env::temp_dir()
         };
+        Self::start_in(options, &base)
+    }
+
+    /// Starts a throwaway cluster on the chosen filesystem. The directory
+    /// must exist and its path must fit PostgreSQL's Unix socket limit.
+    /// The cluster is stopped and removed when the server is dropped.
+    pub fn start_in(options: &ClusterOptions, base: &Path) -> Result<Self> {
         // Clusters left by killed runs whose watchdog died too.
         crate::owner::sweep(
-            &base,
+            base,
             "devkit-pg",
             r#"pg_ctl -D "$1/data" -m immediate -w stop; rm -rf "$1""#,
         );
@@ -288,11 +295,6 @@ impl Server {
                 &format!("COMMENT ON DATABASE {name} IS 'devkit used {now}'"),
             )?;
         }
-        // Every run starts here, so leftovers from earlier runs are cleared
-        // here too. A failure to clean up must not fail the run.
-        if let Err(error) = self.reap(&Reap::default()) {
-            eprintln!("devkit: could not drop unused databases: {error}");
-        }
         Ok(databases)
     }
 
@@ -319,7 +321,7 @@ impl Server {
     /// Drops databases nothing will use again, never one with a connection:
     /// - test databases whose test process has exited, except failed ones,
     ///   of which the newest [`Reap::failed`] are kept for inspection;
-    /// - test databases from runs more than a day old;
+    /// - unfinished test databases from runs more than a day old;
     /// - half-built templates whose owning process exited;
     /// - schema versions beyond the newest [`Reap::schemas`] per project, or
     ///   unused for [`Reap::days`].
@@ -411,6 +413,34 @@ impl Server {
             }
         }
         Ok(dropped)
+    }
+
+    /// Clears abandoned test databases before a run, including runs that reuse
+    /// an existing schema. Cleanup failure is reported without failing tests.
+    pub fn prepare_test_run(&self) {
+        if let Err(error) = self.reap(&Reap::default()) {
+            eprintln!("devkit: could not drop unused databases: {error}");
+        }
+    }
+
+    /// Reaps on the server supplied to a test run, or on the running service
+    /// when the run does not need a database fixture. Never starts a server.
+    pub(crate) fn prepare_run(env: &[(String, String)]) {
+        let socket = env
+            .iter()
+            .rev()
+            .find(|(name, _)| name == "DEVKIT_PG_SOCKET")
+            .map(|(_, value)| PathBuf::from(value))
+            .or_else(|| std::env::var_os("DEVKIT_PG_SOCKET").map(PathBuf::from));
+        if let Some(socket) = socket {
+            Self {
+                socket,
+                owned: None,
+            }
+            .prepare_test_run();
+        } else if let Some(server) = Self::service() {
+            server.prepare_test_run();
+        }
     }
 
     /// `PGHOST` and `PGPORT` for the PostgreSQL command-line tools.
@@ -520,10 +550,13 @@ impl SchemaDatabases {
     pub fn new(project: &str, hash: &str) -> Result<Self> {
         check_name(project)?;
         let short: String = hash.chars().take(16).collect();
-        Ok(Self {
+        let databases = Self {
             schema: format!("{project}_schema_{short}"),
             template: format!("{project}_template_{short}"),
-        })
+        };
+        check_name(&databases.schema)?;
+        check_name(&databases.template)?;
+        Ok(databases)
     }
 }
 

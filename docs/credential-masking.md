@@ -15,3 +15,21 @@ Left word boundaries use a Unicode 16.0.0 table of Python `str.isalnum` plus und
 A sink error is returned unchanged and closes the stream; later calls return `BrokenPipe` without writing. `finish` also closes the stream. The masker never calls `flush`.
 
 The tests run all 138 catalog cases at every byte split and at chunk widths 1 to 8, plus overlap, block boundary, Unicode boundary, long-credential and sink-error cases, and randomized checks that output does not depend on chunking and that embedded credentials never appear in it. The catalog and its provenance are in `crates/credential-masking/tests/fixtures/credential-output`.
+
+## Finding spans
+
+`Scanner` reads UTF-8 pieces with `push`, ends each authored string with
+`block_boundary`, and ends the stream with `finish`. Each boundary returns
+findings with a pattern name, byte start and end, and a SHA-256 fingerprint.
+It returns no matched text. Offsets count source bytes across all pushes;
+a boundary ends token matches but keeps an open private key. Private keys
+spanning several blocks produce one finding per block.
+
+The scanner observes the masker's regions, including its conservative masks
+for an undecided long match. Overlapping regions produce one finding. It also
+finds generic credential assignments with at least 20 ASCII value characters
+and Shannon entropy of at least 3 bits per character. This additional scan
+rule does not change normal output masking. It has no value length cutoff;
+only a hash and character counts accumulate. `SCANNER_VERSION` identifies the
+rules for clients tracking coverage. A finding is a suspected credential,
+not confirmation or permission to remove anything.

@@ -14,7 +14,7 @@ Rust crates and development tooling shared by
 Projects depend on a tag:
 
 ```toml
-hashed-blobs = { git = "https://github.com/Sinity/polylogue-sinex-common", tag = "v0.6.0" }
+hashed-blobs = { git = "https://github.com/Sinity/polylogue-sinex-common", tag = "v0.7.3" }
 ```
 
 ## devkit
@@ -28,6 +28,20 @@ store at `$XDG_STATE_HOME/devkit/history.db`:
 - `xtask history runs | failures [RUN] | diagnostics [RUN] [--level error]`, each with `--json`;
 - `xtask history intermittent | first-failing | durations | diagnostic-groups`: queries across runs and worktrees ([details](docs/history.md));
 - `xtask changed`: the nextest filterset for packages changed since the merge base.
+
+`Run::nextest` accepts `--changed` in its arguments (for example,
+`cargo xtask test --changed`). It compares against the merge base with
+`origin/master`; `--changed-base=<ref>` chooses another base. The diff includes
+committed, staged, unstaged and untracked files. Production changes select the
+owning packages and their reverse dependencies through nextest's `rdeps`.
+Changes confined to test functions select those tests within their package.
+Every changed line must be inside a test in both versions, and its name must
+have no other uses in the package's Rust sources. Calls between tests and
+partial overlaps keep package scope. A change to a Cargo-declared integration test file selects
+that package's test binary. Shared helpers and other package files select the package and reverse
+dependencies; files outside packages select the workspace, except Markdown.
+Explicit `-E` filtersets intersect this selection. An unchanged tree succeeds
+without building tests. This repository's `focused` operation uses the same path.
 
 Passing tests keep no output and each diagnostic text is stored once, so the
 store stays small without deleting anything.
@@ -59,7 +73,12 @@ compile-time-checked SQL. The server is the per-user service on the socket in
 tmpfs when it is not running. Each schema version, named by a hash of the
 schema sources, is built once into a template database and copied to the
 read-only database `DATABASE_URL` points at; every test clones the template
-(`TestDatabase`). `xtask db ensure|url|psql|exec|drop-unused|ready` drives it.
+(`TestDatabase`), using PostgreSQL's `FILE_COPY` strategy. The clone benchmark
+compares it with `WAL_LOG` and a background pool before changing this choice. At the start of each
+`Run::nextest` invocation, devkit reaps abandoned databases on the supplied
+server (or the running per-user service). This also runs when no schema is
+built. Failed-test databases follow the existing newest-five policy.
+`xtask db ensure|url|psql|exec|drop-unused|ready` drives it.
 A half-built template's name carries its builder's PID, and cleanup drops it
 only after that process has exited.
 
@@ -100,3 +119,22 @@ agentctl job start --project /path/to/checkout compile -- -p devkit --all-featur
 ```
 
 An explicit `CARGO_TARGET_DIR` in the caller's environment is passed to the job.
+
+The PostgreSQL clone benchmark is an ignored devkit test. It creates a synthetic
+template in its own throwaway cluster, checks clone contents and isolation, and
+times batches of 50 clones for `FILE_COPY`, `WAL_LOG`, and a four-entry pool
+replenished in the background using `WAL_LOG`. Each batch is dropped after its
+clone timing ends. Pool timing includes creating the initial databases and
+background replenishment. Drop times are reported separately. By default one
+round runs on a cluster containing only the template. `DEVKIT_BENCH_ROUNDS`
+sets the repetition count; setting `DEVKIT_BENCH_WRITES` adds a half-gigabyte
+working set and runs both idle and background-writer cases. The default
+12,662,463-byte target matches the largest measured Sinex schema template;
+`DEVKIT_BENCH_TEMPLATE_BYTES` can set another size. `DEVKIT_BENCH_DIRECTORY`
+chooses the storage directory; without it, the cluster uses tmpfs. Use a short
+path on the same filesystem as the development service for representative
+results. Run it through AgentCTL:
+
+```sh
+agentctl job start --project /path/to/checkout exec -- cargo test -p devkit --features pg benchmark_database_clones -- --ignored --nocapture
+```
