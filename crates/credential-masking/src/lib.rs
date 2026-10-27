@@ -10,6 +10,9 @@
 use std::collections::VecDeque;
 use std::io::{self, Write};
 
+mod scan;
+pub use scan::{Finding, Scanner, SCANNER_VERSION};
+
 mod word_ranges;
 use word_ranges::is_word_char;
 
@@ -540,6 +543,7 @@ pub struct Masker {
     /// The region whose marker was written last; overlapping regions extend it.
     last_marker: Option<Region>,
     closed: bool,
+    findings: Option<scan::Observed>,
 }
 
 impl Default for Masker {
@@ -561,6 +565,7 @@ impl Masker {
             previous: None,
             last_marker: None,
             closed: false,
+            findings: None,
         }
     }
 
@@ -903,6 +908,9 @@ impl Masker {
             .pending
             .pop_front_if(|c| c.region.is_some() || c.pos < safe)
         {
+            if let Some(findings) = &mut self.findings {
+                findings.cell(&cell);
+            }
             let Some(r) = cell.region else {
                 sink.write_all(cell.c.encode_utf8(&mut [0; 4]).as_bytes())?;
                 continue;
