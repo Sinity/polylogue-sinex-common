@@ -586,7 +586,7 @@ fn describe(command: &Command) -> String {
 }
 
 fn status(command: &mut Command) -> Result {
-    let status = command.status().map_err(|e| format!("{command:?}: {e}"))?;
+    let status = crate::process::Process::start(command)?.wait()?;
     if status.success() {
         Ok(())
     } else {
