@@ -1494,3 +1494,43 @@ fn deleting_missing_does_not_escape_a_removed_write_root_or_hide_its_error() {
         .iter()
         .all(|directory| directory.starts_with(&store.write_root)));
 }
+
+#[test]
+fn repeated_stream_is_checked_without_starting_another_compression() {
+    let (_dir, store) = store();
+    let bytes = data(91, 1 << 20);
+    let hash = store.put(bytes.as_slice(), 3).unwrap();
+    // Removing the temporary input at EOF makes another compression impossible:
+    // a repeat only needs the hash and the existing checked representation.
+    struct RemoveInput<'a> {
+        input: &'a [u8],
+        directory: PathBuf,
+    }
+    impl Read for RemoveInput<'_> {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            let n = self.input.read(out)?;
+            if n == 0 {
+                for entry in fs::read_dir(&self.directory)? {
+                    fs::remove_file(entry?.path())?;
+                }
+            }
+            Ok(n)
+        }
+    }
+    assert_eq!(
+        store
+            .put(
+                RemoveInput {
+                    input: &bytes,
+                    directory: store.write_root.join("blobs/tmp")
+                },
+                3
+            )
+            .unwrap(),
+        hash
+    );
+    let path = Store::path_in(&store.write_root, &hash);
+    fs::write(&path, b"damaged").unwrap();
+    assert!(store.put(bytes.as_slice(), 3).is_err());
+    assert_eq!(fs::read(path).unwrap(), b"damaged");
+}
