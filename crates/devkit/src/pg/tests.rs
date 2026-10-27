@@ -337,8 +337,13 @@ fn every_test_run_reaps_without_building_a_schema() {
 #[test]
 #[ignore = "clone timing benchmark; run explicitly with --ignored --nocapture"]
 fn benchmark_database_clones() {
-    use std::time::{Duration, Instant};
-    let server = Server::start(&ClusterOptions::default()).unwrap();
+    use std::time::Instant;
+    let directory = env::var_os("DEVKIT_BENCH_DIRECTORY").map(PathBuf::from);
+    let server = if let Some(directory) = &directory {
+        Server::start_in(&ClusterOptions::default(), directory).unwrap()
+    } else {
+        Server::start(&ClusterOptions::default()).unwrap()
+    };
     let target: u64 = env::var("DEVKIT_BENCH_TEMPLATE_BYTES")
         .unwrap_or_else(|_| "12662463".into())
         .parse()
@@ -379,52 +384,118 @@ fn benchmark_database_clones() {
             .unwrap()
             .trim()
     );
-    for round in 0..3 {
-        let strategies = if round % 2 == 0 {
-            ["FILE_COPY", "WAL_LOG"]
+    // A cluster-wide checkpoint also writes buffers from unrelated databases.
+    // Match the observed shared cluster's roughly half-gigabyte working set.
+    server
+        .sql("postgres", "CREATE DATABASE clone_bench_writes")
+        .unwrap();
+    server.sql("clone_bench_writes", "CREATE TABLE sample (id integer PRIMARY KEY, body text); ALTER TABLE sample ALTER COLUMN body SET STORAGE EXTERNAL; INSERT INTO sample SELECT i, repeat(md5(i::text), 32) FROM generate_series(0, 500000) i").unwrap();
+    server.sql("postgres", "CHECKPOINT").unwrap();
+    for workload in ["idle", "writes"] {
+        let writer = if workload == "writes" {
+            Some(Writer(Command::new("psql").args(["-X", "-q", "-v", "ON_ERROR_STOP=1", "-h"])
+            .arg(server.socket()).args(["-d", "clone_bench_writes", "-c",
+                "DO $$ DECLARE first_row integer := 0; BEGIN LOOP UPDATE sample SET body = reverse(body) WHERE id BETWEEN first_row AND first_row + 127; first_row := (first_row + 128) % 500000; COMMIT; PERFORM pg_sleep(0.001); END LOOP; END $$"])
+            .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap()))
         } else {
-            ["WAL_LOG", "FILE_COPY"]
+            None
         };
-        for strategy in strategies {
-            let mut clone_time = Duration::ZERO;
-            let mut drop_time = Duration::ZERO;
-            for i in 0..50 {
-                let name = format!("clone_bench_{round}_{i}");
+        for round in 0..3 {
+            let strategies = if round % 2 == 0 {
+                ["FILE_COPY", "WAL_LOG"]
+            } else {
+                ["WAL_LOG", "FILE_COPY"]
+            };
+            for strategy in strategies {
+                let mut names = Vec::new();
                 let started = Instant::now();
-                server.sql("postgres", &format!("CREATE DATABASE {name} TEMPLATE clone_bench_template STRATEGY {strategy}")).unwrap();
-                clone_time += started.elapsed();
-                if i == 0 {
-                    assert_eq!(
-                        server
-                            .sql(
-                                &name,
-                                "SELECT count(*), sum(id), sum(length(body)) FROM sample"
-                            )
-                            .unwrap(),
-                        expected
-                    );
-                    server
-                        .sql(&name, "INSERT INTO sample VALUES (-1, 'clone only')")
-                        .unwrap();
-                    assert_eq!(
-                        server
-                            .sql(
-                                "clone_bench_template",
-                                "SELECT count(*), sum(id), sum(length(body)) FROM sample"
-                            )
-                            .unwrap(),
-                        expected
-                    );
+                for i in 0..50 {
+                    let name = format!("clone_bench_{round}_{i}");
+                    server.sql("postgres", &format!("CREATE DATABASE {name} TEMPLATE clone_bench_template STRATEGY {strategy}")).unwrap();
+                    names.push(name);
                 }
+                let clone_time = started.elapsed();
+                assert_clone_contents(&server, &names[0], &expected);
                 let started = Instant::now();
+                for name in names {
+                    server.drop_database(&name).unwrap();
+                }
+                println!(
+                    "workload={workload} round={round} strategy={strategy} clones=50 clone_ms={:.3} drop_ms={:.3}",
+                    clone_time.as_secs_f64() * 1000.0,
+                    started.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+            let started = Instant::now();
+            let names = std::thread::scope(|scope| {
+                let (ready, databases) = std::sync::mpsc::sync_channel(4);
+                let server = &server;
+                scope.spawn(move || {
+                    for i in 0..50 {
+                        let name = format!("clone_bench_pool_{round}_{i}");
+                        server.sql("postgres", &format!("CREATE DATABASE {name} TEMPLATE clone_bench_template STRATEGY WAL_LOG")).unwrap();
+                        ready.send(name).unwrap();
+                    }
+                });
+                let mut names = Vec::new();
+                for i in 0..50 {
+                    let ready = databases.recv().unwrap();
+                    let name = format!("clone_bench_claim_{round}_{i}");
+                    server
+                        .sql(
+                            "postgres",
+                            &format!("ALTER DATABASE {ready} RENAME TO {name}"),
+                        )
+                        .unwrap();
+                    names.push(name);
+                }
+                names
+            });
+            let clone_time = started.elapsed();
+            assert_clone_contents(&server, &names[0], &expected);
+            let started = Instant::now();
+            for name in names {
                 server.drop_database(&name).unwrap();
-                drop_time += started.elapsed();
             }
             println!(
-                "round={round} strategy={strategy} clones=50 clone_ms={:.3} drop_ms={:.3}",
+                "workload={workload} round={round} strategy=POOL_WAL_LOG clones=50 clone_ms={:.3} drop_ms={:.3}",
                 clone_time.as_secs_f64() * 1000.0,
-                drop_time.as_secs_f64() * 1000.0
+                started.elapsed().as_secs_f64() * 1000.0
             );
         }
+        drop(writer);
+    }
+}
+
+fn assert_clone_contents(server: &Server, database: &str, expected: &str) {
+    assert_eq!(
+        server
+            .sql(
+                database,
+                "SELECT count(*), sum(id), sum(length(body)) FROM sample"
+            )
+            .unwrap(),
+        expected
+    );
+    server
+        .sql(database, "INSERT INTO sample VALUES (-1, 'clone only')")
+        .unwrap();
+    assert_eq!(
+        server
+            .sql(
+                "clone_bench_template",
+                "SELECT count(*), sum(id), sum(length(body)) FROM sample"
+            )
+            .unwrap(),
+        expected
+    );
+}
+
+struct Writer(std::process::Child);
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
     }
 }

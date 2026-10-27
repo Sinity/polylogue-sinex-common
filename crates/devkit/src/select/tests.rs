@@ -182,20 +182,6 @@ fn diff_includes_commits_index_working_files_untracked_and_both_sides_of_renames
         changed(root, "baseline").unwrap(),
         Selection::Packages(vec!["base".into()])
     );
-    // metadata writes Cargo.lock; include it in the baseline before later checks.
-    git_ok(root, &["add", "Cargo.lock"]);
-    git_ok(
-        root,
-        &[
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.invalid",
-            "commit",
-            "-m",
-            "lock",
-        ],
-    );
     git_ok(root, &["branch", "current"]);
     std::fs::write(root.join("base/src/main.rs"), "fn main() {}\n").unwrap();
     std::fs::rename(
@@ -219,4 +205,60 @@ fn diff_includes_commits_index_working_files_untracked_and_both_sides_of_renames
     std::fs::write(root.join("new config\nfile.nix"), "{}\n").unwrap();
     assert_eq!(changed(root, "current").unwrap(), Selection::Workspace);
     assert!(changed(root, "missing-ref").is_err());
+}
+
+#[test]
+fn git_diff_narrows_test_bodies_but_keeps_helpers_at_package_scope() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    std::fs::create_dir(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = 'test-selection'\nversion = '0.1.0'\nedition = '2024'\n[workspace]\n",
+    )
+    .unwrap();
+    let source = "fn helper() -> u8 { 1 }\n#[test]\nfn reads() {\n    assert_eq!(helper(), 1);\n}\n#[test]\nfn writes() {}\n";
+    std::fs::write(root.join("src/lib.rs"), source).unwrap();
+    git_ok(root, &["init", "-b", "master"]);
+    git_ok(root, &["add", "Cargo.toml", "src/lib.rs"]);
+    git_ok(
+        root,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "initial",
+        ],
+    );
+    std::fs::write(
+        root.join("src/lib.rs"),
+        source.replace("helper(), 1", "helper(), 2"),
+    )
+    .unwrap();
+    assert_eq!(
+        changed(root, "HEAD").unwrap().filterset().unwrap(),
+        "(package(=test-selection) & (test(reads)))"
+    );
+    let (args, unchanged) =
+        nextest_args(root, &files(&["--changed-base=HEAD", "-E", "test(reads)"])).unwrap();
+    assert!(!unchanged);
+    assert_eq!(
+        args,
+        files(&[
+            "-E",
+            "(test(reads)) & ((package(=test-selection) & (test(reads))))"
+        ])
+    );
+    std::fs::write(
+        root.join("src/lib.rs"),
+        source.replace("u8 { 1 }", "u8 { 2 }"),
+    )
+    .unwrap();
+    assert_eq!(
+        changed(root, "HEAD").unwrap(),
+        Selection::Packages(vec!["test-selection".into()])
+    );
 }

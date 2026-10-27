@@ -34,8 +34,10 @@ store at `$XDG_STATE_HOME/devkit/history.db`:
 `origin/master`; `--changed-base=<ref>` chooses another base. The diff includes
 committed, staged, unstaged and untracked files. Production changes select the
 owning packages and their reverse dependencies through nextest's `rdeps`.
-A change to a Cargo-declared integration test file selects that package's test
-binary. Shared helpers and other package files select the package and reverse
+Changes confined to test functions select those tests within their package.
+Every changed line must be inside a test in both versions; a partial overlap
+keeps package scope. A change to a Cargo-declared integration test file selects
+that package's test binary. Shared helpers and other package files select the package and reverse
 dependencies; files outside packages select the workspace, except Markdown.
 Explicit `-E` filtersets intersect this selection. An unchanged tree succeeds
 without building tests. This repository's `focused` operation uses the same path.
@@ -118,10 +120,17 @@ An explicit `CARGO_TARGET_DIR` in the caller's environment is passed to the job.
 
 The PostgreSQL clone benchmark is an ignored devkit test. It creates a synthetic
 template in its own throwaway cluster, checks clone contents and isolation, and
-times 50 create/drop cycles for each of `FILE_COPY` and `WAL_LOG` over three
-alternating rounds. Creation and drop times are reported separately. The default
+times batches of 50 clones for `FILE_COPY`, `WAL_LOG`, and a four-entry pool
+replenished in the background using `WAL_LOG`. Each batch is dropped after its
+clone timing ends. Three alternating rounds run both with an idle half-gigabyte
+working set and with a writer updating it. Pool timing includes creating the
+initial databases and background replenishment. Drop times are reported
+separately. The default
 12,662,463-byte target matches the largest measured Sinex schema template;
-`DEVKIT_BENCH_TEMPLATE_BYTES` can set another size. Run it through AgentCTL:
+`DEVKIT_BENCH_TEMPLATE_BYTES` can set another size. `DEVKIT_BENCH_DIRECTORY`
+chooses the storage directory; without it, the cluster uses tmpfs. Use a short
+path on the same filesystem as the development service for representative
+results. Run it through AgentCTL:
 
 ```sh
 agentctl job start --project /path/to/checkout exec -- cargo test -p devkit --features pg benchmark_database_clones -- --ignored --nocapture

@@ -83,9 +83,16 @@ impl Server {
         } else {
             env::temp_dir()
         };
+        Self::start_in(options, &base)
+    }
+
+    /// Starts a throwaway cluster on the chosen filesystem. The directory
+    /// must exist and its path must fit PostgreSQL's Unix socket limit.
+    /// The cluster is stopped and removed when the server is dropped.
+    pub fn start_in(options: &ClusterOptions, base: &Path) -> Result<Self> {
         // Clusters left by killed runs whose watchdog died too.
         crate::owner::sweep(
-            &base,
+            base,
             "devkit-pg",
             r#"pg_ctl -D "$1/data" -m immediate -w stop; rm -rf "$1""#,
         );

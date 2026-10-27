@@ -2,6 +2,8 @@
 //!
 //! Files outside packages select the workspace, except Markdown documentation.
 //! Changes confined to a Cargo integration-test target select that binary.
+mod functions;
+
 use serde_json::Value;
 use std::{
     collections::BTreeSet,
@@ -19,6 +21,8 @@ pub enum Selection {
         packages: Vec<String>,
         binaries: Vec<(String, String)>,
     },
+    /// Changes confined to test functions or integration-test binaries.
+    Filter(String),
     Workspace,
 }
 
@@ -27,6 +31,7 @@ impl Selection {
     pub fn filterset(&self) -> Option<String> {
         let (packages, binaries) = match self {
             Self::Workspace => return None,
+            Self::Filter(filter) => return Some(filter.clone()),
             Self::Nothing => return Some("none()".to_owned()),
             Self::Packages(packages) => (packages.as_slice(), &[][..]),
             Self::Tests { packages, binaries } => (packages.as_slice(), binaries.as_slice()),
@@ -54,6 +59,10 @@ struct Package {
 
 /// Changes since the merge base, including staged, unstaged and untracked files.
 pub fn changed(root: &Path, base: &str) -> Result<Selection, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("{}: {error}", root.display()))?;
+    let root = root.as_path();
     let merge_base = git(root, &["merge-base", "HEAD", base])?;
     let mut files = paths(&git(
         root,
@@ -72,7 +81,12 @@ pub fn changed(root: &Path, base: &str) -> Result<Selection, String> {
     if files.is_empty() {
         return Ok(Selection::Nothing);
     }
-    Ok(select(root, &files, &packages(root)?))
+    let packages = packages(root)?;
+    let selection = select(root, &files, &packages);
+    if selection == Selection::Workspace {
+        return Ok(selection);
+    }
+    functions::narrow(root, merge_base.trim(), &files, &packages)
 }
 
 fn paths(output: &str) -> Vec<String> {
