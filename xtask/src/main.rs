@@ -8,6 +8,11 @@ use std::process::ExitCode;
 enum Cli {
     /// Formatting, clippy and every test.
     Check,
+    /// Run selected tests, optionally limited to the current diff.
+    Test {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     #[command(flatten)]
     Shared(devkit::cli::Command),
 }
@@ -17,6 +22,17 @@ fn main() -> ExitCode {
         Cli::Check => {
             let mut run = Run::start("polylogue-sinex-common", "check", &[]);
             let _ = check(&mut run);
+            run.finish()
+        }
+        Cli::Test { args } => {
+            let mut run = Run::start("polylogue-sinex-common", "test", &args);
+            let _ = run.nextest(
+                "test",
+                &Nextest {
+                    args,
+                    ..Nextest::default()
+                },
+            );
             run.finish()
         }
         Cli::Shared(command) => devkit::cli::execute("polylogue-sinex-common", command),

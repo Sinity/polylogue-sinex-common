@@ -31,6 +31,8 @@ clap = { version = "4", features = ["derive"], optional = true }
 quick-xml = "0.38"
 rusqlite = { version = ">=0.32, <0.41", features = ["bundled"], optional = true }
 serde_json = "1"
+syn = { version = "2", features = ["full", "parsing"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
 zstd = { version = "0.13", optional = true }
 
 [dev-dependencies]

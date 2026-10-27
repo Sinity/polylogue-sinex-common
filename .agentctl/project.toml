@@ -38,7 +38,7 @@ unit_properties = ["MemoryHigh=8G"]
 
 [operations.focused]
 description = "Selected shared-crate tests in the normal development queue"
-exec = ["cargo", "nextest", "run", "--locked"]
+exec = ["cargo", "xtask", "test", "--locked"]
 arguments = "required"
 pool = "normal"
 result = "exit"
