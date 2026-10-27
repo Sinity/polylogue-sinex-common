@@ -1192,7 +1192,7 @@
       ]
     },
     {
-      "id": "openai-legacy",
+      "id": "openai-bare",
       "covers": [
         "openai_api_key"
       ],
@@ -1215,7 +1215,7 @@
       ]
     },
     {
-      "id": "openai-legacy-below",
+      "id": "openai-bare-below",
       "covers": [],
       "regions_utf8": [],
       "cuts": "all",
