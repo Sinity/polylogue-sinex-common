@@ -16,20 +16,44 @@ fn test_functions(source: &str) -> Option<Vec<TestFunction>> {
                 syn::Item::Fn(function)
                     if function.attrs.iter().any(|attr| {
                         let path = attr.path();
-                        path.is_ident("test") || (path.segments.len() == 2
-                            && path.segments.first().is_some_and(|part| part.ident == "devkit" || part.ident == "tokio")
-                            && path.segments.last().is_some_and(|part| part.ident == "test"))
+                        path.is_ident("test")
+                            || (path.segments.len() == 2
+                                && path.segments.first().is_some_and(|part| {
+                                    part.ident == "devkit" || part.ident == "tokio"
+                                })
+                                && path
+                                    .segments
+                                    .last()
+                                    .is_some_and(|part| part.ident == "test"))
                     }) =>
                 {
-                    let start = function.attrs.first().map_or(function.span().start(), |attr| attr.span().start());
+                    let start = function
+                        .attrs
+                        .first()
+                        .map_or(function.span().start(), |attr| attr.span().start());
                     let end = function.span().end();
-                    let prefix = source.lines().nth(start.line - 1).and_then(|line| line.get(..start.column));
-                    let suffix = source.lines().nth(end.line - 1).and_then(|line| line.get(end.column..));
+                    let prefix = source
+                        .lines()
+                        .nth(start.line - 1)
+                        .and_then(|line| line.get(..start.column));
+                    let suffix = source
+                        .lines()
+                        .nth(end.line - 1)
+                        .and_then(|line| line.get(end.column..));
                     // A diff describes whole lines. Other items sharing a line
                     // cannot be attributed to this test alone.
-                    if !prefix.is_some_and(|text| text.trim().is_empty()) || !suffix.is_some_and(|text| text.trim().is_empty()) { continue; }
+                    if !prefix.is_some_and(|text| text.trim().is_empty())
+                        || !suffix.is_some_and(|text| text.trim().is_empty())
+                    {
+                        continue;
+                    }
                     tests.push(TestFunction {
-                        name: function.sig.ident.to_string().trim_start_matches("r#").to_owned(),
+                        name: function
+                            .sig
+                            .ident
+                            .to_string()
+                            .trim_start_matches("r#")
+                            .to_owned(),
                         start: start.line,
                         end: end.line,
                     });
@@ -125,7 +149,9 @@ pub(super) fn narrow(
         } else {
             None
         };
-        if let Some(names) = names {
+        if let Some(names) = names
+            .filter(|names| used_only_in_declarations(&package.directory, names).unwrap_or(false))
+        {
             narrowed = true;
             filters.insert(format!(
                 "(package(={}) & ({}))",
@@ -143,13 +169,57 @@ pub(super) fn narrow(
     if !narrowed {
         return Ok(select(root, files, packages));
     }
-    if filters.is_empty() {
-        Ok(Selection::Nothing)
-    } else {
-        Ok(Selection::Filter(
-            filters.into_iter().collect::<Vec<_>>().join(" | "),
-        ))
+    Ok(Selection::Filter(
+        filters.into_iter().collect::<Vec<_>>().join(" | "),
+    ))
+}
+
+// A test can call another test. Any other use of its name keeps package
+// scope, including references from another module or a macro argument.
+fn used_only_in_declarations(directory: &Path, names: &BTreeSet<String>) -> Option<bool> {
+    fn count_tokens(
+        tokens: proc_macro2::TokenStream,
+        counts: &mut std::collections::BTreeMap<String, usize>,
+    ) {
+        for token in tokens {
+            match token {
+                proc_macro2::TokenTree::Group(group) => count_tokens(group.stream(), counts),
+                proc_macro2::TokenTree::Ident(name) => {
+                    if let Some(count) = counts.get_mut(name.to_string().trim_start_matches("r#")) {
+                        *count += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
     }
+    fn walk(
+        directory: &Path,
+        counts: &mut std::collections::BTreeMap<String, usize>,
+    ) -> Option<()> {
+        for entry in std::fs::read_dir(directory).ok()? {
+            let entry = entry.ok()?;
+            if entry.file_name() == "target" || entry.file_name() == ".git" {
+                continue;
+            }
+            let path = entry.path();
+            let kind = entry.file_type().ok()?;
+            if kind.is_symlink() {
+                return None;
+            }
+            if kind.is_dir() {
+                walk(&path, counts)?;
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                let source = std::fs::read_to_string(path).ok()?;
+                let tokens = source.parse::<proc_macro2::TokenStream>().ok()?;
+                count_tokens(tokens, counts);
+            }
+        }
+        Some(())
+    }
+    let mut counts = names.iter().map(|name| (name.clone(), 0)).collect();
+    walk(directory, &mut counts)?;
+    Some(counts.values().all(|count| *count == 1))
 }
 
 #[cfg(test)]

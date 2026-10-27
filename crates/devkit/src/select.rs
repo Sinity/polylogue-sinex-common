@@ -101,6 +101,15 @@ fn select(root: &Path, files: &[String], packages: &[Package]) -> Selection {
     let mut changed = BTreeSet::new();
     let mut binaries = BTreeSet::new();
     for file in files.iter().filter(|f| !f.is_empty()) {
+        if matches!(
+            file.as_str(),
+            "Cargo.toml" | "Cargo.lock" | "flake.nix" | "flake.lock"
+        ) || [".config/", ".cargo/", ".agentctl/"]
+            .iter()
+            .any(|prefix| file.starts_with(prefix))
+        {
+            return Selection::Workspace;
+        }
         let path = root.join(file);
         let owner = packages
             .iter()
@@ -240,13 +249,18 @@ fn intersect_filter(args: &[String], changed: &str) -> Result<Vec<String>, Strin
             result.extend(args.cloned());
             return Ok(result);
         }
-        if arg == "-E" || arg == "--filterset" {
+        if arg == "-E" || arg == "--filterset" || arg == "--filter-expr" {
             let value = args.next().ok_or("missing nextest filterset")?;
             result.extend([arg.clone(), format!("({value}) & ({changed})")]);
             found = true;
         } else if let Some(value) = arg
             .strip_prefix("--filterset=")
-            .or_else(|| arg.strip_prefix("-E").filter(|v| !v.is_empty()))
+            .or_else(|| arg.strip_prefix("--filter-expr="))
+            .or_else(|| {
+                arg.strip_prefix("-E")
+                    .filter(|v| !v.is_empty())
+                    .map(|value| value.strip_prefix('=').unwrap_or(value))
+            })
         {
             result.extend(["-E".into(), format!("({value}) & ({changed})")]);
             found = true;

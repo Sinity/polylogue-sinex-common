@@ -250,7 +250,7 @@ impl Server {
             let created = self.sql(
                 "postgres",
                 &format!(
-                    "CREATE DATABASE {} TEMPLATE {} STRATEGY WAL_LOG",
+                    "CREATE DATABASE {} TEMPLATE {} STRATEGY FILE_COPY",
                     databases.schema, databases.template
                 ),
             );
@@ -304,7 +304,7 @@ impl Server {
         check_name(name)?;
         self.sql(
             "postgres",
-            &format!("CREATE DATABASE {name} TEMPLATE {template} STRATEGY WAL_LOG"),
+            &format!("CREATE DATABASE {name} TEMPLATE {template} STRATEGY FILE_COPY"),
         )
         .map(drop)
     }
@@ -321,7 +321,7 @@ impl Server {
     /// Drops databases nothing will use again, never one with a connection:
     /// - test databases whose test process has exited, except failed ones,
     ///   of which the newest [`Reap::failed`] are kept for inspection;
-    /// - test databases from runs more than a day old;
+    /// - unfinished test databases from runs more than a day old;
     /// - half-built templates whose owning process exited;
     /// - schema versions beyond the newest [`Reap::schemas`] per project, or
     ///   unused for [`Reap::days`].
@@ -615,7 +615,7 @@ pub fn test_database() -> Result<TestDatabase> {
     sql_at(
         &socket,
         "postgres",
-        &format!("CREATE DATABASE {name} TEMPLATE {template} STRATEGY WAL_LOG"),
+        &format!("CREATE DATABASE {name} TEMPLATE {template} STRATEGY FILE_COPY"),
     )?;
     Ok(TestDatabase { socket, name })
 }

@@ -109,7 +109,10 @@ fn explicit_filters_intersect_changes_and_test_arguments_stay_literal() {
     for args in [
         files(&["-E", "test(reads)"]),
         files(&["--filterset=test(reads)"]),
+        files(&["--filter-expr", "test(reads)"]),
+        files(&["--filter-expr=test(reads)"]),
         files(&["-Etest(reads)"]),
+        files(&["-E=test(reads)"]),
     ] {
         assert!(
             intersect_filter(&args, "rdeps(=store)")
@@ -242,6 +245,15 @@ fn git_diff_narrows_test_bodies_but_keeps_helpers_at_package_scope() {
         changed(root, "HEAD").unwrap().filterset().unwrap(),
         "(package(=test-selection) & (test(reads)))"
     );
+    let mut relative = PathBuf::new();
+    for _ in std::env::current_dir().unwrap().ancestors().skip(1) {
+        relative.push("..");
+    }
+    relative.push(root.strip_prefix("/").unwrap());
+    assert_eq!(
+        changed(&relative, "HEAD").unwrap(),
+        changed(root, "HEAD").unwrap()
+    );
     let (args, unchanged) =
         nextest_args(root, &files(&["--changed-base=HEAD", "-E", "test(reads)"])).unwrap();
     assert!(!unchanged);
@@ -261,4 +273,62 @@ fn git_diff_narrows_test_bodies_but_keeps_helpers_at_package_scope() {
         changed(root, "HEAD").unwrap(),
         Selection::Packages(vec!["test-selection".into()])
     );
+}
+
+#[test]
+fn calls_to_a_changed_test_keep_the_package_and_its_dependents() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    std::fs::create_dir(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = 'test-calls'\nversion = '0.1.0'\nedition = '2024'\n[workspace]\n",
+    )
+    .unwrap();
+    let source =
+        "#[test]\nfn reads() {\n    assert_eq!(1, 1);\n}\n#[test]\nfn writes() { reads(); }\n";
+    std::fs::write(root.join("src/lib.rs"), source).unwrap();
+    git_ok(root, &["init", "-b", "master"]);
+    git_ok(root, &["add", "Cargo.toml", "src/lib.rs"]);
+    git_ok(
+        root,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "initial",
+        ],
+    );
+    std::fs::write(root.join("src/lib.rs"), source.replace("1, 1", "2, 2")).unwrap();
+    assert_eq!(
+        changed(root, "HEAD").unwrap(),
+        Selection::Packages(vec!["test-calls".into()])
+    );
+}
+
+#[test]
+fn workspace_settings_select_everything_even_when_a_package_lives_at_the_root() {
+    let packages = vec![Package {
+        name: "root".into(),
+        directory: PathBuf::from("/w"),
+        tests: vec![],
+    }];
+    for file in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "flake.nix",
+        "flake.lock",
+        ".config/nextest.toml",
+        ".cargo/config.toml",
+        ".agentctl/project.toml",
+    ] {
+        assert_eq!(
+            select(Path::new("/w"), &files(&[file]), &packages),
+            Selection::Workspace,
+            "{file}"
+        );
+    }
 }

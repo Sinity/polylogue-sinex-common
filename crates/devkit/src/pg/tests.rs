@@ -326,13 +326,27 @@ fn every_test_run_reaps_without_building_a_schema() {
         server
             .clone_database(&databases.template, &abandoned)
             .unwrap();
-        Server::prepare_run(&server.test_env(&databases.template));
+        let directory = tempfile::tempdir().unwrap();
+        let mut run = crate::Run::unrecorded("reaping", "test", &[]);
+        run.root = directory.path().to_owned();
+        // Selection fails before Cargo starts, after run cleanup has happened.
+        assert!(
+            run.nextest(
+                "test",
+                &crate::Nextest {
+                    args: vec!["--changed-base=missing-ref".into()],
+                    env: server.test_env(&databases.template),
+                    ..crate::Nextest::default()
+                }
+            )
+            .is_err()
+        );
         assert!(!server.database_exists(&abandoned).unwrap());
         assert!(server.database_exists(&databases.template).unwrap());
     }
 }
 
-/// Explicit benchmark: 50 clones per strategy, three alternating rounds.
+/// Explicit benchmark: 50 clones per strategy, with configurable repetitions.
 /// The default size matches the largest observed Sinex schema template.
 #[test]
 #[ignore = "clone timing benchmark; run explicitly with --ignored --nocapture"]
@@ -384,23 +398,35 @@ fn benchmark_database_clones() {
             .unwrap()
             .trim()
     );
-    // A cluster-wide checkpoint also writes buffers from unrelated databases.
-    // Match the observed shared cluster's roughly half-gigabyte working set.
-    server
-        .sql("postgres", "CREATE DATABASE clone_bench_writes")
+    let rounds: u64 = env::var("DEVKIT_BENCH_ROUNDS")
+        .unwrap_or_else(|_| "1".into())
+        .parse()
         .unwrap();
-    server.sql("clone_bench_writes", "CREATE TABLE sample (id integer PRIMARY KEY, body text); ALTER TABLE sample ALTER COLUMN body SET STORAGE EXTERNAL; INSERT INTO sample SELECT i, repeat(md5(i::text), 32) FROM generate_series(0, 500000) i").unwrap();
-    server.sql("postgres", "CHECKPOINT").unwrap();
-    for workload in ["idle", "writes"] {
-        let writer = if workload == "writes" {
+    assert!(rounds > 0, "the benchmark needs at least one round");
+    let writes = env::var_os("DEVKIT_BENCH_WRITES").is_some();
+    // A cluster-wide checkpoint also writes buffers from unrelated databases.
+    if writes {
+        server
+            .sql("postgres", "CREATE DATABASE clone_bench_writes")
+            .unwrap();
+        server.sql("clone_bench_writes", "CREATE TABLE sample (id integer PRIMARY KEY, body text); ALTER TABLE sample ALTER COLUMN body SET STORAGE EXTERNAL; INSERT INTO sample SELECT i, repeat(md5(i::text), 32) FROM generate_series(0, 500000) i").unwrap();
+        server.sql("postgres", "CHECKPOINT").unwrap();
+    }
+    let workloads = if writes {
+        vec!["idle", "writes"]
+    } else {
+        vec!["idle"]
+    };
+    for workload in workloads {
+        let mut writer = if workload == "writes" {
             Some(Writer(Command::new("psql").args(["-X", "-q", "-v", "ON_ERROR_STOP=1", "-h"])
             .arg(server.socket()).args(["-d", "clone_bench_writes", "-c",
                 "DO $$ DECLARE first_row integer := 0; BEGIN LOOP UPDATE sample SET body = reverse(body) WHERE id BETWEEN first_row AND first_row + 127; first_row := (first_row + 128) % 500000; COMMIT; PERFORM pg_sleep(0.001); END LOOP; END $$"])
-            .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap()))
+            .stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap()))
         } else {
             None
         };
-        for round in 0..3 {
+        for round in 0..rounds {
             let strategies = if round % 2 == 0 {
                 ["FILE_COPY", "WAL_LOG"]
             } else {
@@ -461,6 +487,12 @@ fn benchmark_database_clones() {
                 "workload={workload} round={round} strategy=POOL_WAL_LOG clones=50 clone_ms={:.3} drop_ms={:.3}",
                 clone_time.as_secs_f64() * 1000.0,
                 started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        if let Some(writer) = &mut writer {
+            assert!(
+                writer.0.try_wait().unwrap().is_none(),
+                "background writer exited before the benchmark finished"
             );
         }
         drop(writer);
