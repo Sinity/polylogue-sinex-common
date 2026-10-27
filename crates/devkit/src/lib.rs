@@ -56,8 +56,11 @@ pub trait Fixture: Sized {
     fn create() -> std::result::Result<Self, String>;
 }
 
+#[cfg(feature = "cli")]
+pub mod coverage;
+#[cfg(feature = "cli")]
+pub mod fuzz;
 pub mod process;
-#[cfg(feature = "cli")] pub mod coverage;
-#[cfg(feature = "cli")] pub mod fuzz;
 
-#[cfg(feature = "cli")] pub mod vm;
+#[cfg(feature = "cli")]
+pub mod vm;

@@ -4,8 +4,8 @@
 //! Rows are never deleted; the store stays small because passing tests keep
 //! no output and each distinct diagnostic text is stored once. Other programs
 //! may read it; the tables below are its interface.
-mod queries;
 mod analysis;
+mod queries;
 
 use crate::Run;
 use rusqlite::{Connection, OptionalExtension, params};

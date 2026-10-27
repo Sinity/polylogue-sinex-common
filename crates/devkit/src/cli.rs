@@ -205,9 +205,18 @@ pub fn execute(project: &str, command: Command) -> ExitCode {
             })
         }
         Command::Status { json } => with_store(|store| status(store, project, &root, json)),
-        Command::History(History::Compare { before, after }) => with_store(|store| query_output(store.compare(project,before,after)?, true)),
-        Command::History(History::Explain { run }) => with_store(|store| query_output(store.explain(project,run)?, true)),
-        Command::History(History::CompareDays { before, after }) => with_store(|store| query_output(store.compare_days(project,&root.display().to_string(),&before,&after)?, true)),
+        Command::History(History::Compare { before, after }) => {
+            with_store(|store| query_output(store.compare(project, before, after)?, true))
+        }
+        Command::History(History::Explain { run }) => {
+            with_store(|store| query_output(store.explain(project, run)?, true))
+        }
+        Command::History(History::CompareDays { before, after }) => with_store(|store| {
+            query_output(
+                store.compare_days(project, &root.display().to_string(), &before, &after)?,
+                true,
+            )
+        }),
         Command::History(History::Intermittent { scope, json }) => with_store(|store| {
             let paths = scope.paths(&root)?;
             query_output(
