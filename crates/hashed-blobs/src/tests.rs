@@ -1496,39 +1496,96 @@ fn deleting_missing_does_not_escape_a_removed_write_root_or_hide_its_error() {
 }
 
 #[test]
-fn repeated_stream_is_checked_without_starting_another_compression() {
+fn repeated_seekable_input_is_checked_without_a_temporary_file() {
     let (_dir, store) = store();
     let bytes = data(91, 1 << 20);
-    let hash = store.put(bytes.as_slice(), 3).unwrap();
-    // Removing the temporary input at EOF makes another compression impossible:
-    // a repeat only needs the hash and the existing checked representation.
-    struct RemoveInput<'a> {
-        input: &'a [u8],
+    let hash = store.put_seekable(Cursor::new(&bytes), 3).unwrap();
+    struct CheckInput<'a> {
+        input: Cursor<&'a [u8]>,
         directory: PathBuf,
+        read: usize,
     }
-    impl Read for RemoveInput<'_> {
+    impl Read for CheckInput<'_> {
         fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            assert_eq!(fs::read_dir(&self.directory)?.count(), 0);
             let n = self.input.read(out)?;
-            if n == 0 {
-                for entry in fs::read_dir(&self.directory)? {
-                    fs::remove_file(entry?.path())?;
-                }
-            }
+            self.read += n;
             Ok(n)
         }
     }
-    assert_eq!(
-        store
+    impl Seek for CheckInput<'_> {
+        fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+            self.input.seek(position)
+        }
+    }
+    let mut input = CheckInput {
+        input: Cursor::new(&bytes),
+        directory: store.write_root.join("blobs/tmp"),
+        read: 0,
+    };
+    assert_eq!(store.put_seekable(&mut input, 3).unwrap(), hash);
+    assert_eq!(input.read, bytes.len());
+    let path = Store::path_in(&store.write_root, &hash);
+    fs::write(&path, b"damaged").unwrap();
+    assert!(store.put_seekable(Cursor::new(&bytes), 3).is_err());
+    assert_eq!(fs::read(path).unwrap(), b"damaged");
+}
+
+#[test]
+fn seekable_input_stores_bytes_from_its_current_position() {
+    let (_dir, store) = store();
+    for bytes in [Vec::new(), data(92, 2 * FRAME + 17)] {
+        let mut input = Cursor::new([b"skip".as_slice(), &bytes].concat());
+        input.set_position(4);
+        let hash = store.put_seekable(&mut input, 3).unwrap();
+        assert_eq!(hash, Hash(*blake3::hash(&bytes).as_bytes()));
+        assert_eq!(read_all(store.read(&hash).unwrap()), bytes);
+        assert_eq!(input.position(), input.get_ref().len() as u64);
+        assert_eq!(
+            fs::read_dir(store.write_root.join("blobs/tmp"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+}
+
+#[test]
+fn stream_put_compresses_without_copying_the_input() {
+    let (_dir, store) = store();
+    let bytes = vec![b'x'; 4 * FRAME];
+    struct CheckStream<'a> {
+        input: &'a [u8],
+        directory: PathBuf,
+    }
+    impl Read for CheckStream<'_> {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            for entry in fs::read_dir(&self.directory)? {
+                // Compressed frames stay small; a plaintext copy grows each read.
+                assert!(entry?.metadata()?.len() < FRAME as u64);
+            }
+            self.input.read(out)
+        }
+    }
+    for _ in 0..2 {
+        let hash = store
             .put(
-                RemoveInput {
+                CheckStream {
                     input: &bytes,
-                    directory: store.write_root.join("blobs/tmp")
+                    directory: store.write_root.join("blobs/tmp"),
                 },
-                3
+                3,
             )
-            .unwrap(),
-        hash
-    );
+            .unwrap();
+        assert_eq!(read_all(store.read(&hash).unwrap()), bytes);
+        assert_eq!(
+            fs::read_dir(store.write_root.join("blobs/tmp"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+    let hash = Hash(*blake3::hash(&bytes).as_bytes());
     let path = Store::path_in(&store.write_root, &hash);
     fs::write(&path, b"damaged").unwrap();
     assert!(store.put(bytes.as_slice(), 3).is_err());

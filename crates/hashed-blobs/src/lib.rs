@@ -1074,10 +1074,16 @@ impl Store {
 
     /// Store bytes as a plain seekable blob named by their BLAKE3; durable when it returns.
     /// Cannot be cancelled; use `put_plain_checked` for that.
-    pub fn put(&self, mut bytes: impl Read, level: i32) -> Result<Hash> {
-        // A streaming input cannot be rewound. Keep one temporary copy while
-        // hashing, so repeats never enter the compressor.
-        let mut input = self.tmp()?;
+    pub fn put(&self, bytes: impl Read, level: i32) -> Result<Hash> {
+        self.prepare_plain(bytes, level)?.install()
+    }
+
+    /// Store a seekable input from its current position to EOF.
+    /// Hashes the input first, then verifies an existing blob or rewinds and compresses it.
+    /// Only compressed bytes reach a temporary file. Cannot be cancelled.
+    pub fn put_seekable(&self, mut bytes: impl Read + Seek, level: i32) -> Result<Hash> {
+        let start = bytes.stream_position()?;
+        let mut name = blake3::Hasher::new();
         let mut block = [0; 64 << 10];
         loop {
             let n = match bytes.read(&mut block) {
@@ -1087,15 +1093,15 @@ impl Store {
             if n == 0 {
                 break;
             }
-            input.write(&block[..n])?;
+            name.update(&block[..n]);
         }
-        let hash = Hash(*input.hasher.finalize().as_bytes());
+        let hash = Hash(*name.finalize().as_bytes());
         if self.contains(&hash) {
             self.validate_existing(hash, None)?;
             return Ok(hash);
         }
-        self.prepare_plain(File::open(&input.path)?, level)?
-            .install()
+        bytes.seek(SeekFrom::Start(start))?;
+        self.prepare_plain(bytes, level)?.install()
     }
 
     /// Like `put`, but calls `check` between input reads, around each frame compression and

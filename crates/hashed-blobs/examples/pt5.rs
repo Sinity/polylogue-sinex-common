@@ -56,7 +56,7 @@ fn main() {
             let r = BufReader::with_capacity(1 << 20, File::open(p).unwrap());
             let h = match batch.as_mut() {
                 Some(b) => b.put(r, level).unwrap(),
-                None => store.put(r, level).unwrap(),
+                None => store.put_seekable(r, level).unwrap(),
             };
             if biggest.is_none_or(|(b, _)| n > b) {
                 biggest = Some((n, h));
