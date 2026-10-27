@@ -33,7 +33,7 @@ fn reports_keep_package_selection_and_drop_test_filters() {
 #[test]
 fn invalid_threshold_and_reused_output_fail_before_running() {
     let dir = tempfile::tempdir().unwrap();
-    let mut run = Run::start("demo", "coverage", &[]);
+    let mut run = Run::unrecorded("demo", "coverage", &[]);
     let mut options = Coverage {
         output: dir.path().into(),
         format: "json".into(),
@@ -71,7 +71,7 @@ fn fake_report(
             "test(chosen)".into(),
         ],
     };
-    let mut run = Run::start("demo", "coverage", &[]);
+    let mut run = Run::unrecorded("demo", "coverage", &[]);
     let result = execute_with(&mut run, &options, &[], || {
         let mut command = std::process::Command::new("sh");
         command.args(["-c", script, "fake-cargo"]);

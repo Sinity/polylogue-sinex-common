@@ -31,7 +31,7 @@ fn library_search_paths_include_nix_cxx_and_existing_without_duplicates() {
 #[test]
 fn unknown_target_and_zero_budget_fail_before_starting() {
     let dir = tempfile::tempdir().unwrap();
-    let mut run = Run::start("demo", "fuzz", &[]);
+    let mut run = Run::unrecorded("demo", "fuzz", &[]);
     for (target, seconds) in [("missing", 1), ("query", 0)] {
         let options = Fuzz::Run {
             target: target.into(),
@@ -52,7 +52,7 @@ fn crash_artifacts_are_kept_and_replay_passes_the_original_input() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir(dir.path().join("fuzz")).unwrap();
     let output = dir.path().join("experiment");
-    let mut run = Run::start("demo", "fuzz", &[]);
+    let mut run = Run::unrecorded("demo", "fuzz", &[]);
     run.root = dir.path().into();
     let options = Fuzz::Run {
         target: "query".into(),

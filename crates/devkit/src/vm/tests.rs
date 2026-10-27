@@ -40,7 +40,7 @@ fn checkout() -> tempfile::TempDir {
 #[test]
 fn untracked_and_tracked_changes_are_refused_before_discovery() {
     let dir = checkout();
-    let mut run = Run::start("demo", "vm", &[]);
+    let mut run = Run::unrecorded("demo", "vm", &[]);
     run.root = dir.path().into();
     assert!(crate::Tree::observe(dir.path()).dirty.is_none());
     let options = Vm {
@@ -76,7 +76,7 @@ fn untracked_and_tracked_changes_are_refused_before_discovery() {
 fn failed_scenarios_keep_original_logs_and_do_not_skip_later_scenarios() {
     let dir = checkout();
     let output = tempfile::tempdir().unwrap();
-    let mut run = Run::start("demo", "vm", &[]);
+    let mut run = Run::unrecorded("demo", "vm", &[]);
     run.root = dir.path().into();
     let options = Vm {
         scenarios: vec![],
@@ -101,7 +101,7 @@ fn failed_scenarios_keep_original_logs_and_do_not_skip_later_scenarios() {
 #[test]
 fn failed_and_invalid_discovery_are_reported() {
     let dir = checkout();
-    let mut run = Run::start("demo", "vm", &[]);
+    let mut run = Run::unrecorded("demo", "vm", &[]);
     run.root = dir.path().into();
     let options = Vm {
         scenarios: vec![],
