@@ -120,3 +120,30 @@ fn failed_and_invalid_discovery_are_reported() {
         );
     }
 }
+
+#[test]
+fn cached_scenarios_record_the_derivation_log() {
+    let dir = checkout();
+    let output = tempfile::tempdir().unwrap();
+    let mut run = Run::unrecorded("demo", "vm", &[]);
+    run.root = dir.path().into();
+    let options = Vm {
+        scenarios: vec![],
+        system: "x86_64-linux".into(),
+        output: output.path().into(),
+    };
+    execute_with(&mut run, &options, &["vm-stack"], || {
+        let mut command = Command::new("sh");
+        command.args(["-c", r#"case "$1" in eval) printf '%s' '["vm-stack"]';; build) echo 'cached result';; log) echo 'original scenario assertions passed';; *) exit 9;; esac"#, "fake-nix"]);
+        command
+    }).unwrap();
+    assert_eq!(
+        fs::read_to_string(output.path().join("vm-stack.log")).unwrap(),
+        "original scenario assertions passed\n"
+    );
+    assert!(
+        fs::read_to_string(output.path().join("vm-stack.build.log"))
+            .unwrap()
+            .contains("cached result")
+    );
+}

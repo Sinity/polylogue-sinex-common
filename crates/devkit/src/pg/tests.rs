@@ -22,7 +22,16 @@ fn schema_template_and_test_clones() {
     };
     let databases = server.ensure_schema(&schema).unwrap();
     assert_eq!(databases.schema, "demo_schema_abc123");
-    // A second ensure reuses what exists.
+    server
+        .sql(
+            "postgres",
+            &format!(
+                "ALTER DATABASE {} WITH IS_TEMPLATE false",
+                databases.template
+            ),
+        )
+        .unwrap();
+    // A second ensure reuses the data and restores template status.
     let failing = |_: &Server, _: &str| -> Result { Err("must not run".into()) };
     let again = Schema {
         project: "demo",
@@ -30,7 +39,20 @@ fn schema_template_and_test_clones() {
         bootstrap: &failing,
     };
     assert_eq!(server.ensure_schema(&again).unwrap(), databases);
-    // The compile database is read-only; the template is not touched.
+    assert_eq!(
+        server
+            .sql(
+                "postgres",
+                &format!(
+                    "SELECT datistemplate FROM pg_database WHERE datname = '{}'",
+                    databases.template
+                )
+            )
+            .unwrap()
+            .trim(),
+        "t"
+    );
+    // Compile-time checks read the schema; test clones remain writable.
     assert!(
         server
             .sql(&databases.schema, "INSERT INTO notes VALUES (1, 'x')")
@@ -89,7 +111,7 @@ fn demo_schema(server: &Server, project: &str, hash: &str) -> SchemaDatabases {
 /// A pid no process has: exited tests look like this.
 fn dead_pid() -> u32 {
     (4_000_000..4_194_304)
-        .find(|pid| !pid_alive(*pid))
+        .find(|pid| !crate::owner::alive(*pid))
         .expect("a free pid")
 }
 
@@ -169,7 +191,7 @@ fn reap_keeps_the_newest_schema_versions() {
                     "postgres",
                     &format!(
                         "COMMENT ON DATABASE {name} IS 'devkit used {}'",
-                        now - 10 + i
+                        now - 7200 + i
                     ),
                 )
                 .unwrap();
@@ -218,6 +240,14 @@ fn a_failed_test_keeps_its_database_marked_failed() {
         )
         .unwrap();
     assert!(comment.starts_with("devkit failed "), "{comment}");
+    let dropped = server
+        .reap(&Reap {
+            failed: 0,
+            ..Reap::default()
+        })
+        .unwrap();
+    assert!(!dropped.contains(&name));
+    assert!(server.database_exists(&name).unwrap());
 }
 
 #[test]
@@ -249,10 +279,25 @@ fn hash_covers_contents_and_extras() {
         first,
         schema_hash(&[copy.path().to_owned()], &["pg 18"]).unwrap()
     );
+    let linked = tempfile::tempdir().unwrap();
+    let linked_file = linked.path().join("linked.sql");
+    fs::write(&linked_file, "linked one").unwrap();
+    std::os::unix::fs::symlink(&linked_file, dir.path().join("linked.sql")).unwrap();
+    let with_link = schema_hash(&[dir.path().to_owned()], &["pg 18"]).unwrap();
+    fs::write(&linked_file, "linked two").unwrap();
+    assert_ne!(
+        with_link,
+        schema_hash(&[dir.path().to_owned()], &["pg 18"]).unwrap()
+    );
+    fs::remove_file(dir.path().join("linked.sql")).unwrap();
     fs::write(dir.path().join("a.sql"), "two").unwrap();
     assert_ne!(
         first,
         schema_hash(&[dir.path().to_owned()], &["pg 18"]).unwrap()
+    );
+    assert_ne!(
+        schema_hash(&[], &["a\0b"]).unwrap(),
+        schema_hash(&[], &["a", "b"]).unwrap()
     );
 }
 
@@ -533,4 +578,282 @@ impl Drop for Writer {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
+}
+
+#[test]
+fn reap_keeps_new_and_unreadable_schema_stamps_even_with_no_versions_kept() {
+    let server = Server::start(&ClusterOptions::default()).unwrap();
+    let databases = demo_schema(&server, "recent", "one");
+    let policy = Reap {
+        schemas: 0,
+        days: 0,
+        failed: 0,
+    };
+    for comment in [
+        format!("'devkit used {}'", now_secs()),
+        "NULL".into(),
+        "'devkit used unreadable'".into(),
+    ] {
+        for name in [&databases.schema, &databases.template] {
+            server
+                .sql(
+                    "postgres",
+                    &format!("COMMENT ON DATABASE {name} IS {comment}"),
+                )
+                .unwrap();
+        }
+        assert!(server.reap(&policy).unwrap().is_empty());
+        assert!(server.database_exists(&databases.schema).unwrap());
+        assert!(server.database_exists(&databases.template).unwrap());
+    }
+}
+
+#[test]
+fn reap_rechecks_use_and_connections_after_choosing_names() {
+    let server = Server::start(&ClusterOptions::default()).unwrap();
+    let databases = demo_schema(&server, "recheck", "one");
+    let names = vec![databases.schema.clone(), databases.template.clone()];
+    for name in &names {
+        server
+            .sql(
+                "postgres",
+                &format!("COMMENT ON DATABASE {name} IS 'devkit used 1'"),
+            )
+            .unwrap();
+    }
+    // The schema becomes used after cleanup has chosen both names.
+    server.stamp_used(&databases.schema).unwrap();
+    assert!(server.drop_unused(names.clone()).unwrap().is_empty());
+    server
+        .sql(
+            "postgres",
+            &format!(
+                "COMMENT ON DATABASE {} IS 'devkit used 1'",
+                databases.schema
+            ),
+        )
+        .unwrap();
+    let mut holder = Command::new("psql")
+        .args(["-X", "-q", "-h"])
+        .arg(server.socket())
+        .args(["-d", &databases.schema, "-c", "SELECT pg_sleep(60)"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while server
+        .sql(
+            "postgres",
+            &format!(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = '{}'",
+                databases.schema
+            ),
+        )
+        .unwrap()
+        .trim()
+        == "0"
+    {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let dropped = server.drop_unused(names.clone()).unwrap();
+    let _ = holder.kill();
+    let _ = holder.wait();
+    assert!(dropped.is_empty());
+    for name in &names {
+        assert!(server.database_exists(name).unwrap());
+    }
+    let template = server
+        .sql(
+            "postgres",
+            &format!(
+                "SELECT datistemplate FROM pg_database WHERE datname = '{}'",
+                databases.template
+            ),
+        )
+        .unwrap();
+    assert_eq!(template.trim(), "t");
+}
+
+#[test]
+fn schema_builds_and_reaping_in_parallel_keep_every_live_schema() {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+    let server = Server::start(&ClusterOptions::default()).unwrap();
+    let complete = AtomicBool::new(false);
+    let (started, building) = mpsc::sync_channel(0);
+    std::thread::scope(|scope| {
+        let builder = scope.spawn(|| {
+            let result = (|| -> Result<Vec<SchemaDatabases>> {
+                let mut all = Vec::new();
+                for i in 0..8 {
+                    let bootstrap = |server: &Server, name: &str| -> Result {
+                        if i == 0 {
+                            started.send(()).unwrap();
+                        }
+                        server
+                            .sql(name, "CREATE TABLE marker (id integer)")
+                            .map(drop)
+                    };
+                    let databases = server.ensure_schema(&Schema {
+                        project: "parallel",
+                        hash: format!("h{i}"),
+                        bootstrap: &bootstrap,
+                    })?;
+                    server.sql(&databases.schema, "SELECT count(*) FROM marker")?;
+                    all.push(databases);
+                }
+                Ok(all)
+            })();
+            complete.store(true, Ordering::Release);
+            result
+        });
+        building.recv().unwrap();
+        let policy = Reap {
+            schemas: 0,
+            days: 0,
+            failed: 0,
+        };
+        while !complete.load(Ordering::Acquire) {
+            assert!(server.reap(&policy).unwrap().is_empty());
+        }
+        for databases in builder.join().unwrap().unwrap() {
+            assert!(server.database_exists(&databases.template).unwrap());
+            assert_eq!(
+                server
+                    .sql(&databases.schema, "SELECT count(*) FROM marker")
+                    .unwrap()
+                    .trim(),
+                "0"
+            );
+        }
+    });
+}
+
+#[test]
+fn a_run_without_an_explicit_server_leaves_databases_alone() {
+    let server = Server::start(&ClusterOptions::default()).unwrap();
+    let name = format!("t_{}_1_1", dead_pid());
+    server
+        .sql("postgres", &format!("CREATE DATABASE {name}"))
+        .unwrap();
+    let runtime = tempfile::tempdir_in(server.socket()).unwrap();
+    fs::create_dir(runtime.path().join("devkit")).unwrap();
+    std::os::unix::fs::symlink(server.socket(), runtime.path().join("devkit/pg")).unwrap();
+    let service = Server {
+        socket: runtime.path().join("devkit/pg"),
+        owned: None,
+    };
+    assert!(service.ready());
+    for ambient_socket in [false, true] {
+        let marker = runtime.path().join(format!("probe-{ambient_socket}"));
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        child
+            .args(["--exact", "pg::tests::cleanup_without_server_child"])
+            .env("DEVKIT_CLEANUP_PROBE", &marker)
+            .env_remove("DEVKIT_PG_SOCKET")
+            .env("XDG_RUNTIME_DIR", runtime.path());
+        if ambient_socket {
+            child.env("DEVKIT_PG_SOCKET", server.socket());
+        }
+        assert!(child.status().unwrap().success());
+        assert_eq!(fs::read_to_string(marker).unwrap(), "done");
+        assert!(server.database_exists(&name).unwrap());
+    }
+    Server::prepare_run(&[(
+        "DEVKIT_PG_SOCKET".into(),
+        server.socket().display().to_string(),
+    )]);
+    assert!(!server.database_exists(&name).unwrap());
+}
+
+#[test]
+fn cleanup_without_server_child() {
+    if let Some(marker) = std::env::var_os("DEVKIT_CLEANUP_PROBE") {
+        Server::prepare_run(&[]);
+        fs::write(PathBuf::from(marker), "done").unwrap();
+    }
+}
+
+#[test]
+fn schema_names_keep_the_whole_project_name_during_cleanup() {
+    let server = Server::start(&ClusterOptions::default()).unwrap();
+    let databases = demo_schema(&server, "example_schema_project", "abc");
+    for name in [&databases.schema, &databases.template] {
+        server
+            .sql(
+                "postgres",
+                &format!("COMMENT ON DATABASE {name} IS 'devkit used 1'"),
+            )
+            .unwrap();
+    }
+    let mut dropped = server.reap(&Reap::default()).unwrap();
+    dropped.sort();
+    assert_eq!(dropped, vec![databases.schema, databases.template]);
+    assert!(
+        server
+            .drop_unused(vec!["absent_schema_one".into()])
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn reap_does_not_drop_an_old_schema_during_a_template_rebuild() {
+    let server = Server::start(&ClusterOptions::default()).unwrap();
+    let databases = demo_schema(&server, "rebuilding", "one");
+    server
+        .sql(
+            "postgres",
+            &format!(
+                "ALTER DATABASE {} WITH IS_TEMPLATE false",
+                databases.template
+            ),
+        )
+        .unwrap();
+    server.drop_database(&databases.template).unwrap();
+    server
+        .sql(
+            "postgres",
+            &format!(
+                "COMMENT ON DATABASE {} IS 'devkit used 1'",
+                databases.schema
+            ),
+        )
+        .unwrap();
+    let policy = Reap {
+        schemas: 0,
+        days: 0,
+        failed: 0,
+    };
+    let bootstrap = |server: &Server, building: &str| -> Result {
+        let dropped =
+            std::thread::scope(|scope| scope.spawn(|| server.reap(&policy)).join().unwrap())?;
+        assert!(dropped.is_empty(), "{dropped:?}");
+        assert!(server.database_exists(&databases.schema)?);
+        server
+            .sql(building, "CREATE TABLE t (id integer)")
+            .map(drop)
+    };
+    assert_eq!(
+        server
+            .ensure_schema(&Schema {
+                project: "rebuilding",
+                hash: "one".into(),
+                bootstrap: &bootstrap
+            })
+            .unwrap(),
+        databases
+    );
+    assert_eq!(
+        server
+            .sql(&databases.schema, "SELECT count(*) FROM t")
+            .unwrap()
+            .trim(),
+        "0"
+    );
+    assert!(server.reap(&policy).unwrap().is_empty());
 }

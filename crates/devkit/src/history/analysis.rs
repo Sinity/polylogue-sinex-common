@@ -1,20 +1,25 @@
 //! Comparisons over recorded stages and tests. Native queue and resource costs stay with AgentCTL.
 use super::Store;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 impl Store {
     pub fn explain(&self, project: &str, id: i64) -> Result<Value, String> {
-        let mut header = self.conn.query_row(
-            "SELECT command,args,host,toolchain,status,duration_ms,started_ms,agentctl_job,dirty FROM runs WHERE project=?1 AND id=?2",
-            params![project,id],
-            |row| Ok(json!({"command":row.get::<_,String>(0)?,"args":row.get::<_,String>(1)?,"host":row.get::<_,Option<String>>(2)?,"toolchain":row.get::<_,Option<String>>(3)?,"status":row.get::<_,String>(4)?,"duration_ms":row.get::<_,Option<i64>>(5)?,"started_ms":row.get::<_,i64>(6)?,"agentctl_job":row.get::<_,Option<String>>(7)?,"dirty_hash":row.get::<_,Option<String>>(8)?})),
-        ).optional().map_err(|error|error.to_string())?.ok_or("run not found in this project")?;
         let observed = self
             .run(id)
             .map_err(|error| error.to_string())?
-            .ok_or("run not found")?;
+            .filter(|run| run.project == project)
+            .ok_or("run not found in this project")?;
+        let mut header = self.conn.query_row(
+            "SELECT host,toolchain,agentctl_job,dirty FROM runs WHERE id=?1",
+            [id],
+            |row| Ok(json!({"host":row.get::<_,Option<String>>(0)?,"toolchain":row.get::<_,Option<String>>(1)?,"agentctl_job":row.get::<_,Option<String>>(2)?,"dirty_hash":row.get::<_,Option<String>>(3)?})),
+        ).map_err(|error| error.to_string())?;
+        header["command"] = json!(observed.command);
+        header["args"] = json!(observed.args);
+        header["duration_ms"] = json!(observed.duration_ms);
+        header["started_ms"] = json!(observed.started_ms);
         header["status"] = json!(observed.status);
         header["checkout"] = json!(observed.checkout);
         header["head"] = json!(observed.head);
@@ -73,24 +78,30 @@ impl Store {
                 return Err("run source could not be observed consistently".into());
             }
         }
-        let names: BTreeSet<&str> = [&before, &after]
+        let durations = |report: &Value| -> BTreeMap<String, Value> {
+            report["stages"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|stage| {
+                    Some((
+                        stage["name"].as_str()?.to_owned(),
+                        stage["duration_ms"].clone(),
+                    ))
+                })
+                .collect()
+        };
+        let before_stages = durations(&before);
+        let after_stages = durations(&after);
+        let names: BTreeSet<_> = before_stages.keys().chain(after_stages.keys()).collect();
+        let stages: Vec<_> = names
             .into_iter()
-            .flat_map(|report| report["stages"].as_array().into_iter().flatten())
-            .filter_map(|stage| stage["name"].as_str())
+            .map(|name| {
+                let before = before_stages.get(name).unwrap_or(&Value::Null);
+                let after = after_stages.get(name).unwrap_or(&Value::Null);
+                json!({"name":name,"change":duration_delta(before, after)})
+            })
             .collect();
-        let mut stages = Vec::new();
-        for name in names {
-            let duration = |report: &Value| {
-                report["stages"]
-                    .as_array()
-                    .and_then(|stages| stages.iter().find(|stage| stage["name"] == name))
-                    .map(|stage| stage["duration_ms"].clone())
-                    .unwrap_or(Value::Null)
-            };
-            stages.push(
-                json!({"name":name,"change":duration_delta(&duration(&before), &duration(&after))}),
-            );
-        }
         Ok(
             json!({"duration_change":duration_delta(&before["header"]["duration_ms"], &after["header"]["duration_ms"]),"stage_changes":stages,"before":before,"after":after}),
         )

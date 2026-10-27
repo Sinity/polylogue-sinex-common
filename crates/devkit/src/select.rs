@@ -1,6 +1,6 @@
 //! Tests affected by a diff: changed packages and their reverse dependencies.
 //!
-//! Files outside packages select the workspace, except Markdown documentation.
+//! Files outside packages select the workspace, including Markdown read by tests.
 //! Changes confined to a Cargo integration-test target select that binary.
 mod functions;
 
@@ -124,7 +124,6 @@ fn select(root: &Path, files: &[String], packages: &[Package]) -> Selection {
                     changed.insert(package.name.clone());
                 }
             }
-            None if file.ends_with(".md") => {}
             None => return Selection::Workspace,
         }
     }
