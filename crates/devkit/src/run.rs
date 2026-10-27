@@ -337,6 +337,16 @@ impl Run {
     /// (stage `<name>`), keeping each test's outcome. Every selected test runs:
     /// there is no fail-fast, and selecting no tests fails unless allowed.
     pub fn nextest(&mut self, name: &str, options: &Nextest) -> Result {
+        self.nextest_with(name, options, crate::cargo_command, &["nextest", "run"])
+    }
+
+    pub(crate) fn nextest_with(
+        &mut self,
+        name: &str,
+        options: &Nextest,
+        cargo: impl Fn() -> Command,
+        prefix: &[&str],
+    ) -> Result {
         #[cfg(feature = "pg")]
         crate::pg::Server::prepare_run(&options.env);
         let mut selection = None;
@@ -362,11 +372,10 @@ impl Run {
         }
         let args: Vec<&str> = selected_args.iter().map(String::as_str).collect();
 
-        let mut build = crate::cargo_command();
+        let mut build = cargo();
         build
+            .args(prefix)
             .args([
-                "nextest",
-                "run",
                 "--no-run",
                 "--cargo-message-format",
                 "json-diagnostic-rendered-ansi",
@@ -378,7 +387,14 @@ impl Run {
             run.capture_cargo_json(&mut build)
         })?;
 
-        let target = self.target_dir()?;
+        let target = env
+            .iter()
+            .rev()
+            .find(|(name, _)| name == "CARGO_TARGET_DIR")
+            .map(|(_, value)| self.root.join(value))
+            .map(Ok)
+            .unwrap_or_else(|| self.target_dir())?;
+        fs::create_dir_all(&target).map_err(|e| e.to_string())?;
         let junit = target
             .join("nextest")
             .join("default")
@@ -393,8 +409,9 @@ impl Run {
             format!("nextest-version = \"0.9.143\"\n[profile.default.junit]\npath = {report_path}\nstore-success-output = false\nstore-failure-output = true\nreport-skipped = \"all\"\n"),
         )
         .map_err(|e| format!("{}: {e}", config.display()))?;
-        let mut test = crate::cargo_command();
-        test.args(["nextest", "run", "--no-fail-fast"])
+        let mut test = cargo();
+        test.args(prefix)
+            .arg("--no-fail-fast")
             .arg(if options.allow_no_tests {
                 "--no-tests=pass"
             } else {
@@ -586,7 +603,7 @@ fn describe(command: &Command) -> String {
 }
 
 fn status(command: &mut Command) -> Result {
-    let status = crate::process::Process::start(command)?.wait()?;
+    let status = command.status().map_err(|e| format!("{command:?}: {e}"))?;
     if status.success() {
         Ok(())
     } else {

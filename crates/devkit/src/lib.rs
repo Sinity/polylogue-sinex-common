@@ -11,6 +11,7 @@
 //! and the run continues.
 
 mod cargo;
+mod files;
 mod junit;
 #[cfg(any(feature = "nats", feature = "pg"))]
 mod owner;

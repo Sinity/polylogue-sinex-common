@@ -1,11 +1,13 @@
 //! Finding positions and fingerprints from the same stream used for masking.
 use crate::{Cell, Masker};
-use sha2::{Digest, Sha256};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+type Fingerprint = Hmac<Sha256>;
 use std::io;
 mod assignment;
 
 /// Changes whenever the scan rules or finding encoding changes.
-pub const SCANNER_VERSION: &str = "credential-output-1";
+pub const SCANNER_VERSION: &str = "credential-output-2";
 
 /// One masked byte range. It contains no source text.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -16,9 +18,10 @@ pub struct Finding {
     pub fingerprint: String,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct Observed {
-    current: Option<(usize, usize, &'static str, Sha256)>,
+    key: Fingerprint,
+    current: Option<(usize, usize, &'static str, Fingerprint)>,
     done: Vec<Finding>,
 }
 
@@ -37,7 +40,7 @@ impl Observed {
         }
         let (_, end, _, hash) = self
             .current
-            .get_or_insert_with(|| (cell.pos, cell.pos, region.kind, Sha256::new()));
+            .get_or_insert_with(|| (cell.pos, cell.pos, region.kind, self.key.clone()));
         hash.update(cell.c.encode_utf8(&mut [0; 4]).as_bytes());
         *end = cell.pos + cell.c.len_utf8();
     }
@@ -48,7 +51,7 @@ impl Observed {
                 pattern,
                 start,
                 end,
-                fingerprint: format!("{:x}", hash.finalize()),
+                fingerprint: format!("{:x}", hash.finalize().into_bytes()),
             });
         }
     }
@@ -59,17 +62,17 @@ impl Observed {
 /// Offsets count UTF-8 bytes from the start of the stream.
 pub struct Scanner(Masker, assignment::Assignment);
 
-impl Default for Scanner {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Scanner {
-    pub fn new() -> Self {
+    /// Use a random key belonging to the archive whose text is being scanned.
+    pub fn new(key: &[u8]) -> Self {
+        let key = Fingerprint::new_from_slice(key).expect("HMAC accepts any key length");
         let mut stream = Masker::new();
-        stream.findings = Some(Observed::default());
-        Self(stream, assignment::Assignment::default())
+        stream.findings = Some(Observed {
+            key: key.clone(),
+            current: None,
+            done: Vec::new(),
+        });
+        Self(stream, assignment::Assignment::new(key))
     }
 
     pub fn push(&mut self, text: &str) -> io::Result<()> {

@@ -55,7 +55,11 @@ fn a_file_outside_every_package_selects_the_workspace() {
     );
     assert_eq!(
         select(root, &files(&["docs/development.md"]), &packages()),
-        Selection::Nothing
+        Selection::Workspace
+    );
+    assert_eq!(
+        select(root, &files(&["README.md"]), &packages()),
+        Selection::Workspace
     );
 }
 

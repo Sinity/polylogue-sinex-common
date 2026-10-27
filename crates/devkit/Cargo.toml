@@ -26,6 +26,8 @@ bench = ["history"]
 
 [dependencies]
 blake3 = "1"
+libc = "0.2"
+signal-hook = "0.3"
 devkit-macros = { path = "../devkit-macros", version = "0.1.0" }
 clap = { version = "4", features = ["derive"], optional = true }
 quick-xml = "0.38"

@@ -20,14 +20,17 @@ The tests run all 138 catalog cases at every byte split and at chunk widths 1 to
 
 `Scanner` reads UTF-8 pieces with `push`, ends each authored string with
 `block_boundary`, and ends the stream with `finish`. Each boundary returns
-findings with a pattern name, byte start and end, and a SHA-256 fingerprint.
+findings with a pattern name, byte start and end, and an HMAC-SHA256 fingerprint.
+`Scanner::new` requires the caller's key. Polylogue must supply a per-archive
+random key kept in the archive's metadata and reuse it for scans of that archive.
 It returns no matched text. Offsets count source bytes across all pushes;
 a boundary ends token matches but keeps an open private key. Private keys
 spanning several blocks produce one finding per block.
 
 The scanner observes the masker's regions, including its conservative masks
 for an undecided long match. Overlapping regions produce one finding. It also
-finds generic credential assignments with at least 20 ASCII value characters
+finds generic credential assignments, including JSON keys and labels with
+underscore or hyphen prefixes, with at least 20 ASCII value characters
 and Shannon entropy of at least 3 bits per character. This additional scan
 rule does not change normal output masking. It has no value length cutoff;
 only a hash and character counts accumulate. `SCANNER_VERSION` identifies the
