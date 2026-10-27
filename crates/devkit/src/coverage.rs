@@ -1,5 +1,5 @@
 //! LLVM coverage with explicit scope and separate instrumentation output.
-use crate::{Run, cargo_command};
+use crate::{Nextest, Run, cargo_command};
 use serde_json::{Value, json};
 use std::{fs, path::PathBuf};
 
@@ -11,7 +11,7 @@ pub struct Coverage {
     pub format: String,
     #[arg(long)]
     pub threshold: Option<f64>,
-    /// Arguments passed unchanged to llvm-cov nextest, including package and test selection.
+    /// Package and test selection, including devkit's changed-file selection.
     #[arg(last = true)]
     pub args: Vec<String>,
 }
@@ -68,14 +68,14 @@ fn execute_with(
     if summary.exists() || output.join("build").exists() {
         return Err("coverage output already used; choose a new directory".into());
     }
-    let mut command = cargo();
-    command
-        .args(["llvm-cov", "nextest", "--json", "--output-path"])
-        .arg(&summary)
-        .envs(env.iter().cloned())
-        .env("CARGO_TARGET_DIR", output.join("build"))
-        .env("CARGO_LLVM_COV_TARGET_DIR", output.join("build"))
-        .env("CARGO_LLVM_COV_BUILD_DIR", output.join("build"));
+    let mut env = env.to_vec();
+    for name in [
+        "CARGO_TARGET_DIR",
+        "CARGO_LLVM_COV_TARGET_DIR",
+        "CARGO_LLVM_COV_BUILD_DIR",
+    ] {
+        env.push((name.into(), output.join("build").display().to_string()));
+    }
     let explicit_scope = options
         .args
         .iter()
@@ -87,11 +87,27 @@ fn execute_with(
                 || (arg.starts_with("-p") && arg.len() > 2)
                 || arg == "--workspace"
         });
+    let mut args = options.args.clone();
     if !explicit_scope {
-        command.arg("--workspace");
+        args.insert(0, "--workspace".into());
     }
-    command.args(&options.args).arg("--no-tests=fail");
-    run.command("coverage", &mut command)?;
+    run.nextest_with(
+        "coverage",
+        &Nextest {
+            args,
+            env: env.clone(),
+            ..Nextest::default()
+        },
+        &cargo,
+        &["llvm-cov", "nextest", "--no-report"],
+    )?;
+    let mut command = cargo();
+    command
+        .args(["llvm-cov", "report", "--json", "--output-path"])
+        .arg(&summary)
+        .args(report_args(&options.args)?)
+        .envs(env.iter().cloned());
+    run.command("coverage JSON", &mut command)?;
     let report: Value =
         serde_json::from_slice(&fs::read(&summary).map_err(|e| format!("coverage report: {e}"))?)
             .map_err(|e| e.to_string())?;
@@ -114,7 +130,10 @@ fn execute_with(
         command
             .args(report_args(&options.args)?)
             .envs(env.iter().cloned());
-        run.command("coverage report", &mut command)?;
+        run.command(
+            &format!("coverage {}", options.format.to_ascii_uppercase()),
+            &mut command,
+        )?;
         if !expected.is_file() {
             return Err(format!("report missing: {}", expected.display()));
         }
@@ -140,6 +159,9 @@ fn report_args(args: &[String]) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
+        if arg == "--" {
+            break;
+        }
         if matches!(
             arg.as_str(),
             "-p" | "--package" | "--exclude" | "--features" | "--target"

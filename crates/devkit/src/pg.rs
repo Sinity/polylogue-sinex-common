@@ -32,6 +32,9 @@ use std::{
 
 pub type Result<T = ()> = std::result::Result<T, String>;
 
+const RECENT_USE_SECONDS: u64 = 3600;
+const DAY_SECONDS: u64 = 86_400;
+
 /// Settings for a throwaway cluster.
 #[derive(Debug, Clone, Default)]
 pub struct ClusterOptions {
@@ -207,6 +210,10 @@ impl Server {
     /// building them with its bootstrap if they do not.
     pub fn ensure_schema(&self, schema: &Schema<'_>) -> Result<SchemaDatabases> {
         let databases = SchemaDatabases::new(schema.project, &schema.hash)?;
+        let schema_lock = self.schema_lock(&databases.schema)?;
+        schema_lock
+            .lock()
+            .map_err(|e| format!("schema lock: {e}"))?;
         if !self.database_exists(&databases.template)? {
             // Ownership is in the CREATE name itself: bootstrap may spend time
             // compiling without a database connection. A concurrent reaper
@@ -220,6 +227,7 @@ impl Server {
                 );
                 return Err(format!("schema bootstrap: {error}"));
             }
+            self.stamp_used(&building)?;
             // Renaming installs the template only once it is complete. If
             // another process finished first, its copy is used.
             if self
@@ -236,16 +244,17 @@ impl Server {
                 if !self.database_exists(&databases.template)? {
                     return Err(format!("could not install {}", databases.template));
                 }
-            } else {
-                self.sql(
-                    "postgres",
-                    &format!(
-                        "ALTER DATABASE {} WITH IS_TEMPLATE true",
-                        databases.template
-                    ),
-                )?;
             }
         }
+        // A reused template must be marked before cloning or inspecting it.
+        self.stamp_used(&databases.template)?;
+        self.sql(
+            "postgres",
+            &format!(
+                "ALTER DATABASE {} WITH IS_TEMPLATE true",
+                databases.template
+            ),
+        )?;
         if !self.database_exists(&databases.schema)? {
             let created = self.sql(
                 "postgres",
@@ -288,14 +297,18 @@ impl Server {
             }
         }
         // Mark both as used now, for `reap`.
-        let now = now_secs();
         for name in [&databases.template, &databases.schema] {
-            self.sql(
-                "postgres",
-                &format!("COMMENT ON DATABASE {name} IS 'devkit used {now}'"),
-            )?;
+            self.stamp_used(name)?;
         }
         Ok(databases)
+    }
+
+    fn stamp_used(&self, name: &str) -> Result {
+        self.sql(
+            "postgres",
+            &format!("COMMENT ON DATABASE {name} IS 'devkit used {}'", now_secs()),
+        )
+        .map(drop)
     }
 
     /// A fresh database copied from `template`.
@@ -326,6 +339,7 @@ impl Server {
     /// - schema versions beyond the newest [`Reap::schemas`] per project, or
     ///   unused for [`Reap::days`].
     ///
+    /// Databases stamped used or failed within the last hour are kept.
     /// Returns the dropped names.
     pub fn reap(&self, policy: &Reap) -> Result<Vec<String>> {
         let now = now_secs();
@@ -353,23 +367,22 @@ impl Server {
             if let Some(test) = TestName::parse(name) {
                 if let Some(at) = comment.strip_prefix("devkit failed ") {
                     failed.push((at.trim().parse::<u64>().unwrap_or(0), name.to_owned()));
-                } else if !pid_alive(test.pid) || now > test.created + 86_400 {
+                } else if !crate::owner::alive(test.pid)
+                    || now.saturating_sub(test.created) > DAY_SECONDS
+                {
                     drop.push(name.to_owned());
                 }
             } else if let Some(owner) = building_owner(name) {
                 // A bootstrap may compile for minutes without a connection;
                 // only its owner's exit means it was abandoned.
-                if !pid_alive(owner) {
+                if !crate::owner::alive(owner) {
                     drop.push(name.to_owned());
                 }
-            } else if let Some((project, hash)) = name
-                .split_once("_schema_")
-                .or_else(|| name.split_once("_template_"))
-            {
+            } else if let Some((project, _, hash)) = schema_parts(name) {
                 let used = comment
                     .strip_prefix("devkit used ")
                     .and_then(|s| s.trim().parse::<u64>().ok())
-                    .unwrap_or(0);
+                    .unwrap_or(now);
                 let last = versions
                     .entry((project.to_owned(), hash.to_owned()))
                     .or_default();
@@ -389,27 +402,134 @@ impl Server {
         for (project, mut list) in by_project {
             list.sort_by(|a, b| b.cmp(a));
             for (rank, (used, hash)) in list.into_iter().enumerate() {
-                if rank >= policy.schemas || now > used + policy.days * 86_400 {
+                if now.saturating_sub(used) > RECENT_USE_SECONDS
+                    && (rank >= policy.schemas
+                        || now.saturating_sub(used) > policy.days.saturating_mul(DAY_SECONDS))
+                {
                     drop.push(format!("{project}_schema_{hash}"));
                     drop.push(format!("{project}_template_{hash}"));
                 }
             }
         }
+        self.drop_unused(drop)
+    }
+
+    fn schema_lock(&self, name: &str) -> Result<fs::File> {
+        let (project, _, hash) =
+            schema_parts(name).ok_or_else(|| format!("not a schema database: {name:?}"))?;
+        let path = self.socket.join(format!("{project}_schema_{hash}.lock"));
+        // Keep the file in place so every process locks the same inode.
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    fn unused(&self, name: &str) -> Result<bool> {
+        let pair = schema_parts(name).map(|(project, kind, hash)| {
+            let other = if kind == "_schema_" {
+                "template"
+            } else {
+                "schema"
+            };
+            format!("{project}_{other}_{hash}")
+        });
+        let other = pair.as_deref().unwrap_or(name);
+        // Both members may have been used since the initial list was read.
+        let rows = self.sql(
+            "postgres",
+            &format!(
+                "SELECT d.datname, coalesce(shobj_description(d.oid, 'pg_database'), ''),
+                (SELECT count(*) FROM pg_stat_activity a WHERE a.datname = d.datname)
+             FROM pg_database d WHERE d.datname IN ('{name}', '{other}')"
+            ),
+        )?;
+        if !rows.lines().any(|row| row.split('|').next() == Some(name)) {
+            return Ok(false);
+        }
+        let now = now_secs();
+        Ok(!rows.lines().any(|row| {
+            let fields: Vec<_> = row.splitn(3, '|').collect();
+            if fields.len() != 3 || fields[2].trim() != "0" {
+                return true;
+            }
+            let comment = fields[1];
+            if pair.is_some() {
+                let used = comment
+                    .strip_prefix("devkit used ")
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    .unwrap_or(now);
+                if now.saturating_sub(used) <= RECENT_USE_SECONDS {
+                    return true;
+                }
+            } else if let Some(stamp) = comment
+                .strip_prefix("devkit failed ")
+                .or_else(|| comment.strip_prefix("devkit used "))
+            {
+                let used = stamp.trim().parse::<u64>().unwrap_or(now);
+                if now.saturating_sub(used) <= RECENT_USE_SECONDS {
+                    return true;
+                }
+            }
+            building_owner(fields[0]).is_some_and(crate::owner::alive)
+        }))
+    }
+
+    fn drop_unused(&self, names: Vec<String>) -> Result<Vec<String>> {
         let mut dropped = Vec::new();
-        for name in drop {
-            if name.contains("_template_") {
-                let _ = self.sql(
+        for name in names {
+            check_name(&name)?;
+            let _schema_lock = if schema_parts(&name).is_some() {
+                let file = self.schema_lock(&name)?;
+                match file.try_lock() {
+                    Ok(()) => Some(file),
+                    Err(fs::TryLockError::WouldBlock) => continue,
+                    Err(fs::TryLockError::Error(error)) => {
+                        return Err(format!("schema lock: {error}"));
+                    }
+                }
+            } else {
+                None
+            };
+            if !self.unused(&name)? {
+                continue;
+            }
+            let template = schema_parts(&name).is_some_and(|(_, kind, _)| kind == "_template_");
+            if template {
+                // PostgreSQL refuses DROP while IS_TEMPLATE is true.
+                self.sql(
                     "postgres",
                     &format!("ALTER DATABASE {name} WITH IS_TEMPLATE false"),
-                );
+                )?;
+                let rechecked = self.unused(&name);
+                if !matches!(rechecked, Ok(true)) {
+                    let restored = self.sql(
+                        "postgres",
+                        &format!("ALTER DATABASE {name} WITH IS_TEMPLATE true"),
+                    );
+                    rechecked?;
+                    restored?;
+                    continue;
+                }
             }
-            // Only databases without connections were chosen; one that gained
-            // a connection since is refused by DROP without FORCE and kept.
+            // DROP without FORCE also refuses connections opened after the
+            // last check. Restore template status if that happens.
             if self
-                .sql("postgres", &format!("DROP DATABASE IF EXISTS {name}"))
+                .sql("postgres", &format!("DROP DATABASE {name}"))
                 .is_ok()
             {
                 dropped.push(name);
+            } else if template {
+                let restored = self.sql(
+                    "postgres",
+                    &format!("ALTER DATABASE {name} WITH IS_TEMPLATE true"),
+                );
+                if restored.is_err() && self.database_exists(&name)? {
+                    restored?;
+                }
             }
         }
         Ok(dropped)
@@ -423,23 +543,19 @@ impl Server {
         }
     }
 
-    /// Reaps on the server supplied to a test run, or on the running service
-    /// when the run does not need a database fixture. Never starts a server.
+    /// Reaps only on a server explicitly supplied by this run.
     pub(crate) fn prepare_run(env: &[(String, String)]) {
         let socket = env
             .iter()
             .rev()
             .find(|(name, _)| name == "DEVKIT_PG_SOCKET")
-            .map(|(_, value)| PathBuf::from(value))
-            .or_else(|| std::env::var_os("DEVKIT_PG_SOCKET").map(PathBuf::from));
+            .map(|(_, value)| PathBuf::from(value));
         if let Some(socket) = socket {
             Self {
                 socket,
                 owned: None,
             }
             .prepare_test_run();
-        } else if let Some(server) = Self::service() {
-            server.prepare_test_run();
         }
     }
 
@@ -481,7 +597,8 @@ pub struct Reap {
     pub schemas: usize,
     /// Schema versions unused for this many days are dropped regardless.
     pub days: u64,
-    /// Failed test databases kept for inspection, newest first.
+    /// Older failed test databases kept for inspection, newest first.
+    /// Databases stamped within the last hour are kept regardless.
     pub failed: usize,
 }
 
@@ -511,6 +628,14 @@ impl TestName {
     }
 }
 
+fn schema_parts(name: &str) -> Option<(&str, &str, &str)> {
+    ["_schema_", "_template_"]
+        .into_iter()
+        .filter_map(|kind| Some((name.rfind(kind)?, kind)))
+        .max_by_key(|(start, _)| *start)
+        .map(|(start, kind)| (&name[..start], kind, &name[start + kind.len()..]))
+}
+
 /// The owner pid in a half-built template's name,
 /// `devkit_building_<pid>_<unique>`: short enough for PostgreSQL's identifier
 /// limit whatever the project's name.
@@ -519,12 +644,6 @@ fn building_owner(name: &str) -> Option<u32> {
     let pid = parts.next()?.parse().ok()?;
     parts.next()?.parse::<u64>().ok()?;
     parts.next().is_none().then_some(pid)
-}
-
-/// Whether a process with this pid exists on this host. A reused pid only
-/// delays reaping until the one-day limit.
-fn pid_alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
 }
 
 /// How a project builds its schema into an empty database.
@@ -565,44 +684,18 @@ impl SchemaDatabases {
 /// versions. File names enter the hash relative to the path they were found
 /// under, so every checkout of the same sources gets the same hash.
 pub fn schema_hash(paths: &[PathBuf], extra: &[&str]) -> Result<String> {
-    let mut hasher = blake3::Hasher::new();
-    for path in paths {
-        let mut files = Vec::new();
-        collect(path, &mut files)?;
-        files.sort();
-        for file in &files {
-            let relative = file.strip_prefix(path).unwrap_or(file);
-            hasher.update(relative.to_string_lossy().as_bytes());
-            hasher.update(&[0]);
-            hasher.update(&fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?);
-        }
-        hasher.update(&[1]);
-    }
-    for value in extra {
-        hasher.update(value.as_bytes());
-        hasher.update(&[0]);
-    }
-    Ok(hasher.finalize().to_hex().to_string())
-}
-
-fn collect(path: &Path, files: &mut Vec<PathBuf>) -> Result {
-    let meta = fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    if meta.is_file() {
-        files.push(path.to_owned());
-    } else if meta.is_dir() && path.file_name().is_none_or(|n| n != "target") {
-        for entry in fs::read_dir(path).map_err(|e| format!("{}: {e}", path.display()))? {
-            collect(&entry.map_err(|e| e.to_string())?.path(), files)?;
-        }
-    }
-    Ok(())
+    crate::files::hash(paths, extra, true, |path, directory| {
+        !directory || path.file_name().is_none_or(|n| n != "target")
+    })
+    .map(|hash| hash.to_hex().to_string())
 }
 
 /// A database for one test, cloned from the template named in the
 /// environment that [`Server::test_env`] produced. It is dropped when the
 /// value is, unless the test is panicking: then it is kept for inspection,
 /// marked failed and its name printed. [`Server::reap`] keeps only the
-/// newest few failed ones, and drops those of tests killed before they
-/// could drop their own.
+/// recent failed ones and the newest few older ones, and drops databases
+/// of tests killed before they could drop their own.
 pub struct TestDatabase {
     socket: PathBuf,
     pub name: String,

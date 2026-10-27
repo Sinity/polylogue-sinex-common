@@ -147,7 +147,8 @@ fn execute_with(
         flags.push(extra);
         command.env("RUSTFLAGS", flags);
     }
-    // Nix's pinned compiler exposes sanitizer flags through this experiment-only setting.
+    // cargo-fuzz needs unstable sanitizer flags on the pinned stable Nix compiler.
+    // Projects with external sanitizer runtimes supply their linker flags above.
     command
         .env("RUSTC_BOOTSTRAP", "1")
         .args(["fuzz", "run", target]);

@@ -1,16 +1,18 @@
 //! Generic assignments use entropy because their labels alone are ambiguous.
-use super::{Finding, Sha256};
-use sha2::Digest;
+use super::{Finding, Fingerprint};
+use hmac::Mac;
 
 pub(super) struct Assignment {
     label: String,
     previous_word: bool,
-    stage: u8,
+    stage: Stage,
+    quote: Option<char>,
+    key: Fingerprint,
     start: usize,
     end: usize,
     counts: [u64; 67],
     length: u64,
-    hash: Sha256,
+    hash: Fingerprint,
     pub done: Vec<Finding>,
 }
 
@@ -28,59 +30,79 @@ const LABELS: &[&str] = &[
 ];
 const ALPHABET: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/_=-";
 
+#[derive(Clone, Copy)]
+enum Stage {
+    Label,
+    Separator,
+    ValueStart,
+    Value,
+    SkipLabel,
+}
+
 impl Assignment {
     pub fn step(&mut self, c: char, pos: usize) {
         self.character(c, pos);
-        self.previous_word = crate::word_ranges::is_word_char(c);
+        self.previous_word = crate::word_ranges::is_word_char(c)
+            && !(c == '_' && matches!(self.stage, Stage::Label) && self.label.is_empty());
     }
 
     fn character(&mut self, c: char, pos: usize) {
         match self.stage {
-            0 => {
+            Stage::Label => {
                 if self.label.is_empty() && self.previous_word {
                     return;
                 }
-                if crate::word_ranges::is_word_char(c) || c == '-' {
+                if self.label.is_empty() && matches!(c, '\'' | '"') {
+                    self.quote = Some(c);
+                } else if crate::word_ranges::is_word_char(c) || c == '-' {
                     self.label.push(c.to_ascii_lowercase());
                     if !LABELS.iter().any(|label| label.starts_with(&self.label)) {
-                        self.stage = if crate::word_ranges::is_word_char(c) {
-                            4
-                        } else {
-                            0
-                        };
                         self.label.clear();
+                        self.stage = if matches!(c, '_' | '-') {
+                            Stage::Label
+                        } else {
+                            Stage::SkipLabel
+                        };
                     }
-                } else if LABELS.contains(&self.label.as_str())
-                    && (c.is_whitespace() || ":=".contains(c))
-                {
-                    self.stage = if ":=".contains(c) { 2 } else { 1 };
+                } else if LABELS.contains(&self.label.as_str()) {
+                    if c == '=' || c == ':' {
+                        self.stage = Stage::ValueStart;
+                    } else if c.is_whitespace() || Some(c) == self.quote {
+                        self.stage = Stage::Separator;
+                    } else {
+                        self.reset();
+                    }
                     self.label.clear();
                 } else {
-                    self.label.clear();
+                    self.reset();
                 }
             }
-            1 => {
-                if ":=".contains(c) {
-                    self.stage = 2;
+            Stage::Separator => {
+                if matches!(c, ':' | '=') {
+                    self.stage = Stage::ValueStart;
                 } else if !c.is_whitespace() {
                     self.reset();
                     self.character(c, pos);
                 }
             }
-            2 => {
+            Stage::ValueStart => {
                 if c.is_whitespace() {
                     return;
                 }
-                self.stage = 3;
-                if "\"'".contains(c) {
+                self.stage = Stage::Value;
+                if matches!(c, '\'' | '"') {
                     return;
                 }
                 self.value(c, pos);
             }
-            3 => self.value(c, pos),
-            _ => {
-                if !crate::word_ranges::is_word_char(c) {
+            Stage::Value => self.value(c, pos),
+            Stage::SkipLabel => {
+                if !crate::word_ranges::is_word_char(c) || matches!(c, '_' | '-') {
+                    let quote = self.quote;
                     self.reset();
+                    if matches!(c, '_' | '-') {
+                        self.quote = quote;
+                    }
                 }
             }
         }
@@ -95,7 +117,7 @@ impl Assignment {
             // All characters are ASCII. Counts hold only the byte distribution.
             self.counts[index] += 1;
             self.length += 1;
-            self.hash.update([c as u8]);
+            self.hash.update(&[c as u8]);
         } else {
             self.boundary();
         }
@@ -118,7 +140,7 @@ impl Assignment {
                     pattern: "Generic credential assignment",
                     start: self.start,
                     end: self.end,
-                    fingerprint: format!("{:x}", self.hash.clone().finalize()),
+                    fingerprint: format!("{:x}", self.hash.clone().finalize().into_bytes()),
                 });
             }
         }
@@ -126,25 +148,28 @@ impl Assignment {
     }
 
     fn reset(&mut self) {
-        self.stage = 0;
+        self.stage = Stage::Label;
+        self.quote = None;
         self.label.clear();
         self.length = 0;
         self.counts.fill(0);
-        self.hash = Sha256::new();
+        self.hash = self.key.clone();
     }
 }
 
-impl Default for Assignment {
-    fn default() -> Self {
+impl Assignment {
+    pub fn new(key: Fingerprint) -> Self {
         Self {
             label: String::new(),
             previous_word: false,
-            stage: 0,
+            stage: Stage::Label,
+            quote: None,
+            key: key.clone(),
             start: 0,
             end: 0,
             counts: [0; 67],
             length: 0,
-            hash: Sha256::new(),
+            hash: key,
             done: Vec::new(),
         }
     }

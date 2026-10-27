@@ -69,11 +69,12 @@ fn execute_with(
     let mut results = Vec::new();
     for scenario in selected {
         let log = options.output.join(format!("{scenario}.log"));
+        let build_log = options.output.join(format!("{scenario}.build.log"));
         let file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&log)
-            .map_err(|e| format!("{}: {e}", log.display()))?;
+            .open(&build_log)
+            .map_err(|e| format!("{}: {e}", build_log.display()))?;
         let mut command = nix();
         command
             .args([
@@ -85,8 +86,22 @@ fn execute_with(
                 &format!("{flake}.{scenario}"),
             ])
             .stdout(Stdio::from(file.try_clone().map_err(|e| e.to_string())?))
+            .stderr(Stdio::from(file.try_clone().map_err(|e| e.to_string())?));
+        let build = run.command(&scenario, &mut command);
+        // Build output may be empty for a cached result. The derivation log
+        // still contains the scenario's assertions and test output.
+        let original = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&log)
+            .map_err(|e| format!("{}: {e}", log.display()))?;
+        let mut command = nix();
+        command
+            .args(["log", &format!("{flake}.{scenario}")])
+            .stdout(Stdio::from(original))
             .stderr(Stdio::from(file));
-        let result = run.command(&scenario, &mut command);
+        let logged = run.command(&format!("{scenario} log"), &mut command);
+        let result = build.and(logged);
         println!(
             "{scenario}: {} ({})",
             if result.is_ok() { "passed" } else { "failed" },
@@ -95,7 +110,7 @@ fn execute_with(
         if let Err(error) = &result {
             failures.push(format!("{scenario}: {error}; log {}", log.display()));
         }
-        results.push(serde_json::json!({"scenario":scenario,"passed":result.is_ok(),"log":log}));
+        results.push(serde_json::json!({"scenario":scenario,"passed":result.is_ok(),"log":log,"build_log":build_log}));
     }
     fs::write(
         options.output.join("results.json"),
