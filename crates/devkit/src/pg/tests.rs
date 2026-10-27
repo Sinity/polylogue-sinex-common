@@ -316,3 +316,115 @@ fn failed_bootstrap_removes_its_owned_database() {
     assert!(error.contains("deliberate bootstrap failure"));
     assert!(!server.database_exists(&building.borrow()).unwrap());
 }
+
+#[test]
+fn every_test_run_reaps_without_building_a_schema() {
+    let server = Server::start(&ClusterOptions::default()).unwrap();
+    let databases = demo_schema(&server, "runs", "same");
+    for run in 0..2 {
+        let abandoned = format!("t_{}_{}_{run}", dead_pid(), now_secs());
+        server
+            .clone_database(&databases.template, &abandoned)
+            .unwrap();
+        Server::prepare_run(&server.test_env(&databases.template));
+        assert!(!server.database_exists(&abandoned).unwrap());
+        assert!(server.database_exists(&databases.template).unwrap());
+    }
+}
+
+/// Explicit benchmark: 50 clones per strategy, three alternating rounds.
+/// The default size matches the largest observed Sinex schema template.
+#[test]
+#[ignore = "clone timing benchmark; run explicitly with --ignored --nocapture"]
+fn benchmark_database_clones() {
+    use std::time::{Duration, Instant};
+    let server = Server::start(&ClusterOptions::default()).unwrap();
+    let target: u64 = env::var("DEVKIT_BENCH_TEMPLATE_BYTES")
+        .unwrap_or_else(|_| "12662463".into())
+        .parse()
+        .unwrap();
+    server
+        .sql("postgres", "CREATE DATABASE clone_bench_template")
+        .unwrap();
+    server.sql("clone_bench_template", "CREATE TABLE sample (id bigint PRIMARY KEY, body text); ALTER TABLE sample ALTER COLUMN body SET STORAGE EXTERNAL").unwrap();
+    let mut next = 0;
+    let bytes = loop {
+        let bytes: u64 = server
+            .sql(
+                "postgres",
+                "SELECT pg_database_size('clone_bench_template')",
+            )
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        if bytes >= target {
+            break bytes;
+        }
+        let rows = ((target - bytes) / 1200).max(1);
+        server.sql("clone_bench_template", &format!("INSERT INTO sample SELECT i, repeat(md5(i::text), 32) FROM generate_series({next}, {}) i", next + rows - 1)).unwrap();
+        next += rows;
+    };
+    let expected = server
+        .sql(
+            "clone_bench_template",
+            "SELECT count(*), sum(id), sum(length(body)) FROM sample",
+        )
+        .unwrap();
+    server.sql("postgres", "CHECKPOINT").unwrap();
+    println!(
+        "template_bytes={bytes} target_bytes={target} postgres={}",
+        server
+            .sql("postgres", "SHOW server_version")
+            .unwrap()
+            .trim()
+    );
+    for round in 0..3 {
+        let strategies = if round % 2 == 0 {
+            ["FILE_COPY", "WAL_LOG"]
+        } else {
+            ["WAL_LOG", "FILE_COPY"]
+        };
+        for strategy in strategies {
+            let mut clone_time = Duration::ZERO;
+            let mut drop_time = Duration::ZERO;
+            for i in 0..50 {
+                let name = format!("clone_bench_{round}_{i}");
+                let started = Instant::now();
+                server.sql("postgres", &format!("CREATE DATABASE {name} TEMPLATE clone_bench_template STRATEGY {strategy}")).unwrap();
+                clone_time += started.elapsed();
+                if i == 0 {
+                    assert_eq!(
+                        server
+                            .sql(
+                                &name,
+                                "SELECT count(*), sum(id), sum(length(body)) FROM sample"
+                            )
+                            .unwrap(),
+                        expected
+                    );
+                    server
+                        .sql(&name, "INSERT INTO sample VALUES (-1, 'clone only')")
+                        .unwrap();
+                    assert_eq!(
+                        server
+                            .sql(
+                                "clone_bench_template",
+                                "SELECT count(*), sum(id), sum(length(body)) FROM sample"
+                            )
+                            .unwrap(),
+                        expected
+                    );
+                }
+                let started = Instant::now();
+                server.drop_database(&name).unwrap();
+                drop_time += started.elapsed();
+            }
+            println!(
+                "round={round} strategy={strategy} clones=50 clone_ms={:.3} drop_ms={:.3}",
+                clone_time.as_secs_f64() * 1000.0,
+                drop_time.as_secs_f64() * 1000.0
+            );
+        }
+    }
+}

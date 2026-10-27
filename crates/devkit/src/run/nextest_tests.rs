@@ -129,3 +129,21 @@ fn selected_report_keeps_skip_reasons() {
             .contains("no outcomes reported")
     );
 }
+
+#[test]
+fn a_changed_selection_error_fails_the_recorded_run() {
+    let fixture = tempfile::tempdir().unwrap();
+    let mut run = Run::unrecorded("selection", "test", &[]);
+    run.root = fixture.path().into();
+    assert!(
+        run.nextest(
+            "test",
+            &Nextest {
+                args: vec!["--changed-base=does-not-exist".into()],
+                ..Nextest::default()
+            }
+        )
+        .is_err()
+    );
+    assert!(run.failure.as_ref().unwrap().contains("selection"));
+}

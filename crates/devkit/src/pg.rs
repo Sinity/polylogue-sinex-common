@@ -243,7 +243,7 @@ impl Server {
             let created = self.sql(
                 "postgres",
                 &format!(
-                    "CREATE DATABASE {} TEMPLATE {} STRATEGY FILE_COPY",
+                    "CREATE DATABASE {} TEMPLATE {} STRATEGY WAL_LOG",
                     databases.schema, databases.template
                 ),
             );
@@ -288,11 +288,6 @@ impl Server {
                 &format!("COMMENT ON DATABASE {name} IS 'devkit used {now}'"),
             )?;
         }
-        // Every run starts here, so leftovers from earlier runs are cleared
-        // here too. A failure to clean up must not fail the run.
-        if let Err(error) = self.reap(&Reap::default()) {
-            eprintln!("devkit: could not drop unused databases: {error}");
-        }
         Ok(databases)
     }
 
@@ -302,7 +297,7 @@ impl Server {
         check_name(name)?;
         self.sql(
             "postgres",
-            &format!("CREATE DATABASE {name} TEMPLATE {template} STRATEGY FILE_COPY"),
+            &format!("CREATE DATABASE {name} TEMPLATE {template} STRATEGY WAL_LOG"),
         )
         .map(drop)
     }
@@ -411,6 +406,34 @@ impl Server {
             }
         }
         Ok(dropped)
+    }
+
+    /// Clears abandoned test databases before a run, including runs that reuse
+    /// an existing schema. Cleanup failure is reported without failing tests.
+    pub fn prepare_test_run(&self) {
+        if let Err(error) = self.reap(&Reap::default()) {
+            eprintln!("devkit: could not drop unused databases: {error}");
+        }
+    }
+
+    /// Reaps on the server supplied to a test run, or on the running service
+    /// when the run does not need a database fixture. Never starts a server.
+    pub(crate) fn prepare_run(env: &[(String, String)]) {
+        let socket = env
+            .iter()
+            .rev()
+            .find(|(name, _)| name == "DEVKIT_PG_SOCKET")
+            .map(|(_, value)| PathBuf::from(value))
+            .or_else(|| std::env::var_os("DEVKIT_PG_SOCKET").map(PathBuf::from));
+        if let Some(socket) = socket {
+            Self {
+                socket,
+                owned: None,
+            }
+            .prepare_test_run();
+        } else if let Some(server) = Self::service() {
+            server.prepare_test_run();
+        }
     }
 
     /// `PGHOST` and `PGPORT` for the PostgreSQL command-line tools.
@@ -585,7 +608,7 @@ pub fn test_database() -> Result<TestDatabase> {
     sql_at(
         &socket,
         "postgres",
-        &format!("CREATE DATABASE {name} TEMPLATE {template} STRATEGY FILE_COPY"),
+        &format!("CREATE DATABASE {name} TEMPLATE {template} STRATEGY WAL_LOG"),
     )?;
     Ok(TestDatabase { socket, name })
 }

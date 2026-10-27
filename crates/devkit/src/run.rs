@@ -337,6 +337,17 @@ impl Run {
     /// (stage `<name>`), keeping each test's outcome. Every selected test runs:
     /// there is no fail-fast, and selecting no tests fails unless allowed.
     pub fn nextest(&mut self, name: &str, options: &Nextest) -> Result {
+        #[cfg(feature = "pg")]
+        crate::pg::Server::prepare_run(&options.env);
+        let mut selection = None;
+        self.step(&format!("{name} selection"), |run| {
+            selection = Some(crate::select::nextest_args(&run.root, &options.args)?);
+            Ok(())
+        })?;
+        let (selected_args, unchanged) = selection.expect("successful selection");
+        if unchanged {
+            return self.step(name, |_| Ok(()));
+        }
         let temp = if options.tmpfs {
             Some(RunTemp::new()?)
         } else {
@@ -349,7 +360,7 @@ impl Run {
             env.push(("TMPDIR".into(), temp.path().display().to_string()));
             env.push(("TEST_DURABLE_TMPDIR".into(), durable.display().to_string()));
         }
-        let args: Vec<&str> = options.args.iter().map(String::as_str).collect();
+        let args: Vec<&str> = selected_args.iter().map(String::as_str).collect();
 
         let mut build = crate::cargo_command();
         build
