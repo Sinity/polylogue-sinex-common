@@ -5,6 +5,7 @@
 //! no output and each distinct diagnostic text is stored once. Other programs
 //! may read it; the tables below are its interface.
 mod queries;
+mod analysis;
 
 use crate::Run;
 use rusqlite::{Connection, OptionalExtension, params};

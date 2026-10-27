@@ -55,3 +55,9 @@ pub type Result<T = ()> = std::result::Result<T, Failed>;
 pub trait Fixture: Sized {
     fn create() -> std::result::Result<Self, String>;
 }
+
+pub mod process;
+#[cfg(feature = "cli")] pub mod coverage;
+#[cfg(feature = "cli")] pub mod fuzz;
+
+#[cfg(feature = "cli")] pub mod vm;

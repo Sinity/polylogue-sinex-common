@@ -21,6 +21,10 @@ One name per concept. A name says what the thing is in ordinary words; use these
 | fixture | A value `#[devkit::test]` creates for a test parameter |
 | schema database, template | The read-only database compile-time SQL checks use, and the database tests clone |
 | sample | Corpus files drawn for a benchmark, written down in a manifest |
+| scenario | One exported NixOS check selected for a VM run |
+| corpus | The input files a fuzz experiment starts with and grows |
+| region | A source span and execution count reported by LLVM coverage |
+| development stack | A checkout's owned services and selected application processes |
 | quiet run | A bench run during which every host-load reading was below the thresholds |
 
 Words that do not appear: custody, reserve or reservation for bytes, publish or publication (except a NATS publish), retain, retained, retention, retire, retirement, canonical, admission, qualify, qualification, legacy, predecessor, control or proof for a test, witness, authority, closure, candidate (except its plain meaning), basis, frozen, lease, interpretation, backing. Comments and docs carry no issue numbers, specification section numbers or history.
