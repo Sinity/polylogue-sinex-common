@@ -223,6 +223,9 @@ fn a_failed_test_keeps_its_database_marked_failed() {
 #[test]
 fn names_are_checked() {
     assert!(SchemaDatabases::new("bad-name", "x").is_err());
+    assert!(SchemaDatabases::new("demo", "x;drop table t").is_err());
+    assert!(SchemaDatabases::new(&"a".repeat(50), "0123456789abcdef").is_err());
+    assert!(SchemaDatabases::new(&"a".repeat(37), "0123456789abcdef").is_ok());
     assert!(check_name("demo_schema_0123").is_ok());
     assert!(check_name("drop table").is_err());
 }

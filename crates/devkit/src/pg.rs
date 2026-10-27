@@ -550,10 +550,13 @@ impl SchemaDatabases {
     pub fn new(project: &str, hash: &str) -> Result<Self> {
         check_name(project)?;
         let short: String = hash.chars().take(16).collect();
-        Ok(Self {
+        let databases = Self {
             schema: format!("{project}_schema_{short}"),
             template: format!("{project}_template_{short}"),
-        })
+        };
+        check_name(&databases.schema)?;
+        check_name(&databases.template)?;
+        Ok(databases)
     }
 }
 
