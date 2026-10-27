@@ -17,6 +17,7 @@ pub fn targets(root: &Path) -> Result<Vec<String>, String> {
     let packages = metadata["packages"].as_array().ok_or("fuzz packages missing")?;
     let mut names = Vec::new();
     for package in packages {
+        if package["metadata"]["cargo-fuzz"] != true { continue; }
         for target in package["targets"].as_array().ok_or("fuzz targets missing")? {
             if target["kind"].as_array().is_some_and(|kinds| kinds.iter().any(|kind| kind == "bin")) {
                 names.push(target["name"].as_str().ok_or("fuzz target name missing")?.to_owned());
@@ -51,7 +52,8 @@ fn execute_with(run: &mut Run, options: &Fuzz, names: Vec<String>, cargo: impl F
     fs::create_dir_all(&artifacts).map_err(|e| e.to_string())?;
     if budget.is_some() { seed_corpus(&run.root.join("fuzz/seeds").join(target), &corpus)?; }
     let mut command = cargo();
-    command.current_dir(run.root.join("fuzz")).args(["fuzz", "run", target]);
+    // Nix's pinned compiler exposes sanitizer flags through this experiment-only setting.
+    command.env("RUSTC_BOOTSTRAP", "1").args(["fuzz", "run", target]);
     if let Some(input) = input { command.arg(input); } else { command.arg(corpus); }
     command.arg("--").arg(format!("-artifact_prefix={}/", artifacts.display()));
     if let Some((seconds, memory)) = budget {

@@ -42,7 +42,7 @@ fn failed_missing_and_malformed_reports_never_succeed() {
 }
 #[test]
 fn threshold_and_output_checks_use_actual_report() {
-    let script=r#"while [ "$#" -gt 0 ]; do if [ "$1" = --output-path ]; then shift; printf '%s' '{"data":[{"totals":{"lines":{"count":10,"covered":5}}}]}' > "$1"; fi; shift; done"#;
+    let script=r#"while [ "$#" -gt 0 ]; do if [ "$1" = --output-path ]; then shift; printf '%s' '{"data":[{"totals":{"lines":{"count":10,"covered":5}},"functions":[{"filenames":["synthetic.rs"],"regions":[[1,1,10,1,5,0,0,0]]}]}]}' > "$1"; fi; shift; done"#;
     let (dir,result)=fake_report(script,"json",Some(40.0));assert!(result.is_ok());
     let summary:Value=serde_json::from_slice(&fs::read(dir.path().join("output/summary.json")).unwrap()).unwrap();assert_eq!(summary["args"][1],"selected");assert_eq!(summary["line_percent"],50.0);
     assert!(fake_report(script,"json",Some(60.0)).1.unwrap_err().contains("below"));

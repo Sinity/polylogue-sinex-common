@@ -31,6 +31,7 @@ pub fn execute(run: &mut Run, options: &Coverage, env: &[(String, String)]) -> R
 }
 
 fn execute_with(run: &mut Run, options: &Coverage, env: &[(String,String)], cargo: impl Fn() -> std::process::Command) -> Result<(),String> {
+    if !["json","html","lcov"].contains(&options.format.as_str()) { return Err("unsupported coverage format".into()); }
     if options.threshold.is_some_and(|t| !t.is_finite() || !(0.0..=100.0).contains(&t)) { return Err("threshold must be between 0 and 100".into()); }
     fs::create_dir_all(&options.output).map_err(|e| e.to_string())?;
     let output = fs::canonicalize(&options.output).map_err(|e| e.to_string())?;
@@ -40,7 +41,8 @@ fn execute_with(run: &mut Run, options: &Coverage, env: &[(String,String)], carg
     let mut command = cargo();
     command.args(["llvm-cov", "nextest", "--json", "--output-path"]).arg(&summary)
         .envs(env.iter().cloned()).env("CARGO_TARGET_DIR", output.join("build")).env("CARGO_LLVM_COV_TARGET_DIR", output.join("build")).env("CARGO_LLVM_COV_BUILD_DIR", output.join("build"));
-    if options.args.is_empty() { command.arg("--workspace"); }
+    let explicit_scope=options.args.iter().take_while(|arg|arg.as_str()!="--").any(|arg|arg=="-p"||arg=="--package"||arg.starts_with("--package=")||(arg.starts_with("-p")&&arg.len()>2)||arg=="--workspace");
+    if !explicit_scope { command.arg("--workspace"); }
     command.args(&options.args).arg("--no-tests=fail");
     run.command("coverage", &mut command)?;
     let report: Value = serde_json::from_slice(&fs::read(&summary).map_err(|e| format!("coverage report: {e}"))?).map_err(|e| e.to_string())?;
@@ -82,7 +84,8 @@ fn report_args(args: &[String]) -> Result<Vec<String>,String> {
 pub fn regions(report: &Value) -> Result<Vec<Value>, String> {
     let mut out=Vec::new();
     for data in report["data"].as_array().ok_or("coverage data missing")? {
-        if let Some(functions)=data["functions"].as_array() {
+        let functions=data["functions"].as_array().ok_or("LLVM function regions missing from coverage report")?;
+        {
             for function in functions {
                 for region in function["regions"].as_array().ok_or("function regions missing")? {
                     let id=region[5].as_u64().ok_or("region file id missing")? as usize;

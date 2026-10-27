@@ -33,7 +33,7 @@ fn execute_with(run: &mut Run, options: &Vm, defaults: &[&str], nix: impl Fn() -
         let log = options.output.join(format!("{scenario}.log"));
         let file = fs::OpenOptions::new().write(true).create_new(true).open(&log).map_err(|e|format!("{}: {e}",log.display()))?;
         let mut command = nix();
-        command.args(["build","--no-link","--print-build-logs",&format!("{flake}.{scenario}")])
+        command.args(["build","--no-link","--print-build-logs","--max-jobs","1",&format!("{flake}.{scenario}")])
             .stdout(Stdio::from(file.try_clone().map_err(|e|e.to_string())?)).stderr(Stdio::from(file));
         let result = run.command(&scenario,&mut command);
         println!("{scenario}: {} ({})",if result.is_ok(){"passed"}else{"failed"},log.display());

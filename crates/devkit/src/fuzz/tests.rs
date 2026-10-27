@@ -8,7 +8,7 @@ fn missing_and_malformed_manifests_fail() {
 fn manifest_binary_names_are_discovered_without_building() {
     let dir=tempfile::tempdir().unwrap();let fuzz=dir.path().join("fuzz");fs::create_dir_all(fuzz.join("src")).unwrap();
     fs::write(fuzz.join("src/main.rs"),"fn main(){}").unwrap();
-    fs::write(fuzz.join("Cargo.toml"),"[package]\nname='example-fuzz'\nversion='0.0.0'\nedition='2024'\n[workspace]\n[[bin]]\nname='roundtrip'\npath='src/main.rs'\n").unwrap();
+    fs::write(fuzz.join("Cargo.toml"),"[package]\nname='example-fuzz'\nversion='0.0.0'\nedition='2024'\n[package.metadata]\ncargo-fuzz=true\n[workspace]\n[[bin]]\nname='roundtrip'\npath='src/main.rs'\n").unwrap();
     assert_eq!(targets(dir.path()).unwrap(),["roundtrip"]);
 }
 
