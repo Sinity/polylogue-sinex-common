@@ -1,0 +1,64 @@
+# Opens or updates a pull request in each product that moves its Cargo.lock to
+# the newest commit of this repository's master branch.
+#
+# Needs the repository secret COMMON_BUMP_TOKEN: a fine-grained token for
+# Sinity/polylogue and Sinity/sinex with Contents and Pull requests set to
+# read and write.
+name: Update product locks
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: update-product-locks
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        product: [polylogue, sinex]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: Sinity/${{ matrix.product }}
+          token: ${{ secrets.COMMON_BUMP_TOKEN }}
+      - name: Move the shared crates in Cargo.lock to master
+        id: update
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          # The shared crates are the ones the workspace takes from this repository.
+          mapfile -t crates < <(cargo metadata --format-version 1 --no-deps |
+            jq -r '[.packages[].dependencies[]
+              | select((.source // "") | startswith("git+https://github.com/Sinity/polylogue-sinex-common?"))
+              | .name] | unique | .[]')
+          if [ "${#crates[@]}" -eq 0 ]; then
+            echo "no dependency on polylogue-sinex-common" >&2
+            exit 1
+          fi
+          args=()
+          for crate in "${crates[@]}"; do args+=(-p "$crate"); done
+          cargo update "${args[@]}"
+          commit=$(grep -m1 -o 'polylogue-sinex-common?branch=master#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)
+          echo "commit=$commit" >>"$GITHUB_OUTPUT"
+          echo "short=${commit:0:9}" >>"$GITHUB_OUTPUT"
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.COMMON_BUMP_TOKEN }}
+          branch: update-polylogue-sinex-common
+          add-paths: Cargo.lock
+          commit-message: Update polylogue-sinex-common to ${{ steps.update.outputs.short }}
+          title: Update polylogue-sinex-common to ${{ steps.update.outputs.short }}
+          body: |
+            Moves Cargo.lock to Sinity/polylogue-sinex-common@${{ steps.update.outputs.commit }}, the head of its master branch.
+
+            Opened by the `Update product locks` workflow in polylogue-sinex-common. Convert any callers on this branch, then run the checks before merging.
+          delete-branch: true

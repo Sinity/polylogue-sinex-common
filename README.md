@@ -11,10 +11,10 @@ Rust crates and development tooling shared by
 | [`devkit`](crates/devkit/README.md) | The core of each project's `xtask`: test and check runs, their recorded history, changed-package selection, test databases and NATS |
 | [`devkit-macros`](crates/devkit-macros) | The `#[devkit::test]` attribute |
 
-Projects depend on a tag:
+Products follow `master`; each product's `Cargo.lock` pins the exact commit:
 
 ```toml
-hashed-blobs = { git = "https://github.com/Sinity/polylogue-sinex-common", tag = "v0.7.3" }
+hashed-blobs = { git = "https://github.com/Sinity/polylogue-sinex-common", branch = "master" }
 ```
 
 `hashed-blobs` owns blob storage; `credential-masking` owns display masking and credential scanning. Neither depends on devkit. `devkit` owns development runs and fixtures and uses `devkit-macros` for its test attribute.
@@ -35,9 +35,19 @@ An explicit `CARGO_TARGET_DIR` in the caller's environment is passed to the job.
 
 ## Releasing
 
-Both projects pin this repository by tag (`vX.Y.Z`), one tag for every crate.
-Merge through a PR, tag the merge commit, push the tag, then move each
-project's pin with a normal PR in that project. A tag never moves; a fix is a
-new version.
+Merge through a PR. The `Update product locks` workflow then opens or updates
+a pull request in each product that moves its lock to the new `master` commit.
+It needs the repository secret `COMMON_BUMP_TOKEN`, with Contents and Pull
+requests read/write access to both products. Without it, update the product
+locks with `cargo update -p devkit -p hashed-blobs -p credential-masking` and
+open those pull requests manually. Convert affected callers and run the
+product's checks before merging its lock update. Tags are optional release
+markers; the products do not depend on them.
+
+For a change shared with a product, check the repositories out side by side
+and run `cargo xtask link-common` in the product. Its git-ignored
+`.cargo/local.toml` points to this checkout, and `cargo xtask unlink-common`
+restores the product's original lock. Merge the common change first, then
+take its exact commit in the product's lock update.
 
 The repository is public. Test fixtures are synthetic.

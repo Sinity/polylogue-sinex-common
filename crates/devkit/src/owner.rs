@@ -6,24 +6,52 @@
 //! A watchdog per server stops it once the owner is gone, and every start
 //! first sweeps directories whose owner is gone, in case a watchdog was
 //! killed too.
+//!
+//! Started as root, a server whose directory belongs to another account runs
+//! as that account, and so do its cleanup commands: PostgreSQL refuses to
+//! run as root.
 use std::{
     fs,
-    os::unix::process::CommandExt,
+    os::unix::{fs::MetadataExt, process::CommandExt},
     path::Path,
     process::{Command, Stdio},
 };
 
+/// Whether this process runs as root.
+pub(crate) fn running_as_root() -> bool {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// When this process is root, runs `command` as the account that owns
+/// `dir`, inside `dir`, so a root caller's server and its cleanup run as the
+/// server's account. Otherwise leaves `command` as it is.
+pub(crate) fn as_owner_of<'a>(command: &'a mut Command, dir: &Path) -> &'a mut Command {
+    if running_as_root()
+        && let Ok(metadata) = fs::metadata(dir)
+        && metadata.uid() != 0
+    {
+        command
+            .uid(metadata.uid())
+            .gid(metadata.gid())
+            .current_dir(dir);
+    }
+    command
+}
+
 /// Starts a detached watchdog that runs `cleanup` (a shell command) once
 /// process `owner` has exited, unless `dir` was removed first by an orderly
 /// shutdown. It has its own process group and no inherited output, so a
-/// test runner neither kills it with the test nor waits for it.
+/// test runner neither kills it with the test nor waits for it. It runs as
+/// `dir`'s owner ([`as_owner_of`]), which may not signal the owner, so it
+/// checks `/proc` for the owner instead.
 pub(crate) fn watch(owner: u32, dir: &Path, cleanup: &str) {
-    let dir = shell_quote(&dir.display().to_string());
+    let quoted = shell_quote(&dir.display().to_string());
     let script = format!(
-        "while kill -0 {owner} 2>/dev/null && [ -d {dir} ]; do sleep 2; done; \
-         if [ -d {dir} ]; then {cleanup}; fi"
+        "while [ -d /proc/{owner} ] && [ -d {quoted} ]; do sleep 2; done; \
+         if [ -d {quoted} ]; then {cleanup}; fi"
     );
-    let _ = Command::new("sh")
+    let _ = as_owner_of(&mut Command::new("sh"), dir)
         .arg("-c")
         .arg(script)
         .stdin(Stdio::null())
@@ -34,7 +62,8 @@ pub(crate) fn watch(owner: u32, dir: &Path, cleanup: &str) {
 }
 
 /// Runs `cleanup` for every `<base>/<prefix>-<pid>-<id>` directory whose
-/// owner pid no longer exists. `cleanup` gets the directory's path as `$1`.
+/// owner pid no longer exists. `cleanup` gets the directory's path as `$1`
+/// and runs as the directory's owner ([`as_owner_of`]).
 pub(crate) fn sweep(base: &Path, prefix: &str, cleanup: &str) {
     let Ok(entries) = fs::read_dir(base) else {
         return;
@@ -50,7 +79,7 @@ pub(crate) fn sweep(base: &Path, prefix: &str, cleanup: &str) {
             continue;
         };
         if !alive(pid) {
-            let _ = Command::new("sh")
+            let _ = as_owner_of(&mut Command::new("sh"), &entry.path())
                 .arg("-c")
                 .arg(cleanup)
                 .arg("sh")
