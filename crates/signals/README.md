@@ -175,6 +175,74 @@ environment) names the value targets, action commands and the notification
 route; a rule can reach only those. Quiet hours and the interrupt budget are
 changeable settings of the deliverer's product.
 
+## Rust interface and product adoption
+
+`Rule` contains only authored fields. Products stamp `ActiveRule.version`,
+`author` and `via` from their write path and set `live` when the query reads
+current state. `Rule::validate` checks deployment target and command names;
+`effective_rules` overlays authored rules on shipped defaults by product and
+name. An authored disabled revision overrides its shipped default too.
+
+`FIELDS` is the authored field table for help and schema rendering. Identity
+and authorship are separate because they must never be client supplied.
+`fires` serializes as `"on_new"`, `{"on_change":{"what":"membership","k":null}}`,
+`{"on_threshold":{"value":10,"compare":">"}}` or `{"at":{"minute":600}}`.
+Durations accept milliseconds or strings such as `20m`; quiet hours are
+`{"from":1320,"to":480}` in local civil minutes. Local times use the product's
+configured logical day, resolved through the common query language's
+`DaySetting`. `Calendar` is the small adapter from that setting, including
+its gap and fold resolution, to the evaluator. It never reads the system
+zone or environment.
+
+A product queues a complete `Evaluation` for each watched query, with all
+pages joined in query order. Its `at` is the observation checkpoint, and each
+`Row` names the logical `Occurrence` and episode, its original observation,
+its effective start and optional end, a reference, and evidence. A new reading
+keeps that occurrence and episode. New stretches use a new episode. Delivered
+signals and injected context are marked by `Origin` and excluded before any
+mode evaluates. A complete evaluation replaces the current matches; an
+incomplete evaluation preserves them and prevents handoffs until a complete
+one arrives. Numeric threshold samples use `value`.
+
+`Evaluator::advance` visits every known causal boundary; `resume` folds
+observations during downtime and hands overdue work off at the resumed
+clock. Products persist the serializable evaluator checkpoint with the
+owning query/delivery state. Revisions replace the observed baseline and
+cancel pending work; withdrawal removes it. Private intervals consume their
+observations and cancel pending outward work, including quiet-held work.
+The evaluator's deterministic delivery ID hashes the product, rule ID and
+revision, occurrence and episode. Evidence and reading IDs never enter it.
+Change and threshold crossings use evaluator episodes; scheduled rules use
+the logical day. Keep consumed triggers when rebuilding indexes.
+
+Pass the host deliverer's one `InterruptBudget` to every evaluator, including
+forwarded Polylogue deliveries. Persist its handoff timestamps. In primary
+mode Polylogue sends interrupting deliveries to Sinex and does not run a
+local notification worker except for its Sinex-blocked notice. This routing
+boundary belongs to the products; the shared worker has no host discovery.
+Products execute `value` and `action` handoffs through the configured target
+and command, outside their writer. The action reference is the last command
+argument. No signal command is an agent launch.
+
+A durable effect starts with an unknown `DeliveryReceipt`. The desktop
+`notifications::Deliverer` additionally persists `NotificationState` and
+per-route `NotificationReceipt`s. Call `begin`, commit the unknown receipts
+and state, then call `send`. Restored unknown attempts cannot become eligible
+for a send. The asynchronous `notifications::run` worker enforces this order
+with a persistence acknowledgement and handles service appearance and desktop
+protocol signals. It receives committed notices through a channel, never
+through a writer lock. Products apply returned desktop actions through their
+operation table as operator acts with `via: desktop`. The worker receives a
+current-condition callback and rechecks it before sending or retrying.
+
+When adopting, Polylogue removes its old signal evaluator and `notify-send`
+command path, maps logical sessions/notes to occurrences, and saves checkpoints
+with deliveries. Sinex maps citations to occurrences and uses the same worker
+for its own and forwarded deliveries. Both run the shared reference/law cases
+against their catalog adapters and retain the delivery outlets their product
+docs own. Rule target execution and product routing are adapters, not a second
+evaluator or notification implementation.
+
 ## Laws
 
 - **trigger-fires-once**: a trigger fires at most once, and new readings of
