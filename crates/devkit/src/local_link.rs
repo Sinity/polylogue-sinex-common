@@ -17,8 +17,8 @@ type Result<T> = std::result::Result<T, String>;
 
 /// One local dependency override and the workspace locks it owns.
 ///
-/// Paths are distinct and absolute. Each lock's parent is its Cargo workspace directory;
-/// each paired backup retains the Git-backed lock across successful relinks.
+/// Paths are distinct and absolute. Each lock's parent is its Cargo workspace
+/// directory; each paired backup retains the Git-backed lock across relinks.
 pub struct LocalLink<'a> {
     pub repository: &'a str,
     pub patch: &'a Path,

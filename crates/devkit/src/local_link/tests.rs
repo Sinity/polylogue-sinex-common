@@ -134,6 +134,7 @@ fn failed_relink_preserves_the_active_checkout_and_original_locks() {
         .with_link(|link| link.link(&fixture.second))
         .unwrap_err();
     assert!(error.contains("still resolves to Git"), "{error}");
+    assert!(error.contains("fuzz/Cargo.lock"), "{error}");
     assert_eq!(fixture.state(), linked);
     let restored = fixture.with_link(|link| link.unlink()).unwrap();
     assert_eq!(
