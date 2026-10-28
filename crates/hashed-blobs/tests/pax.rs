@@ -445,7 +445,7 @@ mod gnu_tar {
     }
 
     #[test]
-    fn pax_members_match_gnu_tar__names_metadata_xattrs_acls_and_sparse_bytes() {
+    fn pax_members_match_gnu_tar_names_metadata_xattrs_acls_and_sparse_bytes() {
         if !available() {
             return;
         }

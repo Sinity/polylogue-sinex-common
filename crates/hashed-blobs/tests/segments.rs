@@ -154,7 +154,7 @@ fn read_checks_every_frame_and_errors_name_segment_extent() {
     assert!(open.seek(SeekFrom::Start(64)).is_err());
 }
 #[test]
-fn sealed_no_plaintext_on_disk__sealed_tamper_fails__sealed_check_without_key() {
+fn sealed_no_plaintext_on_disk_sealed_tamper_fails_sealed_check_without_key() {
     let dir = tempfile::tempdir().unwrap();
     let p = prep(dir.path());
     let key = DataKey {
@@ -296,7 +296,7 @@ fn lookup_failure_poison_requires_reopen() {
     assert!(SegmentWriter::open(dir.path(), "segment.zst", 0, &[], 0o600).is_ok());
 }
 #[test]
-fn scan_reports_and_repairs_nothing__all_mismatches() {
+fn scan_reports_and_repairs_nothing_all_mismatches() {
     let dir = tempfile::tempdir().unwrap();
     let p = prep(dir.path());
     let mut writer = open(dir.path(), 0);

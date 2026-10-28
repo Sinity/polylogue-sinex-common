@@ -16,6 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let started = Instant::now();
     let mut prepared = Vec::new();
     let mut input_bytes = 0u64;
+    let mut prepared_encoded_bytes = 0u64;
     let mut groups = 0u64;
     let mut written = 0u64;
     let mut next = started + Duration::from_secs(1);
@@ -25,7 +26,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "synthetic content with repeated structure ".repeat(40)
         );
         input_bytes += bytes.len() as u64;
-        prepared.push(preparation.plain(Cursor::new(bytes), 3)?);
+        let material = preparation.plain(Cursor::new(bytes), 3)?;
+        prepared_encoded_bytes += material.stored_len();
+        prepared.push(material);
         if Instant::now() >= next {
             let group = writer
                 .append_group(std::mem::take(&mut prepared), |_| Ok(None))?
@@ -44,6 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         groups += 1;
     }
     let elapsed = started.elapsed().as_secs_f64();
-    println!("materials={count} groups={groups} input_bytes={input_bytes} appended_bytes={written} bytes_per_input_byte={:.6} materials_per_second={:.2} commit_interval_seconds=1 elapsed_seconds={elapsed:.3}",written as f64/input_bytes as f64,count as f64/elapsed);
+    let encoded_write_bytes = prepared_encoded_bytes + written;
+    println!("materials={count} groups={groups} input_bytes={input_bytes} prepared_encoded_bytes={prepared_encoded_bytes} appended_bytes={written} encoded_write_bytes={encoded_write_bytes} appended_bytes_per_input_byte={:.6} encoded_write_bytes_per_input_byte={:.6} materials_per_second={:.2} commit_interval_seconds=1 elapsed_seconds={elapsed:.3}",written as f64/input_bytes as f64,encoded_write_bytes as f64/input_bytes as f64,count as f64/elapsed);
     Ok(())
 }

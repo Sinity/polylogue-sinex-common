@@ -17,9 +17,3 @@ sha2 = "0.10"
 libc = "0.2"
 
 tempfile = "3"
-
-[dev-dependencies]
-
-[lints.clippy]
-# The sealed frame helpers take the frame's full context explicitly.
-too_many_arguments = "allow"

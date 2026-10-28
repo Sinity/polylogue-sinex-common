@@ -102,7 +102,8 @@ fn crash_leaves_only_a_tail_at_append_sync_commit_and_truncate() {
             std::fs::metadata(dir.path().join("segment.zst"))
                 .unwrap()
                 .len(),
-            committed.end()
+            committed.end(),
+            "ordinary open did not remove uncommitted tail"
         );
         let reader = Reader::new(dir.path());
         assert_eq!(
