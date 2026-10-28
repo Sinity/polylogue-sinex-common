@@ -133,7 +133,7 @@ nothing names a particular host, path or person.
 
 ## Cloud sessions and changes the products need
 
-Cloud sessions (Claude Code on the web, Codex cloud) run as root on a fresh
+Cloud sessions (Claude Code on the web, Codex cloud) run on a fresh
 VM without AgentCTL or the operator's services; run `cargo xtask check` and
 `cargo xtask test` there directly. The environment's setup script runs
 `bash dev/cloud/setup.sh`, after which every shell is in the development
