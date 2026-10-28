@@ -652,6 +652,7 @@ fn at_once_per_logical_day_and_shipped_override() {
     let mut r = rule();
     r.rule.fires = Fires::At { minute: 10 * 60 };
     let mut e = evaluator(r.clone(), vec![], at(9), Policy::default());
+    e.observe(evaluation(&r, at(9), vec![])).unwrap();
     assert_eq!(advance(&mut e, at(34)).len(), 2);
     assert!(advance(&mut e, at(34)).is_empty());
     let mut shipped = r.clone();
@@ -770,4 +771,10 @@ fn value_and_action_handoffs_preserve_configured_delivery_and_payload() {
         assert_eq!(got[0].value, Some(42.));
         assert_eq!(got[0].basis[0].reference, "record:a");
     }
+}
+#[test]
+fn incomplete_never_fires_scheduled_without_initial_freshness() {
+    let mut r=rule();r.rule.fires=Fires::At{minute:10*60};
+    let mut e=evaluator(r.clone(),vec![],at(9),Policy::default());assert!(advance(&mut e,at(10)).is_empty());assert_eq!(e.incomplete(),vec![r.version.clone()]);
+    e.observe(evaluation(&r,at(11),vec![])).unwrap();assert_eq!(advance(&mut e,at(11))[0].at,at(11));
 }

@@ -9,7 +9,9 @@ pub trait Calendar {
     fn logical_day(&self, at: Instant) -> String;
     fn minute(&self, at: Instant) -> u16;
     fn next_at(&self, after: Instant, minute: u16) -> Instant;
-    fn quiet_end(&self, at: Instant, hours: QuietHours) -> Instant;
+    fn quiet_end(&self, at: Instant, hours: QuietHours) -> Instant {
+        self.next_at(at, hours.to)
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Occurrence {
@@ -261,7 +263,7 @@ impl Evaluator {
             started: start,
             revision_baseline: false,
             rows: BTreeMap::new(),
-            incomplete: false,
+            incomplete: true,
             baseline: None,
             latest: None,
             reported: false,

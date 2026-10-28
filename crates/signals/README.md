@@ -202,7 +202,8 @@ keeps that occurrence and episode. New stretches use a new episode. Delivered
 signals and injected context are marked by `Origin` and excluded before any
 mode evaluates. A complete evaluation replaces the current matches; an
 incomplete evaluation preserves them and prevents handoffs until a complete
-one arrives. Numeric threshold samples use `value`.
+one arrives. A newly installed query is incomplete until its first complete
+evaluation, including scheduled rules. Numeric threshold samples use `value`.
 
 `Evaluator::advance` visits every known causal boundary; `resume` folds
 observations during downtime and hands overdue work off at the resumed
