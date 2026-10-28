@@ -1,42 +1,102 @@
 # devkit
 
-A project's `xtask` starts a `devkit::Run`, adds its steps (`cargo` commands
-with captured diagnostics, a nextest run with each test's outcome, its own
-checks) and finishes it. Every run is recorded in one machine-wide SQLite
-store at `$XDG_STATE_HOME/devkit/history.db`:
+The core of each product's `xtask`: test and check runs and their recorded
+history, changed-package selection, test databases and NATS servers, the
+`#[devkit::test]` fixtures, and the bench, coverage, fuzz and VM runners. A
+product's `xtask` is a thin binary that starts a `devkit::Run`, adds its own
+steps and checks, and passes the shared commands (`status`, `history`,
+`changed`, `db`, `laws`) to `devkit::cli`.
 
-- `xtask status`: failing tests and compiler errors from this checkout's last run;
-- `xtask history runs | failures [RUN] | diagnostics [RUN] [--level error]`, each with `--json`;
-- `xtask history intermittent | first-failing | durations | diagnostic-groups`: queries across runs and worktrees ([details](../../docs/history.md));
-- `xtask changed`: the nextest filterset for packages changed since the merge base.
+Devkit targets data and guarantees, not one machine. It starts what a run
+needs and stops it on drop, takes paths and services from configuration or
+the environment, and names its interfaces neutrally (`DEVKIT_JOB_ID`,
+`DEVKIT_SCRATCH`, `DEVKIT_PG_SOCKET`, `DEVKIT_NATS_URL`) so that any job
+runner can set them. Nothing here knows a particular runner or host.
 
-`Run::nextest` accepts `--changed` in its arguments (for example,
-`cargo xtask test --changed`). It compares against the merge base with
-`origin/master`; `--changed-base=<ref>` chooses another base. The diff includes
-committed, staged, unstaged and untracked files. Production changes select the
-owning packages and their reverse dependencies through nextest's `rdeps`.
-Changes confined to test functions select those tests within their package.
-Every changed line must be inside a test in both versions, and its name must
-have no other uses in the package's Rust sources. Calls between tests and
-partial overlaps keep package scope. A change to a Cargo-declared integration test file selects
-that package's test binary. Shared helpers and other package files select the package and reverse
-dependencies; files outside packages select the workspace, except Markdown.
-Explicit `-E` filtersets intersect this selection. An unchanged tree succeeds
-without building tests. This repository's `focused` operation uses the same path.
+## Runs
+
+A run is one `xtask` invocation. It adds steps (`cargo` commands with
+captured diagnostics, a nextest run with each test's outcome, the product's
+own checks), prints a short summary and records itself in one machine-wide
+SQLite store at `$XDG_STATE_HOME/devkit/history.db`. History is data, never a
+gate: a store that cannot be opened is reported and the run continues.
 
 Passing tests keep no output and each diagnostic text is stored once, so the
 store stays small without deleting anything.
 
-## Tests
+Nested Cargo commands use `devkit::cargo_command()`, which drops the parent's
+`CARGO_MANIFEST_DIR`, `CARGO_MANIFEST_PATH` and `CARGO_PKG_*` so they do not
+invalidate build-script fingerprints.
+
+## Changed-package selection
+
+`Run::nextest` accepts `--changed` (for example `cargo xtask test
+--changed`); `xtask changed` prints the same selection as a nextest
+filterset. The diff is taken against the merge base with `origin/master`, or
+`--changed-base=<ref>`, and includes committed, staged, unstaged and
+untracked files.
+
+- Production changes select the owning packages and their reverse
+  dependencies through nextest's `rdeps`.
+- Changes confined to test functions select those tests within their package:
+  every changed line must be inside a test in both versions, and the test's
+  name must have no other use in the package's Rust sources. Calls between
+  tests and partial overlaps keep package scope.
+- A change to a Cargo-declared integration test file selects that package's
+  test binary.
+- Shared helpers and other package files select the package and its reverse
+  dependencies; files outside packages select the workspace, except Markdown.
+- Explicit `-E` filtersets intersect the selection. An unchanged tree succeeds
+  without building tests.
+
+## History
+
+`cargo xtask status` shows the failing tests and compiler errors of this
+checkout's last run. `cargo xtask history` queries the store; output is
+formatted JSON, or one line per record with `--json`. Queries read the
+current checkout by default; repeat `--checkout /absolute/path` to read
+several worktrees of the same product, including ones that no longer exist.
+Other products' runs are never included.
+
+Each run records its HEAD, the Git tree object of that commit and a hash of
+its uncommitted changes (tracked diffs and untracked files). If Git fails, an
+untracked file cannot be read, or the checkout changes during the run, the run
+records why in `observation_error` and has no tree.
+
+| Query | Answers |
+|---|---|
+| `runs`, `failures [RUN]`, `diagnostics [RUN] [--level error]` | one checkout's runs, their failing tests and their compiler messages |
+| `intermittent` | tests that passed in one run and failed in another at the same tree and uncommitted-changes hash; different commits with the same tree group together. Each group lists every run with its statuses, checkout, command, toolchain and host. A `flaky` status (failed, then passed on retry) is shown but counts as neither. `results_without_tree` counts results left out because their run has no tree |
+| `first-failing SUITE TEST` | every recorded result of one test in run start order, and the first that failed or was flaky, with whether that run was at a clean HEAD, had uncommitted changes, or is unknown. This is the order runs happened in, not a bisection |
+| `durations COMMAND [--args-json ARGS] [--stage NAME]` | minimum, median and maximum over passed runs of the command with exactly these arguments (default none), or over the successful stage. Every selected run is listed; one left out of the summary says why (`run not passed`, `stage not recorded`, `stage failed`, `duration not recorded`) |
+| `diagnostic-groups [--level error\|warning]` | compiler messages grouped by text across worktrees, each occurrence with its run, checkout, HEAD, command, package and location |
+| `compare BEFORE AFTER` | two passed runs with identical command, arguments, host and toolchain: checkout and Git identity, signed duration changes per run and stage, and slower, faster or stable trends. A stage on one side only shows its duration and an unknown change; a percentage against zero stays null; different scopes or a source observation error are refused |
+| `explain RUN` | every test by duration, pass rate over passed, failed and flaky outcomes, stages, and the recorded runs that overlapped it on the same host. Parallel test durations are never added into wall time, and overlap alone is not reported as contention. The job runner's queue wait is linked through the recorded `DEVKIT_JOB_ID`, not measured here |
+| `compare-days DAY DAY` | this checkout's runs on two UTC days, grouped by exact command, arguments, host and toolchain: run and pass counts and mean passed-run durations. A group present on one day only keeps that day's figures with null changes; failed source observations and invalid durations are left out of means |
+
+Load and cache state at the time of a run are not recorded, so durations are
+compared between runs, never asserted.
+
+## Laws coverage
+
+`cargo xtask laws` reads the `## Laws` sections of a repository's docs and
+crate READMEs and lists each law's key with the tests whose names carry it
+(`restore_refused_while_other_reading_live` for the law
+`restore-refused-while-other-reading-live`, with a suffix when several tests
+check one law), and the laws that have none. It is a report and fails nothing;
+a law without a test is a gap for the area's owner.
+
+## Tests and fixtures
 
 `#[devkit::test]` marks a test. A sync test without parameters is a plain
 `#[test]`; an `async fn` test runs on a current-thread tokio runtime,
 optionally with `timeout = "30s"`. `multi_thread` gives it a multi-thread
-runtime, for a body that blocks a thread while spawned tasks must keep running;
-the test crate then needs tokio's `rt-multi-thread` feature. Each parameter is a fixture whose type
-implements `devkit::Fixture` and is created before the body runs:
+runtime, for a body that blocks a thread while spawned tasks must keep
+running; the test crate then needs tokio's `rt-multi-thread` feature. Each
+parameter is a fixture whose type implements `devkit::Fixture` and is created
+before the body runs:
 
-```rust
+```rust,ignore
 #[devkit::test(timeout = "30s")]
 async fn writes_events(db: devkit::pg::TestDatabase, bus: devkit::nats::TestNats) {
     let url = db.url(None);
@@ -45,79 +105,131 @@ async fn writes_events(db: devkit::pg::TestDatabase, bus: devkit::nats::TestNats
 }
 ```
 
-A project can implement `Fixture` for its own types, such as a context that
+A product can implement `Fixture` for its own types, such as a context that
 wraps a database and a connection.
 
-With the `pg` feature, devkit provides PostgreSQL for projects with
-compile-time-checked SQL. A project's xtask chooses the per-user service on
-the socket in `$XDG_RUNTIME_DIR/devkit/pg` (Sinnix's `devkit-pg`) or an owned
-throwaway cluster on tmpfs. Each schema version, named by a hash of the
-schema sources, is built once into a template database and copied to the
-read-only database `DATABASE_URL` points at; every test clones the template
-(`TestDatabase`), using PostgreSQL's `FILE_COPY` strategy. The clone benchmark
-compares it with `WAL_LOG` and a background pool. Failed-test databases
-follow the newest-five policy.
-`xtask db ensure|url|psql|exec|drop-unused|ready` drives it.
-A half-built template's name carries its builder's PID, and cleanup drops it
-only after that process has exited.
+`Nextest { tmpfs: true, .. }` gives the tests a `TMPDIR` of their own: a child
+of `DEVKIT_SCRATCH` when the job runner supplies one (and removes it after the
+job, even a killed one), otherwise a child of `/dev/shm`. Tests of real
+filesystem durability use `TEST_DURABLE_TMPDIR`. Nextest 0.9.143 or newer is
+required.
 
-Database cleanup in `Run::nextest` requires `DEVKIT_PG_SOCKET` in that run's explicit environment. A project's xtask chooses the shared service or an owned server and supplies its socket when cleanup is wanted; the library never discovers the live service during a test run. Schema builds and cleanup use the same file lock in the server's socket directory; cleanup skips a busy version. Databases stamped used or failed within the last hour stay regardless of cleanup policy. Missing or unreadable schema stamps count as current use, and cleanup rechecks both timestamps and connections before each drop.
+### PostgreSQL
+
+With the `pg` feature, devkit provides PostgreSQL for products with
+compile-time-checked SQL, over a socket: a per-user service when one is
+running (its socket in `$XDG_RUNTIME_DIR/devkit/pg`), otherwise an owned
+throwaway cluster on tmpfs. The product's `xtask` chooses which.
+
+- Each schema version, named by a hash of the schema sources, is built once
+  into a template database and copied to the read-only **schema database**
+  that `DATABASE_URL` points at. Every test clones the template
+  (`TestDatabase`) with PostgreSQL's `FILE_COPY` strategy.
+- A half-built template's name carries its builder's PID, and cleanup drops it
+  only after that process has exited. Schema builds and cleanup take the same
+  file lock in the server's socket directory; cleanup skips a busy version.
+- Cleanup in `Run::nextest` runs only when the run's environment names the
+  server in `DEVKIT_PG_SOCKET`; the library never discovers a service on its
+  own during a test run. Databases stamped used or failed within the last hour
+  stay; a missing or unreadable stamp counts as current use; timestamps and
+  connections are checked again before each drop. Failed-test databases keep
+  the newest five.
+- `xtask db ensure | url | psql | exec | drop-unused | ready` drives it.
+
+An ignored test, `benchmark_database_clones`, times batches of 50 clones for
+`FILE_COPY`, `WAL_LOG` and a four-entry pool replenished in the background, in
+its own throwaway cluster with a synthetic template, checking clone contents
+and isolation; drop times are reported apart. `DEVKIT_BENCH_ROUNDS`,
+`DEVKIT_BENCH_WRITES` (adds a half-gigabyte working set and a background
+writer), `DEVKIT_BENCH_TEMPLATE_BYTES` and `DEVKIT_BENCH_DIRECTORY` (default
+tmpfs; use a short path on the development service's filesystem for
+representative figures) set it up.
+
+### NATS
 
 With the `nats` feature, devkit starts a throwaway `nats-server` with
-JetStream on a free loopback port. A project's xtask starts one per test run
+JetStream on a free loopback port. A product's `xtask` starts one per test run
 and passes its URL through `DEVKIT_NATS_URL`; `TestNats` gives each test that
 server and a unique subject prefix, or a server of its own when run outside
-xtask.
+`xtask`.
 
-`Nextest { tmpfs: true, .. }` gives the tests a `TMPDIR` of their own: a child
-of the job's `AGENTCTL_SCRATCH` when AgentCTL supplies one (declare
-`scratch = "tmpfs"` on test operations, and AgentCTL removes it even after a
-killed run), otherwise a child of `/dev/shm`. Tests of real filesystem
-durability use `TEST_DURABLE_TMPDIR`. Nextest 0.9.143 or newer is required.
+## Runners
 
-Nested Cargo commands use `devkit::cargo_command()`, which drops the parent's
-`CARGO_MANIFEST_DIR`, `CARGO_MANIFEST_PATH` and `CARGO_PKG_*` so they do not
-invalidate build-script fingerprints.
+**Bench** (`bench` feature). Draws a stratified sample of a corpus, written
+down in a manifest; records each run with its metrics and the host load,
+sampled every second; and compares a run with the previous quiet run on the
+same sample and storage. A run is quiet when every load reading was below the
+thresholds and none was more than two seconds late. Products report the
+hardware-independent figures (bytes, syncs and rows per input, stage
+utilisation) beside absolute rates, as paired runs. `linear_estimate` scales a
+sample's time to the whole corpus by input bytes and labels itself
+uncalibrated.
 
-## Benchmarks
+**Coverage.** Runs cargo-llvm-cov through `Run::nextest` with the caller's
+package and test selection, separate instrumentation output, full LLVM JSON
+and an optional HTML or LCOV report. It checks weighted line totals, report
+existence and a caller-chosen threshold, and records the exact selection and
+the line regions mapped through each function's file table. Build
+diagnostics, stages and test outcomes enter the same history as ordinary
+runs. An empty test selection fails. Output is never reused or broadly
+removed.
 
-The `bench` feature draws a stratified sample of a corpus, records each bench
-run with its metrics and the host load, sampled every second by
-`LoadMonitor`, and compares a run with the previous quiet run on the same
-sample and storage. A run is quiet when every load reading was below the
-thresholds and no reading was more than two seconds late.
-`linear_estimate` scales a sample's time to the whole corpus by input bytes
-and labels itself uncalibrated.
+**Fuzz.** Saved inputs are replayed once as ordinary tests, so a crash found
+once stays a test. Longer runs use the same harness: targets are discovered
+from Cargo manifest metadata and a named target runs with explicit duration
+and memory budgets. Corpus and crash files stay in caller-chosen directories
+after a failure. No target is generated or silently skipped. cargo-fuzz needs
+unstable sanitizer flags, so the fuzz command alone sets `RUSTC_BOOTSTRAP=1`;
+`DEVKIT_FUZZ_RUSTFLAGS` adds experiment-only flags to its instrumentation
+(for example
+[`-Zexternal-clangrt`](https://doc.rust-lang.org/unstable-book/compiler-flags/external-clangrt.html)
+with a matching Clang linker when the compiler bundles no sanitizer runtimes).
 
-## Shared development runners
+**VM scenarios.** `devkit::vm` validates the whole requested set of exported
+NixOS scenarios before building, refuses uncommitted source input, retrieves
+each scenario's log with `nix log` even for cached builds, writes build output
+separately, continues through failures and writes per-scenario results. A
+product supplies its scenario names.
 
-`devkit::vm` validates the complete requested set of exported NixOS scenarios before running builds. It refuses uncommitted source input, retrieves each original scenario log with `nix log` even for cached builds, writes build output separately, continues through failures and writes scenario results. A project supplies its scenario names. AgentCTL owns queueing and cancellation.
+**Development stacks.** `devkit::process` owns a checkout's development
+services as process groups, forwards SIGINT and SIGTERM to them and stops
+descendants when dropped. It observes child exits without reaping the leader
+until the final group signal, so an exited leader's ID cannot be reused during
+cleanup. Ordinary `Run` commands stay in the caller's group and receive
+terminal signals directly. `development_lock` holds one stack per checkout
+through a file lock on a persistent file under the checkout's ignored `target`
+directory; the kernel releases it when the process exits. Source-content
+hashing (shared with schema hashes) detects additions, removals and edits
+while excluding build output. A product supplies service setup, executable
+arguments and a real readiness probe.
 
-`devkit::coverage` runs cargo-llvm-cov through `Run::nextest` with the caller's package and test selection, separate instrumentation output, full LLVM JSON and an optional HTML or LCOV report. It checks weighted line totals, report existence and a caller-selected threshold. The summary records the exact selection and line regions mapped through each function's file table. Build diagnostics, stages and individual test outcomes enter the same history as ordinary test runs. Empty test selection fails. Output cannot be reused and is never broadly removed.
+## What a product supplies
 
-`devkit::fuzz` discovers binary targets through Cargo manifest metadata, runs a named target with explicit duration and memory budgets, and replays saved inputs once. Corpus and crash files stay in caller-selected directories after failure. No targets are generated or silently skipped. Nix library search directories are added to the inherited library path. The pinned Nix Rust compiler is stable, while cargo-fuzz requires unstable sanitizer flags. The fuzz command alone sets `RUSTC_BOOTSTRAP=1` to enable those flags. `DEVKIT_FUZZ_RUSTFLAGS` adds experiment-only compiler flags to cargo-fuzz's instrumentation; a project can use [`-Zexternal-clangrt`](https://doc.rust-lang.org/unstable-book/compiler-flags/external-clangrt.html) with a matching Clang linker when its Rust compiler does not bundle sanitizer runtimes.
+Its `xtask` binary and own checks; schema sources and a schema build for the
+`pg` feature; fixture types of its own; bench corpora and metrics; fuzz
+targets; VM scenario names; development-stack services and readiness probes.
 
-`devkit::process` owns development-stack service groups, forwards SIGINT and SIGTERM to them and stops descendants when dropped. It observes child exits without reaping the leader until the final group signal, so an exited leader's id cannot be reused during cleanup. Ordinary `Run` commands stay in the caller's group and receive terminal signals directly. Source-content hashing detects additions, removals and edits while excluding build output. A project supplies service setup, executable arguments and a real readiness probe. AgentCTL's job unit also owns every process on cancellation, including descendants of interrupted build tools.
+## Laws
 
-`devkit::process::development_lock` holds one development stack per checkout. Keep the returned file open until its services stop; the persistent file under the checkout’s ignored `target` directory must stay in place so concurrent processes lock the same inode. The kernel releases ownership when the process exits. `source_hash_excluding` and PostgreSQL schema hashes share the file hashing code; source watches skip symbolic links and select Rust, TOML, JSON and Cargo.lock while schemas follow links in the supplied paths.
-
-## PostgreSQL clone benchmark
-
-The PostgreSQL clone benchmark is an ignored devkit test. It creates a synthetic
-template in its own throwaway cluster, checks clone contents and isolation, and
-times batches of 50 clones for `FILE_COPY`, `WAL_LOG`, and a four-entry pool
-replenished in the background using `WAL_LOG`. Each batch is dropped after its
-clone timing ends. Pool timing includes creating the initial databases and
-background replenishment. Drop times are reported separately. By default one
-round runs on a cluster containing only the template. `DEVKIT_BENCH_ROUNDS`
-sets the repetition count; setting `DEVKIT_BENCH_WRITES` adds a half-gigabyte
-working set and runs both idle and background-writer cases. The default
-12,662,463-byte target matches the largest measured Sinex schema template;
-`DEVKIT_BENCH_TEMPLATE_BYTES` can set another size. `DEVKIT_BENCH_DIRECTORY`
-chooses the storage directory; without it, the cluster uses tmpfs. Use a short
-path on the same filesystem as the development service for representative
-results. Run it through AgentCTL:
-
-```sh
-agentctl job start --project /path/to/checkout exec -- cargo test -p devkit --features pg benchmark_database_clones -- --ignored --nocapture
-```
+- **history-never-gates**: a run whose history store cannot be opened reports
+  that and finishes with the outcome of its steps.
+- **changed-selection-includes-reverse-dependencies**: a production change
+  selects every package that depends on the changed one.
+- **changed-test-only-selects-that-test**: a change confined to one test
+  function, whose name has no other use, selects only that test.
+- **unchanged-tree-builds-nothing**: `--changed` on an unchanged tree succeeds
+  without building tests.
+- **template-built-once-per-schema**: concurrent runs on one schema version
+  build its template once.
+- **half-built-template-outlives-its-builder-only**: cleanup never drops a
+  template whose builder process is alive.
+- **intermittent-means-same-tree**: `intermittent` groups only results at the
+  same tree and uncommitted-changes hash.
+- **stack-stopped-on-drop**: dropping a development stack leaves no process of
+  its groups running.
+- **vm-refuses-uncommitted-input**: a VM run over uncommitted source input is
+  refused before any build.
+- **empty-coverage-selection-fails**: a coverage run that selects no test
+  fails.
+- **laws-report-fails-nothing**: `xtask laws` exits successfully whatever the
+  coverage it reports.

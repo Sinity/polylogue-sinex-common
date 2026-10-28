@@ -1,71 +1,144 @@
 # hashed-blobs
 
-A content-addressed file store for Unix, shared by Polylogue and Sinex. It needs stable Rust 1.98.1 or newer and a C compiler for zstd. Releases are tags of this repository; see its README.
+Content-addressed bytes for Polylogue and Sinex: blobs named by their hash,
+stored in append-only segments, read back with their hashes checked, and
+directory captures read member by member from PAX tar blobs. Both products
+store every raw byte they keep through this crate, so the byte mechanics are
+written once.
 
-The crate holds no policy. Inline-versus-file size, when to use a delta, snapshots, page maps, joining, the excision rewrite, privacy classes and key management belong to the caller.
+The crate holds no policy. When a group commits, which rows cite which
+extents, when bytes may be removed, which key seals what, and how long
+anything is kept all belong to the product.
 
-| Layout | Name | Reads |
-|---|---|---|
-| plain | BLAKE3 of the content | zstd frames (4 MiB, each with its content checksum) plus a seek table in the zstd seekable format; stock `zstd -d` decompresses the file; `Store::read_range` checks all frames; `Reader` verifies the whole name once, then reuses its index and one cached frame |
-| delta | BLAKE3 of the content | a skippable header naming the base, then one zstd frame made the way `zstd --patch-from` makes one: the base as prefix, a window over base and content, long-distance matching; base always plain (at most two blobs per read); not seekable |
-| sealed | BLAKE3 keyed hash under HKDF(data key, "hashed-blobs name v1") | frames under ChaCha20-Poly1305 with a per-encoding frame key HKDF-SHA256(data key, salt = random 32-byte encoding salt, info = "hashed-blobs frame v2" ‖ name) and nonce = frame index; the AAD binds the encoding context and the frame's table entry; a footer carries the frame table and a BLAKE3 of the ciphertext, so `verify` works without the key |
+## Blobs and names
 
-## Writing
+A **blob** is the bytes of one stored input, named by its hash:
 
-- `put_seekable` hashes a file or other seekable input from its current position, verifies an existing blob immediately, and otherwise rewinds to compress it. `put` compresses a non-seekable stream while hashing, then discards the compressed output if the blob already exists. Neither writes an uncompressed temporary copy.
-- `put`, `put_seekable` and `Batch` cannot be cancelled. `put_plain_checked` polls a caller callback while reading and compressing input and while verifying an existing copy; it refuses an existing delta or sealed blob of the same name. A blocking read or a single compression call is not interrupted.
-- A new file is written to `blobs/tmp/`, synced and hard-linked into place, so concurrent writers never overwrite each other. If the name already exists, the existing file is fully verified first (with the key, for sealed data). An invalid existing file is refused and left alone; nothing is repaired silently. A temporary file is removed when its write fails, is cancelled or is installed; only a crash leaves one behind.
-- `prepare_plain`, `prepare_plain_checked` and `prepare_sealed` write the blob to `blobs/tmp/` and return a handle with its `hash()` and `decoded_len()` before the blob is under its name. A caller that keeps its own record of blobs writes that record first, then calls `install()` or `install_checked()`; dropping the handle discards the temporary file. A sealed handle keeps a copy of the data key, so the caller can release its reader and key; sealed input implements `Read + Seek`, starts at offset zero and stays unchanged across the naming and encryption passes, and no plaintext reaches the disk.
-- `names()` streams the names of the blob files in the write root, one shard directory at a time; it skips `blobs/tmp/` and extra roots, and reports an entry that is not a blob file as an `InvalidData` error and goes on. A caller that keeps its own record of blobs uses it to find files that record does not name, and deletes those only while nothing else writes.
-- An install can fail after the hard link, in a directory sync; the blob is then installed and stays. Nothing rolls back installed names, because another reference may use them.
-- A `Batch` shares syncs; it is not atomic. On error some names may be installed and the rest are discarded. On success every returned name is durable. Retrying is safe. Record references only after the commit succeeds. `contains` reports presence only.
+- **plain** blobs are named by the BLAKE3 hash of their content;
+- **sealed** blobs are named by a BLAKE3 keyed hash under a naming key derived
+  from the data key, so equal content sealed under one key deduplicates, and a
+  name says nothing about the content to someone without the key.
 
-## Reading and verification
+A blob is stored as one or more **frames** in a segment. Plain frames are
+standard zstd frames, each with its content checksum, so a segment's plain
+bytes decode with stock `zstd`. Sealed frames are compressed, then encrypted
+with ChaCha20-Poly1305 under a frame key derived from the data key and a
+fresh random salt per encoding; the nonce is the frame index, and each frame's
+associated data binds its position, its lengths and the blob's frame table, so
+a frame moved, cut short or swapped fails authentication. A BLAKE3 hash of the
+ciphertext lets integrity be checked without the key. No plaintext of a
+sealed blob reaches the disk.
 
-- Supported plain files are the ones this writer makes: known-size, checksummed zstd frames without a dictionary, and a seek table without checksums. Anything else is refused as corrupt. Decoding checks every frame's length and extent.
-- `Store::read_range` decodes and checks every plain frame before returning, so it is slow for repeated small reads. It does not check the whole blob against its name, so another valid blob placed under that name would be returned.
-- `Reader` holds one open plain blob and one decoded frame of up to 4 MiB. The first range verifies the whole name; `verify_plain` does the same with a callback that sees each chunk, which must not pass chunks on before success. Later ranges reuse the open file and frame. Switching blobs drops the old one. Each concurrent call may hold its own blob and frame, so the caller limits concurrency. The lock is released before IO and callbacks. A change to the open file is refused; replacing the path never redirects the open file. `Reader` is `Send + Sync`.
-- Callbacks run before metadata work, per frame header, per read of at most 64 KiB, and between decoded chunks of at most 64 KiB, so cancellation works even on blocks that decode to nothing. Memory is the requested output, the seek table, one frame, fixed buffers and the zstd window (window log up to 31). Frames over 4 MiB are streamed, not cached, so each range decodes the whole frame again. `read` returns the whole content in memory.
+An **extent** is the byte range in one segment that holds one blob's frames.
+A product's rows cite extents; a list of extents read in order is one stream.
 
-## Sealed encoding
+## The segment container
 
-Every encoding draws a fresh 32-byte salt from the OS random source before encrypting its first frame, including repeated puts of the same bytes and encodings later dropped by dedup. The salt is public. Naming does not use the salt, so dedup still finds the existing copy; but since dedup happens after encryption, the salt is what prevents key and nonce reuse. If the random source fails, the put fails.
+A **segment** is an append-only file of frames. Each product has one writer,
+and that writer is the only process appending to its segments.
 
-The frame key is HKDF-SHA256 with the data key as input, the salt as HKDF salt, and `hashed-blobs frame v2` followed by the 32-byte keyed name as info. A nonce is eight zero bytes followed by the frame index as a big-endian u32.
+**Writing a group.** The writer collects a group of new blobs and:
 
-The file is ciphertext frames followed by a footer: `HBSEAL2\0` (8 bytes), salt (32), key-reference length (u16 LE), key reference (UTF-8), full/delta flag (u8, 0 or 1), base keyed name (32, delta only), total decoded length (u64 LE), frame count (u32 LE), frame entries (ciphertext length and decoded length, u32 LE each), ciphertext BLAKE3 (32), footer length excluding the last eight bytes (u32 LE), and `HBS2` (4). There is at least one frame, even for empty content. The unkeyed ciphertext hash covers the frames and the footer through the frame table; it detects damage without the key but does not authenticate the footer.
+1. appends their frames to the open segment;
+2. syncs once for the whole group, on a dedicated thread, while the next group
+   is being prepared;
+3. hands the new extents back, and the product commits them in the same
+   database transaction as the rows that cite them.
 
-Each frame's AAD is the footer up to the total decoded length, then the keyed name (32), frame index (u32 LE), frame count (u32 LE), last-frame flag (u8), the frame's ciphertext and decoded lengths (u32 LE each) and its decoded start offset (u64 LE). Changing any table entry or earlier length therefore fails authentication, while a range read still reads only the footer and the frames it needs.
+One sync per group rather than per blob is the design because syncs, not
+compression, set the pace for small blobs. Extents become real only when the
+product commits them; until then they are an uncommitted tail.
 
-`Store::assemble` exposes extents in their original order through `Read + Seek`.
-It keeps at most four verified plain blobs open (four file descriptors and
-their seek tables), least recently used first out, with one decoded frame of at
-most 4 MiB shared between them. Returning to an open blob does not verify it
-again; a blob closed to make room is verified again before its bytes are
-returned. Memory also grows with the number of extents and the open blobs' frame
-counts, plus the decoder window and each returned range (up to 1 MiB). An extent
-over a delta blob reads the whole delta. Sealed blobs need the keyed read
-functions. No plaintext is written to disk or cached between calls.
+**Deduplication.** Before appending, the writer checks the product's hash
+index (committed blobs) and the set of hashes appended in groups that have not
+committed yet. A blob already present in either is not appended again; the
+new row cites the existing extent.
 
-## Measurements
+**Opening a segment.** The product passes the end of the last extent it
+committed. The segment opens there and truncates anything after it. That
+truncation is the ordinary open path, not a recovery step: a crash at any
+point between append, sync, commit and truncate leaves at most an uncommitted
+tail, and opening removes it.
 
-Deltas need the patch-from parameters (2026-10-12, synthetic text, a 100-byte change). A raw-content dictionary saved nothing from a 4 MiB base up. `zstd --patch-from` settings gave 441 B at 4 MiB, 7 KB at 64 MiB, 29 KB at 256 MiB and 123 KB at 1 GiB. Decoding needs about twice the base in memory (0.5 GB at 256 MiB), so the caller limits base size; Polylogue's limit is 640 MiB. The test `delta_against_a_large_base_stays_small` fails if the window is capped at zstd's default.
+**Removing bytes.** The product can name committed extents to punch: their
+bytes are released with a hole punch, and every other extent reads unchanged.
+The product decides when a punch is allowed (for example only after nothing
+else reads those bytes, and never under an open backup hold). A punch the
+product recorded but did not finish before a crash is finished when the
+segment opens, from the list the product passes in. Punching an extent twice
+is harmless.
 
-`examples/pt5.rs` measured real volumes on the operator's QLC drive (2026-10-12):
+**One format.** Segments are the only storage layout. A blob is never patched
+against another blob, and there is no second file-per-blob layout to read.
 
-| Input | Mode | Rate |
-|---|---|---|
-| a day of media, 1.4 GiB in 6,880 files (Opus, WebP) | one durable `put` each, level 1 | 8 MiB/s |
-| the same | `Batch`, `Durability::PerFile`, 1,000 files a batch | 25 MiB/s |
-| the same | `Batch`, `Durability::Filesystem` | 397 MiB/s |
-| a 15 GiB ZIP export | one `put`, level 1 | 75 MiB/s |
+## Reading
 
-Syncs, not compression, set the pace for small blobs. `Durability::Filesystem` calls `syncfs` once before the renames and once after; because that also flushes other programs' writes, use it for bulk imports, and individual puts or small `PerFile` batches for live capture. Media stored at 94% of its size and level 3 gained nothing over level 1, so media is written at level 1. On the 15 GiB export, random 64 KiB range reads took 10 ms median and 70 ms at p99, `verify` streamed at 530 MiB/s and peak memory was 11 MB.
+- A read takes extents and returns their decoded bytes, as a whole value or as
+  a `Read + Seek` stream over the extents in order. Range reads decode only the
+  frames the range touches.
+- Every frame read is checked: plain frames against their checksums and the
+  blob against its name, sealed frames by authentication. A mismatch fails the
+  read with an error naming the segment and the extent. Unchecked bytes are
+  never returned, and a damaged extent is never replaced by bytes from
+  elsewhere.
+- Sealed reads take the data key from the caller for the duration of the read.
+  Nothing decrypted is cached between calls.
+- Reads never block the writer: committed extents never move, so a reader
+  needs no lock beyond the segment file it holds open.
 
-## Tests
+## PAX member access
 
-`src/tests.rs` covers round trips, layouts, ranges, deltas, `assemble`, sealed blobs and corruption detected by the crate itself (the Polylogue archive is No_COW, so btrfs checksums are off). By hand: turning off frame checksums fails the raw-block test, and removing the frame count and last flag from the AAD fails the truncation range-read test.
+A directory capture is stored as one blob holding a POSIX PAX tar stream:
+members keep their raw byte file names (no conversion to UTF-8), mode, owner,
+nanosecond times, extended attributes, POSIX ACLs and sparse-file maps in PAX
+headers. The crate reads the member table of such a blob and returns any
+member's metadata and bytes as a range of the blob, with sparse holes read as
+zeros. A product anchors records at member offsets in the tar stream.
 
-`tests/sealed_lifetime.rs` shows how a caller can revoke in-flight sealed reads: after a lock, expiry, relock or purge, a read that unwrapped its key earlier must not cache or return plaintext. Bytes already returned to a client stay returned. The unlock owner there is a test stand-in, not Sinex's unlock service.
+## Checking stored bytes
 
-`tests/prepared_plain.rs` and `tests/prepared_sealed.rs` cover the prepared handles: hash and length before install, reads after it, concurrent deduplication, temporary-file cleanup on drop, error and cancellation, key-reference mismatch, a corrupt existing copy, and a sync failure after the hard link.
+There is no scheduled check. Reads check what they read, and one on-demand
+scan reads every frame of every segment, checks it, and reports each mismatch
+with its segment and extent. The scan repairs nothing and rewrites nothing; a
+damaged extent is restored from a backup by the operator.
+
+## What a product supplies
+
+- the record of committed extents and the hash index used for deduplication;
+- the transaction that commits extents with the rows that cite them;
+- the committed end of each segment, and the recorded punches, when opening;
+- the decision to punch, and when;
+- data keys and their references for sealed blobs;
+- its durability order around these steps (where derived stores and source
+  positions are saved).
+
+## Laws
+
+- **crash-leaves-only-a-tail**: killing the writer at every point between
+  append, sync, commit and truncate leaves segments that open at their last
+  committed extent, with every committed extent reading back byte for byte.
+- **open-truncates-uncommitted-tail**: bytes after the committed end passed at
+  open are gone after open, and the next append starts there.
+- **committed-extents-never-move**: once committed, an extent's offset and
+  bytes stay the same until it is punched.
+- **one-sync-per-group**: a group of any size issues one data sync.
+- **dedup-across-uncommitted-groups**: a blob appended in a group that has not
+  committed is not appended again by a later group.
+- **read-checks-every-frame**: corrupting one byte of a stored frame makes the
+  next read of it fail naming the segment and extent, and no read returns the
+  damaged bytes.
+- **scan-reports-and-repairs-nothing**: the scan names every damaged extent
+  and leaves every segment byte for byte unchanged.
+- **punch-removes-only-named-extents**: after a punch the named extents read
+  as removed and every other extent reads unchanged.
+- **recorded-punch-finishes-at-open**: a punch recorded before a crash and not
+  performed is performed when the segment opens; repeating it changes nothing.
+- **sealed-no-plaintext-on-disk**: writing and reading a sealed blob leaves no
+  plaintext byte in any file.
+- **sealed-tamper-fails**: changing, moving or truncating any sealed frame or
+  frame-table entry fails authentication on read.
+- **sealed-check-without-key**: the scan detects damage to a sealed blob
+  without its key.
+- **pax-members-match-gnu-tar**: every member read through the crate equals
+  GNU tar's extraction of the same stream, including byte names, extended
+  attributes, ACLs and sparse maps.
