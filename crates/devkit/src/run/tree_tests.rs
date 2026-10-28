@@ -80,7 +80,9 @@ fn failed_git_or_untracked_observation_is_unknown_instead_of_clean() {
                 .parse::<u32>()
                 .unwrap()
         };
-        let output = Command::new(std::env::current_exe().unwrap())
+        // The checkout may be inside a private parent directory. Linux's
+        // executable handle stays reachable after dropping the child's uid.
+        let output = Command::new("/proc/self/exe")
             .args([
                 "--exact",
                 "run::tree_tests::failed_git_or_untracked_observation_is_unknown_instead_of_clean",
