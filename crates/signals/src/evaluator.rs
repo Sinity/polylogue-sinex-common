@@ -176,6 +176,7 @@ struct Pending {
 struct Snapshot {
     at: Instant,
     order: Vec<Occurrence>,
+    rows: Vec<Row>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct RuleState {
@@ -183,6 +184,7 @@ struct RuleState {
     started: Instant,
     revision_baseline: bool,
     rows: BTreeMap<String, Row>,
+    order: Vec<Occurrence>,
     incomplete: bool,
     baseline: Option<Snapshot>,
     latest: Option<Snapshot>,
@@ -193,6 +195,38 @@ struct RuleState {
     observed_at: Option<Instant>,
     next_at: Option<Instant>,
     sent: Vec<Instant>,
+}
+fn current_match(
+    active: &ActiveRule,
+    rows: &BTreeMap<String, Row>,
+    threshold: Option<bool>,
+    latest: Option<&Snapshot>,
+    pending: &Pending,
+    at: Instant,
+) -> bool {
+    if !active.current() {
+        return true;
+    }
+    if let Fires::OnChange { what, k } = active.rule.fires {
+        return pending.change.as_ref().is_some_and(|change| {
+            latest.is_some_and(|latest| difference(&change.after, &latest.order, what, k).is_none())
+        });
+    }
+    (!matches!(active.rule.fires, Fires::OnThreshold { .. }) || threshold == Some(true))
+        && pending.basis.iter().all(|basis| {
+            rows.get(&occurrence_id(&basis.occurrence))
+                .is_some_and(|row| row.current_at(at))
+        })
+}
+fn change_basis(before: &Snapshot, after: &Snapshot) -> Vec<Row> {
+    before
+        .rows
+        .iter()
+        .chain(&after.rows)
+        .map(|row| (row.occurrence.clone(), row.clone()))
+        .collect::<BTreeMap<_, _>>()
+        .into_values()
+        .collect()
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Evaluator {
@@ -263,6 +297,7 @@ impl Evaluator {
             started: start,
             revision_baseline: false,
             rows: BTreeMap::new(),
+            order: Vec::new(),
             incomplete: true,
             baseline: None,
             latest: None,
@@ -489,7 +524,12 @@ impl Evaluator {
                 .into_iter()
                 .filter(|r| r.origin == Origin::Source)
                 .collect();
-            let order = rows.iter().map(|r| r.occurrence.clone()).collect();
+            state.order = rows.iter().map(|r| r.occurrence.clone()).collect();
+            let order = rows
+                .iter()
+                .filter(|row| !state.active.current() || row.current_at(at))
+                .map(|r| r.occurrence.clone())
+                .collect();
             state.rows = rows
                 .into_iter()
                 .map(|r| (occurrence_id(&r.occurrence), r))
@@ -498,6 +538,12 @@ impl Evaluator {
             let snapshot = Snapshot {
                 at: input.at,
                 order,
+                rows: state
+                    .rows
+                    .values()
+                    .filter(|row| !state.active.current() || row.current_at(at))
+                    .cloned()
+                    .collect(),
             };
             match state.active.rule.fires {
                 Fires::OnChange { .. } => {
@@ -578,17 +624,50 @@ impl Evaluator {
             if state.incomplete {
                 continue;
             }
+            // Effective boundaries from observed rows can change a live result
+            // without another arrival. Keep the complete query's original order.
+            if active.current() && matches!(active.rule.fires, Fires::OnChange { .. }) {
+                let order: Vec<_> = state
+                    .order
+                    .iter()
+                    .filter(|occurrence| {
+                        state
+                            .rows
+                            .get(&occurrence_id(occurrence))
+                            .is_some_and(|row| row.current_at(at))
+                    })
+                    .cloned()
+                    .collect();
+                if state
+                    .latest
+                    .as_ref()
+                    .is_some_and(|latest| latest.order != order)
+                {
+                    state.latest = Some(Snapshot {
+                        at,
+                        order,
+                        rows: state
+                            .rows
+                            .values()
+                            .filter(|row| row.current_at(at))
+                            .cloned()
+                            .collect(),
+                    });
+                }
+            }
             if active.current() {
                 self.pending.retain(|_, pending| {
                     if pending.trigger.rule != active.version {
                         return true;
                     }
-                    let matching = pending.basis.iter().all(|basis| {
-                        state
-                            .rows
-                            .get(&occurrence_id(&basis.occurrence))
-                            .is_some_and(|row| row.current_at(at))
-                    });
+                    let matching = current_match(
+                        active,
+                        &state.rows,
+                        state.threshold,
+                        state.latest.as_ref(),
+                        pending,
+                        at,
+                    );
                     if !matching {
                         self.consumed.insert(pending.trigger.clone());
                     }
@@ -657,13 +736,14 @@ impl Evaluator {
                                         trigger,
                                         due: at,
                                         matched: after.at,
-                                        basis: state.rows.values().cloned().collect(),
+                                        basis: change_basis(before, after),
                                         change: Some(change),
                                         value: state.last_value,
                                     });
                                 state.baseline = Some(Snapshot {
                                     at,
                                     order: after.order.clone(),
+                                    rows: after.rows.clone(),
                                 });
                                 state.reported = true;
                                 state.change_due = None;
@@ -736,13 +816,14 @@ impl Evaluator {
             if state.incomplete {
                 continue;
             }
-            let still_matching = !active.current()
-                || pending.basis.iter().all(|basis| {
-                    state
-                        .rows
-                        .get(&occurrence_id(&basis.occurrence))
-                        .is_some_and(|row| row.current_at(at))
-                });
+            let still_matching = current_match(
+                active,
+                &state.rows,
+                state.threshold,
+                state.latest.as_ref(),
+                &pending,
+                at,
+            );
             if active.version != pending.trigger.rule || !active.rule.enabled || !still_matching {
                 self.pending.remove(&id);
                 self.consumed.insert(pending.trigger);

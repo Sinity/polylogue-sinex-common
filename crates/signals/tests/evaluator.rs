@@ -774,7 +774,96 @@ fn value_and_action_handoffs_preserve_configured_delivery_and_payload() {
 }
 #[test]
 fn incomplete_never_fires_scheduled_without_initial_freshness() {
-    let mut r=rule();r.rule.fires=Fires::At{minute:10*60};
-    let mut e=evaluator(r.clone(),vec![],at(9),Policy::default());assert!(advance(&mut e,at(10)).is_empty());assert_eq!(e.incomplete(),vec![r.version.clone()]);
-    e.observe(evaluation(&r,at(11),vec![])).unwrap();assert_eq!(advance(&mut e,at(11))[0].at,at(11));
+    let mut r = rule();
+    r.rule.fires = Fires::At { minute: 10 * 60 };
+    let mut e = evaluator(r.clone(), vec![], at(9), Policy::default());
+    assert!(advance(&mut e, at(10)).is_empty());
+    assert_eq!(e.incomplete(), vec![r.version.clone()]);
+    e.observe(evaluation(&r, at(11), vec![])).unwrap();
+    assert_eq!(advance(&mut e, at(11))[0].at, at(11));
+}
+#[test]
+fn partition_invariance_with_restored_shared_interrupt_budget() {
+    let mut r = rule();
+    r.rule.interrupt = true;
+    r.author = Author::Agent("agent".into());
+    let rows = (0..6)
+        .map(|n| row(&n.to_string(), minute(10, n), minute(10, n), None))
+        .collect::<Vec<_>>();
+    let mut whole = evaluator(r.clone(), rows.clone(), at(9), Policy::default());
+    let mut whole_budget = InterruptBudget {
+        per_hour: 2,
+        handoffs: vec![],
+    };
+    let expected = whole
+        .advance(at(11), &CalendarUtc, &mut whole_budget)
+        .unwrap();
+    assert_eq!(
+        expected
+            .iter()
+            .filter(|d| d.channel == Channel::Interrupt)
+            .count(),
+        2
+    );
+    for checkpoint in [at(9), at(10), minute(10, 2), minute(10, 5), at(11)] {
+        let mut partial = evaluator(r.clone(), rows.clone(), at(9), Policy::default());
+        let mut budget = InterruptBudget {
+            per_hour: 2,
+            handoffs: vec![],
+        };
+        let mut got = partial
+            .advance(checkpoint, &CalendarUtc, &mut budget)
+            .unwrap();
+        let mut restored = roundtrip(&partial);
+        let mut restored_budget: InterruptBudget =
+            serde_json::from_str(&serde_json::to_string(&budget).unwrap()).unwrap();
+        got.extend(
+            restored
+                .advance(at(11), &CalendarUtc, &mut restored_budget)
+                .unwrap(),
+        );
+        assert_eq!(got, expected);
+        assert_eq!(restored_budget, whole_budget);
+    }
+}
+#[test]
+fn current_state_rechecks_at_handoff_threshold_recovery_during_quiet() {
+    let mut r = rule();
+    r.rule.fires = Fires::OnThreshold {
+        value: 10.,
+        compare: Compare::Greater,
+    };
+    r.live = true;
+    r.rule.interrupt = true;
+    r.rule.quiet_hours = Some(quiet());
+    let mut e = evaluator(r.clone(), vec![], at(21), Policy::default());
+    for (time, value) in [(at(21), 1.), (at(23), 20.), (at(25), 1.)] {
+        let mut input = evaluation(&r, time, vec![]);
+        input.value = Some(value);
+        e.observe(input).unwrap();
+    }
+    assert!(advance(&mut e, at(33)).is_empty());
+}
+#[test]
+fn only_observed_rows_wake_live_change_effective_boundaries() {
+    let mut r = rule();
+    r.rule.fires = Fires::OnChange {
+        what: ChangeKind::Membership,
+        k: None,
+    };
+    r.live = true;
+    let mut e = evaluator(r.clone(), vec![], at(9), Policy::default());
+    e.observe(evaluation(
+        &r,
+        at(9),
+        vec![row("a", at(10), at(9), Some(at(12)))],
+    ))
+    .unwrap();
+    let got = advance(&mut e, at(13));
+    assert_eq!(
+        got.iter().map(|d| d.at).collect::<Vec<_>>(),
+        vec![at(10), at(12)]
+    );
+    assert_eq!(got[0].change.as_ref().unwrap().joined[0].id, "a");
+    assert_eq!(got[1].change.as_ref().unwrap().left[0].id, "a");
 }

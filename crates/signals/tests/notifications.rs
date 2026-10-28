@@ -70,6 +70,7 @@ struct Records {
     calls: Arc<Mutex<Vec<Call>>>,
     closed: Arc<Mutex<Vec<u32>>>,
     entered: Arc<tokio::sync::Notify>,
+    stall: Arc<std::sync::atomic::AtomicBool>,
 }
 struct FakeServer {
     records: Records,
@@ -119,7 +120,7 @@ impl FakeServer {
             }
         };
         self.records.entered.notify_one();
-        if self.stall {
+        if self.stall || self.records.stall.load(std::sync::atomic::Ordering::SeqCst) {
             std::future::pending::<()>().await;
         }
         id
@@ -231,6 +232,29 @@ async fn grouping_replaces_rule_summary_and_budget_summary() {
     let third = send(&mut deliverer, notice("c", "source-c")).await;
     assert_ne!(first[0].notification_id, second[0].notification_id);
     assert_eq!(second[0].notification_id, third[0].notification_id);
+    let opened = deliverer.desktop_event(
+        second[0].notification_id.unwrap(),
+        DesktopEvent::OpenReference {
+            reference: String::new(),
+        },
+    );
+    assert_eq!(
+        opened
+            .iter()
+            .filter(|r| matches!(r.event, Some(DesktopEvent::OpenReference { .. })))
+            .count(),
+        1
+    );
+    assert_eq!(
+        opened.iter().find(|r| r.delivery_id == "b").unwrap().event,
+        Some(DesktopEvent::Seen)
+    );
+    assert_eq!(
+        opened.iter().find(|r| r.delivery_id == "c").unwrap().event,
+        Some(DesktopEvent::OpenReference {
+            reference: "https://example.invalid/notices/c".into()
+        })
+    );
     let mut budget = notice("budget-1", "budget");
     budget.interrupt = false;
     budget.budget_passive_count = Some(1);
@@ -659,4 +683,94 @@ async fn appearance_during_downtime_retries_and_same_server_restart_keeps_replac
     );
     drop(requests);
     worker.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn clearing_first_occurrence_promotes_summary_and_keeps_actions_on_visible_notice() {
+    let bus = PrivateBus::start();
+    let records = Records::default();
+    let _server = bus
+        .server(FakeServer {
+            records: records.clone(),
+            actions: true,
+            stall: false,
+        })
+        .await;
+    let mut deliverer = Deliverer::new(bus.connect().await, config(), NotificationState::default());
+    send(&mut deliverer, notice("a", "source-a")).await;
+    let second = send(&mut deliverer, notice("b", "source-b")).await;
+    send(&mut deliverer, notice("c", "source-c")).await;
+    deliverer.cancel("a").await;
+    let calls = records.calls.lock().unwrap().clone();
+    assert_eq!(calls[3].replaces, second[0].notification_id.unwrap());
+    assert_eq!(calls[3].summary, "Source unreadable");
+    assert!(calls[3].body.contains("source needs attention"));
+    assert_eq!(calls[4].summary, "Source unreadable: 2 open occurrences");
+    let b = deliverer.state.attempts["b"].notification_id.unwrap();
+    let c = deliverer.state.attempts["c"].notification_id.unwrap();
+    assert_ne!(b, c);
+    let opened = deliverer.desktop_event(
+        b,
+        DesktopEvent::OpenReference {
+            reference: String::new(),
+        },
+    );
+    assert_eq!(opened.len(), 1);
+    assert_eq!(opened[0].delivery_id, "b");
+    assert_eq!(
+        opened[0].event,
+        Some(DesktopEvent::OpenReference {
+            reference: "https://example.invalid/notices/b".into()
+        })
+    );
+    let opened = deliverer.desktop_event(
+        c,
+        DesktopEvent::OpenReference {
+            reference: String::new(),
+        },
+    );
+    assert_eq!(opened.len(), 1);
+    assert_eq!(opened[0].delivery_id, "c");
+}
+
+#[tokio::test]
+async fn failed_replacement_keeps_prior_notification_actionable_until_condition_clears() {
+    let bus = PrivateBus::start();
+    let records = Records::default();
+    let _server = bus
+        .server(FakeServer {
+            records: records.clone(),
+            actions: true,
+            stall: false,
+        })
+        .await;
+    let mut deliverer = Deliverer::new(bus.connect().await, config(), NotificationState::default());
+    let first = send(&mut deliverer, notice("a", "source-a")).await;
+    records
+        .stall
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let replacement = send(&mut deliverer, notice("b", "source-a")).await;
+    assert_eq!(replacement[0].outcome, DeliveryOutcome::Unknown);
+    let opened = deliverer.desktop_event(
+        first[0].notification_id.unwrap(),
+        DesktopEvent::OpenReference {
+            reference: String::new(),
+        },
+    );
+    assert_eq!(opened.len(), 1);
+    assert_eq!(opened[0].delivery_id, "a");
+    assert_eq!(
+        opened[0].event,
+        Some(DesktopEvent::OpenReference {
+            reference: "https://example.invalid/notices/a".into()
+        })
+    );
+    deliverer.cancel("b").await;
+    assert!(!deliverer.state.attempts["a"].active);
+    assert!(!deliverer.state.attempts["b"].active);
+    assert_eq!(
+        *records.closed.lock().unwrap(),
+        [first[0].notification_id.unwrap()]
+    );
+    assert!(deliverer.server_appeared().is_empty());
 }

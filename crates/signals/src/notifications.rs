@@ -67,6 +67,7 @@ pub enum DesktopEvent {
     OpenReference {
         reference: String,
     },
+    Seen,
     Acknowledged,
     Dismissed,
     Expired,
@@ -102,6 +103,7 @@ pub struct NotificationState {
     slots: BTreeMap<String, u32>,
     first_occurrence: BTreeMap<String, String>,
     server_owner: Option<String>,
+    shown_delivery: BTreeMap<u32, String>,
 }
 
 pub struct Deliverer {
@@ -156,13 +158,6 @@ impl Deliverer {
         {
             return Vec::new();
         }
-        for prior in self.state.attempts.values_mut().filter(|a| {
-            a.notice.product == notice.product
-                && a.notice.rule == notice.rule
-                && a.notice.occurrence == notice.occurrence
-        }) {
-            prior.active = false;
-        }
         self.ready.insert(notice.delivery_id.clone());
         let mut attempt = Attempt {
             notice,
@@ -200,12 +195,18 @@ impl Deliverer {
         let Some(attempt) = self.state.attempts.get(delivery_id).cloned() else {
             return Vec::new();
         };
-        if !attempt.active || (attempt.notice.current && !still_matches(&attempt.notice)) {
+        if !attempt.active {
+            return Vec::new();
+        }
+        if attempt.notice.current && !still_matches(&attempt.notice) {
             return self.cancel(delivery_id).await;
         }
         let mut receipts = Vec::new();
         if attempt.dbus == Some(DeliveryOutcome::Unknown) {
             let (outcome, id) = self.dbus_send(&attempt.notice).await;
+            if outcome == DeliveryOutcome::Delivered {
+                self.replaced(&attempt.notice);
+            }
             let updated = self
                 .state
                 .attempts
@@ -310,6 +311,9 @@ impl Deliverer {
         match result {
             Ok(Ok((id, slot))) => {
                 self.state.slots.insert(slot, id);
+                self.state
+                    .shown_delivery
+                    .insert(id, notice.delivery_id.clone());
                 (DeliveryOutcome::Delivered, Some(id))
             }
             Ok(Err(error)) => (DeliveryOutcome::NotSent(dbus_reason(&error)), None),
@@ -398,7 +402,8 @@ impl Deliverer {
         self.invalidate_server();
         let mut receipts = Vec::new();
         for (id, attempt) in &mut self.state.attempts {
-            if !attempt.retried
+            if attempt.active
+                && !attempt.retried
                 && attempt.dbus == Some(DeliveryOutcome::NotSent("no_notification_server".into()))
             {
                 attempt.retried = true;
@@ -412,6 +417,7 @@ impl Deliverer {
 
     fn invalidate_server(&mut self) {
         self.state.slots.clear();
+        self.state.shown_delivery.clear();
         for attempt in self.state.attempts.values_mut() {
             attempt.notification_id = None;
         }
@@ -420,32 +426,47 @@ impl Deliverer {
     /// A product sends this when a current condition clears, even during quiet
     /// time or when the notification server is absent.
     pub async fn cancel(&mut self, delivery_id: &str) -> Vec<NotificationReceipt> {
-        let Some(attempt) = self.state.attempts.get_mut(delivery_id) else {
+        let Some(notice) = self
+            .state
+            .attempts
+            .get(delivery_id)
+            .map(|a| a.notice.clone())
+        else {
             return Vec::new();
         };
-        attempt.active = false;
-        let notice = attempt.notice.clone();
-        let id = attempt.notification_id;
+        let mut ids = BTreeSet::new();
         let mut receipts = Vec::new();
-        for route in [Route::Dbus, Route::Command] {
-            let outcome = if route == Route::Dbus {
-                &mut attempt.dbus
-            } else {
-                &mut attempt.command
-            };
-            if outcome.is_some() && *outcome != Some(DeliveryOutcome::Delivered) {
-                *outcome = Some(DeliveryOutcome::Cancelled);
-                receipts.push(receipt(attempt, route));
+        for attempt in self.state.attempts.values_mut().filter(|a| {
+            a.notice.product == notice.product
+                && a.notice.rule == notice.rule
+                && a.notice.occurrence == notice.occurrence
+        }) {
+            attempt.active = false;
+            if let Some(id) = attempt.notification_id {
+                ids.insert(id);
+            }
+            for route in [Route::Dbus, Route::Command] {
+                let outcome = if route == Route::Dbus {
+                    &mut attempt.dbus
+                } else {
+                    &mut attempt.command
+                };
+                if outcome.is_some() && *outcome != Some(DeliveryOutcome::Delivered) {
+                    *outcome = Some(DeliveryOutcome::Cancelled);
+                    receipts.push(receipt(attempt, route));
+                }
             }
         }
-        // A grouped notification belongs to all of its live occurrences.
-        let shared = id.is_some()
-            && self
+        // A grouped notification remains while another occurrence owns it.
+        for id in ids {
+            if self
                 .state
                 .attempts
                 .values()
-                .any(|other| other.active && other.notification_id == id);
-        if !shared && let Some(id) = id {
+                .any(|other| other.active && other.notification_id == Some(id))
+            {
+                continue;
+            }
             let _ = tokio::time::timeout(self.config.deadline, async {
                 self.close_proxy()
                     .await?
@@ -454,10 +475,12 @@ impl Deliverer {
             })
             .await;
             self.state.slots.retain(|_, value| *value != id);
+            self.state.shown_delivery.remove(&id);
         }
         let group = Self::group(&notice);
         let open = self.open_occurrences(&notice);
         let first = self.state.first_occurrence.get(&group).cloned();
+        let mut promoted = None;
         if let Some(first) = first
             && !open.contains(&first)
         {
@@ -469,7 +492,24 @@ impl Deliverer {
                     .insert(group.clone(), next.clone());
                 if let Some(id) = self.state.slots.remove(&format!("summary:{group}")) {
                     self.state.slots.insert(format!("occurrence:{group}"), id);
+                    promoted = Some(next.clone());
                 }
+            }
+        }
+        if let Some(promoted) = promoted {
+            let next = self
+                .state
+                .attempts
+                .values()
+                .find(|a| {
+                    a.active
+                        && a.notice.product == notice.product
+                        && a.notice.rule == notice.rule
+                        && a.notice.occurrence == promoted
+                })
+                .map(|a| a.notice.clone());
+            if let Some(next) = next {
+                receipts.push(self.update_notice(&next).await);
             }
         }
         if open.len() <= 1 {
@@ -481,6 +521,7 @@ impl Deliverer {
                         .await
                 })
                 .await;
+                self.state.shown_delivery.remove(&id);
             }
         } else if matches!(self.config.route, Route::Dbus | Route::Both) {
             let first = self.state.first_occurrence.get(&group);
@@ -496,18 +537,36 @@ impl Deliverer {
                 })
                 .map(|a| a.notice.clone());
             if let Some(representative) = representative {
-                let (outcome, notification_id) = self.dbus_send(&representative).await;
-                let attempt = self
-                    .state
-                    .attempts
-                    .get_mut(&representative.delivery_id)
-                    .expect("active occurrence");
-                attempt.dbus = Some(outcome);
-                attempt.notification_id = notification_id;
-                receipts.push(receipt(attempt, Route::Dbus));
+                receipts.push(self.update_notice(&representative).await);
             }
         }
         receipts
+    }
+
+    fn replaced(&mut self, notice: &Notice) {
+        for prior in self.state.attempts.values_mut().filter(|a| {
+            a.notice.delivery_id != notice.delivery_id
+                && a.notice.product == notice.product
+                && a.notice.rule == notice.rule
+                && a.notice.occurrence == notice.occurrence
+        }) {
+            prior.active = false;
+        }
+    }
+
+    async fn update_notice(&mut self, notice: &Notice) -> NotificationReceipt {
+        let (outcome, notification_id) = self.dbus_send(notice).await;
+        if outcome == DeliveryOutcome::Delivered {
+            self.replaced(notice);
+        }
+        let attempt = self
+            .state
+            .attempts
+            .get_mut(&notice.delivery_id)
+            .expect("active occurrence");
+        attempt.dbus = Some(outcome);
+        attempt.notification_id = notification_id;
+        receipt(attempt, Route::Dbus)
     }
 
     /// Converts protocol signals into delivery records. The product executes the
@@ -525,9 +584,15 @@ impl Deliverer {
             .filter(|a| a.active && a.notification_id == Some(notification_id))
         {
             let event = match &event {
-                DesktopEvent::OpenReference { .. } => DesktopEvent::OpenReference {
-                    reference: attempt.notice.reference.clone(),
-                },
+                DesktopEvent::OpenReference { .. }
+                    if self.state.shown_delivery.get(&notification_id)
+                        == Some(&attempt.notice.delivery_id) =>
+                {
+                    DesktopEvent::OpenReference {
+                        reference: attempt.notice.reference.clone(),
+                    }
+                }
+                DesktopEvent::OpenReference { .. } => DesktopEvent::Seen,
                 event => event.clone(),
             };
             if matches!(
@@ -546,6 +611,7 @@ impl Deliverer {
             DesktopEvent::Dismissed | DesktopEvent::Expired | DesktopEvent::Closed
         ) {
             self.state.slots.retain(|_, id| *id != notification_id);
+            self.state.shown_delivery.remove(&notification_id);
             self.state.first_occurrence.retain(|group, occurrence| {
                 self.state.attempts.values().any(|a| {
                     a.active
@@ -653,7 +719,9 @@ pub async fn run(
         .ok()
         .and_then(|message| message.body().deserialize::<String>().ok());
     let retry_waiting = deliverer.state.attempts.values().any(|a| {
-        !a.retried && a.dbus == Some(DeliveryOutcome::NotSent("no_notification_server".into()))
+        a.active
+            && !a.retried
+            && a.dbus == Some(DeliveryOutcome::NotSent("no_notification_server".into()))
     });
     if let Some(owner) = owner {
         if deliverer.state.server_owner.as_ref() != Some(&owner) || retry_waiting {
