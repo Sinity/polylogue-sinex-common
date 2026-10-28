@@ -5,7 +5,10 @@
 //!   `$XDG_RUNTIME_DIR/devkit/pg`. Without it (CI, Nix builds, a host that
 //!   does not run the service) [`Server::start`] runs a throwaway cluster on
 //!   tmpfs, owned by the calling process and removed when dropped. Neither
-//!   listens on TCP, so nothing collides across checkouts.
+//!   listens on TCP, so nothing collides across checkouts. PostgreSQL refuses
+//!   to run as root, so a cluster started by root (cloud VMs, containers)
+//!   runs as `nobody`, with a superuser named `root`: root's clients connect
+//!   exactly as they would to a cluster of their own.
 //! - **Schema databases.** A project's schema is identified by a hash of its
 //!   sources ([`schema_hash`]). [`Server::ensure_schema`] builds
 //!   `<project>_template_<hash>` once, by running the project's bootstrap,
@@ -90,8 +93,9 @@ impl Server {
     }
 
     /// Starts a throwaway cluster on the chosen filesystem. The directory
-    /// must exist and its path must fit PostgreSQL's Unix socket limit.
-    /// The cluster is stopped and removed when the server is dropped.
+    /// must exist, its path must fit PostgreSQL's Unix socket limit, and when
+    /// the caller is root, `nobody` must be able to reach it. The cluster is
+    /// stopped and removed when the server is dropped.
     pub fn start_in(options: &ClusterOptions, base: &Path) -> Result<Self> {
         // Clusters left by killed runs whose watchdog died too.
         crate::owner::sweep(
@@ -108,14 +112,20 @@ impl Server {
             socket: root.clone(),
             owned: Some(owned),
         };
-        run(Command::new("initdb")
-            .args([
-                "--no-sync",
-                "--no-locale",
-                "--auth=trust",
-                "--data-checksums",
-                "-D",
-            ])
+        let mut initdb = Command::new("initdb");
+        initdb.args([
+            "--no-sync",
+            "--no-locale",
+            "--auth=trust",
+            "--data-checksums",
+        ]);
+        if crate::owner::running_as_root() {
+            give_to_nobody(&root)?;
+            // libpq's default user is the OS user's name.
+            initdb.arg("--username=root");
+        }
+        run(crate::owner::as_owner_of(&mut initdb, &root)
+            .arg("-D")
             .arg(&data))?;
         let mut settings = vec![
             ("listen_addresses".to_owned(), String::new()),
@@ -135,12 +145,14 @@ impl Server {
         for (name, value) in &settings {
             server_options += &format!(" -c {name}={value}");
         }
-        run(Command::new("pg_ctl")
-            .arg("-D")
-            .arg(&data)
-            .arg("-l")
-            .arg(root.join("postgres.log"))
-            .args(["-o", &server_options, "-w", "start"]))?;
+        run(
+            crate::owner::as_owner_of(&mut Command::new("pg_ctl"), &root)
+                .arg("-D")
+                .arg(&data)
+                .arg("-l")
+                .arg(root.join("postgres.log"))
+                .args(["-o", &server_options, "-w", "start"]),
+        )?;
         // pg_ctl daemonizes the server, so it would survive a killed test;
         // the watchdog stops it once this process is gone.
         let quoted_data = crate::owner::shell_quote(&data.display().to_string());
@@ -580,7 +592,7 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         if let Some(owned) = &self.owned {
-            let _ = Command::new("pg_ctl")
+            let _ = crate::owner::as_owner_of(&mut Command::new("pg_ctl"), &self.socket)
                 .arg("-D")
                 .arg(&owned.data)
                 .args(["-m", "immediate", "-w", "stop"])
@@ -782,6 +794,33 @@ fn sql_at(socket: &Path, database: &str, sql: &str) -> Result<String> {
             String::from_utf8_lossy(&output.stderr).trim()
         ))
     }
+}
+
+/// Hands a new cluster directory to `nobody`, which the cluster then runs as.
+fn give_to_nobody(dir: &Path) -> Result {
+    let mut account = std::mem::MaybeUninit::<libc::passwd>::uninit();
+    let mut buffer = vec![0 as libc::c_char; 4096];
+    let mut found = std::ptr::null_mut();
+    // SAFETY: every pointer refers to live memory of the stated size, and the
+    // result is read only when getpwnam_r reports that it filled `account`.
+    let error = unsafe {
+        libc::getpwnam_r(
+            c"nobody".as_ptr(),
+            account.as_mut_ptr(),
+            buffer.as_mut_ptr(),
+            buffer.len(),
+            &mut found,
+        )
+    };
+    if error != 0 || found.is_null() {
+        return Err(
+            "PostgreSQL refuses root, and there is no `nobody` account to run it as".into(),
+        );
+    }
+    // SAFETY: getpwnam_r filled `account`.
+    let account = unsafe { account.assume_init() };
+    std::os::unix::fs::chown(dir, Some(account.pw_uid), Some(account.pw_gid))
+        .map_err(|e| format!("{}: {e}", dir.display()))
 }
 
 fn run(command: &mut Command) -> Result {

@@ -857,3 +857,32 @@ fn reap_does_not_drop_an_old_schema_during_a_template_rebuild() {
     );
     assert!(server.reap(&policy).unwrap().is_empty());
 }
+
+/// PostgreSQL refuses root, so a cluster started by root runs as another
+/// account; either way the caller connects as a superuser without naming one.
+#[test]
+fn a_throwaway_cluster_runs_unprivileged_and_admits_its_caller() {
+    use std::os::unix::fs::MetadataExt;
+    let server = Server::start(&ClusterOptions::default()).unwrap();
+    let cluster_owner = fs::metadata(server.socket().join("data")).unwrap().uid();
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let caller = unsafe { libc::geteuid() };
+    if caller == 0 {
+        assert_ne!(cluster_owner, 0);
+    } else {
+        assert_eq!(cluster_owner, caller);
+    }
+    assert_eq!(
+        server
+            .sql(
+                "postgres",
+                "SELECT rolsuper FROM pg_roles WHERE rolname = current_user"
+            )
+            .unwrap()
+            .trim(),
+        "t"
+    );
+    let socket = server.socket().to_owned();
+    drop(server);
+    assert!(!socket.exists());
+}
