@@ -150,9 +150,13 @@ recorded punch list until its own retention policy allows removing it.
 `Reader::new(root)` addresses every operation by `&[Extent]`. `read` verifies
 each blob's whole plain or keyed name before returning a value. `open` and
 `open_checked` return a `BlobReader` implementing `Read + Seek`;
-`read_range` decodes only intersecting frames. Each descriptor authenticates
+`read_range` decodes only intersecting frames.
+`open_checked_with_limits` accepts operation-specific `ReadLimits` for
+encoded index size and frame size, checked before allocating those buffers. Each descriptor authenticates
 the frame index, including the blob name; each frame has a digest, and
-sealed frames also authenticate their position and complete length table.
+sealed frames also authenticate their position and a commitment to the complete
+length table. That commitment is computed once, so encoding and reading stay
+linear in the frame count.
 Plain extents end in the standard zstd seek table and decode with stock
 zstd. No range read needs a scan or hash lookup. `stats` reports decoded
 frames, decoded bytes, encoded bytes and index bytes.

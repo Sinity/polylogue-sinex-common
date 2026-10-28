@@ -37,6 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     if !prepared.is_empty() {
+        std::thread::sleep(next.saturating_duration_since(Instant::now()));
         let group = writer.append_group(prepared, |_| Ok(None))?.wait()?;
         written += group.metrics.appended_bytes;
         writer.acknowledge(&group)?;

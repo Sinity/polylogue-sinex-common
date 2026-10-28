@@ -110,10 +110,14 @@ fn read_seek_range_and_plain_stock_zstd_identity() {
     opened.read_to_end(&mut last).unwrap();
     assert_eq!(last, b"tail");
     assert_eq!(
-        reader.read_range(&[extent.clone()], 31, 35, None).unwrap(),
+        reader
+            .read_range(std::slice::from_ref(&extent), 31, 35, None)
+            .unwrap(),
         body[31..66]
     );
-    assert!(reader.read_range(&[extent.clone()], 997, 1, None).is_err());
+    assert!(reader
+        .read_range(std::slice::from_ref(&extent), 997, 1, None)
+        .is_err());
     let file = std::fs::File::open(dir.path().join("segment.zst")).unwrap();
     let mut stored = vec![0; extent.len as usize];
     file.read_exact_at(&mut stored, extent.offset).unwrap();
@@ -134,11 +138,13 @@ fn read_checks_every_frame_and_errors_name_segment_extent() {
     let reader = Reader::new(dir.path());
     // Untouched frames remain seekable; the damaged first frame is never returned.
     assert_eq!(
-        reader.read_range(&[extent.clone()], 64, 10, None).unwrap(),
+        reader
+            .read_range(std::slice::from_ref(&extent), 64, 10, None)
+            .unwrap(),
         [b'a'; 10]
     );
     let error = reader
-        .read_range(&[extent.clone()], 0, 1, None)
+        .read_range(std::slice::from_ref(&extent), 0, 1, None)
         .unwrap_err()
         .to_string();
     assert!(error.contains("segment.zst"));
@@ -148,7 +154,7 @@ fn read_checks_every_frame_and_errors_name_segment_extent() {
     assert!(open.seek(SeekFrom::Start(64)).is_err());
 }
 #[test]
-fn sealed_no_plaintext_on_disk_tamper_fails_and_scan_checks_without_key() {
+fn sealed_no_plaintext_on_disk__sealed_tamper_fails__sealed_check_without_key() {
     let dir = tempfile::tempdir().unwrap();
     let p = prep(dir.path());
     let key = DataKey {
@@ -203,9 +209,15 @@ fn punch_removes_only_named_extents_and_recorded_punch_finishes_at_open() {
     let last = put(&mut writer, &p, b"keep after");
     let end = last.end();
     drop(writer);
-    let mut writer =
-        SegmentWriter::open(dir.path(), "segment.zst", end, &[removed.clone()], 0o600).unwrap();
-    writer.punch(&[removed.clone()]).unwrap();
+    let mut writer = SegmentWriter::open(
+        dir.path(),
+        "segment.zst",
+        end,
+        std::slice::from_ref(&removed),
+        0o600,
+    )
+    .unwrap();
+    writer.punch(std::slice::from_ref(&removed)).unwrap();
     let reader = Reader::new(dir.path());
     assert_eq!(reader.read(&[first], None).unwrap(), b"keep before");
     assert_eq!(reader.read(&[last], None).unwrap(), b"keep after");
@@ -284,7 +296,7 @@ fn lookup_failure_poison_requires_reopen() {
     assert!(SegmentWriter::open(dir.path(), "segment.zst", 0, &[], 0o600).is_ok());
 }
 #[test]
-fn scan_reports_all_mismatches_and_repairs_nothing() {
+fn scan_reports_and_repairs_nothing__all_mismatches() {
     let dir = tempfile::tempdir().unwrap();
     let p = prep(dir.path());
     let mut writer = open(dir.path(), 0);
@@ -315,7 +327,8 @@ fn caller_budgets_refuse_index_and_frame_before_content_allocation() {
             index_bytes: 1,
         },
     ] {
-        let result = reader.open_checked_with_limits(&[extent.clone()], None, limits, || Ok(()));
+        let result =
+            reader.open_checked_with_limits(std::slice::from_ref(&extent), None, limits, || Ok(()));
         assert!(matches!(result, Err(hashed_blobs::Error::Refused(_))));
     }
     let mut descriptor = extent.clone();
@@ -338,4 +351,101 @@ fn caller_budgets_refuse_index_and_frame_before_content_allocation() {
             || Ok(())
         )
         .is_err());
+}
+
+#[test]
+fn readers_keep_extents_open_while_writer_appends() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = prep(dir.path());
+    let mut writer = open(dir.path(), 0);
+    let first = put(&mut writer, &p, &[13; 97]);
+    let mut held = Reader::new(dir.path())
+        .open(std::slice::from_ref(&first), None)
+        .unwrap();
+    let mut head = [0; 7];
+    held.read_exact(&mut head).unwrap();
+    let _later = put(&mut writer, &p, b"append concurrently held extent");
+    held.seek(SeekFrom::Start(0)).unwrap();
+    let mut bytes = Vec::new();
+    held.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, [13; 97]);
+}
+#[test]
+fn scan_cancellation_is_an_error_and_leaves_bytes_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = prep(dir.path());
+    let mut writer = open(dir.path(), 0);
+    let extent = put(&mut writer, &p, &[13; 97]);
+    let path = dir.path().join("segment.zst");
+    let before = std::fs::read(&path).unwrap();
+    let mut calls = 0;
+    let result = Reader::new(dir.path()).scan_checked(&[extent], || {
+        calls += 1;
+        if calls == 2 {
+            Err(hashed_blobs::Error::Refused("cancel scan".into()))
+        } else {
+            Ok(())
+        }
+    });
+    assert!(result.is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+#[test]
+fn punch_releases_allocated_blocks() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = tempfile::tempdir().unwrap();
+    let p = Preparation::new(dir.path().join("scratch"))
+        .unwrap()
+        .with_frame_size(65536)
+        .unwrap();
+    let mut writer = open(dir.path(), 0);
+    let mut bytes = vec![0; 1 << 20];
+    blake3::Hasher::new().finalize_xof().fill(&mut bytes);
+    let extent = put(&mut writer, &p, &bytes);
+    let path = dir.path().join("segment.zst");
+    let before = std::fs::metadata(&path).unwrap();
+    writer.punch(&[extent]).unwrap();
+    let after = std::fs::metadata(&path).unwrap();
+    assert_eq!(before.len(), after.len());
+    assert!(
+        after.blocks() < before.blocks(),
+        "allocated blocks before={} after={}",
+        before.blocks(),
+        after.blocks()
+    );
+}
+#[test]
+fn locked_sealed_reader_cancels_even_with_a_cached_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = prep(dir.path());
+    let key = DataKey {
+        key_ref: "fixture".into(),
+        key: [9; 32],
+    };
+    let mut writer = open(dir.path(), 0);
+    let group = writer
+        .append_group(
+            vec![p.sealed(std::io::Cursor::new([42; 97]), 3, &key).unwrap()],
+            |_| Ok(None),
+        )
+        .unwrap()
+        .wait()
+        .unwrap();
+    writer.acknowledge(&group).unwrap();
+    let locked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let state = locked.clone();
+    let mut reader = Reader::new(dir.path())
+        .open_checked(&group.extents, Some(&key), move || {
+            if state.load(std::sync::atomic::Ordering::SeqCst) {
+                Err(hashed_blobs::Error::Refused("key locked".into()))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap();
+    reader.read_exact(&mut [0; 1]).unwrap();
+    assert_eq!(reader.stats().frames, 1);
+    locked.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(reader.read(&mut [0; 1]).is_err());
+    assert!(reader.seek(SeekFrom::Start(0)).is_err());
 }

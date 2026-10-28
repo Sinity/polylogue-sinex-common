@@ -12,6 +12,7 @@ pub(crate) struct Frame {
 #[derive(Clone)]
 pub(crate) struct Index {
     pub hash: Hash,
+    pub binding: Hash,
     pub kind: Kind,
     pub salt: [u8; 32],
     pub frames: Vec<Frame>,
@@ -51,26 +52,38 @@ impl Index {
             });
         }
         c.finish()?;
-        Ok(Self {
+        let mut index = Self {
             hash,
+            binding: Hash([0; 32]),
             kind,
             salt,
             frames,
-        })
+        };
+        index.bind(hash);
+        Ok(index)
     }
-    /// Lengths and positions are known before encryption. Digests are recorded
-    /// afterwards and bound by the trusted extent's index hash.
-    pub fn aad(&self, name: Hash, number: usize) -> Vec<u8> {
-        let mut out = b"hashed-blobs frame v3".to_vec();
-        out.extend(name.0);
-        put_kind(&mut out, &self.kind);
-        out.extend(self.salt);
-        out.extend((number as u64).to_le_bytes());
-        out.extend((self.frames.len() as u64).to_le_bytes());
-        for f in &self.frames {
-            out.extend(f.stored.to_le_bytes());
-            out.extend(f.decoded.to_le_bytes());
+    /// Commit the complete length table once. Each frame authenticates this
+    /// commitment and its own number, keeping work linear in the frame count.
+    pub fn bind(&mut self, name: Hash) {
+        self.hash = name;
+        let mut table = blake3::Hasher::new();
+        table.update(b"hashed-blobs frame table v3");
+        table.update(&name.0);
+        let mut kind = Vec::new();
+        put_kind(&mut kind, &self.kind);
+        table.update(&kind);
+        table.update(&self.salt);
+        table.update(&(self.frames.len() as u64).to_le_bytes());
+        for frame in &self.frames {
+            table.update(&frame.stored.to_le_bytes());
+            table.update(&frame.decoded.to_le_bytes());
         }
+        self.binding = Hash(*table.finalize().as_bytes());
+    }
+    pub fn aad(&self, number: usize) -> Vec<u8> {
+        let mut out = b"hashed-blobs frame v3".to_vec();
+        out.extend(self.binding.0);
+        out.extend((number as u64).to_le_bytes());
         out
     }
 }

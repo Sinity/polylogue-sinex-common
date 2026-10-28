@@ -71,6 +71,7 @@ impl Preparation {
         let mut compressor = compressor(level).map_err(Error::Io)?;
         let mut index = Index {
             hash: Hash([0; 32]),
+            binding: Hash([0; 32]),
             kind: Kind::Plain,
             salt: [0; 32],
             frames: Vec::new(),
@@ -82,6 +83,9 @@ impl Preparation {
             check()?;
             let n = read_frame(&mut reader, &mut buffer).map_err(Error::Io)?;
             check()?;
+            if n == 0 && !index.frames.is_empty() {
+                break;
+            }
             hasher.update(&buffer[..n]);
             total += n as u64;
             let encoded = compressor.compress(&buffer[..n]).map_err(Error::Io)?;
@@ -113,6 +117,7 @@ impl Preparation {
         let mut buffer = vec![0; self.frame];
         let mut index = Index {
             hash: Hash([0; 32]),
+            binding: Hash([0; 32]),
             kind: Kind::Sealed {
                 key_ref: key.key_ref.clone(),
             },
@@ -129,6 +134,9 @@ impl Preparation {
             check()?;
             let n = read_frame(&mut reader, &mut buffer).map_err(Error::Io)?;
             check()?;
+            if n == 0 && !index.frames.is_empty() {
+                break;
+            }
             naming.update(&buffer[..n]);
             total += n as u64;
             let compressed = compressor.compress(&buffer[..n]).map_err(Error::Io)?;
@@ -142,6 +150,7 @@ impl Preparation {
             }
         }
         let hash = Hash(*naming.finalize().as_bytes());
+        index.bind(hash);
         reader.seek(SeekFrom::Start(start)).map_err(Error::Io)?;
         let cipher = ChaCha20Poly1305::new((&codec::frame_key(key, hash, &index.salt)).into());
         let mut file = tempfile::tempfile_in(&self.scratch).map_err(Error::Io)?;
@@ -163,7 +172,7 @@ impl Preparation {
                     Nonce::from_slice(&codec::nonce(number)),
                     Payload {
                         msg: &compressed,
-                        aad: &index.aad(hash, number),
+                        aad: &index.aad(number),
                     },
                 )
                 .map_err(|_| Error::Refused("frame encryption failed".into()))?;
@@ -200,7 +209,7 @@ fn read_frame(reader: &mut impl Read, buffer: &mut [u8]) -> std::io::Result<usiz
     Ok(n)
 }
 fn finish(mut file: File, hash: Hash, decoded_len: u64, mut index: Index) -> Result<Prepared> {
-    index.hash = hash;
+    index.bind(hash);
     let encoded = index.encode();
     let index_hash = Hash::of(&encoded);
     let metadata_len = encoded

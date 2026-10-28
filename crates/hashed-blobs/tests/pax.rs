@@ -405,18 +405,47 @@ mod gnu_tar {
         }
         let expected_acl = acl();
         assert_eq!(xattr(path, b"system.posix_acl_access"), expected_acl);
+        // GNU tar writes newline-separated ACL entries. Other producers use
+        // commas and may append a numeric qualifier after the permissions.
+        let access_acl = &entry.acls[b"access".as_slice()];
+        assert_eq!(access_acl, &entry.fields[b"SCHILY.acl.access".as_slice()]);
+        let entries: Vec<Vec<u8>> = access_acl
+            .split(|b| *b == b'\n' || *b == b',')
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                entry
+                    .split(|b| *b == b':')
+                    .take(3)
+                    .collect::<Vec<_>>()
+                    .join(&b":"[..])
+            })
+            .collect();
         assert_eq!(
-            entry.acls[b"access".as_slice()],
-            b"user::rw-,user:12345:r--,group::r--,mask::r--,other::---"
+            entries,
+            [
+                b"user::rw-".to_vec(),
+                b"user:12345:r--".to_vec(),
+                b"group::r--".to_vec(),
+                b"mask::r--".to_vec(),
+                b"other::---".to_vec()
+            ]
         );
-        assert_eq!(
-            archive.read_range(member, 0, usize::MAX).unwrap(),
-            std::fs::read(path).unwrap()
+        let actual = archive.read_range(member, 0, usize::MAX).unwrap();
+        let expected = std::fs::read(path).unwrap();
+        let first_difference = actual.iter().zip(&expected).position(|(a, b)| a != b);
+        assert!(
+            actual == expected,
+            "reader length {} tar length {}, first difference {:?}, reader BLAKE3 {} tar BLAKE3 {}",
+            actual.len(),
+            expected.len(),
+            first_difference,
+            blake3::hash(&actual),
+            blake3::hash(&expected)
         );
     }
 
     #[test]
-    fn synthetic_pax_matches_gnu_tar_extraction_names_metadata_xattrs_acls_and_sparse_bytes() {
+    fn pax_members_match_gnu_tar__names_metadata_xattrs_acls_and_sparse_bytes() {
         if !available() {
             return;
         }
@@ -451,10 +480,17 @@ mod gnu_tar {
                 (b"GNU.sparse.size", b"2097152"),
                 (b"GNU.sparse.numblocks", b"3"),
                 (b"GNU.sparse.name", &name),
-                (b"GNU.sparse.map", b"0,4,1048579,4,2097152,0"),
+                (b"GNU.sparse.map", b"0,512,1048579,4,2097152,0"),
             ],
         );
-        append(&mut tar, b'0', b"GNUSparseFile/data", b"headtail");
+        // GNU tar produces block-sized interior fragments. Its extractor
+        // advances to the next 512-byte block after each fragment, so this
+        // oracle fixture follows that convention. The standalone map tests
+        // above still cover arbitrary unaligned ranges without a GNU oracle.
+        let mut packed = b"head".to_vec();
+        packed.resize(512, 0);
+        packed.extend(b"tail");
+        append(&mut tar, b'0', b"GNUSparseFile/data", &packed);
         let tar = finish(tar);
         let file = root.path().join("archive.tar");
         std::fs::write(&file, &tar).unwrap();

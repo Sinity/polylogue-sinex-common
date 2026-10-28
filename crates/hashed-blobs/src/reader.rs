@@ -200,47 +200,60 @@ impl Reader {
         let mut mismatches = Vec::new();
         for extent in extents {
             check()?;
-            let result = (|| {
-                let (value, _) = OpenExtent::open(&self.root, extent, ReadLimits::default())?;
-                let mut digest = blake3::Hasher::new();
-                let mut at = 0;
-                while at < extent.len {
-                    check()?;
-                    let n = (extent.len - at).min(65536);
-                    digest.update(&value.at(at, n)?);
-                    at += n;
-                }
-                if Hash(*digest.finalize().as_bytes()) != extent.encoded_hash {
-                    return Err(Error::corrupt(
-                        extent,
-                        "encoded bytes differ from committed digest",
-                    ));
-                }
-                if extent.kind == Kind::Plain {
-                    let mut naming = blake3::Hasher::new();
-                    let mut stats = VerificationStats::default();
-                    for frame in 0..value.index.frames.len() {
-                        check()?;
-                        naming.update(&value.decode(frame, None, &mut stats)?);
+            let mut cancelled = None;
+            let result = {
+                let mut check_frame = || match check() {
+                    Ok(()) => Ok(()),
+                    Err(error) => {
+                        cancelled = Some(error);
+                        Err(Error::Refused("scan cancelled".into()))
                     }
-                    if Hash(*naming.finalize().as_bytes()) != extent.hash {
+                };
+                (|| {
+                    let (value, _) = OpenExtent::open(&self.root, extent, ReadLimits::default())?;
+                    let mut digest = blake3::Hasher::new();
+                    let mut at = 0;
+                    while at < extent.len {
+                        check_frame()?;
+                        let n = (extent.len - at).min(65536);
+                        digest.update(&value.at(at, n)?);
+                        at += n;
+                    }
+                    if Hash(*digest.finalize().as_bytes()) != extent.encoded_hash {
                         return Err(Error::corrupt(
                             extent,
-                            "decoded content differs from blob name",
+                            "encoded bytes differ from committed digest",
                         ));
                     }
-                } else {
-                    for (number, frame) in value.index.frames.iter().enumerate() {
-                        check()?;
-                        if Hash::of(&value.at(value.starts[number].0, frame.stored)?)
-                            != frame.digest
-                        {
-                            return Err(Error::corrupt(extent, "sealed frame digest differs"));
+                    if extent.kind == Kind::Plain {
+                        let mut naming = blake3::Hasher::new();
+                        let mut stats = VerificationStats::default();
+                        for frame in 0..value.index.frames.len() {
+                            check_frame()?;
+                            naming.update(&value.decode(frame, None, &mut stats)?);
+                        }
+                        if Hash(*naming.finalize().as_bytes()) != extent.hash {
+                            return Err(Error::corrupt(
+                                extent,
+                                "decoded content differs from blob name",
+                            ));
+                        }
+                    } else {
+                        for (number, frame) in value.index.frames.iter().enumerate() {
+                            check_frame()?;
+                            if Hash::of(&value.at(value.starts[number].0, frame.stored)?)
+                                != frame.digest
+                            {
+                                return Err(Error::corrupt(extent, "sealed frame digest differs"));
+                            }
                         }
                     }
-                }
-                Ok(())
-            })();
+                    Ok(())
+                })()
+            };
+            if let Some(error) = cancelled {
+                return Err(error);
+            }
             if let Err(error) = result {
                 mismatches.push(Mismatch {
                     extent: extent.clone(),
@@ -268,6 +281,7 @@ impl OpenExtent {
             extent: extent.clone(),
             index: Index {
                 hash: Hash([0; 32]),
+                binding: Hash([0; 32]),
                 kind: Kind::Plain,
                 salt: [0; 32],
                 frames: Vec::new(),
@@ -435,7 +449,7 @@ impl OpenExtent {
                         Nonce::from_slice(&codec::nonce(number)),
                         Payload {
                             msg: &encoded,
-                            aad: &self.index.aad(self.extent.hash, number),
+                            aad: &self.index.aad(number),
                         },
                     )
                     .map_err(|_| {
@@ -518,7 +532,11 @@ impl Seek for BlobReader {
         if self.failed {
             return Err(io::Error::other("extent reader stopped after failure"));
         }
-        (self.check)().map_err(io::Error::other)?;
+        if let Err(error) = (self.check)() {
+            self.failed = true;
+            self.cache = None;
+            return Err(io::Error::other(error));
+        }
         let position = match from {
             SeekFrom::Start(n) => i128::from(n),
             SeekFrom::Current(n) => i128::from(self.position) + i128::from(n),
@@ -534,3 +552,6 @@ impl Seek for BlobReader {
         Ok(self.position)
     }
 }
+
+#[cfg(test)]
+mod tests;

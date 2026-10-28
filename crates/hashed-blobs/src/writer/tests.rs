@@ -1,6 +1,6 @@
 //! Real SIGKILL probes. The durable descriptor file stands in for a product
 //! transaction: each test reopens exclusively from the committed descriptor.
-use hashed_blobs::{Extent, Preparation, Reader, SegmentWriter};
+use crate::{Extent, Preparation, Reader, SegmentWriter};
 use std::{
     fs::File,
     io::{Read, Write},
@@ -35,13 +35,9 @@ fn crash_worker() {
             |_| Ok(None),
         )
         .unwrap();
-    if boundary == "append" {
-        stop();
-    }
+
     let group = group.wait().unwrap();
-    if boundary == "sync" {
-        stop();
-    }
+
     commit(&root, &group.extents[0]);
     if boundary == "commit" {
         stop();
@@ -58,10 +54,8 @@ fn crash_worker() {
     assert!(tail.end > group.end);
     drop(writer);
     let _writer = SegmentWriter::open(&root, "segment.zst", group.end, &[], 0o600).unwrap();
-    if boundary == "truncate" {
-        stop();
-    }
-    panic!("unknown crash boundary");
+
+    panic!("crash boundary was not reached: {boundary}");
 }
 #[test]
 fn crash_leaves_only_a_tail_at_append_sync_commit_and_truncate() {
@@ -82,7 +76,7 @@ fn crash_leaves_only_a_tail_at_append_sync_commit_and_truncate() {
         drop(writer);
         let mut child = Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
-            .arg("crash_worker")
+            .arg("writer::tests::crash_worker")
             .arg("--nocapture")
             .env("HASHED_BLOBS_CRASH_ROOT", dir.path())
             .env("HASHED_BLOBS_CRASH_BOUNDARY", boundary)

@@ -77,7 +77,7 @@ impl SegmentWriter {
         codec::segment_name(&segment)?;
         let path = root.as_ref().join(&segment);
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            create_directories(parent)?;
         }
         let existed = path.exists();
         if !existed && committed_end != 0 {
@@ -111,6 +111,8 @@ impl SegmentWriter {
         }
         if length != committed_end {
             file.set_len(committed_end)?;
+            #[cfg(test)]
+            boundary("truncate");
             file.sync_data()?;
         }
         if !existed {
@@ -140,6 +142,10 @@ impl SegmentWriter {
                     };
                     if result.is_err() {
                         failure.store(true, Ordering::Release);
+                    }
+                    #[cfg(test)]
+                    if result.is_ok() {
+                        boundary("sync");
                     }
                     let _ = request.reply.send(result);
                 }
@@ -241,6 +247,8 @@ impl SegmentWriter {
         }
         // Flush user-space buffers before asking the dedicated thread to sync.
         self.file.flush()?;
+        #[cfg(test)]
+        boundary("append");
         let (reply, rx) = mpsc::channel();
         self.sync
             .as_ref()
@@ -357,3 +365,32 @@ fn punch(file: &File, extent: &Extent) -> Result<()> {
         ))
     }
 }
+
+fn create_directories(path: &Path) -> Result<()> {
+    if path.as_os_str().is_empty() || path.is_dir() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        create_directories(parent)?;
+    }
+    match std::fs::create_dir(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => {}
+        Err(error) => return Err(error.into()),
+    }
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    File::open(parent)?.sync_all()?;
+    Ok(())
+}
+#[cfg(test)]
+fn boundary(point: &str) {
+    if std::env::var("HASHED_BLOBS_CRASH_BOUNDARY").is_ok_and(|value| value == point) {
+        unsafe { libc::raise(libc::SIGSTOP) };
+        unreachable!("parent kills the stopped crash worker");
+    }
+}
+#[cfg(test)]
+mod tests;
