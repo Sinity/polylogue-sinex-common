@@ -4,50 +4,74 @@ Rust crates and development tooling shared by
 [Polylogue](https://github.com/Sinity/polylogue) and
 [Sinex](https://github.com/Sinity/sinex).
 
-| Crate | What it is |
+| Crate | Holds |
 |---|---|
-| [`hashed-blobs`](crates/hashed-blobs) | Content-addressed file store: plain, delta and sealed blobs with checked range reads |
-| [`credential-masking`](crates/credential-masking) | Streaming credential masking that never refuses input ([behaviour](docs/credential-masking.md)) |
-| [`devkit`](crates/devkit/README.md) | The core of each project's `xtask`: test and check runs, their recorded history, changed-package selection, test databases and NATS |
-| [`devkit-macros`](crates/devkit-macros) | The `#[devkit::test]` attribute |
+| [`hashed-blobs`](crates/hashed-blobs/README.md) | content-addressed blobs in an append-only segment container, checked reads, PAX member access, the on-demand scan |
+| [`query-language`](docs/query-language.md) | the shared grammar and spelling, the syntax tree's meaning, time expressions, the logical day, cursors, the completer and the shared law suite |
+| [`command-surface`](docs/command-surface.md) | the `Operation` trait, failures with their exit and HTTP table, request and answer envelopes, latency classes and deadlines, server-sent-event framing, the status figure format |
+| [`web-shell`](docs/web-shell.md) | the rendering model, visual tokens, the shared key table, palette, copy, page frame, live fragments and windowed lists |
+| [`signals`](docs/signals.md) | the signal rule schema, the evaluator and its laws, the interrupt budget and desktop notifications |
+| [`devkit`](crates/devkit/README.md), [`devkit-macros`](crates/devkit-macros) | the core of each product's `xtask`: runs and their history, changed-package selection, test databases and NATS, fixtures, bench, coverage, fuzz and VM runners |
 
-Products follow `master`; each product's `Cargo.lock` pins the exact commit:
+Each crate's `README.md` is its documentation. A crate that is not yet in the
+workspace is described by its page under `docs/`, which becomes its README
+when the crate is created. [`docs/vocabulary.md`](docs/vocabulary.md) names
+the shared mechanics.
+
+## What is shared
+
+Code lives here only where the two products' mechanics are identical: storing
+bytes, the query language's grammar and meaning, how operations travel and
+fail, the web front end's shell, signal evaluation, and development runs.
+Shared signals also mean one budget for the operator's attention on a host.
+
+Concepts stay in their product even where the words are alike. Polylogue's
+authored records and their currency, annotations, Pages and measures, and
+Sinex's privacy rules, are different things, and neither product's concept is
+bent to fit the other. Each product supplies its own catalog, failure kinds,
+budgets, views, rules and occurrence keys to the shared mechanics; each
+crate's page says what a product must supply.
+
+The wire between the products stays at the wire level: queries travel as
+text, failures as kind codes, references as strings. That is why each product
+can take a new commit of this repository on its own schedule.
+
+## Conventions
+
+- Every crate page ends with `## Laws`: one bullet per law, a stable key in
+  bold, then the property and its oracle. A test that checks a law carries the
+  key in its name (`cursor_refusals` for `cursor-refusals`), and
+  `cargo xtask laws` reports each law's tests and the laws without one.
+- The operator's rulings are quoted with their date and a locator, following
+  [Polylogue's citation convention](https://github.com/Sinity/polylogue/blob/master/docs/README.md).
+  Everything unlabelled is the design.
+
+## Depending on this repository
+
+Both products follow this repository's `master` branch; each product's
+`Cargo.lock` pins the exact commit, so builds are reproducible:
 
 ```toml
 hashed-blobs = { git = "https://github.com/Sinity/polylogue-sinex-common", branch = "master" }
 ```
 
-`hashed-blobs` owns blob storage; `credential-masking` owns display masking and credential scanning. Neither depends on devkit. `devkit` owns development runs and fixtures and uses `devkit-macros` for its test attribute.
+When `master` moves, a workflow here opens a pull request in each product that
+updates its lock to the new commit, and the product's own checks decide when
+to take it. The workflow needs the repository secret `COMMON_BUMP_TOKEN`,
+with Contents and Pull requests read/write access to both products. Without
+it, update their locks with `cargo update -p devkit -p hashed-blobs
+-p credential-masking` and open those pull requests manually. Convert affected
+callers and run the product's checks before merging its lock update.
 
-The [devkit guide](crates/devkit/README.md) describes its APIs and fixtures; the [history guide](docs/history.md) describes run queries.
+To work on this repository and a product together, check both out side by
+side and run `cargo xtask link-common` in the product: it writes a git-ignored
+`.cargo/local.toml`, which the product's tracked `.cargo/config.toml` includes
+optionally, so the product builds against the local checkout. Common is found
+by argument, then `POLYLOGUE_SINEX_COMMON`, then `../polylogue-sinex-common`.
+`cargo xtask unlink-common` returns to the locked commit. A cross-repository
+change is two pull requests: merge the change here, then take the lock update
+in the product, converting every caller in that pull request.
 
-## Development runs
+Tags mark releases only; nothing depends on them.
 
-Run checks through the repository's declared AgentCTL operations:
-
-```sh
-agentctl job start --project /path/to/checkout check
-agentctl job start --project /path/to/checkout focused -- -p devkit --all-features
-agentctl job start --project /path/to/checkout compile -- -p devkit --all-features
-```
-
-An explicit `CARGO_TARGET_DIR` in the caller's environment is passed to the job.
-
-## Releasing
-
-Merge through a PR. The `Update product locks` workflow then opens or updates
-a pull request in each product that moves its lock to the new `master` commit.
-It needs the repository secret `COMMON_BUMP_TOKEN`, with Contents and Pull
-requests read/write access to both products. Without it, update the product
-locks with `cargo update -p devkit -p hashed-blobs -p credential-masking` and
-open those pull requests manually. Convert affected callers and run the
-product's checks before merging its lock update. Tags are optional release
-markers; the products do not depend on them.
-
-For a change shared with a product, check the repositories out side by side
-and run `cargo xtask link-common` in the product. Its git-ignored
-`.cargo/local.toml` points to this checkout, and `cargo xtask unlink-common`
-restores the product's original lock. Merge the common change first, then
-take its exact commit in the product's lock update.
-
-The repository is public. Test fixtures are synthetic.
+The repository is public. Test fixtures are synthetic and neutral.
