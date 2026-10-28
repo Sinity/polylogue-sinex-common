@@ -80,3 +80,7 @@ in the product, converting every caller in that pull request.
 Tags mark releases only; nothing depends on them.
 
 The repository is public. Test fixtures are synthetic and neutral.
+
+Cloud preparation uses [one shared setup implementation](dev/cloud/README.md)
+for this repository and both products, with Nix and an explicit rootless
+native backend.
