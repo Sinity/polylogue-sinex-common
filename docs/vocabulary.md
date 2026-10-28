@@ -108,4 +108,5 @@ mechanic and nothing else in the shared crates.
 | region | a source span and execution count reported by LLVM coverage |
 | development stack | a checkout's owned services and selected application processes |
 | development lock | an exclusive file lock held while a checkout's development stack runs |
+| local dependency link | a Cargo patch to a checkout, with original workspace locks kept until unlinking |
 | law | a property a page states under `## Laws`, with a stable key that test names carry |

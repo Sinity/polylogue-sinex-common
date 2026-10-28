@@ -48,7 +48,7 @@ can take a new commit of this repository on its own schedule.
 
 ## Depending on this repository
 
-Both products follow this repository's `master` branch; each product's
+Both products follow this repository's `master` branch; each workspace's
 `Cargo.lock` pins the exact commit, so builds are reproducible:
 
 ```toml
@@ -56,20 +56,25 @@ hashed-blobs = { git = "https://github.com/Sinity/polylogue-sinex-common", branc
 ```
 
 When `master` moves, a workflow here opens a pull request in each product that
-updates its lock to the new commit, and the product's own checks decide when
-to take it. The workflow needs the repository secret `COMMON_BUMP_TOKEN`,
+updates all its workspace locks to the new commit. The product's own checks
+decide when to take it. The workflow needs the repository secret `COMMON_BUMP_TOKEN`,
 with Contents and Pull requests read/write access to both products. Without
 it, update their locks with `cargo update -p devkit -p hashed-blobs
 -p credential-masking` and open those pull requests manually. Convert affected
 callers and run the product's checks before merging its lock update.
+Sinex also has `fuzz/Cargo.lock`: update it with
+`cargo update --manifest-path fuzz/Cargo.toml -p devkit -p hashed-blobs`.
+Use `--precise <commit>` to select the same revision in both locks.
 
 To work on this repository and a product together, check both out side by
 side and run `cargo xtask link-common` in the product: it writes a git-ignored
 `.cargo/local.toml`, which the product's tracked `.cargo/config.toml` includes
 optionally, so the product builds against the local checkout. Common is found
 by argument, then `POLYLOGUE_SINEX_COMMON`, then `../polylogue-sinex-common`.
-`cargo xtask unlink-common` returns to the locked commit. A cross-repository
-change is two pull requests: merge the change here, then take the lock update
+`cargo xtask unlink-common` restores the original workspace locks.
+`devkit::local_link::LocalLink` owns patching, lock backups and error rollback;
+each product supplies its checkout discovery and workspace paths.
+A cross-repository change is two pull requests: merge the change here, then take the lock update
 in the product, converting every caller in that pull request.
 
 Tags mark releases only; nothing depends on them.

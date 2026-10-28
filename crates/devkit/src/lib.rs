@@ -13,6 +13,7 @@
 mod cargo;
 mod files;
 mod junit;
+pub mod local_link;
 #[cfg(any(feature = "nats", feature = "pg"))]
 mod owner;
 mod run;
