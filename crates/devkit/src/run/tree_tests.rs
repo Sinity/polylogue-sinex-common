@@ -67,6 +67,38 @@ fn distinct_commits_with_equal_git_trees_keep_identity_separate_from_dirty_conte
 
 #[test]
 fn failed_git_or_untracked_observation_is_unknown_instead_of_clean() {
+    if crate::owner::running_as_root() {
+        use std::os::unix::process::CommandExt;
+        // Root can read mode-000 files. Exercise the same observation failures
+        // as an unprivileged caller so the read-denial assertion still applies.
+        let account_id = |flag| {
+            let output = Command::new("id").args([flag, "nobody"]).output().unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .trim()
+                .parse::<u32>()
+                .unwrap()
+        };
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "run::tree_tests::failed_git_or_untracked_observation_is_unknown_instead_of_clean",
+            ])
+            .uid(account_id("-u"))
+            .gid(account_id("-g"))
+            .current_dir("/dev/shm")
+            .env("TMPDIR", "/dev/shm")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let missing = Tree::observe(dir.path());
     assert!(missing.git_tree.is_none());
