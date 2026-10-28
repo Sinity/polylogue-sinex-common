@@ -36,10 +36,10 @@ jobs:
           GIT_TERMINAL_PROMPT: "0"
           COMMON_COMMIT: ${{ github.sha }}
         run: |
-          updated=0
+          locks=()
           while IFS= read -r -d '' lock; do
             manifest="${lock%Cargo.lock}Cargo.toml"
-            [ -f "$manifest" ] || continue
+            [ -f "$lock" ] && [ -f "$manifest" ] || continue
             metadata=$(cargo metadata --manifest-path "$manifest" --format-version 1 --no-deps)
             mapfile -t crates < <(jq -r '[.packages[].dependencies[]
               | select(((.source // "") | split("#")[0]) == "git+https://github.com/Sinity/polylogue-sinex-common?branch=master")
@@ -48,21 +48,24 @@ jobs:
             args=()
             for crate in "${crates[@]}"; do args+=(-p "$crate"); done
             cargo update --manifest-path "$manifest" "${args[@]}" --precise "$COMMON_COMMIT"
-            updated=1
+            locks+=("$lock")
           done < <(git ls-files -z -- Cargo.lock '**/Cargo.lock')
-          if [ "$updated" -eq 0 ]; then
+          if [ "${#locks[@]}" -eq 0 ]; then
             echo "no workspace follows polylogue-sinex-common's master branch" >&2
             exit 1
           fi
-          echo "commit=$COMMON_COMMIT" >>"$GITHUB_OUTPUT"
-          echo "short=${COMMON_COMMIT:0:9}" >>"$GITHUB_OUTPUT"
+          {
+            echo "commit=$COMMON_COMMIT"
+            echo "short=${COMMON_COMMIT:0:9}"
+            echo "locks<<LOCKS"
+            printf '%s\n' "${locks[@]}"
+            echo "LOCKS"
+          } >>"$GITHUB_OUTPUT"
       - uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.COMMON_BUMP_TOKEN }}
           branch: update-polylogue-sinex-common
-          add-paths: |
-            Cargo.lock
-            **/Cargo.lock
+          add-paths: ${{ steps.update.outputs.locks }}
           commit-message: Update polylogue-sinex-common to ${{ steps.update.outputs.short }}
           title: Update polylogue-sinex-common to ${{ steps.update.outputs.short }}
           body: |
