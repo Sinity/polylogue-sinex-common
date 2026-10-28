@@ -30,6 +30,10 @@ mechanic and nothing else in the shared crates.
 |---|---|
 | catalog | a product's units or tables, their fields, closed-set values and defaults |
 | compiler | a product's translation of a parsed query into execution |
+| normal form | the canonical parsed question, with source spans removed and commutative operands ordered |
+| question identity | the BLAKE3 hash of the normal form and declared parameter types |
+| read position | a product-owned retained view that a continuation reads |
+| version binding | a schema, definition, grant or ranking version fixed for a continuation |
 | unit | what a query reads rows of (a product's sessions, events, tables …) |
 | condition | one test of a row; conditions side by side are joined by `AND` |
 | stage | one `\|` step of a query |

@@ -1,0 +1,228 @@
+//! Type-aware scalar spelling, preserving numeric-looking text as text.
+use crate::{
+    ast::*,
+    catalog::{Catalog, Field, FieldKind, UnknownRule},
+};
+use std::collections::BTreeMap;
+type Fields = BTreeMap<String, Field>;
+fn fields(catalog: &Catalog, unit: &str) -> Fields {
+    catalog
+        .unit(unit)
+        .map(|u| {
+            u.fields
+                .iter()
+                .cloned()
+                .map(|f| (f.name.clone(), f))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+fn field(scope: &Fields, operand: &Operand) -> Option<Field> {
+    match operand {
+        Operand::Field { name } => scope.get(name).cloned(),
+        _ => None,
+    }
+}
+fn value(value: &mut Value, field: &Field) {
+    match value {
+        Value::Set { values } => {
+            for value in values {
+                self::value(value, field);
+            }
+        }
+        Value::Scalar { text, .. } => {
+            if matches!(&field.unknown,UnknownRule::Word(word) if word==text) {
+                return;
+            }
+            let kind = match &field.kind {
+                FieldKind::List(kind) => kind.as_ref(),
+                kind => kind,
+            };
+            let normalized = match kind {
+                FieldKind::Integer | FieldKind::Number => crate::number::canonical(text),
+                FieldKind::Money => crate::number::canonical(
+                    text.strip_suffix("usd")
+                        .unwrap_or(text)
+                        .strip_prefix('$')
+                        .unwrap_or(text.strip_suffix("usd").unwrap_or(text)),
+                )
+                .map(|s| format!("{s}usd")),
+                FieldKind::Duration => {
+                    crate::time::duration(text).map(|d| format!("{}ns", d.as_nanos()))
+                }
+                FieldKind::Bool
+                    if text.eq_ignore_ascii_case("true") || text.eq_ignore_ascii_case("false") =>
+                {
+                    Some(text.to_ascii_lowercase())
+                }
+                FieldKind::Time => text
+                    .parse::<jiff::Timestamp>()
+                    .ok()
+                    .map(|at| at.to_string()),
+                _ => None,
+            };
+            if let Some(normalized) = normalized {
+                *text = normalized;
+            }
+        }
+        _ => {}
+    }
+}
+fn condition(c: &mut Condition, scope: &Fields, catalog: &Catalog) {
+    match &mut c.kind {
+        ConditionKind::And { conditions } | ConditionKind::Or { conditions } => {
+            for c in conditions {
+                condition(c, scope, catalog);
+            }
+        }
+        ConditionKind::Not { condition: c } => condition(c, scope, catalog),
+        ConditionKind::Match {
+            field: name,
+            value: v,
+        } => {
+            if let Some(f) = scope.get(name) {
+                value(v, f);
+            }
+        }
+        ConditionKind::Compare {
+            operand, value: v, ..
+        } => {
+            if let Some(f) = field(scope, operand) {
+                value(v, &f);
+            }
+        }
+        ConditionKind::Between { operand, from, to } => {
+            if let Some(f) = field(scope, operand) {
+                value(from, &f);
+                value(to, &f);
+            }
+        }
+        ConditionKind::Exists { unit, condition: c }
+        | ConditionKind::Count {
+            unit, condition: c, ..
+        } => {
+            if let Some(c) = c {
+                condition(c, &fields(catalog, unit), catalog);
+            }
+        }
+        ConditionKind::In { query, .. } => canonicalize(query, catalog),
+        ConditionKind::Sequence { unit, steps, .. } => {
+            for c in steps {
+                condition(c, &fields(catalog, unit), catalog);
+            }
+        }
+        ConditionKind::Extension { arguments, .. } => arguments
+            .iter_mut()
+            .for_each(|a| argument(a, scope, catalog)),
+        _ => {}
+    }
+}
+fn argument(a: &mut ExtensionArgument, scope: &Fields, catalog: &Catalog) {
+    match a {
+        ExtensionArgument::Condition(c) => condition(c, scope, catalog),
+        ExtensionArgument::Query(q) => canonicalize(q, catalog),
+        ExtensionArgument::Optional(arguments) => arguments
+            .iter_mut()
+            .for_each(|a| argument(a, scope, catalog)),
+        _ => {}
+    }
+}
+pub(super) fn canonicalize(query: &mut Query, catalog: &Catalog) {
+    let mut scope = match &query.source {
+        Source::Unit { unit, .. } => fields(catalog, unit),
+        _ => fields(catalog, &catalog.default_unit),
+    };
+    match &mut query.source {
+        Source::Unit { unit, condition: c } => {
+            if let Some(u) = catalog.unit(unit) {
+                *unit = u.name.clone();
+            }
+            if let Some(c) = c {
+                condition(c, &scope, catalog);
+            }
+        }
+        Source::RecallLast { condition: Some(c) } => condition(c, &scope, catalog),
+        _ => {}
+    }
+    for attachment in &mut query.attach {
+        for window in &mut attachment.windows {
+            if let Window::Where(c) = window {
+                condition(c, &fields(catalog, &attachment.unit), catalog);
+            }
+        }
+    }
+    let mut group_input = None;
+    for stage in &mut query.stages {
+        match &mut stage.kind {
+            StageKind::Where { condition: c } => {
+                condition(c, &scope, catalog);
+                group_input = None;
+            }
+            StageKind::Scope { unit, condition: c } => {
+                group_input = None;
+                scope = fields(catalog, unit);
+                if let Some(c) = c {
+                    condition(c, &scope, catalog);
+                }
+            }
+            StageKind::Group { keys } => {
+                group_input = Some(scope.clone());
+                scope = keys
+                    .iter()
+                    .filter_map(|k| field(&scope, k).map(|f| (k.column(), f)))
+                    .collect();
+                scope.insert(
+                    "count".into(),
+                    Field {
+                        name: "count".into(),
+                        kind: FieldKind::Integer,
+                        ..Field::default()
+                    },
+                );
+            }
+            StageKind::Aggregate { aggregates } => {
+                let grouped = group_input.is_some();
+                let input = group_input.take().unwrap_or_else(|| scope.clone());
+                if !grouped {
+                    scope.clear();
+                }
+                for aggregate in aggregates {
+                    let kind = match aggregate.function {
+                        AggregateFunction::Count | AggregateFunction::CountDistinct => {
+                            FieldKind::Integer
+                        }
+                        _ => aggregate
+                            .fields
+                            .first()
+                            .and_then(|f| input.get(f))
+                            .map(|f| f.kind.clone())
+                            .unwrap_or(FieldKind::Number),
+                    };
+                    let name = aggregate.column();
+                    scope.insert(
+                        name.clone(),
+                        Field {
+                            name,
+                            kind,
+                            ..Field::default()
+                        },
+                    );
+                }
+            }
+            StageKind::Fields { fields } => {
+                scope.retain(|name, _| fields.contains(name));
+                group_input = None;
+            }
+            StageKind::Combine { query, .. } | StageKind::Temporal { query, .. } => {
+                canonicalize(query, catalog);
+                group_input = None;
+            }
+            StageKind::Extension { arguments, .. } => arguments
+                .iter_mut()
+                .for_each(|a| argument(a, &scope, catalog)),
+            _ => {
+                group_input = None;
+            }
+        }
+    }
+}
