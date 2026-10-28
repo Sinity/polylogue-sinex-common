@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Prepares a cloud VM (Claude Code on the web, Codex cloud) to build and test
 # this repository: the Nix development shell for every later command and
-# Cargo's sources. It runs as root from the environment's setup script while
+# Cargo's sources. It requires root permissions during environment setup while
 # the network is open, and is safe to run again. Claude Code clones the
 # repository to /home/user/polylogue-sinex-common; Codex starts in the checkout:
 #

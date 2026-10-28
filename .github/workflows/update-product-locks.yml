@@ -30,35 +30,43 @@ jobs:
         with:
           repository: Sinity/${{ matrix.product }}
           token: ${{ secrets.COMMON_BUMP_TOKEN }}
-      - name: Move the shared crates in Cargo.lock to master
+      - name: Move shared crates in every workspace lock to this commit
         id: update
         env:
           GIT_TERMINAL_PROMPT: "0"
+          COMMON_COMMIT: ${{ github.sha }}
         run: |
-          # The shared crates are the ones the workspace takes from this repository.
-          mapfile -t crates < <(cargo metadata --format-version 1 --no-deps |
-            jq -r '[.packages[].dependencies[]
-              | select((.source // "") | startswith("git+https://github.com/Sinity/polylogue-sinex-common?"))
-              | .name] | unique | .[]')
-          if [ "${#crates[@]}" -eq 0 ]; then
-            echo "no dependency on polylogue-sinex-common" >&2
+          updated=0
+          while IFS= read -r -d '' lock; do
+            manifest="${lock%Cargo.lock}Cargo.toml"
+            [ -f "$manifest" ] || continue
+            metadata=$(cargo metadata --manifest-path "$manifest" --format-version 1 --no-deps)
+            mapfile -t crates < <(jq -r '[.packages[].dependencies[]
+              | select(((.source // "") | split("#")[0]) == "git+https://github.com/Sinity/polylogue-sinex-common?branch=master")
+              | .name] | unique | .[]' <<<"$metadata")
+            [ "${#crates[@]}" -gt 0 ] || continue
+            args=()
+            for crate in "${crates[@]}"; do args+=(-p "$crate"); done
+            cargo update --manifest-path "$manifest" "${args[@]}" --precise "$COMMON_COMMIT"
+            updated=1
+          done < <(git ls-files -z -- Cargo.lock '**/Cargo.lock')
+          if [ "$updated" -eq 0 ]; then
+            echo "no workspace follows polylogue-sinex-common's master branch" >&2
             exit 1
           fi
-          args=()
-          for crate in "${crates[@]}"; do args+=(-p "$crate"); done
-          cargo update "${args[@]}"
-          commit=$(grep -m1 -o 'polylogue-sinex-common?branch=master#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)
-          echo "commit=$commit" >>"$GITHUB_OUTPUT"
-          echo "short=${commit:0:9}" >>"$GITHUB_OUTPUT"
+          echo "commit=$COMMON_COMMIT" >>"$GITHUB_OUTPUT"
+          echo "short=${COMMON_COMMIT:0:9}" >>"$GITHUB_OUTPUT"
       - uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.COMMON_BUMP_TOKEN }}
           branch: update-polylogue-sinex-common
-          add-paths: Cargo.lock
+          add-paths: |
+            Cargo.lock
+            **/Cargo.lock
           commit-message: Update polylogue-sinex-common to ${{ steps.update.outputs.short }}
           title: Update polylogue-sinex-common to ${{ steps.update.outputs.short }}
           body: |
-            Moves Cargo.lock to Sinity/polylogue-sinex-common@${{ steps.update.outputs.commit }}, the head of its master branch.
+            Moves workspace lock files to Sinity/polylogue-sinex-common@${{ steps.update.outputs.commit }}.
 
             Opened by the `Update product locks` workflow in polylogue-sinex-common. Convert any callers on this branch, then run the checks before merging.
           delete-branch: true
