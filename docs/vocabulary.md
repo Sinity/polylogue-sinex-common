@@ -52,6 +52,8 @@ mechanic and nothing else in the shared crates.
 | request, answer | what a caller sends, and the typed value it gets back |
 | outcome | what kind of answer came back (rows, empty, incomplete …), or a failure |
 | failure, failure kind | a typed error, and its stable name on the wire |
+| failure code | a product's precise failure name, registered once against a shared failure kind |
+| caller scope | the server's authenticated identity namespace for request retries; never supplied in request JSON |
 | exit code | the CLI's process status for an answer, one per failure kind |
 | latency class | the group an operation belongs to for its default deadline: local, status, completion, read, search, aggregate |
 | deadline | how long a request may run; a default any caller can lift |
