@@ -21,6 +21,10 @@ Sinex in [its query page](https://github.com/Sinity/sinex/blob/master/docs/query
 - `|` separates stages; the tabular output is a "table"; `page_size` is how
   many rows travel in one response.
 - `~` means contains; `similar:` asks for semantic ranking.
+- `sort by random` and `sort by random()` both leave the seed unspecified;
+  `random(N)` retains the explicit unsigned seed.
+- `measure NAME` retains the complete product selector, including comma-separated
+  parts such as `compare:origin,words`. A following `by` starts group keys.
 - Percentiles are nearest-rank.
 - Cursors are sealed keyset cursors.
 
@@ -209,6 +213,9 @@ Sinex's adoption replaces parsing and time mechanics in `sinex-model::query` whi
 The crate's law suite runs against both catalogs; each compiler runs it plus
 its own laws.
 
+- **format-roundtrip**: parsing formatted syntax preserves the canonical question,
+  including implicit time bounds, explicit random seeds and complete measure selectors;
+  formatting the result again produces the same text. The law runs against both catalogs.
 - **filter-composition**: `Q | where A | where B` returns the same rows as
   `Q | where A AND B`.
 - **three-valued-filters**: a row whose value is unknown satisfies neither

@@ -156,3 +156,142 @@ fn quoted_comparison_symbols_remain_scalar_values() {
         );
     }
 }
+
+#[test]
+fn format_roundtrip_time_bounds_precede_initial_field_guard() {
+    for catalog in [support::polylogue(), support::sinex()] {
+        let main_time = catalog
+            .unit(&catalog.default_unit)
+            .unwrap()
+            .main_time
+            .clone()
+            .unwrap();
+        for (keyword, upper, until) in [("since", "SINCE", false), ("until", "UNTIL", true)] {
+            for spelling in [
+                format!("{keyword}:2026-10-02"),
+                format!("{keyword} 2026-10-02"),
+                format!("{upper} 2026-10-02"),
+            ] {
+                let query = parse(&spelling, &catalog).unwrap();
+                let Source::Unit {
+                    condition: Some(condition),
+                    implicit: true,
+                    ..
+                } = &query.source
+                else {
+                    panic!("{spelling}")
+                };
+                let (operand, value) = match &condition.kind {
+                    ConditionKind::Since { operand, value } if !until => (operand, value),
+                    ConditionKind::Until { operand, value } if until => (operand, value),
+                    other => panic!("wrong bound: {other:?}"),
+                };
+                assert_eq!(operand, &Operand::field(&main_time));
+                assert!(matches!(value, Value::Scalar { text, .. } if text == "2026-10-02"));
+                roundtrip(&spelling, &catalog);
+            }
+            // Values keep their spelling even when the positional keyword is folded.
+            let query = parse(&format!("{upper} $ExactCase"), &catalog).unwrap();
+            let rendered = format_query(&query, &catalog).unwrap();
+            assert_eq!(rendered, format!("{keyword} $ExactCase"));
+        }
+    }
+    let catalog = support::polylogue();
+    roundtrip("since = literal", &catalog);
+    roundtrip("\"since\"", &catalog);
+    assert!(parse("title", &catalog).is_err());
+    let mut no_time = catalog.clone();
+    no_time
+        .units
+        .iter_mut()
+        .for_each(|unit| unit.main_time = None);
+    assert!(parse("since 2026-10-02", &no_time).is_err());
+}
+
+#[test]
+fn format_roundtrip_random_preserves_explicit_seed_presence() {
+    for catalog in [support::polylogue(), support::sinex()] {
+        let bare = parse("| sort by random", &catalog).unwrap();
+        let empty = parse("| sort by RANDOM()", &catalog).unwrap();
+        assert_eq!(
+            normal_form(&bare, &catalog).unwrap(),
+            normal_form(&empty, &catalog).unwrap()
+        );
+        let StageKind::Sort { keys } = &empty.stages[0].kind else {
+            panic!()
+        };
+        assert!(
+            matches!(&keys[0].operand, Operand::Function { name, arguments } if name == "random" && arguments.is_empty())
+        );
+        for text in [
+            "| sort by random",
+            "| sort by random()",
+            "| sort by random(0)",
+            "| sort by random(18446744073709551615) desc",
+        ] {
+            roundtrip(text, &catalog);
+        }
+        let seeded = parse("| sort by random(0)", &catalog).unwrap();
+        assert_ne!(
+            normal_form(&empty, &catalog).unwrap(),
+            normal_form(&seeded, &catalog).unwrap()
+        );
+        for invalid in [
+            "| sort by random(1,2)",
+            "| sort by random(1",
+            "| sort by random(-1)",
+        ] {
+            assert!(parse(invalid, &catalog).is_err(), "{invalid}");
+        }
+    }
+}
+
+#[test]
+fn format_roundtrip_measure_retains_every_selector_and_group_key() {
+    for catalog in [support::polylogue(), support::sinex()] {
+        let field = catalog
+            .unit(&catalog.default_unit)
+            .unwrap()
+            .main_time
+            .as_ref()
+            .unwrap();
+        let text = format!("| measure compare:origin,words by {field}");
+        let query = parse(&text, &catalog).unwrap();
+        let StageKind::Measure { name, by } = &query.stages[0].kind else {
+            panic!()
+        };
+        assert_eq!(name, "compare:origin,words");
+        assert_eq!(by, &[Operand::field(field)]);
+        roundtrip(&text, &catalog);
+        roundtrip("| measure compare:Origin,Words,Cost | limit 1", &catalog);
+        roundtrip("| measure \"compare:Origin,Words with spaces\"", &catalog);
+        assert!(parse("| measure compare:origin, | limit 1", &catalog).is_err());
+    }
+}
+
+proptest! {
+    #[test]
+    fn format_roundtrip_measure_selector_payloads_remain_case_exact(selectors in prop::collection::vec("[a-zA-Z][a-zA-Z0-9_]{0,14}", 2..8)) {
+        let name = format!("compare:{}", selectors.join(","));
+        for catalog in [support::polylogue(), support::sinex()] {
+            let text = format!("| measure {name}");
+            let query = parse(&text, &catalog).unwrap();
+            let StageKind::Measure { name: actual, by } = &query.stages[0].kind else { panic!() };
+            prop_assert_eq!(actual, &name);
+            prop_assert!(by.is_empty());
+            roundtrip(&text, &catalog);
+        }
+    }
+
+    #[test]
+    fn format_roundtrip_random_seed_is_not_replaced(seed in any::<u64>()) {
+        for catalog in [support::polylogue(), support::sinex()] {
+            let text = format!("| sort by random({seed})");
+            let query = parse(&text, &catalog).unwrap();
+            let StageKind::Sort { keys } = &query.stages[0].kind else { panic!() };
+            let Operand::Function { arguments, .. } = &keys[0].operand else { panic!() };
+            prop_assert_eq!(arguments, &vec![Operand::field(seed.to_string())]);
+            roundtrip(&text, &catalog);
+        }
+    }
+}

@@ -537,13 +537,17 @@ impl Parser<'_> {
                     first.span.start,
                 )
                 .hint(format!("run the `{}` command", first.text)));
-            } else if self.field_known(&scope, &first.text) {
+            } else if self.field_known(&scope, &first.text)
+                && !matches!(lower.as_str(), "since" | "until")
+            {
                 return Err(Error::new(
                     ErrorKind::InvalidQuery,
                     format!("`{}` is a field; give it an operator and value", first.text),
                     first.span.start,
                 ));
-            } else if let Some(word) = closest(&first.text, self.catalog.command_words()) {
+            } else if !matches!(lower.as_str(), "since" | "until")
+                && let Some(word) = closest(&first.text, self.catalog.command_words())
+            {
                 return Err(Error::new(
                     ErrorKind::NotAQuery,
                     format!(
@@ -1140,9 +1144,9 @@ impl Parser<'_> {
             return Ok(self.cond(start, ConditionKind::Compare { operand, op, value }));
         }
         self.at += 1;
-        if matches!(token.text.as_str(), "since" | "until") {
+        if token.text.eq_ignore_ascii_case("since") || token.text.eq_ignore_ascii_case("until") {
             let value = self.value()?;
-            let kind = self.time_bound(scope, token.text == "until", value)?;
+            let kind = self.time_bound(scope, token.text.eq_ignore_ascii_case("until"), value)?;
             return Ok(self.cond(start, kind));
         }
         if token.text == "overlaps" {
@@ -1662,7 +1666,7 @@ impl Parser<'_> {
                 loop {
                     let operand = if self.take("random") {
                         let mut arguments = Vec::new();
-                        if self.take("(") {
+                        if self.take("(") && !self.take(")") {
                             let n = self.number()?;
                             arguments.push(Operand::field(n.to_string()));
                             self.expect(")")?;
@@ -1795,7 +1799,22 @@ impl Parser<'_> {
                 StageKind::Fields { fields }
             }
             "measure" => {
-                let name = self.next()?.text;
+                let first = self.next()?;
+                let mut name = first.text;
+                if !first.quoted {
+                    while self.take(",") {
+                        let selector = self.next()?;
+                        if !selector.quoted && is_symbol(&selector.text) {
+                            return Err(Error::new(
+                                ErrorKind::InvalidQuery,
+                                "a measure selector needs a name after the comma",
+                                selector.span.start,
+                            ));
+                        }
+                        name.push(',');
+                        name.push_str(&selector.text);
+                    }
+                }
                 let mut by = Vec::new();
                 if self.take("by") {
                     loop {
