@@ -56,7 +56,7 @@ pub fn complete(text: &str, position: usize, catalog: &Catalog) -> Vec<Completio
             for value in &spec.values {
                 if value.starts_with(fragment) {
                     add(
-                        &literal_spelling(value),
+                        &literal_spelling(value, &spec.unknown),
                         CompletionKind::Value,
                         &spec.help,
                         span,
@@ -70,7 +70,7 @@ pub fn complete(text: &str, position: usize, catalog: &Catalog) -> Vec<Completio
             for value in &spec.values {
                 if value.starts_with(partial) {
                     add(
-                        &literal_spelling(value),
+                        &literal_spelling(value, &spec.unknown),
                         CompletionKind::Value,
                         &spec.help,
                         Span {
@@ -104,7 +104,7 @@ pub fn complete(text: &str, position: usize, catalog: &Catalog) -> Vec<Completio
                 for value in &spec.values {
                     if value.starts_with(fragment) {
                         add(
-                            &literal_spelling(value),
+                            &literal_spelling(value, &spec.unknown),
                             CompletionKind::Value,
                             &spec.help,
                             span,
@@ -335,8 +335,9 @@ fn set_field(before: &str) -> Option<&str> {
     head.strip_suffix(':')
 }
 
-fn literal_spelling(value: &str) -> String {
-    if matches!(value, "unknown" | "*")
+fn literal_spelling(value: &str, unknown: &crate::catalog::UnknownRule) -> String {
+    if matches!(value, "unknown" | "*" | "last" | "this")
+        || matches!(unknown,crate::catalog::UnknownRule::Word(word) if word.eq_ignore_ascii_case(value))
         || value.starts_with('$')
         || value.is_empty()
         || value

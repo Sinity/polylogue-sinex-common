@@ -119,3 +119,53 @@ fn closed_set_literal_completion_preserves_reserved_words_and_query_punctuation(
         assert_eq!(text, literal);
     }
 }
+
+#[test]
+fn closed_literal_completion_respects_custom_unknown_words_and_calendar_keywords() {
+    use query_language::{
+        ast::{ConditionKind, Source, Value},
+        catalog::UnknownRule,
+        parse::parse,
+    };
+    let mut catalog = support::sinex();
+    let field = catalog
+        .units
+        .iter_mut()
+        .find(|u| u.name == "runs")
+        .unwrap()
+        .fields
+        .iter_mut()
+        .find(|f| f.name == "status")
+        .unwrap();
+    field.values = vec!["missing".into(), "last".into(), "this".into()];
+    field.unknown = UnknownRule::Word("missing".into());
+    for (prefix, tail, literal) in [
+        ("runs where status:m", "", "missing"),
+        ("runs where status = l", " sort started", "last"),
+        ("runs where status = t", " sort started", "this"),
+    ] {
+        let text = format!("{prefix}{tail}");
+        let completion = complete(&text, prefix.len(), &catalog)
+            .into_iter()
+            .find(|c| c.value.starts_with('"'))
+            .unwrap();
+        let completed = format!(
+            "{}{}{}",
+            &text[..completion.replace.start],
+            completion.value,
+            &text[completion.replace.end..]
+        );
+        let Source::Unit {
+            condition: Some(condition),
+            ..
+        } = parse(&completed, &catalog).unwrap().source
+        else {
+            panic!("unit condition")
+        };
+        let value = match condition.kind {
+            ConditionKind::Match { value, .. } | ConditionKind::Compare { value, .. } => value,
+            _ => panic!("scalar comparison"),
+        };
+        assert!(matches!(value,Value::Scalar{text,..} if text==literal));
+    }
+}
