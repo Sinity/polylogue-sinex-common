@@ -1315,11 +1315,11 @@ fn authorize(notices: &[Notice], decision: SendDecision) -> Authorization {
             .collect(),
     }
 }
-fn permit(request: &PolicyRequest) -> Authorization {
-    authorize(&request.notices, SendDecision::Permit)
+fn permit(request: PolicyRequest) -> signal_delivery::PolicyFuture {
+    Box::pin(async move { authorize(&request.notices, SendDecision::Permit) })
 }
-fn cancelled(request: &PolicyRequest) -> Authorization {
-    authorize(&request.notices, SendDecision::Cancel)
+fn cancelled(request: PolicyRequest) -> signal_delivery::PolicyFuture {
+    Box::pin(async move { authorize(&request.notices, SendDecision::Cancel) })
 }
 async fn clear(deliverer: &mut Deliverer, id: &str, check: &Policy) -> Vec<NotificationReceipt> {
     let mut receipts = deliverer.cancel(id, check).await;
@@ -1352,15 +1352,20 @@ async fn imported_retry_rechecks_changed_quiet_policy_after_restart_without_anot
         let quiet = Arc::clone(&quiet_until);
         let revision = Arc::clone(&revision);
         Arc::new(move |request| {
-            let decision = if now.load(Ordering::SeqCst) < quiet.load(Ordering::SeqCst) {
-                SendDecision::HoldUntil {
-                    at: quiet.load(Ordering::SeqCst),
-                    policy: format!("owner-policy:{}", revision.load(Ordering::SeqCst)),
-                }
-            } else {
-                SendDecision::Permit
-            };
-            authorize(&request.notices, decision)
+            let now = Arc::clone(&now);
+            let quiet = Arc::clone(&quiet);
+            let revision = Arc::clone(&revision);
+            Box::pin(async move {
+                let decision = if now.load(Ordering::SeqCst) < quiet.load(Ordering::SeqCst) {
+                    SendDecision::HoldUntil {
+                        at: quiet.load(Ordering::SeqCst),
+                        policy: format!("owner-policy:{}", revision.load(Ordering::SeqCst)),
+                    }
+                } else {
+                    SendDecision::Permit
+                };
+                authorize(&request.notices, decision)
+            })
         })
     };
     let clock: signal_delivery::DeliveryClock = {
@@ -1483,22 +1488,27 @@ async fn policy_batch_uses_one_short_fence_for_all_members_without_retaining_it_
         let batches = Arc::clone(&batches);
         let members = Arc::clone(&members);
         Arc::new(move |request| {
-            assert!(
-                !active.swap(true, Ordering::SeqCst),
-                "previous admission fence was not released"
-            );
-            batches.fetch_add(1, Ordering::SeqCst);
-            members.store(request.notices.len(), Ordering::SeqCst);
-            let fence = Lease(Arc::clone(&active));
-            let authorization = authorize(
-                &request.notices,
-                SendDecision::HoldUntil {
-                    at: 10_000,
-                    policy: "policy:current".into(),
-                },
-            );
-            drop(fence);
-            authorization
+            let active = Arc::clone(&active);
+            let batches = Arc::clone(&batches);
+            let members = Arc::clone(&members);
+            Box::pin(async move {
+                assert!(
+                    !active.swap(true, Ordering::SeqCst),
+                    "previous admission fence was not released"
+                );
+                batches.fetch_add(1, Ordering::SeqCst);
+                members.store(request.notices.len(), Ordering::SeqCst);
+                let fence = Lease(Arc::clone(&active));
+                let authorization = authorize(
+                    &request.notices,
+                    SendDecision::HoldUntil {
+                        at: 10_000,
+                        policy: "policy:current".into(),
+                    },
+                );
+                drop(fence);
+                authorization
+            })
         })
     };
     let mut state = NotificationState::default();
@@ -1625,21 +1635,26 @@ async fn stalled_server_does_not_hold_policy_lock_and_the_next_route_rechecks_po
         let calls = Arc::clone(&calls);
         let policy = Arc::clone(&policy);
         Arc::new(move |request| {
-            calls.fetch_add(1, Ordering::SeqCst);
-            let guard = Arc::clone(&policy).try_read_owned().unwrap();
-            let decision = if *guard {
-                SendDecision::Permit
-            } else {
-                SendDecision::Cancel
-            };
-            assert!(!active.swap(true, Ordering::SeqCst));
-            let fence = Lease {
-                active: Arc::clone(&active),
-                _guard: guard,
-            };
-            let authorization = authorize(&request.notices, decision);
-            drop(fence);
-            authorization
+            let active = Arc::clone(&active);
+            let calls = Arc::clone(&calls);
+            let policy = Arc::clone(&policy);
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let guard = Arc::clone(&policy).try_read_owned().unwrap();
+                let decision = if *guard {
+                    SendDecision::Permit
+                } else {
+                    SendDecision::Cancel
+                };
+                assert!(!active.swap(true, Ordering::SeqCst));
+                let fence = Lease {
+                    active: Arc::clone(&active),
+                    _guard: guard,
+                };
+                let authorization = authorize(&request.notices, decision);
+                drop(fence);
+                authorization
+            })
         })
     };
     let directory = tempfile::tempdir().unwrap();
@@ -1703,6 +1718,59 @@ async fn stalled_server_does_not_hold_policy_lock_and_the_next_route_rechecks_po
     cancelled.persisted.send(()).unwrap();
     assert!(calls.load(Ordering::SeqCst) >= 2);
     assert_eq!(records.calls.lock().unwrap().len(), 1);
+    drop(requests);
+    worker.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn platform_effect_waits_for_asynchronous_owner_admission_completion() {
+    let bus = PrivateBus::start();
+    let records = Records::default();
+    let _server = bus
+        .server(FakeServer {
+            records: records.clone(),
+            actions: true,
+            stall: false,
+        })
+        .await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let complete = Arc::new(tokio::sync::Notify::new());
+    let check: signal_delivery::PolicyCheck = {
+        let entered = Arc::clone(&entered);
+        let complete = Arc::clone(&complete);
+        Arc::new(move |request| {
+            let entered = Arc::clone(&entered);
+            let complete = Arc::clone(&complete);
+            Box::pin(async move {
+                entered.notify_one();
+                complete.notified().await;
+                authorize(&request.notices, SendDecision::Permit)
+            })
+        })
+    };
+    let (requests, received) = mpsc::unbounded_channel();
+    let (updates, mut updated) = mpsc::unbounded_channel();
+    let worker = tokio::spawn(run(
+        Deliverer::new(bus.connect().await, config(), NotificationState::default()),
+        received,
+        updates,
+        check,
+        Arc::new(|| 1_000),
+    ));
+    requests
+        .send(NotificationRequest::Deliver(Box::new(notice(
+            "async", "one",
+        ))))
+        .unwrap();
+    let initial = update(&mut updated).await;
+    initial.persisted.send(()).unwrap();
+    entered.notified().await;
+    assert!(records.calls.lock().unwrap().is_empty());
+    complete.notify_one();
+    let delivered = update(&mut updated).await;
+    assert_eq!(delivered.receipts[0].outcome, DeliveryOutcome::Delivered);
+    assert_eq!(records.calls.lock().unwrap().len(), 1);
+    delivered.persisted.send(()).unwrap();
     drop(requests);
     worker.await.unwrap().unwrap();
 }

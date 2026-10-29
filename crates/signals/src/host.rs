@@ -59,6 +59,11 @@ impl HostPolicy {
     pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
+    /// Original immutable intents, including quiet-held local handoffs. The
+    /// owner can attach their original evidence before any later policy change.
+    pub fn pending_intents(&self) -> impl Iterator<Item = &FiredIntent> {
+        self.pending.values().map(|held| &held.intent)
+    }
     /// Fold policy boundaries during downtime without effects or budget use.
     pub fn fold(&mut self, check: impl Fn(&FiredIntent) -> Condition) {
         self.pending.retain(|id, held| {
