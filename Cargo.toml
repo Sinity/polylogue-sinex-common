@@ -10,7 +10,7 @@ rust-version = "1.98.1"
 repository = "https://github.com/Sinity/polylogue-sinex-common"
 publish = false
 
-# Tests spend most of their CPU in compression and the credential masker.
+# Tests spend most of their CPU in compression.
 # Optimizing dependencies, and the workspace lightly, cuts that sharply while
 # keeping incremental rebuilds cheap.
 [profile.dev]

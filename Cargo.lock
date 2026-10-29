@@ -359,15 +359,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "credential-masking"
-version = "0.1.1"
-dependencies = [
- "hmac",
- "serde_json",
- "sha2",
-]
-
-[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
