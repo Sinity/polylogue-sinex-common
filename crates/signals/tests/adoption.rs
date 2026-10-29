@@ -157,7 +157,7 @@ fn identical_retry_preserves_a_quiet_held_occurrence_and_its_original_basis() {
     let held = host.pending_intents().next().unwrap().clone();
     let host_before = serde_json::to_vec(&host).unwrap();
     let evaluator_before = serde_json::to_vec(&e).unwrap();
-    e.replace_rule(r, hour(25), &Utc).unwrap();
+    e.replace_rule(r, hour(21), &Utc).unwrap();
     assert_eq!(serde_json::to_vec(&e).unwrap(), evaluator_before);
     assert_eq!(serde_json::to_vec(&host).unwrap(), host_before);
     let delivered = e.advance(hour(32), &Utc, &mut host).unwrap();
@@ -212,4 +212,43 @@ fn queued_pre_adoption_observation_refuses_adoption_without_mutation() {
     let before = serde_json::to_vec(&e).unwrap();
     assert!(e.replace_rule(r, hour(12), &Utc).is_err());
     assert_eq!(serde_json::to_vec(&e).unwrap(), before);
+}
+
+#[test]
+fn frozen_retry_after_checkpoint_advance_retains_the_original_baseline() {
+    let mut r = rule();
+    r.rule.fires = Fires::OnChange {
+        what: ChangeKind::Membership,
+        k: None,
+    };
+    let mut e = Evaluator::new(hour(9), vec![], Policy::default(), &Utc).unwrap();
+    e.replace_rule(r.clone(), hour(12), &Utc).unwrap();
+    observe(&mut e, &r, hour(12), &["baseline"]);
+    assert!(advance(&mut e, hour(12)).is_empty());
+    observe(&mut e, &r, hour(13), &["changed"]);
+    assert_eq!(advance(&mut e, hour(13)).len(), 1);
+    let before = serde_json::to_vec(&e).unwrap();
+    // This is the original frozen adoption, retried after a newer checkpoint.
+    e.replace_rule(r.clone(), hour(12), &Utc).unwrap();
+    assert_eq!(serde_json::to_vec(&e).unwrap(), before);
+    observe(&mut e, &r, hour(14), &["again"]);
+    let got = advance(&mut e, hour(14));
+    assert_eq!(got.len(), 1);
+    let change = got[0].delivery.change.as_ref().unwrap();
+    assert_eq!(
+        change
+            .before
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        ["changed"]
+    );
+    assert_eq!(
+        change
+            .after
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        ["again"]
+    );
 }

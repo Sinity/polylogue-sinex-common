@@ -408,9 +408,6 @@ impl Evaluator {
         observed_at: Instant,
         calendar: &impl Calendar,
     ) -> Result<(), EvaluationError> {
-        if observed_at < self.now {
-            return Err(EvaluationError("rule adoption precedes checkpoint".into()));
-        }
         let key = rule_id(&active.version);
         if let Some(old) = self.rules.get(&key) {
             if old.active == active {
@@ -419,6 +416,9 @@ impl Evaluator {
             if active.version.revision <= old.active.version.revision {
                 return Err(EvaluationError("rule edits require a new revision".into()));
             }
+        }
+        if observed_at < self.now {
+            return Err(EvaluationError("rule adoption precedes checkpoint".into()));
         }
         if self
             .inputs
