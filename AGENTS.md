@@ -34,7 +34,9 @@ in both products before changing a shared interface.
 - [`web-shell`](crates/web-shell/README.md): server-rendered HTML from typed answers,
   one TypeScript shell, one visual language.
 - [`signals`](crates/signals/README.md): one rule schema and evaluator, one interrupt
-  budget, freedesktop notifications.
+  budget and pure delivery checkpoint types.
+- [`signal-delivery`](crates/signal-delivery/README.md): desktop and command I/O
+  over the shared signal checkpoint.
 - [`devkit`](crates/devkit/README.md): the core of each product's `xtask`. It
   starts what a run needs and stops it on drop, and names its interfaces
   neutrally (`DEVKIT_JOB_ID`, `DEVKIT_SCRATCH`) so that any job runner can

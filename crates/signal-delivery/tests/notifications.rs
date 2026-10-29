@@ -1,3 +1,4 @@
+use signal_delivery::{Deliverer, NotificationRequest, NotificationUpdate, run};
 use signals::DeliveryOutcome;
 use signals::notifications::*;
 use std::collections::HashMap;
@@ -214,7 +215,7 @@ async fn notification_replaced_in_place_and_current_clear_closes() {
         calls[0].actions,
         ["default", "Open", "acknowledge", "Acknowledge"]
     );
-    deliverer.cancel("b").await;
+    deliverer.cancel("b", &|_| true).await;
     assert_eq!(
         *records.closed.lock().unwrap(),
         [a[0].notification_id.unwrap()]
@@ -274,7 +275,7 @@ async fn grouping_replaces_rule_summary_and_budget_summary() {
     budget_update.budget_passive_count = Some(2);
     let budget2 = send(&mut deliverer, budget_update).await;
     assert_eq!(budget1[0].notification_id, budget2[0].notification_id);
-    assert!(deliverer.state.attempts["a"].active);
+    assert!(deliverer.state.attempts()["a"].active);
     let calls = records.calls.lock().unwrap().clone();
     assert_eq!(calls[1].summary, "Source unreadable: 2 open occurrences");
     assert_eq!(calls[2].summary, "Source unreadable: 3 open occurrences");
@@ -287,7 +288,7 @@ async fn grouping_replaces_rule_summary_and_budget_summary() {
     assert!(calls[4].body.ends_with("example read notice:budget-2"));
     assert_eq!(calls[2].urgency, 2);
     assert_eq!(calls[2].expire, 0);
-    let shrink = deliverer.cancel("b").await;
+    let shrink = deliverer.cancel("b", &|_| true).await;
     let calls = records.calls.lock().unwrap().clone();
     assert_eq!(calls.len(), 6);
     assert_eq!(calls[5].replaces, second[0].notification_id.unwrap());
@@ -297,7 +298,7 @@ async fn grouping_replaces_rule_summary_and_budget_summary() {
     assert_eq!(shrink.len(), 1);
     assert_eq!(shrink[0].delivery_id, "c");
     assert_eq!(
-        deliverer.state.attempts["budget-2"].notification_id,
+        deliverer.state.attempts()["budget-2"].notification_id,
         budget2[0].notification_id
     );
     let summary_open = deliverer.desktop_event(
@@ -328,7 +329,7 @@ async fn grouping_replaces_rule_summary_and_budget_summary() {
             reference: "https://example.invalid/notices/budget-2".into()
         })
     );
-    deliverer.cancel("c").await;
+    deliverer.cancel("c", &|_| true).await;
     assert!(
         records
             .closed
@@ -336,8 +337,8 @@ async fn grouping_replaces_rule_summary_and_budget_summary() {
             .unwrap()
             .contains(&second[0].notification_id.unwrap())
     );
-    deliverer.cancel("budget-2").await;
-    assert!(deliverer.state.attempts["a"].active);
+    deliverer.cancel("budget-2", &|_| true).await;
+    assert!(deliverer.state.attempts()["a"].active);
     assert!(
         !records
             .closed
@@ -763,14 +764,14 @@ async fn clearing_first_occurrence_promotes_summary_and_keeps_actions_on_visible
     send(&mut deliverer, notice("a", "source-a")).await;
     let second = send(&mut deliverer, notice("b", "source-b")).await;
     send(&mut deliverer, notice("c", "source-c")).await;
-    deliverer.cancel("a").await;
+    deliverer.cancel("a", &|_| true).await;
     let calls = records.calls.lock().unwrap().clone();
     assert_eq!(calls[3].replaces, second[0].notification_id.unwrap());
     assert_eq!(calls[3].summary, "Source unreadable");
     assert!(calls[3].body.contains("source needs attention"));
     assert_eq!(calls[4].summary, "Source unreadable: 2 open occurrences");
-    let b = deliverer.state.attempts["b"].notification_id.unwrap();
-    let c = deliverer.state.attempts["c"].notification_id.unwrap();
+    let b = deliverer.state.attempts()["b"].notification_id.unwrap();
+    let c = deliverer.state.attempts()["c"].notification_id.unwrap();
     assert_ne!(b, c);
     let opened = deliverer.desktop_event(
         b,
@@ -828,9 +829,9 @@ async fn failed_replacement_keeps_prior_notification_actionable_until_condition_
             reference: "https://example.invalid/notices/a".into()
         })
     );
-    deliverer.cancel("b").await;
-    assert!(!deliverer.state.attempts["a"].active);
-    assert!(!deliverer.state.attempts["b"].active);
+    deliverer.cancel("b", &|_| true).await;
+    assert!(!deliverer.state.attempts()["a"].active);
+    assert!(!deliverer.state.attempts()["b"].active);
     assert_eq!(
         *records.closed.lock().unwrap(),
         [first[0].notification_id.unwrap()]
@@ -891,9 +892,9 @@ async fn explicit_dbus_error_retries_on_new_owner_but_not_same_server_restart() 
         .unwrap()
         .unwrap();
     assert!(barrier.receipts.is_empty());
-    assert!(!barrier.state.attempts["a"].retried);
+    assert!(!barrier.state.attempts()["a"].retried);
     assert_eq!(
-        barrier.state.attempts["a"].dbus,
+        barrier.state.attempts()["a"].dbus,
         Some(sent[0].outcome.clone())
     );
     barrier.persisted.send(()).unwrap();
@@ -920,9 +921,9 @@ async fn explicit_dbus_error_retries_on_new_owner_but_not_same_server_restart() 
     assert_eq!(delivered.receipts.len(), 1);
     assert_eq!(delivered.receipts[0].delivery_id, "a");
     assert_eq!(delivered.receipts[0].outcome, DeliveryOutcome::Delivered);
-    assert!(delivered.state.attempts["a"].retried);
+    assert!(delivered.state.attempts()["a"].retried);
     assert_eq!(
-        delivered.state.attempts["a"].command,
+        delivered.state.attempts()["a"].command,
         Some(DeliveryOutcome::Delivered)
     );
     delivered.persisted.send(()).unwrap();
@@ -976,7 +977,7 @@ async fn missing_bus_records_dbus_failure_and_still_runs_both_route_command() {
             delivered.receipts[0].outcome,
             DeliveryOutcome::NotSent("no_notification_server".into())
         );
-        assert!(!delivered.state.attempts["headless"].retried);
+        assert!(!delivered.state.attempts()["headless"].retried);
         if route == Route::Both {
             assert_eq!(delivered.receipts[1].route, Route::Command);
             assert_eq!(delivered.receipts[1].outcome, DeliveryOutcome::Delivered);
@@ -989,4 +990,255 @@ async fn missing_bus_records_dbus_failure_and_still_runs_both_route_command() {
         drop(requests);
         worker.await.unwrap().unwrap();
     }
+}
+
+#[tokio::test]
+async fn historical_occurrence_still_requires_current_policy() {
+    let bus = PrivateBus::start();
+    let records = Records::default();
+    let _server = bus
+        .server(FakeServer {
+            records: records.clone(),
+            actions: true,
+            stall: false,
+        })
+        .await;
+    let mut d = Deliverer::new(bus.connect().await, config(), NotificationState::default());
+    let mut n = notice("historical", "once");
+    n.current = false;
+    d.begin(n);
+    let result = d.send("historical", &|_| false).await;
+    assert_eq!(result[0].outcome, DeliveryOutcome::Cancelled);
+    assert!(records.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn grouped_replacement_checks_policy_before_notify() {
+    let bus = PrivateBus::start();
+    let records = Records::default();
+    let _server = bus
+        .server(FakeServer {
+            records: records.clone(),
+            actions: true,
+            stall: false,
+        })
+        .await;
+    let mut d = Deliverer::new(bus.connect().await, config(), NotificationState::default());
+    for id in ["a", "b", "c"] {
+        send(&mut d, notice(id, id)).await;
+    }
+    let before = records.calls.lock().unwrap().len();
+    d.cancel("a", &|_| false).await;
+    assert_eq!(records.calls.lock().unwrap().len(), before);
+    assert!(d.state.attempts().values().all(|a| !a.active));
+}
+
+#[tokio::test]
+async fn unknown_command_is_not_retried_when_dbus_appears() {
+    let bus = PrivateBus::start();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("count");
+    let mut configured = config();
+    configured.route = Route::Both;
+    configured.deadline = Duration::from_millis(100);
+    configured.command = Some(RouteCommand {
+        program: "sh".into(),
+        arguments: vec![
+            "-c".into(),
+            "cat >/dev/null; printf x >> \"$1\"; exec sleep 10".into(),
+            "route".into(),
+            path.to_string_lossy().into_owned(),
+        ],
+    });
+    let mut d = Deliverer::new(
+        bus.connect().await,
+        configured,
+        NotificationState::default(),
+    );
+    let first = send(&mut d, notice("a", "a")).await;
+    assert_eq!(
+        first[0].outcome,
+        DeliveryOutcome::NotSent("no_notification_server".into())
+    );
+    assert_eq!(first[1].outcome, DeliveryOutcome::Unknown);
+    assert_eq!(std::fs::read(&path).unwrap(), b"x");
+    let records = Records::default();
+    let _server = bus
+        .server(FakeServer {
+            records: records.clone(),
+            actions: true,
+            stall: false,
+        })
+        .await;
+    d.server_appeared();
+    let retry = d.send("a", &|_| true).await;
+    assert_eq!(retry.len(), 1);
+    assert_eq!(retry[0].route, Route::Dbus);
+    assert_eq!(retry[0].outcome, DeliveryOutcome::Delivered);
+    assert_eq!(
+        d.state.attempt("a").unwrap().command,
+        Some(DeliveryOutcome::Unknown)
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"x");
+}
+
+#[tokio::test]
+async fn live_import_retries_absent_server_once_after_persisting_unknown() {
+    let bus = PrivateBus::start();
+    let mut source = Deliverer::new(bus.connect().await, config(), NotificationState::default());
+    send(&mut source, notice("a", "a")).await;
+    let original = source.state.attempt("a").unwrap().clone();
+    let records = Records::default();
+    let _server = bus
+        .server(FakeServer {
+            records: records.clone(),
+            actions: true,
+            stall: false,
+        })
+        .await;
+    let receiver = Deliverer::new(bus.connect().await, config(), NotificationState::default());
+    let (requests, received) = mpsc::unbounded_channel();
+    let (updates, mut updated) = mpsc::unbounded_channel();
+    let worker = tokio::spawn(run(receiver, received, updates, Arc::new(|_| true)));
+    // Consume startup owner checkpoint before inserting the transferred attempt.
+    let startup = raw_update(&mut updated).await;
+    startup.persisted.send(()).unwrap();
+    let (ack, wait) = tokio::sync::oneshot::channel();
+    requests
+        .send(NotificationRequest::Import {
+            attempt: Box::new(original.clone()),
+            imported: ack,
+        })
+        .unwrap();
+    let imported = raw_update(&mut updated).await;
+    assert_eq!(imported.state.attempt("a").unwrap().dbus, original.dbus);
+    assert!(records.calls.lock().unwrap().is_empty());
+    imported.persisted.send(()).unwrap();
+    assert_eq!(wait.await.unwrap(), Ok(()));
+    let prepared = raw_update(&mut updated).await;
+    assert!(prepared.state.attempt("a").unwrap().retried);
+    assert_eq!(prepared.receipts[0].outcome, DeliveryOutcome::Unknown);
+    assert!(records.calls.lock().unwrap().is_empty());
+    prepared.persisted.send(()).unwrap();
+    let completed = raw_update(&mut updated).await;
+    assert_eq!(completed.receipts[0].outcome, DeliveryOutcome::Delivered);
+    completed.persisted.send(()).unwrap();
+    let (ack, wait) = tokio::sync::oneshot::channel();
+    requests
+        .send(NotificationRequest::Import {
+            attempt: Box::new(original),
+            imported: ack,
+        })
+        .unwrap();
+    assert_eq!(wait.await.unwrap(), Ok(()));
+    requests
+        .send(NotificationRequest::Clear("barrier".into()))
+        .unwrap();
+    let barrier = raw_update(&mut updated).await;
+    assert_eq!(
+        barrier.state.attempt("a").unwrap().dbus,
+        Some(DeliveryOutcome::Delivered)
+    );
+    assert!(barrier.state.attempt("a").unwrap().retried);
+    barrier.persisted.send(()).unwrap();
+    assert_eq!(records.calls.lock().unwrap().len(), 1);
+    drop(requests);
+    worker.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn release_persists_original_handoff_and_inactive_checkpoint_before_ack() {
+    let bus = PrivateBus::start();
+    let receiver = Deliverer::new(None, config(), NotificationState::default());
+    let (requests, received) = mpsc::unbounded_channel();
+    let (updates, mut updated) = mpsc::unbounded_channel();
+    let worker = tokio::spawn(run(receiver, received, updates, Arc::new(|_| true)));
+    requests
+        .send(NotificationRequest::Deliver(Box::new(notice("a", "a"))))
+        .unwrap();
+    let began = raw_update(&mut updated).await;
+    began.persisted.send(()).unwrap();
+    let sent = raw_update(&mut updated).await;
+    let original = sent.state.attempt("a").unwrap().clone();
+    sent.persisted.send(()).unwrap();
+    let (ack, mut wait) = tokio::sync::oneshot::channel();
+    requests
+        .send(NotificationRequest::Release {
+            delivery_id: "a".into(),
+            released: ack,
+        })
+        .unwrap();
+    let released = raw_update(&mut updated).await;
+    assert_eq!(released.released, Some(original.clone()));
+    assert!(!released.state.attempt("a").unwrap().active);
+    assert_eq!(
+        wait.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    );
+    released.persisted.send(()).unwrap();
+    assert_eq!(wait.await.unwrap(), Some(original));
+    drop(requests);
+    worker.await.unwrap().unwrap();
+    drop(bus);
+}
+
+async fn raw_update(
+    updates: &mut mpsc::UnboundedReceiver<NotificationUpdate>,
+) -> NotificationUpdate {
+    tokio::time::timeout(Duration::from_secs(5), updates.recv())
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn importing_grouped_attempts_in_reverse_order_keeps_the_visible_action_owner() {
+    let bus = PrivateBus::start();
+    let records = Records::default();
+    let _server = bus
+        .server(FakeServer {
+            records: records.clone(),
+            actions: true,
+            stall: false,
+        })
+        .await;
+    let mut source = Deliverer::new(bus.connect().await, config(), NotificationState::default());
+    for id in ["a", "b", "c"] {
+        send(&mut source, notice(id, id)).await;
+    }
+    let mut state = NotificationState::default();
+    state.set_server_owner(source.state.server_owner().map(str::to_owned));
+    for id in ["c", "b", "a"] {
+        state
+            .import_attempt(source.state.attempt(id).unwrap().clone())
+            .unwrap();
+    }
+    let mut receiver = Deliverer::new(bus.connect().await, config(), state);
+    let id = source.state.attempt("c").unwrap().notification_id.unwrap();
+    let actions = receiver.desktop_event(
+        id,
+        DesktopEvent::OpenReference {
+            reference: String::new(),
+        },
+    );
+    assert_eq!(
+        actions
+            .iter()
+            .filter(|r| matches!(r.event, Some(DesktopEvent::OpenReference { .. })))
+            .count(),
+        1
+    );
+    assert_eq!(
+        actions.iter().find(|r| r.delivery_id == "c").unwrap().event,
+        Some(DesktopEvent::OpenReference {
+            reference: notice("c", "c").reference
+        })
+    );
+    assert_eq!(
+        actions.iter().find(|r| r.delivery_id == "b").unwrap().event,
+        Some(DesktopEvent::Seen)
+    );
+    let before = records.calls.lock().unwrap().len();
+    assert!(receiver.send("c", &|_| true).await.is_empty());
+    assert_eq!(records.calls.lock().unwrap().len(), before);
 }
