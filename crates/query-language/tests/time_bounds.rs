@@ -2,7 +2,6 @@ mod support;
 use jiff::{Timestamp, civil::Time as CivilTime, tz::TimeZone};
 use query_language::{
     ast::{ConditionKind, Operand, Query, Source, Value},
-    catalog::Catalog,
     format::format_query,
     identity::{normal_form, question_id},
     parse::parse,
