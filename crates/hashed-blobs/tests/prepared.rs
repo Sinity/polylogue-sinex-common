@@ -286,3 +286,33 @@ fn serializers_write_directly_to_bounded_encoded_custody() {
     let encoded = std::fs::read(target.path()).unwrap();
     assert!(!encoded.windows(4096).any(|bytes| bytes == &oracle[..4096]));
 }
+
+#[test]
+fn a_single_encoded_journal_reopens_without_a_second_metadata_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = Preparation::new(dir.path()).unwrap();
+    let data = b"{\"cursor\":42,\"facts\":[\"synthetic\"]}";
+    let prepared = p.plain(data.as_slice(), 3).unwrap();
+    let descriptor = prepared.descriptor();
+    let inspected = Prepared::inspect(prepared.into_file(), None, ReadLimits::default()).unwrap();
+    assert_eq!(inspected.descriptor(), descriptor);
+    let mut actual = Vec::new();
+    inspected
+        .reader(None, ReadLimits::default())
+        .unwrap()
+        .read_to_end(&mut actual)
+        .unwrap();
+    assert_eq!(actual, data);
+    let key = DataKey {
+        key_ref: "synthetic-journal-key".into(),
+        key: [4; 32],
+    };
+    let sealed = p.sealed(std::io::Cursor::new(data), 3, &key).unwrap();
+    let descriptor = sealed.descriptor();
+    let inspected =
+        Prepared::inspect(sealed.into_file(), Some(&key), ReadLimits::default()).unwrap();
+    assert_eq!(inspected.descriptor(), descriptor);
+    let broken = p.plain(data.as_slice(), 3).unwrap().into_file();
+    broken.write_all_at(&[0; 8], 0).unwrap();
+    assert!(Prepared::inspect(broken, None, ReadLimits::default()).is_err());
+}

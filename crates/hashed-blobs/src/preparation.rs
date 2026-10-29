@@ -57,6 +57,12 @@ impl Prepared {
     pub fn reader(&self, key: Option<&DataKey>, limits: ReadLimits) -> Result<crate::BlobReader> {
         self.descriptor().open(self.file.try_clone()?, key, limits)
     }
+    /// Open one locally owned encoded file, deriving and verifying its descriptor.
+    /// Remote input must additionally match its independently declared hash and length.
+    pub fn inspect(file: File, key: Option<&DataKey>, limits: ReadLimits) -> Result<Self> {
+        let descriptor = EncodedBlob::inspect(&file, limits)?;
+        Self::from_encoded(file, descriptor, key, limits)
+    }
     /// Adopt an immutable owned encoding only after complete byte and decoded identity checks.
     /// No decoded bytes are written. The file is not copied or recompressed.
     pub fn from_encoded(
