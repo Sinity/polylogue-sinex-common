@@ -19,6 +19,13 @@ pub struct Deliverer {
     owner_position: Option<zbus::message::Sequence>,
 }
 
+struct PreparedDbus {
+    proxy: zbus::Proxy<'static>,
+    owner: String,
+    actions: Vec<&'static str>,
+    deadline: tokio::time::Instant,
+}
+
 impl Deliverer {
     /// The caller supplies a session-bus connection, or None when unavailable.
     /// Missing-bus attempts are recorded while command routes still run. Tests
@@ -37,7 +44,7 @@ impl Deliverer {
         }
     }
 
-    async fn proxy(&self) -> zbus::Result<zbus::Proxy<'static>> {
+    async fn proxy(&mut self) -> zbus::Result<zbus::Proxy<'static>> {
         let connection = self
             .connection
             .clone()
@@ -45,7 +52,7 @@ impl Deliverer {
         zbus::Proxy::new_owned(connection, DESTINATION, PATH, DESTINATION).await
     }
 
-    async fn close_proxy(&self) -> zbus::Result<zbus::Proxy<'static>> {
+    async fn close_proxy(&mut self) -> zbus::Result<zbus::Proxy<'static>> {
         let connection = self
             .connection
             .clone()
@@ -72,61 +79,108 @@ impl Deliverer {
     }
     /// All effects require a fresh policy decision, including historical
     /// occurrences. Restored unknown routes are never automatically selected.
-    pub async fn send(
-        &mut self,
-        id: &str,
-        can_send: &(dyn Fn(&Notice) -> bool + Send + Sync),
-    ) -> Vec<NotificationReceipt> {
+    pub async fn send(&mut self, id: &str, check: &Policy) -> Vec<NotificationReceipt> {
         let Some(routes) = self.ready.remove(id) else {
             return Vec::new();
         };
-        let Some(a) = self.state.attempt(id).cloned() else {
-            return Vec::new();
-        };
-        if !a.active {
-            return Vec::new();
-        }
         let mut receipts = Vec::new();
-        if let Some(denied) = self
-            .state
-            .group_members(&a.notice)
-            .into_iter()
-            .find(|n| !can_send(n))
-        {
-            receipts.extend(self.cancel(&denied.delivery_id, can_send).await);
-        }
-        if !self.state.attempt(id).is_some_and(|a| a.active) {
-            return receipts;
-        }
-
-        if routes.contains(&Route::Dbus) && a.dbus == Some(DeliveryOutcome::Unknown) {
-            receipts.push(self.update_notice(&a.notice).await);
-        }
-        if routes.contains(&Route::Command) && a.command == Some(DeliveryOutcome::Unknown) {
-            if !can_send(&a.notice) {
-                receipts.extend(self.cancel(id, can_send).await);
-                return receipts;
+        for route in routes {
+            let Some(attempt) = self.state.attempt(id).cloned().filter(|a| a.active) else {
+                break;
+            };
+            let outcome = if route == Route::Dbus {
+                &attempt.dbus
+            } else {
+                &attempt.command
+            };
+            if *outcome != Some(DeliveryOutcome::Unknown) {
+                continue;
             }
-            let outcome = self.command_send(&a.notice).await;
-            receipts.push(self.state.completed(
-                id,
-                Route::Command,
+            let prepared = if route == Route::Dbus {
+                match self.prepare_dbus().await {
+                    Ok(prepared) => Some(prepared),
+                    Err(completion) => {
+                        receipts.push(self.state.completed(id, route, completion));
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            let (allowed, more) = self.authorize(id, route, check).await;
+            receipts.extend(more);
+            if !allowed {
+                continue;
+            }
+            let completion = if let Some(prepared) = prepared {
+                self.notify(&attempt.notice, prepared).await
+            } else {
                 Completion {
-                    outcome,
+                    outcome: self.command_send(&attempt.notice).await,
                     notification_id: None,
                     server_owner: None,
                     slot: None,
-                },
-            ));
+                }
+            };
+            receipts.push(self.state.completed(id, route, completion));
         }
         receipts
     }
-    async fn dbus_send(
+    /// No owner lock crosses an I/O await. This fence admits exactly one
+    /// occurrence/route, with its summary contributors, under current policy.
+    async fn authorize(
         &mut self,
-        notice: &Notice,
-    ) -> (DeliveryOutcome, Option<u32>, Option<String>, Option<String>) {
+        id: &str,
+        route: Route,
+        check: &Policy,
+    ) -> (bool, Vec<NotificationReceipt>) {
+        let mut receipts = Vec::new();
+        loop {
+            let Some(notice) = self
+                .state
+                .attempt(id)
+                .filter(|a| a.active)
+                .map(|a| a.notice.clone())
+            else {
+                return (false, receipts);
+            };
+            let request = PolicyRequest {
+                delivery_id: id.to_string(),
+                route,
+                notices: self.state.group_members(&notice),
+            };
+            let Authorization { decisions, lease } = check(&request);
+            let denied = request
+                .notices
+                .iter()
+                .find(|n| decision(&decisions, &n.delivery_id) == SendDecision::Cancel)
+                .map(|n| n.delivery_id.clone());
+            let held = request
+                .notices
+                .iter()
+                .filter_map(|n| match decision(&decisions, &n.delivery_id) {
+                    SendDecision::HoldUntil { at, policy } => Some((at, policy)),
+                    _ => None,
+                })
+                .max_by_key(|(at, _)| *at);
+            // Decisions are immutable after admission. Policy changes may now
+            // proceed while the already-admitted platform call is in flight.
+            drop(lease);
+            if let Some(denied) = denied {
+                receipts.extend(self.cancel_authorized(&denied, &decisions).await);
+                continue;
+            }
+            if let Some((at, policy)) = held {
+                self.state.hold(id, [route], at, &policy);
+                return (false, receipts);
+            }
+            return (true, receipts);
+        }
+    }
+    async fn prepare_dbus(&mut self) -> Result<PreparedDbus, Completion> {
+        let deadline = tokio::time::Instant::now() + self.config.deadline;
         let mut used_owner = None;
-        let result = tokio::time::timeout(self.config.deadline, async {
+        let result = tokio::time::timeout_at(deadline, async {
             let connection = self
                 .connection
                 .clone()
@@ -144,48 +198,73 @@ impl Deliverer {
                 .deserialize::<String>()?;
             used_owner = Some(owner.clone());
             self.state.set_server_owner(Some(owner.clone()));
-            let proxy = zbus::Proxy::new_owned(connection, owner, PATH, DESTINATION).await?;
+            let proxy =
+                zbus::Proxy::new_owned(connection, owner.clone(), PATH, DESTINATION).await?;
             let capabilities: Vec<String> = proxy.call("GetCapabilities", &()).await?;
             let actions = if capabilities.iter().any(|c| c == "actions") {
                 vec!["default", "Open", "acknowledge", "Acknowledge"]
             } else {
                 Vec::new()
             };
-            let view = self.state.presentation(notice, !actions.is_empty());
-            let mut hints = HashMap::new();
-            hints.insert("urgency", Value::U8(if view.data_loss { 2 } else { 1 }));
-            let category = format!("{}.{}", notice.product, notice.rule);
-            hints.insert("category", Value::from(category.as_str()));
-            let id: u32 = proxy
-                .call(
-                    "Notify",
-                    &(
-                        notice.product.as_str(),
-                        view.replaces,
-                        notice.icon.as_str(),
-                        view.summary.as_str(),
-                        view.body.as_str(),
-                        actions,
-                        hints,
-                        if view.data_loss { 0i32 } else { -1i32 },
-                    ),
-                )
-                .await?;
-            Ok::<_, zbus::Error>((id, view.slot))
+            Ok::<_, zbus::Error>(PreparedDbus {
+                proxy,
+                owner,
+                actions,
+                deadline,
+            })
         })
         .await;
         match result {
-            Ok(Ok((id, slot))) => (DeliveryOutcome::Delivered, Some(id), used_owner, Some(slot)),
-            Ok(Err(e)) => (
-                DeliveryOutcome::NotSent(dbus_reason(&e)),
-                None,
-                used_owner,
-                None,
-            ),
-            Err(_) => (DeliveryOutcome::Unknown, None, used_owner, None),
+            Ok(Ok(prepared)) => Ok(prepared),
+            result => Err(Completion {
+                outcome: match result {
+                    Ok(Err(e)) => DeliveryOutcome::NotSent(dbus_reason(&e)),
+                    _ => DeliveryOutcome::Unknown,
+                },
+                notification_id: None,
+                server_owner: used_owner,
+                slot: None,
+            }),
         }
     }
-    async fn command_send(&self, notice: &Notice) -> DeliveryOutcome {
+    async fn notify(&mut self, notice: &Notice, prepared: PreparedDbus) -> Completion {
+        let view = self
+            .state
+            .presentation(notice, !prepared.actions.is_empty());
+        let mut hints = HashMap::new();
+        hints.insert("urgency", Value::U8(if view.data_loss { 2 } else { 1 }));
+        let category = format!("{}.{}", notice.product, notice.rule);
+        hints.insert("category", Value::from(category.as_str()));
+        let result = tokio::time::timeout_at(
+            prepared.deadline,
+            prepared.proxy.call::<_, _, u32>(
+                "Notify",
+                &(
+                    notice.product.as_str(),
+                    view.replaces,
+                    notice.icon.as_str(),
+                    view.summary.as_str(),
+                    view.body.as_str(),
+                    prepared.actions,
+                    hints,
+                    if view.data_loss { 0i32 } else { -1i32 },
+                ),
+            ),
+        )
+        .await;
+        let (outcome, id, slot) = match result {
+            Ok(Ok(id)) => (DeliveryOutcome::Delivered, Some(id), Some(view.slot)),
+            Ok(Err(e)) => (DeliveryOutcome::NotSent(dbus_reason(&e)), None, None),
+            Err(_) => (DeliveryOutcome::Unknown, None, None),
+        };
+        Completion {
+            outcome,
+            notification_id: id,
+            server_owner: Some(prepared.owner),
+            slot,
+        }
+    }
+    async fn command_send(&mut self, notice: &Notice) -> DeliveryOutcome {
         let Some(command) = &self.config.command else {
             return DeliveryOutcome::NotSent("notification_command_not_configured".into());
         };
@@ -237,7 +316,7 @@ impl Deliverer {
         }
         receipts
     }
-    async fn close(&self, ids: Vec<u32>) {
+    async fn close(&mut self, ids: Vec<u32>) {
         for id in ids {
             let _ = tokio::time::timeout(self.config.deadline, async {
                 self.close_proxy()
@@ -248,20 +327,31 @@ impl Deliverer {
             .await;
         }
     }
-    pub async fn cancel(
+    pub async fn cancel(&mut self, id: &str, check: &Policy) -> Vec<NotificationReceipt> {
+        let Some(notice) = self.state.attempt(id).map(|a| a.notice.clone()) else {
+            return Vec::new();
+        };
+        let Authorization { decisions, lease } = check(&PolicyRequest {
+            delivery_id: id.to_string(),
+            route: Route::Dbus,
+            notices: self.state.group_members(&notice),
+        });
+        drop(lease);
+        self.cancel_authorized(id, &decisions).await
+    }
+    async fn cancel_authorized(
         &mut self,
         id: &str,
-        can_send: &(dyn Fn(&Notice) -> bool + Send + Sync),
+        decisions: &BTreeMap<String, SendDecision>,
     ) -> Vec<NotificationReceipt> {
         let Some(notice) = self.state.attempt(id).map(|a| a.notice.clone()) else {
             return Vec::new();
         };
-        // Remove every unauthorized contributor before computing a summary.
         let mut ids: Vec<_> = self
             .state
             .group_members(&notice)
             .into_iter()
-            .filter(|n| !can_send(n))
+            .filter(|n| decision(decisions, &n.delivery_id) == SendDecision::Cancel)
             .map(|n| n.delivery_id)
             .collect();
         ids.push(id.to_string());
@@ -281,16 +371,32 @@ impl Deliverer {
             self.close(update.close).await;
             let mut rejected = false;
             for next in update.notices {
-                if can_send(&next) {
-                    receipts.push(self.update_notice(&next).await);
-                } else {
-                    let cancelled = self.state.deactivate(&next.delivery_id);
-                    for id in cancelled.deactivated {
-                        self.ready.remove(&id);
+                match decision(decisions, &next.delivery_id) {
+                    SendDecision::Permit => {
+                        if let Some(prepared) = self.state.prepare_refresh(&next.delivery_id) {
+                            self.ready
+                                .entry(next.delivery_id)
+                                .or_default()
+                                .insert(Route::Dbus);
+                            receipts.push(prepared);
+                        }
                     }
-                    self.close(cancelled.close).await;
-                    receipts.extend(cancelled.receipts);
-                    rejected = true;
+                    SendDecision::HoldUntil { at, policy } => {
+                        if let Some(prepared) = self.state.prepare_refresh(&next.delivery_id) {
+                            self.state
+                                .hold(&next.delivery_id, [Route::Dbus], at, &policy);
+                            receipts.push(prepared);
+                        }
+                    }
+                    SendDecision::Cancel => {
+                        let cancelled = self.state.deactivate(&next.delivery_id);
+                        for id in cancelled.deactivated {
+                            self.ready.remove(&id);
+                        }
+                        self.close(cancelled.close).await;
+                        receipts.extend(cancelled.receipts);
+                        rejected = true;
+                    }
                 }
             }
             if !rejected {
@@ -299,18 +405,18 @@ impl Deliverer {
         }
         receipts
     }
-    async fn update_notice(&mut self, notice: &Notice) -> NotificationReceipt {
-        let (outcome, id, owner, slot) = self.dbus_send(notice).await;
-        self.state.completed(
-            &notice.delivery_id,
-            Route::Dbus,
-            Completion {
-                outcome,
-                notification_id: id,
-                server_owner: owner,
-                slot,
-            },
-        )
+    pub fn ready_ids(&self) -> Vec<String> {
+        self.ready.keys().cloned().collect()
+    }
+    pub fn resume_holds(&mut self, now: i64) -> Vec<NotificationReceipt> {
+        let receipts = self.state.resume_holds(now);
+        for receipt in &receipts {
+            self.ready
+                .entry(receipt.delivery_id.clone())
+                .or_default()
+                .insert(receipt.route);
+        }
+        receipts
     }
     pub fn desktop_event(&mut self, id: u32, event: DesktopEvent) -> Vec<NotificationReceipt> {
         self.state.desktop_event(id, event)
@@ -356,6 +462,7 @@ fn dbus_reason(error: &zbus::Error) -> String {
 pub enum NotificationRequest {
     Deliver(Box<Notice>),
     Clear(String),
+    Recheck,
     Import {
         attempt: Box<Attempt>,
         imported: tokio::sync::oneshot::Sender<Result<(), ImportError>>,
@@ -377,7 +484,24 @@ pub struct NotificationUpdate {
     pub persisted: tokio::sync::oneshot::Sender<()>,
 }
 
-pub type ConditionCheck = Arc<dyn Fn(&Notice) -> bool + Send + Sync>;
+/// The precise occurrence and route admitted under one current owner snapshot.
+pub struct PolicyRequest {
+    pub delivery_id: String,
+    pub route: Route,
+    pub notices: Vec<Notice>,
+}
+/// One short owner-policy fence. The worker releases it before platform I/O;
+/// later independently admitted routes obtain a fresh authorization.
+pub struct Authorization {
+    pub decisions: BTreeMap<String, SendDecision>,
+    pub lease: Option<Box<dyn std::any::Any + Send>>,
+}
+pub type Policy = dyn Fn(&PolicyRequest) -> Authorization + Send + Sync;
+pub type PolicyCheck = Arc<Policy>;
+pub type DeliveryClock = Arc<dyn Fn() -> i64 + Send + Sync>;
+fn decision(decisions: &BTreeMap<String, SendDecision>, id: &str) -> SendDecision {
+    decisions.get(id).cloned().unwrap_or(SendDecision::Cancel)
+}
 
 /// Runs one host's deliverer. The unbounded channel carries outbox wakeups outside
 /// the writer; durable outbox storage remains owned by the product.
@@ -385,12 +509,22 @@ pub async fn run(
     mut deliverer: Deliverer,
     mut requests: mpsc::UnboundedReceiver<NotificationRequest>,
     updates: mpsc::UnboundedSender<NotificationUpdate>,
-    still_matches: ConditionCheck,
+    still_matches: PolicyCheck,
+    clock: DeliveryClock,
 ) -> zbus::Result<()> {
+    if !resume(&mut deliverer, (clock)(), &updates, still_matches.as_ref()).await {
+        return Ok(());
+    }
     if deliverer.config.route == Route::Command || deliverer.connection.is_none() {
-        while let Some(request) = requests.recv().await {
-            if !handle_request(&mut deliverer, request, &updates, still_matches.as_ref()).await {
-                break;
+        loop {
+            tokio::select! {
+                request=requests.recv()=>{
+                    let Some(request)=request else {break};
+                    if !handle_request(&mut deliverer,request,&updates,still_matches.as_ref(),(clock)()).await {break;}
+                }
+                _=hold_timer(deliverer.state.next_hold(),(clock)())=>{
+                    if !resume(&mut deliverer,(clock)(),&updates,still_matches.as_ref()).await {break;}
+                }
             }
         }
         return Ok(());
@@ -424,16 +558,19 @@ pub async fn run(
         }
     } else if deliverer.state.server_owner().is_some() {
         deliverer.state.set_server_owner(None);
-        if !persist(&deliverer, Vec::new(), &updates).await {
+        if !persist(&mut deliverer, Vec::new(), &updates).await {
             return Ok(());
         }
     }
     loop {
         tokio::select! {
+            _=hold_timer(deliverer.state.next_hold(),(clock)())=>{
+                if !resume(&mut deliverer,(clock)(),&updates,still_matches.as_ref()).await {break;}
+            }
             request = requests.recv() => {
                 match request {
                     Some(request) => {
-                        if !handle_request(&mut deliverer, request, &updates, still_matches.as_ref()).await { break; }
+                        if !handle_request(&mut deliverer, request, &updates, still_matches.as_ref(),(clock)()).await { break; }
                     }
                     None => break,
                 }
@@ -448,7 +585,7 @@ pub async fn run(
                 {
                     if new.is_empty() {
                         deliverer.state.set_server_owner(None);
-                        if !persist(&deliverer, Vec::new(), &updates).await { return Ok(()); }
+                        if !persist(&mut deliverer, Vec::new(), &updates).await { return Ok(()); }
                     } else {
                         deliverer.state.set_server_owner(Some(new));
                         if !appearance(&mut deliverer, &updates, still_matches.as_ref()).await { return Ok(()); }
@@ -471,7 +608,7 @@ pub async fn run(
                 };
                 if let Some((id, event)) = event {
                     let receipts = deliverer.desktop_event(id, event);
-                    if !persist(&deliverer, receipts, &updates).await { break; }
+                    if !persist(&mut deliverer, receipts, &updates).await { break; }
                 }
             }
         }
@@ -482,31 +619,63 @@ pub async fn run(
 async fn appearance(
     deliverer: &mut Deliverer,
     updates: &mpsc::UnboundedSender<NotificationUpdate>,
-    still_matches: &(dyn Fn(&Notice) -> bool + Send + Sync),
+    still_matches: &Policy,
 ) -> bool {
     let receipts = deliverer.server_appeared();
-    let ids: Vec<_> = receipts.iter().map(|r| r.delivery_id.clone()).collect();
     if !persist(deliverer, receipts, updates).await {
         return false;
     }
-    for id in ids {
-        let receipts = deliverer.send(&id, still_matches).await;
+    flush(deliverer, updates, still_matches).await
+}
+async fn flush(
+    deliverer: &mut Deliverer,
+    updates: &mpsc::UnboundedSender<NotificationUpdate>,
+    check: &Policy,
+) -> bool {
+    while let Some(id) = deliverer.ready_ids().into_iter().next() {
+        let receipts = deliverer.send(&id, check).await;
         if !persist(deliverer, receipts, updates).await {
             return false;
         }
     }
     true
 }
+async fn resume(
+    deliverer: &mut Deliverer,
+    now: i64,
+    updates: &mpsc::UnboundedSender<NotificationUpdate>,
+    check: &Policy,
+) -> bool {
+    let receipts = deliverer.resume_holds(now);
+    if receipts.is_empty() {
+        return true;
+    }
+    if !persist(deliverer, receipts, updates).await {
+        return false;
+    }
+    flush(deliverer, updates, check).await
+}
+async fn hold_timer(due: Option<i64>, now: i64) {
+    match due {
+        None => std::future::pending::<()>().await,
+        Some(due) => {
+            tokio::time::sleep(std::time::Duration::from_millis(
+                u64::try_from(due.saturating_sub(now).max(1)).unwrap_or(u64::MAX),
+            ))
+            .await
+        }
+    }
+}
 
 async fn handle_request(
     deliverer: &mut Deliverer,
     request: NotificationRequest,
     updates: &mpsc::UnboundedSender<NotificationUpdate>,
-    still_matches: &(dyn Fn(&Notice) -> bool + Send + Sync),
+    still_matches: &Policy,
+    now: i64,
 ) -> bool {
     match request {
         NotificationRequest::Deliver(notice) => {
-            let id = notice.delivery_id.clone();
             let began = deliverer.begin(*notice);
             if began.is_empty() {
                 return true;
@@ -514,13 +683,16 @@ async fn handle_request(
             if !persist(deliverer, began, updates).await {
                 return false;
             }
-            let receipts = deliverer.send(&id, still_matches).await;
-            persist(deliverer, receipts, updates).await
+            flush(deliverer, updates, still_matches).await
         }
         NotificationRequest::Clear(id) => {
             let receipts = deliverer.cancel(&id, still_matches).await;
-            persist(deliverer, receipts, updates).await
+            if !persist(deliverer, receipts, updates).await {
+                return false;
+            }
+            flush(deliverer, updates, still_matches).await
         }
+        NotificationRequest::Recheck => resume(deliverer, now, updates, still_matches).await,
         NotificationRequest::Import { attempt, imported } => {
             let id = attempt.notice.delivery_id.clone();
             let result = deliverer.state.import_attempt(*attempt);
@@ -561,8 +733,7 @@ async fn handle_request(
                         if !persist(deliverer, receipts, updates).await {
                             return false;
                         }
-                        let receipts = deliverer.send(&id, still_matches).await;
-                        if !persist(deliverer, receipts, updates).await {
+                        if !flush(deliverer, updates, still_matches).await {
                             return false;
                         }
                     }
@@ -586,14 +757,14 @@ async fn handle_request(
 }
 
 async fn persist(
-    deliverer: &Deliverer,
+    deliverer: &mut Deliverer,
     receipts: Vec<NotificationReceipt>,
     updates: &mpsc::UnboundedSender<NotificationUpdate>,
 ) -> bool {
     persist_release(deliverer, receipts, None, updates).await
 }
 async fn persist_release(
-    deliverer: &Deliverer,
+    deliverer: &mut Deliverer,
     receipts: Vec<NotificationReceipt>,
     released: Option<Attempt>,
     updates: &mpsc::UnboundedSender<NotificationUpdate>,

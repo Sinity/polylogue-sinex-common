@@ -8,6 +8,16 @@ use std::time::Duration;
 mod state;
 pub use state::{Cancellation, Completion, GroupUpdate, ImportError, ImportStatus, Presentation};
 
+/// Current owner policy at the actual effect boundary. A hold keeps the
+/// original occurrence and route; it does not admit another budget handoff.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(tag = "decision", rename_all = "snake_case")]
+pub enum SendDecision {
+    Permit,
+    Cancel,
+    HoldUntil { at: i64, policy: String },
+}
+
 /// The evaluator has already applied quiet hours and the shared host budget.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct Notice {
@@ -95,6 +105,8 @@ pub struct Attempt {
     pub server_owner: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     handoff: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    held: BTreeMap<Route, HeldRoute>,
 }
 
 /// Persist this beside the product's delivery records. An unknown attempt is
@@ -106,4 +118,12 @@ pub struct NotificationState {
     first_occurrence: BTreeMap<String, String>,
     server_owner: Option<String>,
     shown_delivery: BTreeMap<u32, String>,
+}
+
+/// The owner policy that deferred this exact route. Deadlines are absolute
+/// milliseconds; the owner resolves its current policy again after waking.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct HeldRoute {
+    pub at: i64,
+    pub policy: String,
 }

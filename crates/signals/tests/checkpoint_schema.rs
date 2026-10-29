@@ -79,6 +79,7 @@ fn product_checkpoint_schema_contains_complete_typed_private_state() {
                 "active",
                 "server_owner",
                 "handoff",
+                "held",
             ],
         ),
     ] {
