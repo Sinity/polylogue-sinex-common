@@ -733,6 +733,14 @@ fn rule_schema_defaults_configuration_and_authorship() {
         serde_json::from_str::<Duration>("\"20m\"").unwrap(),
         Duration(20 * MIN)
     );
+    assert_eq!(
+        serde_json::from_str::<Duration>("\" 1.5s \"").unwrap(),
+        Duration(1500)
+    );
+    assert_eq!(
+        serde_json::from_str::<Duration>("\"1w\"").unwrap(),
+        Duration(7 * 24 * HOUR)
+    );
     assert!(serde_json::from_str::<Duration>("-1").is_err());
     assert!(serde_json::from_str::<Duration>("\"999999999999999999999d\"").is_err());
 }

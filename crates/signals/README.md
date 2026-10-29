@@ -190,9 +190,12 @@ and authorship are separate because they must never be client supplied.
 Durations accept milliseconds or strings such as `20m`; quiet hours are
 `{"from":1320,"to":480}` in local civil minutes. Local times use the product's
 configured logical day, resolved through the common query language's
-`DaySetting`. `Calendar` is the small adapter from that setting, including
-its gap and fold resolution, to the evaluator. It never reads the system
-zone or environment.
+`DaySetting`. `DayCalendar` is its shared adapter for both products, including
+scheduled gaps, earlier folds, skipped dates and complete quiet intervals.
+Repeated civil minutes cannot re-enter an interval whose earlier-fold end
+already passed. `Calendar` remains the test seam. Neither reads the system
+zone or environment. Duration text uses the query language's duration parser
+and must resolve to whole milliseconds, the evaluator clock's precision.
 
 A product queues a complete `Evaluation` for each watched query, with all
 pages joined in query order. Its `at` is the observation checkpoint, and each

@@ -14,7 +14,7 @@ impl JsonSchema for Duration {
         "Duration".into()
     }
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({"oneOf":[{"type":"integer","minimum":0},{"type":"string","pattern":"^[0-9]+(ms|s|m|h|d)$"}]})
+        schemars::json_schema!({"oneOf":[{"type":"integer","minimum":0},{"type":"string","description":"Elapsed duration, for example 20m or1.5s, in whole milliseconds"}]})
     }
 }
 impl<'de> Deserialize<'de> for Duration {
@@ -27,25 +27,9 @@ impl<'de> Deserialize<'de> for Duration {
         }
         let value = match Input::deserialize(d)? {
             Input::Number(n) => n,
-            Input::Text(text) => {
-                let split = text
-                    .find(|c: char| !c.is_ascii_digit())
-                    .ok_or_else(|| serde::de::Error::custom("duration needs a unit"))?;
-                let (number, unit) = text.split_at(split);
-                let multiplier = match unit {
-                    "ms" => 1,
-                    "s" => 1000,
-                    "m" => 60_000,
-                    "h" => HOUR,
-                    "d" => 24 * HOUR,
-                    _ => return Err(serde::de::Error::custom("unknown duration unit")),
-                };
-                number
-                    .parse::<i64>()
-                    .ok()
-                    .and_then(|n| n.checked_mul(multiplier))
-                    .ok_or_else(|| serde::de::Error::custom("duration out of range"))?
-            }
+            Input::Text(text) => query_language::time::duration_ms(&text).ok_or_else(|| {
+                serde::de::Error::custom("duration must be representable in whole milliseconds")
+            })?,
         };
         if value < 0 {
             return Err(serde::de::Error::custom("negative duration"));
