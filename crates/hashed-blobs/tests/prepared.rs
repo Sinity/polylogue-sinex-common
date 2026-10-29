@@ -389,7 +389,6 @@ fn a_mid_group_preparation_failure_cannot_make_partial_custody_committable() {
     writer.acknowledge(&group).unwrap();
     assert!(Reader::new(dir.path())
         .scan(&group.extents)
-        .unwrap()
         .is_empty());
 }
 
