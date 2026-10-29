@@ -120,7 +120,7 @@ fn cursor_keeps_rows_after_boundary_row_is_removed_and_new_rows_arrive() {
         values: vec![serde_json::json!(key)],
         row_identity: id.into(),
     };
-    let first = vec![
+    let first = [
         position(1, "a"),
         position(2, "b"),
         position(3, "c"),

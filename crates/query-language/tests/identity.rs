@@ -215,17 +215,12 @@ fn duration_gap_spellings_and_catalog_unknown_words_share_identity() {
     let mut c = catalog();
     c.units[0].fields[0].unknown = query_language::catalog::UnknownRule::Word("missing".into());
     let a = query(vec![condition("source", "missing", 0)]);
-    let mut b = a.clone();
-    if let Source::Unit {
-        condition: Some(root),
-        ..
-    } = &mut b.source
-    {
-        if let ConditionKind::And { conditions } = &mut root.kind {
-            if let ConditionKind::Match { value, .. } = &mut conditions[0].kind {
-                *value = Value::Unknown;
-            }
-        }
-    }
+    let b = query(vec![Condition {
+        span: Span::default(),
+        kind: ConditionKind::Match {
+            field: "source".into(),
+            value: Value::Unknown,
+        },
+    }]);
     assert_eq!(normal_form(&a, &c).unwrap(), normal_form(&b, &c).unwrap());
 }

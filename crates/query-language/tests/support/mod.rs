@@ -74,21 +74,21 @@ pub fn polylogue() -> Catalog {
             &["live", "archived", "tombstoned"][..],
         ),
     ] {
-        if let Some(u) = catalog.units.iter_mut().find(|u| u.name == unit) {
-            if let Some(f) = u.fields.iter_mut().find(|f| f.name == field) {
-                f.values = values.iter().map(|v| v.to_string()).collect();
-            }
+        if let Some(u) = catalog.units.iter_mut().find(|u| u.name == unit)
+            && let Some(f) = u.fields.iter_mut().find(|f| f.name == field)
+        {
+            f.values = values.iter().map(|v| v.to_string()).collect();
         }
     }
     for name in ["messages", "blocks"] {
-        if let Some(unit) = catalog.units.iter_mut().find(|u| u.name == name) {
-            if !unit.fields.iter().any(|f| f.name == "session") {
-                unit.fields.push(Field {
-                    name: "session".into(),
-                    kind: FieldKind::Reference,
-                    ..Field::default()
-                });
-            }
+        if let Some(unit) = catalog.units.iter_mut().find(|u| u.name == name)
+            && !unit.fields.iter().any(|f| f.name == "session")
+        {
+            unit.fields.push(Field {
+                name: "session".into(),
+                kind: FieldKind::Reference,
+                ..Field::default()
+            });
         }
     }
 
@@ -173,10 +173,10 @@ pub fn sinex() -> Catalog {
             &["live", "archived", "tombstoned"][..],
         ),
     ] {
-        if let Some(u) = catalog.units.iter_mut().find(|u| u.name == unit) {
-            if let Some(f) = u.fields.iter_mut().find(|f| f.name == field) {
-                f.values = values.iter().map(|v| v.to_string()).collect();
-            }
+        if let Some(u) = catalog.units.iter_mut().find(|u| u.name == unit)
+            && let Some(f) = u.fields.iter_mut().find(|f| f.name == field)
+        {
+            f.values = values.iter().map(|v| v.to_string()).collect();
         }
     }
     catalog
