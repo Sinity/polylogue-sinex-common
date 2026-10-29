@@ -18,6 +18,13 @@ impl NotificationState {
     /// Import an immutable handoff without creating a new attempt. Repeating the
     /// same snapshot after local progress preserves that progress.
     pub fn import_attempt(&mut self, mut attempt: Attempt) -> Result<ImportStatus, ImportError> {
+        if attempt.held.keys().any(|route| match route {
+            Route::Dbus => attempt.dbus != Some(DeliveryOutcome::Unknown),
+            Route::Command => attempt.command != Some(DeliveryOutcome::Unknown),
+            Route::Both => true,
+        }) {
+            return Err(ImportError::InvalidAttempt);
+        }
         attempt.handoff = None;
         let identity = blake3::hash(&serde_json::to_vec(&attempt).expect("attempt JSON"))
             .to_hex()
@@ -523,6 +530,7 @@ pub enum ImportStatus {
 #[serde(rename_all = "snake_case")]
 pub enum ImportError {
     Conflict,
+    InvalidAttempt,
 }
 
 /// The platform result, applied without selecting a new effect.
@@ -538,6 +546,9 @@ impl std::fmt::Display for ImportError {
         match self {
             Self::Conflict => {
                 f.write_str("notification attempt identity reused with a different body")
+            }
+            Self::InvalidAttempt => {
+                f.write_str("held routes must name an original unknown attempt")
             }
         }
     }
