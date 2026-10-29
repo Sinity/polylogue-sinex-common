@@ -261,14 +261,14 @@ fn serializers_write_directly_to_bounded_encoded_custody() {
     let mut writer = p.plain_writer(target.reopen().unwrap(), 3).unwrap();
     let mut oracle = Vec::new();
     for value in 0..10_000 {
-        write!(
+        writeln!(
             writer,
-            "{{\"value\":{value},\"body\":\"synthetic repeated field\"}}\n"
+            "{{\"value\":{value},\"body\":\"synthetic repeated field\"}}"
         )
         .unwrap();
-        write!(
+        writeln!(
             oracle,
-            "{{\"value\":{value},\"body\":\"synthetic repeated field\"}}\n"
+            "{{\"value\":{value},\"body\":\"synthetic repeated field\"}}"
         )
         .unwrap();
     }
