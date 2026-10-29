@@ -35,7 +35,7 @@ pkg-config, Perl with its standard generator modules, Node.js 24 or newer and
 not need D-Bus development headers or an operator session bus.
 The native backend downloads the SHA256-pinned artifacts in
 `pins.json`: Rust with rustfmt and Clippy, nextest, CMake, TypeScript 7.0.2,
-esbuild 0.27.2, PostgreSQL 18, TimescaleDB and NATS. The bootstrap also pins M4, Bison and Flex, which
+esbuild 0.27.2, PostgreSQL 18, TimescaleDB, pgvector 0.8.7 and NATS. The bootstrap also pins M4, Bison and Flex, which
 PostgreSQL 18 requires even when building its release archives. Rust matches the product's `rust-toolchain.toml`.
 PostgreSQL and TimescaleDB build into the user's prefix. The toolchain does
 not need root, a writable `/nix`, user namespaces or PRoot.
@@ -54,7 +54,10 @@ checks their SHA256 from the signed Debian index, and extracts files into the
 owned prefix; it runs no package scripts or system installation. Bison's data
 directory and M4 path are exported for the relocated tools. The default
 `CLOUD_NATIVE_BOOTSTRAP=source` compiles the generator release archives.
-Both routes use the same PostgreSQL/Timescale/NATS smoke checks.
+Both routes build pgvector against the owned PostgreSQL headers with portable
+compiler flags and use the same PostgreSQL/Timescale/pgvector/NATS smoke checks.
+The extension pin is tracked separately from core toolchain pins, so changing
+only pgvector rebuilds that extension while rechecking the existing core tools.
 
 `CLOUD_PREFIX` selects the absolute writable prefix; its default is `.cloud`
 beside the checkout. Downloads and build trees stay there for repeat setup.
@@ -63,7 +66,8 @@ The frontend tools use the upstream npm tarballs directly, without npm install
 scripts or changing workspace manifests. Their versions match the shared
 development shell so the committed web-shell bundle remains reproducible.
 Every native setup checks the installed tools, starts a throwaway PostgreSQL
-cluster, creates and queries a TimescaleDB hypertable, and checks a throwaway
+cluster, creates and queries a TimescaleDB hypertable, checks synthetic vector
+dimensions/cosine distance/HNSW index ordering, and checks a throwaway
 NATS JetStream server. Both services stop before setup returns. The native
 PostgreSQL is for local test sockets and omits ICU, Readline, zlib and TLS;
 it is not a production database installation.

@@ -124,7 +124,9 @@ def main():
     if bootstrap_kind == "debian13":
         env |= {"M4": str(bootstrap_bin / "m4"), "BISON_PKGDATADIR": str(bootstrap / "usr/share/bison")}
     stamp = prefix / "installed.json"
-    identity = hashlib.sha256(pins_path.read_bytes()).hexdigest()
+    # Extension changes reuse the independently qualified core toolchain.
+    core_pins = {key: value for key, value in pins.items() if key != "pgvector"}
+    identity = hashlib.sha256((json.dumps(core_pins, indent=2) + "\n").encode()).hexdigest()
     postgres_pin = pins["postgres_github"] if bootstrap_kind == "debian13" else pins["postgres"]
     saved = json.loads(stamp.read_text()) if stamp.exists() else {}
     installed = saved.get("pins_sha256") == identity and saved.get("bootstrap") == bootstrap_kind
@@ -167,6 +169,12 @@ def main():
         run(["cmake", "-S", ts_sources, "-B", ts_build, "-DPG_CONFIG=" + str(pg / "bin/pg_config"), "-DREGRESS_CHECKS=OFF", "-DWARNINGS_AS_ERRORS=OFF", "-DUSE_OPENSSL=OFF"], env=env)
         run(["cmake", "--build", ts_build, "--parallel", jobs], env=env)
         run(["cmake", "--install", ts_build], env=env)
+    if not installed or saved.get("pgvector_sha256") != pins["pgvector"]["sha256"]:
+        vector_sources = unpack(artifact("pgvector.tar.gz", pins["pgvector"], cache), build / "pgvector", single_root=True)
+        vector_make = ["make", "PG_CONFIG=" + str(pg / "bin/pg_config"), "OPTFLAGS="]
+        run(vector_make + ["clean"], cwd=vector_sources, env=env)
+        run(vector_make + ["-j" + jobs], cwd=vector_sources, env=env)
+        run(vector_make + ["install"], cwd=vector_sources, env=env)
     # Check the tools again when reusing a completed prefix; a deleted binary
     # must fail setup instead of being silently accepted by a saved stamp.
     for command in (["m4", "--version"], ["bison", "--version"], ["flex", "--version"], ["node", "--version"], ["tsc", "--version"], ["esbuild", "--version"], ["dbus-daemon", "--version"], ["rustc", "--version"], ["cargo", "--version"], ["cargo", "nextest", "--version"], ["postgres", "--version"], ["nats-server", "--version"]):
@@ -174,6 +182,9 @@ def main():
     pkglib = Path(subprocess.check_output([str(pg / "bin/pg_config"), "--pkglibdir"], text=True, env=env).strip())
     if not (pkglib / "timescaledb.so").is_file():
         raise RuntimeError("TimescaleDB loader is missing from the prepared PostgreSQL")
+    sharedir = Path(subprocess.check_output([str(pg / "bin/pg_config"), "--sharedir"], text=True, env=env).strip())
+    if not (pkglib / "vector.so").is_file() or not (sharedir / "extension/vector.control").is_file():
+        raise RuntimeError("pgvector library or extension control file is missing")
     run([sys.executable, Path(__file__).with_name("smoke.py"), "--scratch", prefix], env=env)
     entries = {"CARGO_HOME": str(cargo), "RUSTUP_HOME": str(rustup), "PATH": env["PATH"], "LINKING_COMMON": "1"}
     if bootstrap_kind == "debian13":
@@ -182,7 +193,7 @@ def main():
     temporary = environment.with_suffix(".new")
     temporary.write_text("\n".join("export " + key + "=" + shlex.quote(value) for key, value in entries.items()) + "\n")
     temporary.replace(environment)
-    stamp.write_text(json.dumps({"pins_sha256": identity, "backend": "native", "bootstrap": bootstrap_kind}, indent=2) + "\n")
+    stamp.write_text(json.dumps({"pins_sha256": identity, "backend": "native", "bootstrap": bootstrap_kind, "pgvector_sha256": pins["pgvector"]["sha256"]}, indent=2) + "\n")
     print("cloud setup: source " + shlex.quote(str(environment)), flush=True)
 
 
