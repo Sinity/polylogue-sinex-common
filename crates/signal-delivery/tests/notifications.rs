@@ -13,21 +13,46 @@ use zbus::zvariant::OwnedValue;
 struct PrivateBus {
     process: std::process::Child,
     address: String,
+    _configuration: tempfile::TempDir,
 }
 impl PrivateBus {
     fn start() -> Self {
+        let configuration = tempfile::tempdir().unwrap();
+        let path = configuration.path().join("session.conf");
+        // This private bus needs no host session configuration or activation.
+        std::fs::write(
+            &path,
+            r#"<busconfig>
+<type>session</type>
+<listen>unix:tmpdir=/tmp</listen>
+<auth>EXTERNAL</auth>
+<policy context="default">
+  <allow send_destination="*"/>
+  <allow receive_sender="*"/>
+  <allow own="*"/>
+</policy>
+</busconfig>"#,
+        )
+        .unwrap();
         let mut process = std::process::Command::new("dbus-daemon")
-            .args(["--session", "--nofork", "--print-address=1"])
+            .arg("--config-file")
+            .arg(path)
+            .args(["--nofork", "--print-address=1"])
             .stdout(std::process::Stdio::piped())
             .spawn()
             .expect("private dbus-daemon");
         let mut address = String::new();
-        std::io::BufReader::new(process.stdout.take().unwrap())
+        let bytes = std::io::BufReader::new(process.stdout.take().unwrap())
             .read_line(&mut address)
             .unwrap();
+        if bytes == 0 {
+            let status = process.wait().unwrap();
+            panic!("private dbus-daemon returned no address: {status}");
+        }
         Self {
             process,
             address: address.trim().to_string(),
+            _configuration: configuration,
         }
     }
     async fn connect(&self) -> zbus::Connection {
