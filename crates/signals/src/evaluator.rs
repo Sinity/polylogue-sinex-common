@@ -59,7 +59,6 @@ pub struct Interval {
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Policy {
-    pub quiet_hours: Option<QuietHours>,
     pub private: Vec<Interval>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -194,26 +193,26 @@ struct RuleState {
     last_value: Option<f64>,
     observed_at: Option<Instant>,
     next_at: Option<Instant>,
-    sent: Vec<Instant>,
 }
 fn current_match(
     active: &ActiveRule,
     rows: &BTreeMap<String, Row>,
     threshold: Option<bool>,
     latest: Option<&Snapshot>,
-    pending: &Pending,
+    basis: &[Row],
+    change: Option<&Change>,
     at: Instant,
 ) -> bool {
     if !active.current() {
         return true;
     }
     if let Fires::OnChange { what, k } = active.rule.fires {
-        return pending.change.as_ref().is_some_and(|change| {
+        return change.is_some_and(|change| {
             latest.is_some_and(|latest| difference(&change.after, &latest.order, what, k).is_none())
         });
     }
     (!matches!(active.rule.fires, Fires::OnThreshold { .. }) || threshold == Some(true))
-        && pending.basis.iter().all(|basis| {
+        && basis.iter().all(|basis| {
             rows.get(&occurrence_id(&basis.occurrence))
                 .is_some_and(|row| row.current_at(at))
         })
@@ -233,6 +232,7 @@ pub struct Evaluator {
     now: Instant,
     policy: Policy,
     rules: BTreeMap<String, RuleState>,
+    products: BTreeSet<String>,
     inputs: Vec<Evaluation>,
     consumed: BTreeSet<Trigger>,
     pending: BTreeMap<String, Pending>,
@@ -266,6 +266,7 @@ impl Evaluator {
             now: start,
             policy,
             rules: BTreeMap::new(),
+            products: BTreeSet::new(),
             inputs: Vec::new(),
             consumed: BTreeSet::new(),
             pending: BTreeMap::new(),
@@ -281,6 +282,7 @@ impl Evaluator {
             if evaluator.rules.contains_key(&key) {
                 return Err(EvaluationError("duplicate rule identity".into()));
             }
+            evaluator.products.insert(active.version.product.clone());
             evaluator
                 .rules
                 .insert(key, Self::state(active, start, calendar));
@@ -307,7 +309,6 @@ impl Evaluator {
             last_value: None,
             observed_at: None,
             next_at,
-            sent: Vec::new(),
         }
     }
     pub fn now(&self) -> Instant {
@@ -393,6 +394,7 @@ impl Evaluator {
         {
             return Err(EvaluationError("rule edits require a new revision".into()));
         }
+        self.products.insert(active.version.product.clone());
         let mut state = Self::state(active, self.now, calendar);
         // A revised query can read a different relation. Its first complete
         // evaluation, rather than the previous query's rows, is its baseline.
@@ -416,46 +418,140 @@ impl Evaluator {
         &mut self,
         stop: Instant,
         calendar: &impl Calendar,
-        budget: &mut InterruptBudget,
+        host: &mut HostPolicy,
     ) -> Result<Vec<Delivery>, EvaluationError> {
-        self.run(stop, calendar, budget, false)
+        Ok(self
+            .advance_in_mode(
+                stop,
+                calendar,
+                EvaluationMode::Local {
+                    host,
+                    forwarded: &|_| Condition::Incomplete,
+                },
+            )?
+            .deliveries)
     }
-    /// Fold downtime observations and policy boundaries without past handoffs;
-    /// the final handoff and policy checks use the resumed clock.
     pub fn resume(
         &mut self,
         stop: Instant,
         calendar: &impl Calendar,
-        budget: &mut InterruptBudget,
+        host: &mut HostPolicy,
     ) -> Result<Vec<Delivery>, EvaluationError> {
-        self.run(stop, calendar, budget, true)
+        Ok(self
+            .run(
+                stop,
+                calendar,
+                EvaluationMode::Local {
+                    host,
+                    forwarded: &|_| Condition::Incomplete,
+                },
+                true,
+            )?
+            .deliveries)
+    }
+    pub fn advance_in_mode(
+        &mut self,
+        stop: Instant,
+        calendar: &impl Calendar,
+        mode: EvaluationMode<'_>,
+    ) -> Result<EvaluationOutput, EvaluationError> {
+        self.run(stop, calendar, mode, false)
+    }
+    pub fn resume_in_mode(
+        &mut self,
+        stop: Instant,
+        calendar: &impl Calendar,
+        mode: EvaluationMode<'_>,
+    ) -> Result<EvaluationOutput, EvaluationError> {
+        self.run(stop, calendar, mode, true)
+    }
+    pub fn condition(&self, intent: &FiredIntent, at: Instant) -> Condition {
+        if self.private(at) {
+            return Condition::Ended;
+        }
+        let Some(state) = self.rules.get(&rule_id(&intent.delivery.trigger.rule)) else {
+            return Condition::Ended;
+        };
+        if state.active.version != intent.delivery.trigger.rule || !state.active.rule.enabled {
+            return Condition::Ended;
+        }
+        if state.incomplete {
+            return Condition::Incomplete;
+        }
+        if current_match(
+            &state.active,
+            &state.rows,
+            state.threshold,
+            state.latest.as_ref(),
+            &intent.delivery.basis,
+            intent.delivery.change.as_ref(),
+            at,
+        ) {
+            Condition::Matching
+        } else {
+            Condition::Ended
+        }
     }
     fn run(
         &mut self,
         stop: Instant,
         calendar: &impl Calendar,
-        budget: &mut InterruptBudget,
+        mut mode: EvaluationMode<'_>,
         resume: bool,
-    ) -> Result<Vec<Delivery>, EvaluationError> {
+    ) -> Result<EvaluationOutput, EvaluationError> {
         if stop < self.now {
             return Err(EvaluationError("clock must be monotone".into()));
         }
-        let mut deliveries = Vec::new();
-        self.read(self.now, calendar);
-        if !resume {
-            deliveries.extend(self.handoff(self.now, calendar, budget));
-        }
-        while self.now < stop {
-            self.now = self.boundary(stop);
+        let mut output = EvaluationOutput::default();
+        loop {
             self.read(self.now, calendar);
-            if !resume {
-                deliveries.extend(self.handoff(self.now, calendar, budget));
+            if !resume || self.now == stop {
+                let intents = self.fire(self.now);
+                match &mut mode {
+                    EvaluationMode::Local { host, forwarded } => {
+                        for intent in intents {
+                            host.submit(intent, self.now);
+                        }
+                        output
+                            .deliveries
+                            .extend(host.advance(self.now, calendar, |intent| {
+                                if self
+                                    .products
+                                    .contains(&intent.delivery.trigger.rule.product)
+                                {
+                                    self.condition(intent, self.now)
+                                } else {
+                                    forwarded(intent)
+                                }
+                            }));
+                    }
+                    EvaluationMode::Forward => output.intents.extend(intents),
+                }
+            } else if let EvaluationMode::Local { host, forwarded } = &mut mode {
+                host.fold(|intent| {
+                    if self
+                        .products
+                        .contains(&intent.delivery.trigger.rule.product)
+                    {
+                        self.condition(intent, self.now)
+                    } else {
+                        forwarded(intent)
+                    }
+                });
             }
+            if self.now == stop {
+                break;
+            }
+            let next = self.boundary(stop);
+            self.now = match &mode {
+                EvaluationMode::Local { host, .. } => host
+                    .next_due()
+                    .filter(|due| *due > self.now)
+                    .map_or(next, |due| due.min(next)),
+                EvaluationMode::Forward => next,
+            };
         }
-        if resume {
-            deliveries.extend(self.handoff(stop, calendar, budget));
-        }
-        Ok(deliveries)
+        Ok(output)
     }
     fn boundary(&self, stop: Instant) -> Instant {
         let mut next = stop;
@@ -665,7 +761,8 @@ impl Evaluator {
                         &state.rows,
                         state.threshold,
                         state.latest.as_ref(),
-                        pending,
+                        &pending.basis,
+                        pending.change.as_ref(),
                         at,
                     );
                     if !matching {
@@ -783,12 +880,7 @@ impl Evaluator {
             }
         }
     }
-    fn handoff(
-        &mut self,
-        at: Instant,
-        calendar: &impl Calendar,
-        budget: &mut InterruptBudget,
-    ) -> Vec<Delivery> {
+    fn fire(&mut self, at: Instant) -> Vec<FiredIntent> {
         if self.private(at) {
             return Vec::new();
         }
@@ -805,10 +897,10 @@ impl Evaluator {
                 .cmp(&a.change.as_ref().map_or(0, Change::size))
                 .then_with(|| a.trigger.cmp(&b.trigger))
         });
-        let mut deliveries = Vec::new();
+        let mut intents = Vec::new();
         for pending in pending {
             let id = pending.trigger.delivery_id();
-            let Some(state) = self.rules.get_mut(&rule_id(&pending.trigger.rule)) else {
+            let Some(state) = self.rules.get(&rule_id(&pending.trigger.rule)) else {
                 self.pending.remove(&id);
                 continue;
             };
@@ -816,69 +908,52 @@ impl Evaluator {
             if state.incomplete {
                 continue;
             }
-            let still_matching = current_match(
-                active,
-                &state.rows,
-                state.threshold,
-                state.latest.as_ref(),
-                &pending,
-                at,
-            );
-            if active.version != pending.trigger.rule || !active.rule.enabled || !still_matching {
+            if active.version != pending.trigger.rule
+                || !active.rule.enabled
+                || !current_match(
+                    active,
+                    &state.rows,
+                    state.threshold,
+                    state.latest.as_ref(),
+                    &pending.basis,
+                    pending.change.as_ref(),
+                    at,
+                )
+            {
                 self.pending.remove(&id);
                 self.consumed.insert(pending.trigger);
-                continue;
-            }
-            if active.rule.interrupt
-                && let Some(hours) = active.rule.quiet_hours.or(self.policy.quiet_hours)
-                && hours.contains(calendar.minute(at))
-            {
-                self.pending.get_mut(&id).expect("pending exists").due =
-                    calendar.quiet_end(at, hours);
                 continue;
             }
             self.pending.remove(&id);
             if !self.consumed.insert(pending.trigger.clone()) {
                 continue;
             }
-            let mut channel = match active.rule.deliver {
+            let channel = match active.rule.deliver {
                 Deliver::Notice if active.rule.interrupt => Channel::Interrupt,
                 Deliver::Notice => Channel::Notice,
                 Deliver::Value => Channel::Value,
                 Deliver::Action => Channel::Action,
             };
-            let mut downgrade = None;
-            if active.rule.rate_limit.as_ref().is_some_and(|limit| {
-                state
-                    .sent
-                    .iter()
-                    .filter(|sent| at.saturating_sub(**sent) < limit.window.0)
-                    .count()
-                    >= limit.count
-            }) {
-                channel = Channel::Brief;
-                downgrade = Some(Downgrade::RateLimit);
-            } else {
-                if channel == Channel::Interrupt && !budget.admit(at, &active.author) {
-                    channel = Channel::Notice;
-                    downgrade = Some(Downgrade::InterruptBudgetSpent);
-                }
-                state.sent.push(at);
-            }
-            deliveries.push(Delivery {
-                id,
-                trigger: pending.trigger,
-                matched: pending.matched,
-                at,
-                basis: pending.basis,
-                channel,
-                downgrade,
-                change: pending.change,
-                value: pending.value,
-                scope: active.rule.scope.clone(),
+            intents.push(FiredIntent {
+                delivery: Delivery {
+                    id,
+                    trigger: pending.trigger,
+                    matched: pending.matched,
+                    at,
+                    basis: pending.basis,
+                    channel,
+                    downgrade: None,
+                    change: pending.change,
+                    value: pending.value,
+                    scope: active.rule.scope.clone(),
+                },
+                author: active.author.clone(),
+                quiet_hours: active.rule.quiet_hours,
+                rate_limit: active.rule.rate_limit.clone(),
+                current: active.current(),
             });
         }
-        deliveries
+        intents
     }
 }
 /// Compare whole result sets. Scores and page boundaries do not enter here.

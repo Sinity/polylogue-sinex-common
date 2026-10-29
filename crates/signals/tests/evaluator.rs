@@ -65,7 +65,35 @@ fn evaluation(rule: &ActiveRule, at: i64, rows: Vec<Row>) -> Evaluation {
         value: None,
     }
 }
-fn evaluator(rule: ActiveRule, rows: Vec<Row>, start: i64, policy: Policy) -> Evaluator {
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TestEvaluator {
+    evaluator: Evaluator,
+    host: HostPolicy,
+}
+impl std::ops::Deref for TestEvaluator {
+    type Target = Evaluator;
+    fn deref(&self) -> &Evaluator {
+        &self.evaluator
+    }
+}
+impl std::ops::DerefMut for TestEvaluator {
+    fn deref_mut(&mut self) -> &mut Evaluator {
+        &mut self.evaluator
+    }
+}
+impl TestEvaluator {
+    fn next_due(&self) -> Option<i64> {
+        self.evaluator
+            .next_due()
+            .into_iter()
+            .chain(self.host.next_due())
+            .min()
+    }
+    fn pending_count(&self) -> usize {
+        self.evaluator.pending_count() + self.host.pending_count()
+    }
+}
+fn evaluator(rule: ActiveRule, rows: Vec<Row>, start: i64, policy: Policy) -> TestEvaluator {
     let mut evaluator = Evaluator::new(start, vec![rule.clone()], policy, &CalendarUtc).unwrap();
     let mut revisions: BTreeMap<i64, Vec<Row>> = BTreeMap::new();
     for row in rows {
@@ -83,11 +111,18 @@ fn evaluator(rule: ActiveRule, rows: Vec<Row>, start: i64, policy: Policy) -> Ev
             .observe(evaluation(&rule, time, latest.values().cloned().collect()))
             .unwrap();
     }
-    evaluator
+    TestEvaluator {
+        evaluator,
+        host: HostPolicy::default(),
+    }
 }
-fn advance(e: &mut Evaluator, stop: i64) -> Vec<Delivery> {
-    e.advance(stop, &CalendarUtc, &mut InterruptBudget::default())
+fn advance(e: &mut TestEvaluator, stop: i64) -> Vec<Delivery> {
+    e.evaluator
+        .advance(stop, &CalendarUtc, &mut e.host)
         .unwrap()
+}
+fn resume(e: &mut TestEvaluator, stop: i64) -> Vec<Delivery> {
+    e.evaluator.resume(stop, &CalendarUtc, &mut e.host).unwrap()
 }
 fn quiet() -> QuietHours {
     QuietHours {
@@ -95,7 +130,7 @@ fn quiet() -> QuietHours {
         to: 8 * 60,
     }
 }
-fn roundtrip(e: &Evaluator) -> Evaluator {
+fn roundtrip(e: &TestEvaluator) -> TestEvaluator {
     serde_json::from_str(&serde_json::to_string(e).unwrap()).unwrap()
 }
 
@@ -363,7 +398,7 @@ fn late_current_episode_starts_duration_at_observation_duration_from_observation
 }
 #[test]
 fn budget_shared_and_operator_exempt_at_handoff_budget_spares_operator_rules() {
-    let mut budget = InterruptBudget::default();
+    let mut budget = HostPolicy::default();
     for n in 0..6 {
         let mut r = rule();
         r.version.product = format!("product{n}");
@@ -411,15 +446,13 @@ fn resume_uses_actual_clock_and_unknown_does_not_auto_resend_no_retroactive_hand
         Policy::default(),
     );
     assert!(advance(&mut e, at(10)).is_empty());
-    let got = e
-        .resume(at(12), &CalendarUtc, &mut InterruptBudget::default())
-        .unwrap();
+    let got = resume(&mut e, at(12));
     assert_eq!(got[0].at, at(12));
     let mut restored = roundtrip(&e);
     assert!(advance(&mut restored, at(13)).is_empty());
     assert!(
         restored
-            .advance(at(11), &CalendarUtc, &mut InterruptBudget::default())
+            .advance(at(11), &CalendarUtc, &mut HostPolicy::default())
             .is_err()
     );
 }
@@ -440,12 +473,7 @@ fn resume_consumes_private_arrivals_without_catchup() {
         );
         assert!(advance(&mut e, checkpoint).is_empty());
         let mut restored = roundtrip(&e);
-        assert!(
-            restored
-                .resume(at(15), &CalendarUtc, &mut InterruptBudget::default())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(resume(&mut restored, at(15)).is_empty());
     }
     let mut control = evaluator(
         rule(),
@@ -454,13 +482,7 @@ fn resume_consumes_private_arrivals_without_catchup() {
         Policy::default(),
     );
     assert!(advance(&mut control, at(12)).is_empty());
-    assert_eq!(
-        control
-            .resume(at(15), &CalendarUtc, &mut InterruptBudget::default())
-            .unwrap()[0]
-            .at,
-        at(15)
-    );
+    assert_eq!(resume(&mut control, at(15))[0].at, at(15));
 }
 #[test]
 fn resume_drops_quiet_pending_across_private_boundary() {
@@ -490,12 +512,7 @@ fn resume_drops_quiet_pending_across_private_boundary() {
         );
         assert!(advance(&mut e, checkpoint).is_empty());
         let mut restored = roundtrip(&e);
-        assert!(
-            restored
-                .resume(at(34), &CalendarUtc, &mut InterruptBudget::default())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(resume(&mut restored, at(34)).is_empty());
         assert_eq!(restored.pending_count(), 0);
     }
 }
@@ -791,10 +808,13 @@ fn partition_invariance_with_restored_shared_interrupt_budget() {
         .map(|n| row(&n.to_string(), minute(10, n), minute(10, n), None))
         .collect::<Vec<_>>();
     let mut whole = evaluator(r.clone(), rows.clone(), at(9), Policy::default());
-    let mut whole_budget = InterruptBudget {
-        per_hour: 2,
-        handoffs: vec![],
-    };
+    let mut whole_budget = HostPolicy::new(
+        InterruptBudget {
+            per_hour: 2,
+            handoffs: vec![],
+        },
+        None,
+    );
     let expected = whole
         .advance(at(11), &CalendarUtc, &mut whole_budget)
         .unwrap();
@@ -807,15 +827,18 @@ fn partition_invariance_with_restored_shared_interrupt_budget() {
     );
     for checkpoint in [at(9), at(10), minute(10, 2), minute(10, 5), at(11)] {
         let mut partial = evaluator(r.clone(), rows.clone(), at(9), Policy::default());
-        let mut budget = InterruptBudget {
-            per_hour: 2,
-            handoffs: vec![],
-        };
+        let mut budget = HostPolicy::new(
+            InterruptBudget {
+                per_hour: 2,
+                handoffs: vec![],
+            },
+            None,
+        );
         let mut got = partial
             .advance(checkpoint, &CalendarUtc, &mut budget)
             .unwrap();
         let mut restored = roundtrip(&partial);
-        let mut restored_budget: InterruptBudget =
+        let mut restored_budget: HostPolicy =
             serde_json::from_str(&serde_json::to_string(&budget).unwrap()).unwrap();
         got.extend(
             restored
@@ -866,4 +889,137 @@ fn only_observed_rows_wake_live_change_effective_boundaries() {
     );
     assert_eq!(got[0].change.as_ref().unwrap().joined[0].id, "a");
     assert_eq!(got[1].change.as_ref().unwrap().left[0].id, "a");
+}
+#[test]
+fn one_deliverer_per_host_forwarded_intents_use_one_quiet_policy_and_budget() {
+    let mut pl_rule = rule();
+    pl_rule.version.product = "pl".into();
+    pl_rule.rule.interrupt = true;
+    pl_rule.author = Author::Agent("pl-agent".into());
+    let mut sx_rule = pl_rule.clone();
+    sx_rule.version.product = "sx".into();
+    sx_rule.author = Author::Agent("sx-agent".into());
+    let mut pl = evaluator(
+        pl_rule,
+        vec![row("pl-row", at(23), at(23), None)],
+        at(22),
+        Policy::default(),
+    );
+    let mut sx = evaluator(
+        sx_rule,
+        vec![row("sx-row", at(23), at(23), None)],
+        at(22),
+        Policy::default(),
+    );
+    let fired = pl
+        .advance_in_mode(at(23), &CalendarUtc, EvaluationMode::Forward)
+        .unwrap();
+    assert!(fired.deliveries.is_empty());
+    assert_eq!(fired.intents.len(), 1);
+    let original = fired.intents[0].clone();
+    let mut host = HostPolicy::new(
+        InterruptBudget {
+            per_hour: 1,
+            handoffs: vec![],
+        },
+        Some(quiet()),
+    );
+    host.submit(original.clone(), at(23));
+    host.submit(original.clone(), at(23));
+    let mode = EvaluationMode::Local {
+        host: &mut host,
+        forwarded: &|_| Condition::Matching,
+    };
+    let local = sx.advance_in_mode(at(23), &CalendarUtc, mode).unwrap();
+    assert!(local.deliveries.is_empty());
+    assert!(host.budget.handoffs.is_empty());
+    assert_eq!(host.pending_count(), 2);
+    let mut restored: HostPolicy =
+        serde_json::from_str(&serde_json::to_string(&host).unwrap()).unwrap();
+    let released = sx
+        .advance_in_mode(
+            at(32),
+            &CalendarUtc,
+            EvaluationMode::Local {
+                host: &mut restored,
+                forwarded: &|_| Condition::Matching,
+            },
+        )
+        .unwrap();
+    assert_eq!(released.deliveries.len(), 2);
+    assert!(released.deliveries.iter().all(|d| d.at == at(32)));
+    assert_eq!(restored.budget.handoffs, vec![at(32)]);
+    assert_eq!(
+        released
+            .deliveries
+            .iter()
+            .filter(|d| d.channel == Channel::Interrupt)
+            .count(),
+        1
+    );
+    assert_eq!(
+        released
+            .deliveries
+            .iter()
+            .filter(|d| d.downgrade == Some(Downgrade::InterruptBudgetSpent))
+            .count(),
+        1
+    );
+    assert_eq!(released.deliveries[0].id, original.delivery.id);
+    assert_eq!(released.deliveries[0].basis[0].observed, at(23));
+    restored.submit(original, at(33));
+    assert!(
+        restored
+            .advance(at(33), &CalendarUtc, |_| Condition::Matching)
+            .is_empty()
+    );
+    assert_eq!(restored.budget.handoffs, vec![at(32)]);
+}
+#[test]
+fn budget_spares_operator_rules_after_forwarding_and_host_rechecks_current_conditions() {
+    let mut r = rule();
+    r.version.product = "pl".into();
+    r.rule.interrupt = true;
+    r.author = Author::Operator;
+    r.live = true;
+    let mut pl = evaluator(
+        r,
+        vec![row("operator", at(10), at(10), None)],
+        at(9),
+        Policy::default(),
+    );
+    let fired = pl
+        .advance_in_mode(at(10), &CalendarUtc, EvaluationMode::Forward)
+        .unwrap();
+    let mut host = HostPolicy::new(
+        InterruptBudget {
+            per_hour: 0,
+            handoffs: vec![],
+        },
+        None,
+    );
+    let intent = fired.intents[0].clone();
+    host.submit(intent.clone(), at(10));
+    assert!(
+        host.advance(at(10), &CalendarUtc, |_| Condition::Incomplete)
+            .is_empty()
+    );
+    assert_eq!(host.pending_count(), 1);
+    let got = host.advance(at(11), &CalendarUtc, |_| Condition::Matching);
+    assert_eq!(got[0].channel, Channel::Interrupt);
+    assert_eq!(got[0].at, at(11));
+    assert!(host.budget.handoffs.is_empty());
+    let mut ended = intent;
+    ended.delivery.trigger.occurrence.episode = "2".into();
+    ended.delivery.id = ended.delivery.trigger.delivery_id();
+    host.submit(ended.clone(), at(12));
+    assert!(
+        host.advance(at(12), &CalendarUtc, |_| Condition::Ended)
+            .is_empty()
+    );
+    host.submit(ended, at(13));
+    assert!(
+        host.advance(at(13), &CalendarUtc, |_| Condition::Matching)
+            .is_empty()
+    );
 }

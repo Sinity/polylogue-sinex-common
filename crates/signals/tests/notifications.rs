@@ -255,7 +255,7 @@ async fn grouping_replaces_rule_summary_and_budget_summary() {
             reference: "https://example.invalid/notices/c".into()
         })
     );
-    let mut budget = notice("budget-1", "budget");
+    let mut budget = notice("budget-1", "source-a");
     budget.interrupt = false;
     budget.budget_passive_count = Some(1);
     let budget1 = send(&mut deliverer, budget.clone()).await;
@@ -263,6 +263,7 @@ async fn grouping_replaces_rule_summary_and_budget_summary() {
     budget.budget_passive_count = Some(2);
     let budget2 = send(&mut deliverer, budget).await;
     assert_eq!(budget1[0].notification_id, budget2[0].notification_id);
+    assert!(deliverer.state.attempts["a"].active);
     let calls = records.calls.lock().unwrap().clone();
     assert_eq!(calls[1].summary, "Source unreadable: 2 open occurrences");
     assert_eq!(calls[2].summary, "Source unreadable: 3 open occurrences");
@@ -274,10 +275,32 @@ async fn grouping_replaces_rule_summary_and_budget_summary() {
     );
     assert_eq!(calls[2].urgency, 2);
     assert_eq!(calls[2].expire, 0);
-    deliverer.cancel("b").await;
+    let shrink = deliverer.cancel("b").await;
+    let calls = records.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 6);
+    assert_eq!(calls[5].replaces, second[0].notification_id.unwrap());
+    assert_eq!(calls[5].summary, "Source unreadable: 2 open occurrences");
+    assert_eq!(calls[5].urgency, 2);
+    assert!(calls[5].body.ends_with("example read notice:c"));
+    assert_eq!(shrink.len(), 1);
+    assert_eq!(shrink[0].delivery_id, "c");
     assert_eq!(
-        records.calls.lock().unwrap().last().unwrap().summary,
-        "Source unreadable: 2 open occurrences"
+        deliverer.state.attempts["budget-2"].notification_id,
+        budget2[0].notification_id
+    );
+    let budget_open = deliverer.desktop_event(
+        budget2[0].notification_id.unwrap(),
+        DesktopEvent::OpenReference {
+            reference: String::new(),
+        },
+    );
+    assert_eq!(budget_open.len(), 1);
+    assert_eq!(budget_open[0].delivery_id, "budget-2");
+    assert_eq!(
+        budget_open[0].event,
+        Some(DesktopEvent::OpenReference {
+            reference: "https://example.invalid/notices/budget-2".into()
+        })
     );
     deliverer.cancel("c").await;
     assert!(
@@ -287,6 +310,20 @@ async fn grouping_replaces_rule_summary_and_budget_summary() {
             .unwrap()
             .contains(&second[0].notification_id.unwrap())
     );
+    deliverer.cancel("budget-2").await;
+    assert!(deliverer.state.attempts["a"].active);
+    assert!(
+        !records
+            .closed
+            .lock()
+            .unwrap()
+            .contains(&first[0].notification_id.unwrap())
+    );
+    assert_eq!(
+        records.closed.lock().unwrap().last().copied(),
+        budget2[0].notification_id
+    );
+    assert_eq!(records.calls.lock().unwrap().len(), 6);
 }
 
 #[tokio::test]

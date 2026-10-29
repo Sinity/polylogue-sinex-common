@@ -283,6 +283,7 @@ impl Deliverer {
                 || (slot.starts_with("summary:")
                     && self.state.attempts.values().any(|a| {
                         a.active
+                            && a.notice.budget_passive_count.is_none()
                             && a.notice.data_loss
                             && a.notice.product == notice.product
                             && a.notice.rule == notice.rule
@@ -436,11 +437,12 @@ impl Deliverer {
         };
         let mut ids = BTreeSet::new();
         let mut receipts = Vec::new();
-        for attempt in self.state.attempts.values_mut().filter(|a| {
-            a.notice.product == notice.product
-                && a.notice.rule == notice.rule
-                && a.notice.occurrence == notice.occurrence
-        }) {
+        for attempt in self
+            .state
+            .attempts
+            .values_mut()
+            .filter(|a| same_occurrence(&a.notice, &notice))
+        {
             attempt.active = false;
             if let Some(id) = attempt.notification_id {
                 ids.insert(id);
@@ -477,6 +479,9 @@ impl Deliverer {
             self.state.slots.retain(|_, value| *value != id);
             self.state.shown_delivery.remove(&id);
         }
+        if notice.budget_passive_count.is_some() {
+            return receipts;
+        }
         let group = Self::group(&notice);
         let open = self.open_occurrences(&notice);
         let first = self.state.first_occurrence.get(&group).cloned();
@@ -503,6 +508,7 @@ impl Deliverer {
                 .values()
                 .find(|a| {
                     a.active
+                        && a.notice.budget_passive_count.is_none()
                         && a.notice.product == notice.product
                         && a.notice.rule == notice.rule
                         && a.notice.occurrence == promoted
@@ -531,6 +537,7 @@ impl Deliverer {
                 .values()
                 .find(|a| {
                     a.active
+                        && a.notice.budget_passive_count.is_none()
                         && a.notice.product == notice.product
                         && a.notice.rule == notice.rule
                         && Some(&a.notice.occurrence) != first
@@ -545,10 +552,7 @@ impl Deliverer {
 
     fn replaced(&mut self, notice: &Notice) {
         for prior in self.state.attempts.values_mut().filter(|a| {
-            a.notice.delivery_id != notice.delivery_id
-                && a.notice.product == notice.product
-                && a.notice.rule == notice.rule
-                && a.notice.occurrence == notice.occurrence
+            a.notice.delivery_id != notice.delivery_id && same_occurrence(&a.notice, notice)
         }) {
             prior.active = false;
         }
@@ -622,6 +626,13 @@ impl Deliverer {
         }
         receipts
     }
+}
+
+fn same_occurrence(a: &Notice, b: &Notice) -> bool {
+    a.product == b.product
+        && a.rule == b.rule
+        && a.occurrence == b.occurrence
+        && a.budget_passive_count.is_some() == b.budget_passive_count.is_some()
 }
 
 fn receipt(attempt: &Attempt, route: Route) -> NotificationReceipt {

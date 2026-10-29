@@ -216,11 +216,25 @@ revision, occurrence and episode. Evidence and reading IDs never enter it.
 Change and threshold crossings use evaluator episodes; scheduled rules use
 the logical day. Keep consumed triggers when rebuilding indexes.
 
-Pass the host deliverer's one `InterruptBudget` to every evaluator, including
-forwarded Polylogue deliveries. Persist its handoff timestamps. In primary
-mode Polylogue sends interrupting deliveries to Sinex and does not run a
-local notification worker except for its Sinex-blocked notice. This routing
-boundary belongs to the products; the shared worker has no host discovery.
+The host deliverer's one `HostPolicy` owns quiet hours, the `InterruptBudget`,
+actual handoff rate limits, pending intents and consumed delivery IDs. Persist
+it atomically with emitted deliveries. `Evaluator::advance` and `resume` apply
+this policy for a standalone product. Runtime wakeups combine the evaluator's
+and host policy's `next_due`; neither is a polling interval.
+
+In primary mode Polylogue uses the trusted `EvaluationMode::Forward`, which
+emits `FiredIntent`s and spends no host budget. Sinex submits those intents to
+its one `HostPolicy`, alongside its own local rules. Its `EvaluationMode::Local`
+receives a trusted forwarded-condition callback for other products; its own
+conditions use `Evaluator::condition`. The callback returns `Matching`,
+`Ended` or `Incomplete`, checking enabled revision, current condition and source
+freshness. Incomplete intents wait; ended intents are consumed without an
+outward handoff. These modes are Rust runtime choices and cannot be supplied
+in an authored rule or deserialized from a client request. The forwarding
+adapter obtains authorship from authenticated product context. Duplicate
+submissions preserve the first immutable basis and cannot consume the host
+budget twice, including after a checkpoint restore.
+
 Products execute `value` and `action` handoffs through the configured target
 and command, outside their writer. The action reference is the last command
 argument. No signal command is an agent launch.
