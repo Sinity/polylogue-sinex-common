@@ -1,8 +1,9 @@
 //! Local checkout overrides for a Git dependency shared by Cargo workspaces.
 //!
 //! The caller chooses the repository, patch and original-lock backup paths.
-//! Linking resolves every workspace against the checkout and preserves the original locks until unlinking. Returned errors restore the
-//! files as they were before the operation, including an earlier active link.
+//! Linking resolves every workspace against the checkout and preserves the
+//! original locks until unlinking. Returned errors restore the files as they
+//! were before the operation, including an earlier active link.
 //! A killed process can leave the operation unfinished; original backups remain
 //! available for the caller's next unlink.
 use serde_json::Value;
