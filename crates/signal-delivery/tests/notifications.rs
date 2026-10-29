@@ -1313,7 +1313,6 @@ fn authorize(notices: &[Notice], decision: SendDecision) -> Authorization {
             .iter()
             .map(|n| (n.delivery_id.clone(), decision.clone()))
             .collect(),
-        lease: None,
     }
 }
 fn permit(request: &PolicyRequest) -> Authorization {
@@ -1490,14 +1489,15 @@ async fn policy_batch_uses_one_short_fence_for_all_members_without_retaining_it_
             );
             batches.fetch_add(1, Ordering::SeqCst);
             members.store(request.notices.len(), Ordering::SeqCst);
-            let mut authorization = authorize(
+            let fence = Lease(Arc::clone(&active));
+            let authorization = authorize(
                 &request.notices,
                 SendDecision::HoldUntil {
                     at: 10_000,
                     policy: "policy:current".into(),
                 },
             );
-            authorization.lease = Some(Box::new(Lease(Arc::clone(&active))));
+            drop(fence);
             authorization
         })
     };
@@ -1633,11 +1633,12 @@ async fn stalled_server_does_not_hold_policy_lock_and_the_next_route_rechecks_po
                 SendDecision::Cancel
             };
             assert!(!active.swap(true, Ordering::SeqCst));
-            let mut authorization = authorize(&request.notices, decision);
-            authorization.lease = Some(Box::new(Lease {
+            let fence = Lease {
                 active: Arc::clone(&active),
                 _guard: guard,
-            }));
+            };
+            let authorization = authorize(&request.notices, decision);
+            drop(fence);
             authorization
         })
     };

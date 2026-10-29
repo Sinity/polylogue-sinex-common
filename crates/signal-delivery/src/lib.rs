@@ -149,7 +149,7 @@ impl Deliverer {
                 route,
                 notices: self.state.group_members(&notice),
             };
-            let Authorization { decisions, lease } = check(&request);
+            let Authorization { decisions } = check(&request);
             let denied = request
                 .notices
                 .iter()
@@ -165,7 +165,6 @@ impl Deliverer {
                 .max_by_key(|(at, _)| *at);
             // Decisions are immutable after admission. Policy changes may now
             // proceed while the already-admitted platform call is in flight.
-            drop(lease);
             if let Some(denied) = denied {
                 receipts.extend(self.cancel_authorized(&denied, &decisions).await);
                 continue;
@@ -331,12 +330,11 @@ impl Deliverer {
         let Some(notice) = self.state.attempt(id).map(|a| a.notice.clone()) else {
             return Vec::new();
         };
-        let Authorization { decisions, lease } = check(&PolicyRequest {
+        let Authorization { decisions } = check(&PolicyRequest {
             delivery_id: id.to_string(),
             route: Route::Dbus,
             notices: self.state.group_members(&notice),
         });
-        drop(lease);
         self.cancel_authorized(id, &decisions).await
     }
     async fn cancel_authorized(
@@ -490,11 +488,11 @@ pub struct PolicyRequest {
     pub route: Route,
     pub notices: Vec<Notice>,
 }
-/// One short owner-policy fence. The worker releases it before platform I/O;
-/// later independently admitted routes obtain a fresh authorization.
+/// Completed owner-policy admission. The callback finishes all database
+/// commit/rollback and releases every guard before returning these decisions.
+/// Later independently admitted routes obtain a fresh authorization.
 pub struct Authorization {
     pub decisions: BTreeMap<String, SendDecision>,
-    pub lease: Option<Box<dyn std::any::Any + Send>>,
 }
 pub type Policy = dyn Fn(&PolicyRequest) -> Authorization + Send + Sync;
 pub type PolicyCheck = Arc<Policy>;

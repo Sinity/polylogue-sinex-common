@@ -225,3 +225,21 @@ fn imported_attempt_is_immutable_across_receiver_progress_and_restart() {
     );
     assert!(restored.server_appeared().is_empty());
 }
+
+#[test]
+fn imported_holds_cannot_enable_an_unattempted_or_combined_route() {
+    let mut source = NotificationState::default();
+    let notice:Notice=serde_json::from_value(json!({"delivery_id":"a","product":"p","icon":"i","rule":"r","occurrence":"o","summary":"s","body":"b","reference":"record:a","command_hint":"","interrupt":true,"current":true,"data_loss":false,"budget_passive_count":null})).unwrap();
+    source.begin(notice, Route::Dbus);
+    for route in ["both", "command"] {
+        let mut wire = serde_json::to_value(source.attempt("a").unwrap()).unwrap();
+        wire["held"] = json!({(route):{"at":1000,"policy":"owner-policy:1"}});
+        let attempt = serde_json::from_value(wire).unwrap();
+        let mut receiver = NotificationState::default();
+        assert_eq!(
+            receiver.import_attempt(attempt),
+            Err(signals::notifications::ImportError::InvalidAttempt)
+        );
+        assert!(receiver.attempts().is_empty());
+    }
+}
