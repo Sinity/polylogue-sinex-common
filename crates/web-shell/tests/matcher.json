@@ -1,0 +1,8 @@
+[
+  {"query":"ab","label":"abc","score":12.999},
+  {"query":"rr","label":"Read result","score":9.991},
+  {"query":"X","label":"abc","score":null},
+  {"query":"","label":"abc","score":-0.003},
+  {"query":"λ","label":"Λ value","score":4.994},
+  {"query":"a-b","label":"a-b","score":25}
+]

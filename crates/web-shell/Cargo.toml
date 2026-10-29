@@ -1,0 +1,16 @@
+[package]
+name = "web-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+command-surface = { path = "../command-surface" }
+http = "1"
+maud = "0.27"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ts-rs = { version = "11", features = ["serde-compat", "no-serde-warnings"] }

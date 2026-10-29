@@ -1,0 +1,1 @@
+IBM Plex Sans and Mono Regular, complete WOFF2, from [IBM/plex](https://github.com/IBM/plex/tree/71f558992315a12ca1f06a2215d57962a1992162), revision `71f558992315a12ca1f06a2215d57962a1992162`. Licensed under the SIL Open Font License in LICENSE.txt. Fonts are served locally.

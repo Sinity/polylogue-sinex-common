@@ -44,6 +44,10 @@ fn check(run: &mut Run) -> devkit::Result {
         "fmt",
         devkit::cargo_command().args(["fmt", "--all", "--", "--check"]),
     )?;
+    run.command(
+        "web-shell",
+        std::process::Command::new("node").args(["crates/web-shell/build.mjs", "--test"]),
+    )?;
     run.cargo(
         "clippy",
         &[
