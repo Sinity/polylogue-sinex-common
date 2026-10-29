@@ -3,6 +3,7 @@ pub mod ast;
 pub mod catalog;
 pub mod complete;
 pub mod cursor;
+pub mod format;
 pub mod identity;
 pub mod laws;
 mod number;
@@ -13,7 +14,7 @@ pub mod time;
 use serde::{Deserialize, Serialize};
 
 /// Stable language refusal kinds. Transport mappings belong to command-surface.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
     InvalidQuery,
@@ -38,7 +39,7 @@ impl ErrorKind {
 }
 
 /// A byte-positioned refusal, with an executable correction where one exists.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Error {
     pub kind: ErrorKind,
     pub message: String,

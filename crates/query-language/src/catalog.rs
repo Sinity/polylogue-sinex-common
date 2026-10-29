@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub struct Catalog {
     pub default_unit: String,
     pub sequence_unit: Option<String>,
+    pub recall_last_unit: Option<String>,
     pub units: Vec<Unit>,
     pub commands: Vec<String>,
     pub extensions: Vec<Extension>,

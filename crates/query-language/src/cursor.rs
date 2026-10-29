@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PageRequest {
     pub page_size: NonZeroUsize,
     pub cursor: Option<SealedCursor>,
@@ -16,7 +16,7 @@ pub struct PageRequest {
 
 /// Context fixed on the first page. Products bind grants, schema/definition/ranking
 /// versions and every read position here, and check their continued availability.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CursorContext {
     pub question: QuestionId,
@@ -28,14 +28,14 @@ pub struct CursorContext {
 }
 
 /// The last row's explicit sort values, followed by its unique row identity.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OrderPosition {
     pub values: Vec<Value>,
     pub row_identity: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Continuation {
     pub context: CursorContext,
@@ -43,7 +43,7 @@ pub struct Continuation {
 }
 
 /// Wire representation is opaque; consumers open it through the owning seal.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct SealedCursor(String);
 impl SealedCursor {
@@ -155,7 +155,7 @@ fn digit(byte: u8) -> Option<u8> {
 
 /// Unknown values sort last in either direction; row identity is always the
 /// final ascending key. Products use this ordering when compiling keyset SQL.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum Direction {
     Ascending,
     Descending,
@@ -173,6 +173,11 @@ pub fn compare_positions(
         ));
     }
     for ((left, right), direction) in left.values.iter().zip(&right.values).zip(directions) {
+        if matches!(left, Value::Array(_) | Value::Object(_))
+            || matches!(right, Value::Array(_) | Value::Object(_))
+        {
+            return Err(invalid("order keys require scalar values"));
+        }
         let order = match (left, right) {
             (Value::Null, Value::Null) => Ordering::Equal,
             (Value::Null, _) => Ordering::Greater,

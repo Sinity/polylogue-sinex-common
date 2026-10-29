@@ -14,16 +14,20 @@ fn bad(message: impl ToString) -> Error {
 }
 
 /// A resolved named zone and a valid wall-clock start. Deployment owns defaults.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(try_from = "DaySettingWire", into = "DaySettingWire")]
 pub struct DaySetting {
+    #[schemars(with = "String")]
     zone: TimeZone,
+    #[schemars(with = "String")]
     start: CivilTime,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 struct DaySettingWire {
     #[serde(with = "jiff::fmt::serde::tz::required")]
+    #[schemars(with = "String")]
     zone: TimeZone,
+    #[schemars(with = "String")]
     start: CivilTime,
 }
 impl TryFrom<DaySettingWire> for DaySetting {
@@ -132,27 +136,38 @@ pub fn days_between(from: Date, to: Date) -> Result<i64, Error> {
     Ok(i64::from(from.until(to).map_err(bad)?.get_days()))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ResolutionNote {
-    SkippedTime { local: DateTime },
-    RepeatedTime { local: DateTime },
+    SkippedTime {
+        #[schemars(with = "String")]
+        local: DateTime,
+    },
+    RepeatedTime {
+        #[schemars(with = "String")]
+        local: DateTime,
+    },
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LocalResolution {
+    #[schemars(with = "String")]
     pub instant: Timestamp,
     pub notes: Vec<ResolutionNote>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(try_from = "RangeWire", into = "RangeWire")]
 pub struct TimeRange {
+    #[schemars(with = "String")]
     pub start: Timestamp,
+    #[schemars(with = "String")]
     pub end: Timestamp,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 struct RangeWire {
+    #[schemars(with = "String")]
     start: Timestamp,
+    #[schemars(with = "String")]
     end: Timestamp,
 }
 impl TryFrom<RangeWire> for TimeRange {
@@ -189,17 +204,33 @@ impl TimeRange {
         self.end.duration_since(self.start)
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(try_from = "TimeWire", into = "TimeWire")]
 pub enum Time {
-    Instant { at: Timestamp },
-    Span { start: Timestamp, end: Timestamp },
+    Instant {
+        #[schemars(with = "String")]
+        at: Timestamp,
+    },
+    Span {
+        #[schemars(with = "String")]
+        start: Timestamp,
+        #[schemars(with = "String")]
+        end: Timestamp,
+    },
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "time", rename_all = "snake_case")]
 enum TimeWire {
-    Instant { at: Timestamp },
-    Span { start: Timestamp, end: Timestamp },
+    Instant {
+        #[schemars(with = "String")]
+        at: Timestamp,
+    },
+    Span {
+        #[schemars(with = "String")]
+        start: Timestamp,
+        #[schemars(with = "String")]
+        end: Timestamp,
+    },
 }
 impl TryFrom<TimeWire> for Time {
     type Error = Error;
@@ -240,8 +271,9 @@ impl From<TimeRange> for Time {
         }
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Clock {
+    #[schemars(with = "String")]
     pub now: Timestamp,
     pub day: DaySetting,
 }
@@ -250,7 +282,7 @@ impl Clock {
         Self { now, day }
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ResolvedTime {
     pub expression: String,
     pub value: Time,
@@ -323,6 +355,24 @@ pub fn resolve(text: &str, clock: &Clock) -> Result<ResolvedTime, Error> {
         Time::Instant {
             at: clock.now.checked_sub(elapsed).map_err(bad)?,
         }
+    } else if let Some(elapsed) = normalized.strip_prefix("last ").and_then(duration) {
+        if elapsed <= SignedDuration::ZERO {
+            return Err(bad("last duration requires a positive duration"));
+        }
+        TimeRange::new(clock.now.checked_sub(elapsed).map_err(bad)?, clock.now)?.into()
+    } else if normalized
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == '-' || c == '+')
+        && let Ok(date) = normalized.parse::<Date>()
+    {
+        // Jiff's DateTime parser also accepts a bare date as midnight. A
+        // date in the query language denotes the configured logical day.
+        notes.extend(day.local(date.to_datetime(day.start))?.notes);
+        notes.extend(
+            day.local(date.tomorrow().map_err(bad)?.to_datetime(day.start))?
+                .notes,
+        );
+        day.day(date)?.into()
     } else if let Ok(at) = text.trim().parse::<Timestamp>() {
         Time::Instant { at }
     } else if let Ok(dt) = text.trim().parse::<DateTime>() {
@@ -496,7 +546,7 @@ fn calendar_period(text: &str, today: Date) -> Result<(Date, Date), Error> {
 }
 
 /// Precision is carried separately from the represented half-open period.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Precision {
     Instant,
@@ -509,14 +559,14 @@ pub enum Precision {
 }
 /// Boundary provenance is mandatory for day and hour-derived values. Hour
 /// grains may use bounded precision and retain the same setting here.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(try_from = "TimeValueWire", into = "TimeValueWire")]
 pub struct TimeValue {
     pub period: Time,
     pub precision: Precision,
     pub boundary: Option<DaySetting>,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 struct TimeValueWire {
     period: Time,
     precision: Precision,
@@ -673,19 +723,41 @@ fn classify(all: bool, none: bool) -> Truth {
         Truth::Unknown
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "condition", rename_all = "snake_case")]
 pub enum TimeCondition {
-    Before { at: Timestamp },
-    AtOrBefore { at: Timestamp },
-    After { at: Timestamp },
-    AtOrAfter { at: Timestamp },
-    Equal { at: Timestamp },
-    NotEqual { at: Timestamp },
-    Within { range: TimeRange },
+    Before {
+        #[schemars(with = "String")]
+        at: Timestamp,
+    },
+    AtOrBefore {
+        #[schemars(with = "String")]
+        at: Timestamp,
+    },
+    After {
+        #[schemars(with = "String")]
+        at: Timestamp,
+    },
+    AtOrAfter {
+        #[schemars(with = "String")]
+        at: Timestamp,
+    },
+    Equal {
+        #[schemars(with = "String")]
+        at: Timestamp,
+    },
+    NotEqual {
+        #[schemars(with = "String")]
+        at: Timestamp,
+    },
+    Within {
+        range: TimeRange,
+    },
 }
 /// Derived order puts precise matches first, independently of enumeration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum MatchRank {
     Precise,

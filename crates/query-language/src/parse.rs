@@ -116,6 +116,13 @@ pub fn parse(text: &str, catalog: &Catalog) -> Result<Query, Error> {
                         error.suggestion = Some(corrected);
                         break;
                     }
+                    Err(next)
+                        if next.kind == ErrorKind::NotAQuery
+                            && next.message.contains("is a command") =>
+                    {
+                        error.suggestion = Some(corrected);
+                        break;
+                    }
                     Err(next) => candidate = next.suggestion,
                 }
             }
@@ -271,18 +278,29 @@ impl Parser<'_> {
                     self.at += 1;
                     consumed_source = true;
                     source = if self.take("last") {
+                        scope.unit = self
+                            .catalog
+                            .recall_last_unit
+                            .clone()
+                            .unwrap_or_else(|| scope.unit.clone());
                         let condition = if self.take("where") {
                             Some(self.condition(&scope)?)
                         } else {
                             None
                         };
-                        Source::RecallLast { condition }
+                        Source::RecallLast {
+                            unit: scope.unit.clone(),
+                            condition,
+                        }
                     } else if self.take("mark") {
                         let number = if self.peek().is_some_and(|t| t.text.parse::<u64>().is_ok()) {
                             self.number()?
                         } else {
                             1
                         };
+                        if number == 0 {
+                            return Err(self.error("mark number must be positive"));
+                        }
                         Source::RecallMark {
                             number,
                             window: self.recall_window()?,
@@ -326,6 +344,12 @@ impl Parser<'_> {
                         first.span.start,
                     )
                     .hint(format!("run the `{}` command", first.text)));
+                } else if self.field_known(&scope, &first.text) {
+                    return Err(Error::new(
+                        ErrorKind::InvalidQuery,
+                        format!("`{}` is a field; give it an operator and value", first.text),
+                        first.span.start,
+                    ));
                 } else if let Some(word) = closest(&first.text, self.catalog.command_words()) {
                     return Err(Error::new(
                         ErrorKind::NotAQuery,
@@ -515,7 +539,7 @@ impl Parser<'_> {
     }
     fn atom(&mut self, scope: &Scope) -> Result<Condition, Error> {
         let start = self.pos();
-        if self.is("not")
+        if self.peek().is_some_and(|t| !t.quoted && t.text == "not")
             && self
                 .tokens
                 .get(self.at + 1)
@@ -670,6 +694,13 @@ impl Parser<'_> {
                 ));
             }
             if field.eq_ignore_ascii_case("query") {
+                if raw.is_empty() || raw.starts_with('$') {
+                    return Err(Error::new(
+                        ErrorKind::BadValue,
+                        "a saved query needs a literal name; parameters stand only for values",
+                        start,
+                    ));
+                }
                 let name = raw.to_string();
                 let arguments = self.arguments()?;
                 return Ok(self.cond(start, ConditionKind::Saved { name, arguments }));
@@ -682,7 +713,7 @@ impl Parser<'_> {
                     },
                 ));
             }
-            let value = if raw.is_empty() {
+            let mut value = if raw.is_empty() {
                 if self.peek().is_some_and(|t| Op::parse(&t.text).is_some()) {
                     let op = self.next()?;
                     let value = self.value()?;
@@ -713,6 +744,7 @@ impl Parser<'_> {
                 ));
             }
             self.check_field(scope, field, start)?;
+            self.normalize_unknown(scope, field, &mut value);
             self.check_value(scope, field, &value, start + field.len() + 1)?;
             return Ok(self.cond(
                 start,
@@ -731,9 +763,11 @@ impl Parser<'_> {
                 return Ok(self.cond(start, ConditionKind::FieldExists { operand }));
             }
             if self.take("between") {
-                let from = self.value()?;
+                let mut from = self.value()?;
                 self.expect("and")?;
-                let to = self.value()?;
+                let mut to = self.value()?;
+                self.normalize_operand_unknown(scope, &operand, &mut from);
+                self.normalize_operand_unknown(scope, &operand, &mut to);
                 self.check_operand_value(scope, &operand, &from, start)?;
                 self.check_operand_value(scope, &operand, &to, start)?;
                 return Ok(self.cond(start, ConditionKind::Between { operand, from, to }));
@@ -762,7 +796,8 @@ impl Parser<'_> {
                 ));
             }
             let op = self.op()?;
-            let value = self.value()?;
+            let mut value = self.value()?;
+            self.normalize_operand_unknown(scope, &operand, &mut value);
             if let Operand::Field { name } = &operand {
                 if self
                     .catalog
@@ -1087,6 +1122,27 @@ impl Parser<'_> {
             e
         })
     }
+    fn normalize_operand_unknown(&self, scope: &Scope, operand: &Operand, value: &mut Value) {
+        if let Operand::Field { name } = operand {
+            self.normalize_unknown(scope, name, value);
+        }
+    }
+    fn normalize_unknown(&self, scope: &Scope, field: &str, value: &mut Value) {
+        if let Value::Set { values } = value {
+            for value in values {
+                self.normalize_unknown(scope, field, value);
+            }
+            return;
+        }
+        if let Some(spec) = self.catalog.field(&scope.unit, field) {
+            if let crate::catalog::UnknownRule::Word(word) = &spec.unknown {
+                if matches!(value,Value::Scalar{text,quoted:false} if text.eq_ignore_ascii_case(word))
+                {
+                    *value = Value::Unknown;
+                }
+            }
+        }
+    }
     fn check_value(
         &self,
         scope: &Scope,
@@ -1345,9 +1401,38 @@ impl Parser<'_> {
                 }
                 StageKind::Fields { fields }
             }
-            "measure" => StageKind::Measure {
-                name: self.next()?.text,
-            },
+            "measure" => {
+                let name = self.next()?.text;
+                let mut by = Vec::new();
+                if self.take("by") {
+                    loop {
+                        if self.peek().is_some_and(|t| {
+                            matches!(t.text.as_str(), "day" | "week" | "month")
+                                && !self.next_is(1, "(")
+                                && !self.field_known(scope, &t.text)
+                        }) {
+                            let bucket = self.next()?;
+                            let time = self
+                                .catalog
+                                .unit(&scope.unit)
+                                .and_then(|unit| unit.main_time.clone())
+                                .ok_or_else(|| {
+                                    self.error("period measure keys need the unit's main time")
+                                })?;
+                            by.push(Operand::Function {
+                                name: bucket.text,
+                                arguments: vec![Operand::field(time)],
+                            });
+                        } else {
+                            by.push(self.operand(scope)?);
+                        }
+                        if !self.take(",") {
+                            break;
+                        }
+                    }
+                }
+                StageKind::Measure { name, by }
+            }
             "union" | "intersect" | "except" | "fuse" => {
                 self.expect("(")?;
                 let query = Box::new(self.query()?);

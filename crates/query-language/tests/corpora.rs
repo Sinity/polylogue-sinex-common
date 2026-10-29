@@ -289,3 +289,56 @@ fn predecessor_refusals_and_documented_changes() {
         assert!(parse(text, &catalog).is_err(), "{text}: {reason}");
     }
 }
+
+#[test]
+fn sinex_associated_predecessor_positive_shapes() {
+    let catalog = support::sinex();
+    // Original inputs from query/tests/{sessions,gaps}.rs. Binding definitions,
+    // finite fill bounds and registered payload schemas stay compiler obligations.
+    for (original, shared) in [
+        (
+            "shell-sessions where cwds ^ /src/tide sort start desc",
+            "shell-sessions where cwds ^ /src/tide sort start desc",
+        ),
+        (
+            r#"recall last where cwds ^ "/src/tide (notes)""#,
+            r#"recall last where cwds ^ "/src/tide (notes)""#,
+        ),
+        (
+            "shell-sessions where cwds != /src/tide",
+            "shell-sessions where cwds != /src/tide",
+        ),
+        ("recall mark 2 ±5m", "recall mark 2 ±5m"),
+        (
+            "events where payload.exit_code >= 0 and event_type = command.executed sum(payload.duration_ns)",
+            "events where payload.exit_code >= 0 AND event_type = command.executed sum(payload.duration_ns)",
+        ),
+        (
+            "commands where when in last 3d group by day(when), cwd count fill where count >= 1 sort day",
+            "commands where when in last 3d group by day(when), cwd count fill where count >= 1 sort day",
+        ),
+        (
+            r#"query:by-directory(root="x\" or source exists", code=1) count"#,
+            r#"query:by-directory(root="x\" or source exists", code=1) count"#,
+        ),
+    ] {
+        if original != shared {
+            let error = parse(original, &catalog).unwrap_err();
+            parse(
+                error
+                    .suggestion
+                    .as_deref()
+                    .expect("runnable shared spelling"),
+                &catalog,
+            )
+            .unwrap();
+        }
+        parse(shared, &catalog).unwrap_or_else(|e| panic!("{original}: {e}"));
+    }
+}
+
+#[test]
+fn associated_predecessor_mark_number_refusal() {
+    let error = parse("recall mark 0", &support::sinex()).unwrap_err();
+    assert!(error.message.contains("positive"));
+}

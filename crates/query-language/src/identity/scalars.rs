@@ -30,8 +30,9 @@ fn value(value: &mut Value, field: &Field) {
                 self::value(value, field);
             }
         }
-        Value::Scalar { text, .. } => {
-            if matches!(&field.unknown,UnknownRule::Word(word) if word==text) {
+        Value::Scalar { text, quoted } => {
+            if !*quoted && matches!(&field.unknown,UnknownRule::Word(word) if word==text) {
+                *value = Value::Unknown;
                 return;
             }
             let kind = match &field.kind {
@@ -106,16 +107,33 @@ fn condition(c: &mut Condition, scope: &Fields, catalog: &Catalog) {
             }
         }
         ConditionKind::In { query, .. } => canonicalize(query, catalog),
-        ConditionKind::Sequence { unit, steps, .. } => {
+        ConditionKind::Sequence {
+            unit, steps, gaps, ..
+        } => {
             for c in steps {
                 condition(c, &fields(catalog, unit), catalog);
             }
+            for gap in gaps {
+                if let Gap::Within { duration } = gap {
+                    duration_value(duration);
+                }
+            }
         }
+        ConditionKind::TimeDifference { value, .. } => duration_value(value),
         ConditionKind::Extension { arguments, .. } => arguments
             .iter_mut()
             .for_each(|a| argument(a, scope, catalog)),
         _ => {}
     }
+}
+fn duration_value(v: &mut Value) {
+    value(
+        v,
+        &Field {
+            kind: FieldKind::Duration,
+            ..Field::default()
+        },
+    );
 }
 fn argument(a: &mut ExtensionArgument, scope: &Fields, catalog: &Catalog) {
     match a {
@@ -129,7 +147,7 @@ fn argument(a: &mut ExtensionArgument, scope: &Fields, catalog: &Catalog) {
 }
 pub(super) fn canonicalize(query: &mut Query, catalog: &Catalog) {
     let mut scope = match &query.source {
-        Source::Unit { unit, .. } => fields(catalog, unit),
+        Source::Unit { unit, .. } | Source::RecallLast { unit, .. } => fields(catalog, unit),
         _ => fields(catalog, &catalog.default_unit),
     };
     match &mut query.source {
@@ -141,7 +159,17 @@ pub(super) fn canonicalize(query: &mut Query, catalog: &Catalog) {
                 condition(c, &scope, catalog);
             }
         }
-        Source::RecallLast { condition: Some(c) } => condition(c, &scope, catalog),
+        Source::RecallLast {
+            condition: Some(c), ..
+        } => condition(c, &scope, catalog),
+        Source::Recall {
+            window: Some(window),
+            ..
+        }
+        | Source::RecallMark {
+            window: Some(window),
+            ..
+        } => duration_value(window),
         _ => {}
     }
     for attachment in &mut query.attach {
@@ -213,8 +241,15 @@ pub(super) fn canonicalize(query: &mut Query, catalog: &Catalog) {
                 scope.retain(|name, _| fields.contains(name));
                 group_input = None;
             }
-            StageKind::Combine { query, .. } | StageKind::Temporal { query, .. } => {
+            StageKind::Combine { query, .. } => {
                 canonicalize(query, catalog);
+                group_input = None;
+            }
+            StageKind::Temporal { query, within, .. } => {
+                canonicalize(query, catalog);
+                if let Some(within) = within {
+                    duration_value(within);
+                }
                 group_input = None;
             }
             StageKind::Extension { arguments, .. } => arguments

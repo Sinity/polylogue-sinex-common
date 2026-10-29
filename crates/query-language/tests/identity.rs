@@ -184,3 +184,48 @@ fn numeric_group_columns_canonicalize_in_the_result_relation() {
         normal_form(&b, &catalog()).unwrap()
     );
 }
+
+#[test]
+fn duration_gap_spellings_and_catalog_unknown_words_share_identity() {
+    let sequence = |duration| Query {
+        source: Source::Unit {
+            unit: "events".into(),
+            condition: Some(Condition {
+                span: Span::default(),
+                kind: ConditionKind::Sequence {
+                    unit: "events".into(),
+                    all: false,
+                    steps: vec![
+                        condition("source", "alpha", 0),
+                        condition("source", "beta", 1),
+                    ],
+                    gaps: vec![Gap::Within {
+                        duration: Value::scalar(duration),
+                    }],
+                },
+            }),
+        },
+        attach: vec![],
+        stages: vec![],
+    };
+    assert_eq!(
+        normal_form(&sequence("1.5s"), &catalog()).unwrap(),
+        normal_form(&sequence("1500ms"), &catalog()).unwrap()
+    );
+    let mut c = catalog();
+    c.units[0].fields[0].unknown = query_language::catalog::UnknownRule::Word("missing".into());
+    let a = query(vec![condition("source", "missing", 0)]);
+    let mut b = a.clone();
+    if let Source::Unit {
+        condition: Some(root),
+        ..
+    } = &mut b.source
+    {
+        if let ConditionKind::And { conditions } = &mut root.kind {
+            if let ConditionKind::Match { value, .. } = &mut conditions[0].kind {
+                *value = Value::Unknown;
+            }
+        }
+    }
+    assert_eq!(normal_form(&a, &c).unwrap(), normal_form(&b, &c).unwrap());
+}

@@ -426,3 +426,62 @@ fn calendar_precision_requires_the_complete_period_under_its_recorded_setting() 
     };
     assert!(TimeValue::new(arbitrary_empty, Precision::Day, Some(day)).is_err());
 }
+
+#[test]
+fn last_compact_duration_is_elapsed_span_and_last_days_is_calendar_span() {
+    let c = Clock::new(ts("2026-03-29T10:00Z"), setting("Europe/Warsaw", "04:00"));
+    assert_eq!(
+        time::resolve("last 7d", &c).unwrap().value,
+        time::Time::Span {
+            start: ts("2026-03-22T10:00Z"),
+            end: ts("2026-03-29T10:00Z"),
+        }
+    );
+    assert_eq!(
+        time::resolve("last 7 days", &c).unwrap().value,
+        time::Time::Span {
+            start: ts("2026-03-23T03:00Z"),
+            end: ts("2026-03-30T02:00Z"),
+        }
+    );
+    assert_eq!(
+        time::resolve("last 0.5ms", &c).unwrap().value,
+        time::Time::Span {
+            start: c
+                .now
+                .checked_sub(SignedDuration::from_nanos(500_000))
+                .unwrap(),
+            end: c.now,
+        }
+    );
+    for text in [
+        "last 0d",
+        "last -7d",
+        "last 0 days",
+        "last 99999999999999999999999999999d",
+    ] {
+        assert_eq!(
+            time::resolve(text, &c).unwrap_err().kind,
+            query_language::ErrorKind::BadValue,
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn bare_dates_are_whole_logical_days_and_datetimes_keep_their_clock_time() {
+    let c = clock();
+    assert_eq!(
+        time::resolve("2026-10-05", &c).unwrap().value,
+        time::Time::Span {
+            start: ts("2026-10-05T02:00Z"),
+            end: ts("2026-10-06T02:00Z"),
+        }
+    );
+    assert_eq!(
+        time::resolve("2026-10-05T00:00", &c).unwrap().value,
+        time::Time::Instant {
+            at: ts("2026-10-04T22:00Z"),
+        }
+    );
+}

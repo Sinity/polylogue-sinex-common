@@ -278,3 +278,60 @@ fn product_reference_forms_stay_literal_nodes() {
         ConditionKind::Match { .. }
     ));
 }
+
+#[test]
+fn custom_unknown_words_are_unknown_unless_quoted() {
+    let mut catalog = support::polylogue();
+    catalog
+        .units
+        .iter_mut()
+        .find(|u| u.name == "sessions")
+        .unwrap()
+        .fields
+        .iter_mut()
+        .find(|f| f.name == "cost")
+        .unwrap()
+        .unknown = UnknownRule::Word("not-recorded".into());
+    for text in ["cost:not-recorded", "cost = not-recorded"] {
+        assert!(matches!(
+            condition(text, &catalog).kind,
+            ConditionKind::Match {
+                value: Value::Unknown,
+                ..
+            } | ConditionKind::Compare {
+                value: Value::Unknown,
+                ..
+            }
+        ));
+    }
+    assert!(matches!(
+        condition("cost:\"not-recorded\"", &catalog).kind,
+        ConditionKind::Match {
+            value: Value::Scalar { .. },
+            ..
+        }
+    ));
+}
+#[test]
+fn command_suggestions_survive_command_dispatch() {
+    let catalog = support::sinex();
+    let error = parse("reltaed reference", &catalog).unwrap_err();
+    assert_eq!(error.suggestion.as_deref(), Some("related reference"));
+    assert_eq!(
+        parse(error.suggestion.as_deref().unwrap(), &catalog)
+            .unwrap_err()
+            .kind,
+        ErrorKind::NotAQuery
+    );
+}
+#[test]
+fn recall_last_binds_its_own_unit() {
+    let c = support::sinex();
+    let q = parse("recall last where cwds ^ \"/src/demo (notes)\"", &c).unwrap();
+    assert!(
+        matches!(q.source,Source::RecallLast{unit,condition:Some(_)} if unit=="shell-sessions")
+    );
+    let c = support::mixed();
+    let q = parse("recall last where cwds ^ /src/demo", &c).unwrap();
+    assert_eq!(q.namespaces().into_iter().collect::<Vec<_>>(), ["sx"]);
+}

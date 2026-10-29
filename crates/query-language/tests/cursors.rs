@@ -204,3 +204,19 @@ proptest! {
         prop_assert_eq!(compare_positions(&position(a),&position(b),&[Direction::Ascending]).unwrap(),a.cmp(&b));
     }
 }
+
+#[test]
+fn composite_order_keys_refuse_even_when_the_other_key_is_unknown() {
+    let key = |value| OrderPosition {
+        values: vec![value],
+        row_identity: "a".into(),
+    };
+    assert!(
+        compare_positions(
+            &key(serde_json::Value::Null),
+            &key(serde_json::json!({"x":1})),
+            &[Direction::Ascending]
+        )
+        .is_err()
+    );
+}

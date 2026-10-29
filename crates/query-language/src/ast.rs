@@ -36,6 +36,7 @@ pub enum Source {
         window: Option<Value>,
     },
     RecallLast {
+        unit: String,
         condition: Option<Condition>,
     },
     RecallMark {
@@ -312,6 +313,7 @@ pub enum StageKind {
     },
     Measure {
         name: String,
+        by: Vec<Operand>,
     },
     Extension {
         name: String,
@@ -416,7 +418,12 @@ impl Query {
                     c.visit_units(visitor);
                 }
             }
-            Source::RecallLast { condition: Some(c) } => c.visit_units(visitor),
+            Source::RecallLast { unit, condition } => {
+                visitor(unit);
+                if let Some(c) = condition {
+                    c.visit_units(visitor);
+                }
+            }
             _ => {}
         }
         for a in &self.attach {
