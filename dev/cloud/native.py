@@ -38,11 +38,14 @@ def artifact(name, pin, cache):
     return target
 
 
-def unpack(archive, directory):
+def unpack(archive, directory, *, single_root=False):
     directory.mkdir(parents=True, exist_ok=True)
     with tarfile.open(archive) as source:
+        roots = {Path(member.name).parts[0] for member in source.getmembers() if Path(member.name).parts}
+        if single_root and len(roots) != 1:
+            raise RuntimeError(f"expected one source root in {archive.name}")
         source.extractall(directory, filter="data")
-    return directory
+    return directory / next(iter(roots)) if single_root else directory
 
 
 def main():
@@ -50,6 +53,14 @@ def main():
     parser.add_argument("--prefix", required=True, type=Path)
     parser.add_argument("--repo", required=True, type=Path)
     args = parser.parse_args()
+    if os.getuid() == 0:
+        parser.error("the native backend expects an ordinary user; privileged environments can use Nix")
+    if not (args.repo / "Cargo.toml").is_file():
+        parser.error("the target checkout has no Cargo.toml")
+    jobs = int(os.environ.get("CLOUD_BUILD_JOBS", "2"))
+    if jobs < 1:
+        parser.error("CLOUD_BUILD_JOBS must be positive")
+    jobs = str(jobs)
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         parser.error("the pinned native toolchain currently targets x86_64 Linux")
     for tool in ("cc", "c++", "make", "pkg-config"):
@@ -76,7 +87,8 @@ def main():
     pg = prefix / "postgres"
     cmake = prefix / "cmake" / "cmake-3.31.8-linux-x86_64" / "bin"
     env = os.environ | {"CARGO_HOME": str(cargo), "RUSTUP_HOME": str(rustup), "RUSTUP_INIT_SKIP_PATH_CHECK": "yes"}
-    env["PATH"] = os.pathsep.join(map(str, (cargo / "bin", tools, pg / "bin", bootstrap / "bin", cmake))) + os.pathsep + os.environ["PATH"]
+    paths = list(map(str, (cargo / "bin", tools, pg / "bin", bootstrap / "bin", cmake))) + os.environ["PATH"].split(os.pathsep)
+    env["PATH"] = os.pathsep.join(dict.fromkeys(paths))
     stamp = prefix / "installed.json"
     identity = hashlib.sha256(pins_path.read_bytes()).hexdigest()
     installed = stamp.exists() and json.loads(stamp.read_text()).get("pins_sha256") == identity
@@ -92,15 +104,18 @@ def main():
                 raise RuntimeError(f"expected one {binary} in {name} archive")
             shutil.copy2(candidates[0], tools / binary)
         unpack(artifact("cmake.tar.gz", pins["cmake"], cache), prefix / "cmake")
-        jobs = str(int(os.environ.get("CLOUD_BUILD_JOBS", "2")))
         # PostgreSQL 18 requires its parser generators even from release
         # archives; these are part of the owned bootstrap, not system packages.
+        # Their bundled portability headers predate C23's type-generic libc
+        # macros. Use their supported C dialect even when cc defaults to C23.
+        bootstrap_env = env | {"CFLAGS": env.get("CFLAGS", "-O2") + " -std=gnu17"}
         for name in ("m4", "bison", "flex"):
-            sources = unpack(artifact(name + ".tar", pins[name], cache), build / name)
-            sources = next(path for path in sources.iterdir() if path.is_dir())
-            run([sources / "configure", "--prefix=" + str(bootstrap), "--disable-nls"], cwd=sources, env=env)
-            run(["make", "-j" + jobs], cwd=sources, env=env)
-            run(["make", "install"], cwd=sources, env=env)
+            sources = unpack(artifact(name + ".tar", pins[name], cache), build / name, single_root=True)
+            if (sources / "Makefile").exists():
+                run(["make", "distclean"], cwd=sources, env=bootstrap_env)
+            run([sources / "configure", "--prefix=" + str(bootstrap), "--disable-nls"], cwd=sources, env=bootstrap_env)
+            run(["make", "-j" + jobs], cwd=sources, env=bootstrap_env)
+            run(["make", "install"], cwd=sources, env=bootstrap_env)
         pg_sources = unpack(artifact("postgres.tar.bz2", pins["postgres"], cache), build / "postgres") / ("postgresql-" + pins["postgres"]["version"])
         # The test clusters use Unix sockets. These optional client features
         # would otherwise require system development packages in a rootless VM.
@@ -108,8 +123,7 @@ def main():
         run(["make", "-j" + jobs], cwd=pg_sources, env=env)
         run(["make", "install"], cwd=pg_sources, env=env)
         run(["make", "-C", "contrib/pg_trgm", "install"], cwd=pg_sources, env=env)
-        ts_sources = unpack(artifact("timescale.tar.gz", pins["timescale"], cache), build / "timescale")
-        ts_sources = next(path for path in ts_sources.iterdir() if path.is_dir())
+        ts_sources = unpack(artifact("timescale.tar.gz", pins["timescale"], cache), build / "timescale", single_root=True)
         ts_build = build / "timescale-build"
         run(["cmake", "-S", ts_sources, "-B", ts_build, "-DPG_CONFIG=" + str(pg / "bin/pg_config"), "-DREGRESS_CHECKS=OFF", "-DWARNINGS_AS_ERRORS=OFF", "-DUSE_OPENSSL=OFF"], env=env)
         run(["cmake", "--build", ts_build, "--parallel", jobs], env=env)
