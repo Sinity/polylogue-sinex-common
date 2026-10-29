@@ -263,6 +263,15 @@ impl Time {
             Self::Span { start, .. } => start,
         }
     }
+    /// An exclusive upper bound for `until`: a period includes its whole
+    /// extent; an instant remains exclusive at exactly that instant. Explicit
+    /// comparisons instead use `start`, so `< DATE` stops at the day start.
+    pub fn until_bound(self) -> Timestamp {
+        match self {
+            Self::Instant { at } => at,
+            Self::Span { end, .. } => end,
+        }
+    }
     pub fn range(self) -> Option<TimeRange> {
         match self {
             Self::Span { start, end } => Some(TimeRange { start, end }),

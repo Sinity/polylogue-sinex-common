@@ -1,5 +1,5 @@
 //! Product-owned vocabulary and structural extension declarations.
-use crate::ast::Value;
+use crate::ast::{Argument, ResultPart, Source, Value};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -10,8 +10,61 @@ pub struct Catalog {
     pub commands: Vec<String>,
     pub extensions: Vec<Extension>,
     pub references: Vec<ReferenceSyntax>,
+    /// Immutable product-derived outputs of expanded saved questions and kept results.
+    #[serde(default)]
+    pub source_outputs: Vec<SourceOutput>,
     /// Both products accept pipes; products may additionally expose clauses without pipes.
     pub unpiped_stages: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OutputSource {
+    Saved {
+        name: String,
+        arguments: Vec<Argument>,
+    },
+    Result {
+        reference: String,
+        part: ResultPart,
+    },
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputSchema {
+    /// Actual row domain supplied by the product, used for nested implicit sources.
+    pub unit: Option<String>,
+    pub fields: Vec<Field>,
+    pub main_time: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceOutput {
+    pub source: OutputSource,
+    pub schema: OutputSchema,
+}
+impl Catalog {
+    pub fn source_output(&self, source: &Source) -> Option<&OutputSchema> {
+        self.source_outputs.iter().find_map(|output| {
+            let matches = match (&output.source, source) {
+                (
+                    OutputSource::Saved { name, arguments },
+                    Source::Saved {
+                        name: other,
+                        arguments: actual,
+                        ..
+                    },
+                ) => name == other && arguments_equal(arguments, actual),
+                (
+                    OutputSource::Result { reference, part },
+                    Source::Result {
+                        reference: other,
+                        part: actual,
+                        ..
+                    },
+                ) => reference == other && part == actual,
+                _ => false,
+            };
+            matches.then_some(&output.schema)
+        })
+    }
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Unit {
@@ -348,3 +401,47 @@ pub const KEY_FUNCTIONS: &[&str] = &[
     "program",
     "fingerprint",
 ];
+
+fn arguments_equal(a: &[Argument], b: &[Argument]) -> bool {
+    a.len() == b.len()
+        && a.iter().all(|arg| {
+            b.iter().any(|other| {
+                arg.parameter == other.parameter && values_equal(&arg.value, &other.value)
+            })
+        })
+}
+fn values_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Scalar { text: a, .. }, Value::Scalar { text: b, .. }) => a == b,
+        (Value::Set { values: a }, Value::Set { values: b }) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| values_equal(a, b))
+        }
+        _ => a == b,
+    }
+}
+
+pub(crate) fn same_output_source(a: &OutputSource, b: &OutputSource) -> bool {
+    match (a, b) {
+        (
+            OutputSource::Saved {
+                name: a,
+                arguments: av,
+            },
+            OutputSource::Saved {
+                name: b,
+                arguments: bv,
+            },
+        ) => a == b && arguments_equal(av, bv),
+        (
+            OutputSource::Result {
+                reference: a,
+                part: ap,
+            },
+            OutputSource::Result {
+                reference: b,
+                part: bp,
+            },
+        ) => a == b && ap == bp,
+        _ => false,
+    }
+}

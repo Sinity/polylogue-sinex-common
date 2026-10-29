@@ -54,6 +54,15 @@ fn normalize(value: &mut Value) {
         }
         Value::Object(fields) => {
             fields.remove("span");
+            if fields.get("implicit") == Some(&Value::Bool(false)) {
+                fields.remove("implicit");
+            }
+            if matches!(
+                fields.get("kind").and_then(Value::as_str),
+                Some("saved" | "result")
+            ) {
+                fields.remove("output");
+            }
             if fields.get("kind").and_then(Value::as_str) == Some("scalar") {
                 fields.remove("quoted");
             }

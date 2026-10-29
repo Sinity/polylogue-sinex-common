@@ -169,3 +169,325 @@ fn closed_literal_completion_respects_custom_unknown_words_and_calendar_keywords
         assert!(matches!(value,Value::Scalar{text,..} if text==literal));
     }
 }
+
+#[test]
+fn declared_values_complete_inside_open_quotes_with_escaped_replacements() {
+    use query_language::{
+        ast::{ConditionKind, Source, Value},
+        parse::parse,
+    };
+    for (mut catalog, unit, field) in [
+        (support::polylogue(), "sessions", "origin"),
+        (support::sinex(), "runs", "status"),
+    ] {
+        catalog
+            .units
+            .iter_mut()
+            .find(|u| u.name == unit)
+            .unwrap()
+            .fields
+            .iter_mut()
+            .find(|f| f.name == field)
+            .unwrap()
+            .values = vec![
+            "two words".into(),
+            r#"a"quote\path"#.into(),
+            "λ value".into(),
+        ];
+        for (prefix, wanted) in [
+            (format!("{unit} where {field}:\"two"), "two words"),
+            (format!("{unit} where {field} = \"two"), "two words"),
+            (format!("{unit} where {field}:\"λ"), "λ value"),
+            (format!(r#"{unit} where {field}:"a\"q"#), r#"a"quote\path"#),
+        ] {
+            let completion = complete(&prefix, prefix.len(), &catalog)
+                .into_iter()
+                .find(|c| c.kind == query_language::complete::CompletionKind::Value)
+                .unwrap();
+            assert_eq!(completion.replace.start, prefix.find('"').unwrap());
+            assert_eq!(completion.replace.end, prefix.len());
+            let applied = format!(
+                "{}{}",
+                &prefix[..completion.replace.start],
+                completion.value
+            );
+            let parsed = parse(&applied, &catalog).unwrap();
+            let Source::Unit {
+                condition: Some(condition),
+                ..
+            } = parsed.source
+            else {
+                panic!("missing condition")
+            };
+            let value = match condition.kind {
+                ConditionKind::Match { value, .. } | ConditionKind::Compare { value, .. } => value,
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(
+                value,
+                Value::Scalar {
+                    text: wanted.into(),
+                    quoted: true
+                }
+            );
+        }
+        let text = format!("{unit} where {field}:\"two wo\"");
+        let cursor = text.find("two").unwrap() + 3;
+        let completion = complete(&text, cursor, &catalog)
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(completion.replace.end, text.len());
+        let applied = format!(
+            "{}{}{}",
+            &text[..completion.replace.start],
+            completion.value,
+            &text[completion.replace.end..]
+        );
+        assert!(parse(&applied, &catalog).is_ok());
+    }
+}
+
+#[test]
+fn grouped_completion_includes_implicit_count_before_explicit_aggregation() {
+    for (catalog, text) in [
+        (
+            support::polylogue(),
+            "sessions | group by origin | where co",
+        ),
+        (
+            support::sinex(),
+            "events | group by event_type | sort by co",
+        ),
+    ] {
+        assert!(
+            complete(text, text.len(), &catalog)
+                .iter()
+                .any(|candidate| candidate.value == "count"
+                    && candidate.kind == query_language::complete::CompletionKind::Field)
+        );
+    }
+}
+
+#[test]
+fn saved_output_completion_uses_typed_snapshot_fields_and_every_value_path() {
+    use query_language::{
+        ast::OutputBinding,
+        catalog::{Field, FieldKind, OutputSchema, OutputSource, SourceOutput},
+        complete::CompletionKind,
+        parse::parse,
+    };
+    for (mut catalog, unit) in [
+        (support::polylogue(), "tool_calls"),
+        (support::sinex(), "commands"),
+    ] {
+        let default = catalog
+            .units
+            .iter_mut()
+            .find(|unit| unit.name == catalog.default_unit)
+            .unwrap();
+        default.fields.push(Field {
+            name: "outcome".into(),
+            values: vec!["wrong-default".into()],
+            ..Field::default()
+        });
+        catalog.source_outputs.push(SourceOutput {
+            source: OutputSource::Saved {
+                name: "failing".into(),
+                arguments: vec![],
+            },
+            schema: OutputSchema {
+                unit: Some(unit.into()),
+                main_time: None,
+                fields: vec![
+                    Field {
+                        name: "command".into(),
+                        kind: FieldKind::Text,
+                        help: "saved command".into(),
+                        ..Field::default()
+                    },
+                    Field {
+                        name: "outcome".into(),
+                        kind: FieldKind::Match,
+                        values: vec![
+                            "error".into(),
+                            "error with spaces".into(),
+                            "escaped\"error\\path".into(),
+                        ],
+                        help: "saved outcome".into(),
+                        ..Field::default()
+                    },
+                    Field {
+                        name: "promoted_alias".into(),
+                        kind: FieldKind::Integer,
+                        ..Field::default()
+                    },
+                ],
+            },
+        });
+        let fields: Vec<_> = complete("query:failing | where ", 22, &catalog)
+            .into_iter()
+            .filter(|value| value.kind == CompletionKind::Field)
+            .map(|value| value.value)
+            .collect();
+        assert_eq!(fields, ["command", "outcome", "promoted_alias"]);
+        assert_eq!(values("query:failing | where out", &catalog), ["outcome"]);
+        for prefix in [
+            "query:failing | where outcome:er",
+            "query:failing | where outcome = er",
+            "query:failing | where outcome:(er",
+            "query:failing | where outcome:\"er",
+            "query:failing | where outcome = \"er",
+        ] {
+            let got = complete(prefix, prefix.len(), &catalog);
+            assert!(
+                got.iter()
+                    .any(|value| value.value == "error" || value.value == "\"error\""),
+                "{prefix}: {got:?}"
+            );
+            assert!(got.iter().all(|value| value.value != "wrong-default"));
+            assert!(
+                got.iter()
+                    .filter(|value| value.kind == CompletionKind::Value
+                        && value.value.contains("error"))
+                    .all(|value| value.help == "saved outcome")
+            );
+        }
+        let prefix = r#"query:failing | where outcome:"escaped\"e"#;
+        let completion = complete(prefix, prefix.len(), &catalog)
+            .into_iter()
+            .find(|value| value.kind == CompletionKind::Value)
+            .unwrap();
+        assert_eq!(completion.replace.start, prefix.find('"').unwrap());
+        assert_eq!(completion.value, r#""escaped\"error\\path""#);
+        let applied = format!(
+            "{}{}",
+            &prefix[..completion.replace.start],
+            completion.value
+        );
+        assert!(matches!(
+            parse(&applied, &catalog).unwrap().source,
+            query_language::ast::Source::Saved {
+                output: OutputBinding::Known,
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn deferred_and_incomplete_saved_or_result_sources_never_offer_default_fields() {
+    use query_language::complete::CompletionKind;
+    for catalog in [support::polylogue(), support::sinex()] {
+        for prefix in [
+            "query:missing ",
+            "query:missing | where ",
+            "query:missing | where out",
+            "query:missing(unbound=",
+            "result:missing | where ",
+            "result:missing.matches | sort by ",
+            "result:\"unfinished",
+        ] {
+            let got = complete(prefix, prefix.len(), &catalog);
+            assert!(
+                got.iter().all(|value| value.kind != CompletionKind::Field),
+                "{prefix}: {got:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn result_rows_and_matches_have_separate_field_and_value_completion_scopes() {
+    use query_language::{
+        ast::ResultPart,
+        catalog::{Field, OutputSchema, OutputSource, SourceOutput},
+        complete::CompletionKind,
+    };
+    for mut catalog in [support::polylogue(), support::sinex()] {
+        for (part, name, value) in [
+            (ResultPart::Rows, "row_alias", "row_value"),
+            (ResultPart::Matches, "match_alias", "match_value"),
+        ] {
+            catalog.source_outputs.push(SourceOutput {
+                source: OutputSource::Result {
+                    reference: "result:kept".into(),
+                    part,
+                },
+                schema: OutputSchema {
+                    unit: None,
+                    main_time: None,
+                    fields: vec![Field {
+                        name: name.into(),
+                        values: vec![value.into()],
+                        help: value.into(),
+                        ..Field::default()
+                    }],
+                },
+            });
+        }
+        for (source, field, value) in [
+            ("result:kept.rows", "row_alias", "row_value"),
+            ("result:kept.matches", "match_alias", "match_value"),
+        ] {
+            let prefix = format!("{source} | sort by ");
+            let got: Vec<_> = complete(&prefix, prefix.len(), &catalog)
+                .into_iter()
+                .filter(|value| value.kind == CompletionKind::Field)
+                .map(|value| value.value)
+                .collect();
+            assert_eq!(got, [field]);
+            for tail in [
+                format!("{field}:{}", &value[..3]),
+                format!("{field}:\"{}", &value[..3]),
+            ] {
+                let prefix = format!("{source} | where {tail}");
+                let got = values(&prefix, &catalog);
+                assert!(
+                    got.contains(&value.into()) || got.contains(&format!("\"{value}\"")),
+                    "{prefix}: {got:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn nested_implicit_completion_uses_saved_actual_row_domain_and_defers_unknown_domain() {
+    use query_language::{
+        catalog::{Field, OutputSchema, OutputSource, SourceOutput},
+        complete::CompletionKind,
+    };
+    for (mut catalog, unit, underlying) in [
+        (support::polylogue(), "tool_calls", "outcome"),
+        (support::sinex(), "commands", "exit_code"),
+    ] {
+        catalog.source_outputs.push(SourceOutput {
+            source: OutputSource::Saved {
+                name: "grouped".into(),
+                arguments: vec![],
+            },
+            schema: OutputSchema {
+                unit: Some(unit.into()),
+                fields: vec![Field {
+                    name: "id".into(),
+                    ..Field::default()
+                }],
+                main_time: None,
+            },
+        });
+        let prefix = "query:grouped | where id in (";
+        let got: Vec<_> = complete(prefix, prefix.len(), &catalog)
+            .into_iter()
+            .filter(|value| value.kind == CompletionKind::Field)
+            .map(|value| value.value)
+            .collect();
+        assert!(got.contains(&underlying.into()), "{unit}: {got:?}");
+        let prefix = "query:missing | where id in (";
+        assert!(
+            complete(prefix, prefix.len(), &catalog)
+                .iter()
+                .all(|value| value.kind != CompletionKind::Field)
+        );
+    }
+}

@@ -90,8 +90,8 @@ one can be formed), `hint` and `retryable`. The language's kinds are
   `march`) resolve to one instant or range, shown in the query's explanation;
   an ambiguous phrase is an error listing the readings.
 - **Natural-language choices:** a bare weekday means its latest occurrence including today; `last WEEKDAY` is strictly earlier. A named month means that month in the current logical year. `last N days` includes the current logical day. Slash dates with two distinct valid readings are `ambiguous` and list their ISO readings.
-- **Bounds:** dates are half-open whole days; `between` two dates includes
-  both days; `since:` and `until:` select spans by overlap.
+- **Bounds:** dates are half-open whole days; `between` two dates includes both days. `since DATE` (or `since:DATE`) starts at that logical day's start; `until DATE` (or `until:DATE`) includes that entire day and stops at its exclusive end. `until INSTANT` stops exclusively at that instant. These operations select spans by overlap. Explicit comparisons keep their operator meaning: `when < DATE` stops at the day's start.
+- **Bound syntax:** `ConditionKind::Since` and `ConditionKind::Until` retain the catalog's main-time operand and the unresolved value. They remain distinct from `Compare` through serialization, formatting and canonical identity. Compilers use `Time::start()` for a lower bound or explicit comparison and `Time::until_bound()` for an exclusive `until` bound; they never infer an operation from source spans.
 - **Daylight saving:** a local time inside a skipped hour means the first
   instant after the gap; inside a repeated hour, the earlier instant, with a
   note.
@@ -151,7 +151,21 @@ the resolved question. It is sealed: opaque to the caller and checked on use.
 - A page may be empty and still carry a cursor; only a page without a next
   cursor is the end.
 
+## Saved and kept output binding
+
+`Source::Saved` and `Source::Result` carry `OutputBinding::Deferred` until the product supplies their output in the immutable catalog's `source_outputs`. A `SourceOutput` identifies the saved name and arguments, or kept reference and `ResultPart`, and provides an `OutputSchema` of typed fields, optional main time and optional actual row unit. Products derive these schemas from expanded saved definitions or stored result columns. The parser performs no reads and never borrows the default unit's fields for either source.
+
+A deferred tree is syntax only. Before execution, the product calls `bind::bind` with the derived snapshot; the resulting `BoundQuery` contains a tree whose saved and kept scopes are all known, including nested sources. Binding reuses the shared parser's field, type and closed-set checks and refuses missing schemas, unknown suffix fields and invalid values. Products use that same snapshot for canonical identity. The binding marker is validation state and does not enter question identity; the `since`, `until`, source identity and kept result part do.
+
+Inline conditions on saved and kept sources are stored in their source's `condition`, separately from a piped `StageKind::Where`. This preserves the product's distinction between conditions applied to an expanded base relation and filters applied after that relation's output has been selected.
+
+`Source::Unit.implicit` records whether the unit was omitted. An omitted nested source inherits its enclosing actual row unit and uses that unit's underlying catalog fields, even after grouping or projection; an explicit unit keeps its own row domain. Products supply `OutputSchema.unit` when a saved or kept source can contain such nested questions. Missing source schemas or unresolved inherited row domains cannot bind. Formatting preserves the omission, transport carries the marker, and canonical identity drops it once the actual unit is known.
+
+A kept reference's `.rows` or `.matches` selector is a typed `ResultPart`. A quoted identity retains those characters as literal data: `result:"example.matches"` reads rows from that identity, while `result:"example".matches` selects matches from `example`.
+
 ## Completion
+
+Completion uses the same typed output-schema snapshot as parsing and binding. Saved and kept sources offer their actual fields, help and closed-set values, including promoted or grouped aliases; rows and matches use separate schemas. Missing output schemas offer no default-unit fields. Every value position, including an open quote, reads the active schema's field declaration. Nested omitted sources use the enclosing actual row unit rather than its shaped output columns.
 
 The completer proposes what may come next at a grammar position (units,
 fields, closed-set values, stages, operators) from the catalog it is given.
@@ -221,3 +235,5 @@ its own laws.
   past its read position is `stale_cursor`.
 - **cursor-keeps-rows**: rows whose order key did not change between pages
   are neither skipped nor repeated.
+
+Completion inside an unfinished quoted field value offers only declared catalog values. Replacements include the literal quotes and escapes and use UTF-8 byte spans; applying a candidate preserves the value as data. Grouped output includes the implicit numeric `count` alongside its group keys before any explicit aggregation, for filtering, sorting and completion.

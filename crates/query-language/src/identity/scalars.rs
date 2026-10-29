@@ -96,7 +96,9 @@ fn condition(c: &mut Condition, scope: &Fields, catalog: &Catalog) {
         }
         ConditionKind::Compare {
             operand, value: v, ..
-        } => {
+        }
+        | ConditionKind::Since { operand, value: v }
+        | ConditionKind::Until { operand, value: v } => {
             if let Some(f) = field(scope, operand) {
                 value(v, &f);
             }
@@ -157,18 +159,40 @@ fn argument(a: &mut ExtensionArgument, scope: &Fields, catalog: &Catalog) {
 pub(super) fn canonicalize(query: &mut Query, catalog: &Catalog) {
     let mut scope = match &query.source {
         Source::Unit { unit, .. } | Source::RecallLast { unit, .. } => fields(catalog, unit),
+        Source::Saved { .. } | Source::Result { .. } => catalog
+            .source_output(&query.source)
+            .map(|output| {
+                output
+                    .fields
+                    .iter()
+                    .cloned()
+                    .map(|f| (f.name.clone(), f))
+                    .collect()
+            })
+            .unwrap_or_default(),
         _ => fields(catalog, &catalog.default_unit),
     };
     match &mut query.source {
-        Source::Unit { unit, condition: c } => {
+        Source::Unit {
+            unit,
+            implicit,
+            condition: c,
+        } => {
             if let Some(u) = catalog.unit(unit) {
                 *unit = u.name.clone();
+                *implicit = false;
             }
             if let Some(c) = c {
                 condition(c, &scope, catalog);
             }
         }
         Source::RecallLast {
+            condition: Some(c), ..
+        }
+        | Source::Saved {
+            condition: Some(c), ..
+        }
+        | Source::Result {
             condition: Some(c), ..
         } => condition(c, &scope, catalog),
         Source::Recall {

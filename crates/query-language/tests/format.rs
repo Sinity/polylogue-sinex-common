@@ -130,7 +130,7 @@ fn unrepresentable_trees_are_refused() {
 proptest! {
  #[test]
  fn quoted_text_preserves_every_character(text in any::<String>()){
-  let catalog=support::polylogue();let query=Query{source:Source::Unit{unit:"sessions".into(),condition:Some(Condition{span:Span::default(),kind:ConditionKind::Text{text,mode:TextMode::Phrase}})},attach:Vec::new(),stages:Vec::new()};
+  let catalog=support::polylogue();let query=Query{source:Source::Unit{unit:"sessions".into(),implicit:false,condition:Some(Condition{span:Span::default(),kind:ConditionKind::Text{text,mode:TextMode::Phrase}})},attach:Vec::new(),stages:Vec::new()};
   let rendered=format_query(&query,&catalog).unwrap();let parsed=parse(&rendered,&catalog).unwrap();prop_assert_eq!(normal_form(&query,&catalog).unwrap(),normal_form(&parsed,&catalog).unwrap());
  }
 }
@@ -139,7 +139,7 @@ proptest! {
     #[test]
     fn scalar_quoting_cannot_introduce_syntax(text in any::<String>()) {
         let catalog=support::polylogue();
-        let query=Query{source:Source::Unit{unit:"sessions".into(),condition:Some(Condition{span:Span::default(),kind:ConditionKind::Match{field:"title".into(),value:Value::Scalar{text,quoted:false}}})},attach:Vec::new(),stages:Vec::new()};
+        let query=Query{source:Source::Unit{unit:"sessions".into(),implicit:false,condition:Some(Condition{span:Span::default(),kind:ConditionKind::Match{field:"title".into(),value:Value::Scalar{text,quoted:false}}})},attach:Vec::new(),stages:Vec::new()};
         let rendered=format_query(&query,&catalog).unwrap();let parsed=parse(&rendered,&catalog).unwrap();prop_assert_eq!(normal_form(&query,&catalog).unwrap(),normal_form(&parsed,&catalog).unwrap());
     }
 }

@@ -18,14 +18,21 @@ pub struct Query {
 pub enum Source {
     Unit {
         unit: String,
+        /// True when the unit was omitted and inherits its enclosing row scope.
+        implicit: bool,
         condition: Option<Condition>,
     },
     Saved {
         name: String,
         arguments: Vec<Argument>,
+        condition: Option<Condition>,
+        output: OutputBinding,
     },
     Result {
         reference: String,
+        part: ResultPart,
+        condition: Option<Condition>,
+        output: OutputBinding,
     },
     Walk {
         direction: WalkDirection,
@@ -43,6 +50,19 @@ pub enum Source {
         number: u64,
         window: Option<Value>,
     },
+}
+/// Deferred output scopes are syntax only and must pass shared binding before execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputBinding {
+    Deferred,
+    Known,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultPart {
+    Rows,
+    Matches,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -75,6 +95,17 @@ pub enum ConditionKind {
     Compare {
         operand: Operand,
         op: Op,
+        value: Value,
+    },
+    /// Main-time lower bound; span-valued rows are selected by overlap.
+    Since {
+        operand: Operand,
+        value: Value,
+    },
+    /// Main-time exclusive upper bound. A date resolves to its logical-day
+    /// end, while an instant remains that instant.
+    Until {
+        operand: Operand,
         value: Value,
     },
     Between {
@@ -412,10 +443,17 @@ impl Query {
     }
     pub fn visit_units(&self, visitor: &mut impl FnMut(&str)) {
         match &self.source {
-            Source::Unit { unit, condition } => {
+            Source::Unit {
+                unit, condition, ..
+            } => {
                 visitor(unit);
                 if let Some(c) = condition {
                     c.visit_units(visitor);
+                }
+            }
+            Source::Saved { condition, .. } | Source::Result { condition, .. } => {
+                if let Some(condition) = condition {
+                    condition.visit_units(visitor);
                 }
             }
             Source::RecallLast { unit, condition } => {
@@ -478,6 +516,8 @@ impl Condition {
                 }
             }
             ConditionKind::Extension { arguments, .. } => visit_arguments(arguments, visitor),
+            // Bounds contain values and an already-bound field, never units.
+            ConditionKind::Since { .. } | ConditionKind::Until { .. } => {}
             _ => {}
         }
     }
