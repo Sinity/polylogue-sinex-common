@@ -494,3 +494,6 @@ pub(crate) fn terminal_text(text: &str) -> String {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests;
