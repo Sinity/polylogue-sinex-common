@@ -9,6 +9,13 @@ Run setup from the checkout you want to prepare:
 bash dev/cloud/setup.sh
 ```
 
+Command sandbox permissions and environment capabilities are separate.
+Dependency downloads may require the command tool's normal reviewed approval
+path, while retaining the inherited proxy and configured host allowlist.
+Diagnose network and namespace errors in that command's effective sandbox
+context. A proxy host-policy denial still requires the environment's normal
+review/save path for the required hosts before retrying.
+
 The default `CLOUD_BACKEND=nix` uses the repository's development shell. If
 Nix is absent, installation requires a privileged Debian/Ubuntu setup phase.
 An existing Nix installation can be used by an ordinary user. Local

@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import shlex
 from pathlib import Path
 import socket
 import subprocess
@@ -42,9 +43,9 @@ def main():
         nats = None
         with (root / "nats.log").open("w") as nats_log:
             try:
-                run(["pg_ctl", "-D", data, "-l", root / "pg.log", "-o", f"-k {sock} -c listen_addresses='' -c shared_preload_libraries=timescaledb -c timescaledb.telemetry_level=off", "-w", "start"])
+                run(["pg_ctl", "-D", data, "-l", root / "pg.log", "-o", f"-k {shlex.quote(str(sock))} -c listen_addresses='' -c shared_preload_libraries=timescaledb -c timescaledb.telemetry_level=off", "-w", "start"])
                 started = True
-                answer = run(["psql", "-h", sock, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-Atc", "CREATE EXTENSION timescaledb; CREATE EXTENSION pg_trgm; CREATE TABLE synthetic(ts timestamptz NOT NULL, value int); SELECT create_hypertable('synthetic','ts'); INSERT INTO synthetic VALUES ('2020-01-01T00:00:00Z',7); SELECT sum(value) FROM synthetic;"])
+                answer = run(["psql", "-X", "-h", sock, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-Atc", "CREATE EXTENSION timescaledb; CREATE EXTENSION pg_trgm; CREATE TABLE synthetic(ts timestamptz NOT NULL, value int); SELECT create_hypertable('synthetic','ts'); INSERT INTO synthetic VALUES ('2020-01-01T00:00:00Z',7); SELECT sum(value) FROM synthetic;"])
                 if answer.splitlines()[-1] != "7":
                     raise RuntimeError("synthetic TimescaleDB query returned " + answer)
                 monitoring = port()
