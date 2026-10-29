@@ -147,6 +147,15 @@ compile-time-checked SQL, over a socket: a per-user service when one is
 running (its socket in `$XDG_RUNTIME_DIR/devkit/pg`), otherwise an owned
 throwaway cluster on tmpfs. The product's `xtask` chooses which.
 
+`ClusterOptions.required_extensions` names the extensions schema bootstrap
+needs. `Server::service_or_start` checks the running service's actual
+`pg_available_extensions`, PostgreSQL major version and required preloaded
+libraries before reusing it. An incompatible service stays running; devkit
+starts an isolated cluster from the current development shell instead and
+verifies the same requirements before returning it. A missing extension in
+that shell fails by name before schema bootstrap. Further server settings
+apply to newly started clusters.
+
 - Each schema version, named by a hash of the schema sources, is built once
   into a template database and copied to the read-only **schema database**
   that `DATABASE_URL` points at. Every test clones the template
