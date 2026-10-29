@@ -1318,6 +1318,7 @@ dependencies = [
  "signals",
  "tempfile",
  "tokio",
+ "tokio-util",
  "zbus",
 ]
 

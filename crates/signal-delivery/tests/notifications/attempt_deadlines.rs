@@ -554,3 +554,41 @@ async fn definitive_policy_denial_remains_cancelled_after_work_deadline() {
     assert!(!deliverer.state.attempt("denied").unwrap().active);
     assert!(!output.exists());
 }
+
+#[tokio::test]
+async fn expired_definitive_denial_cancels_without_close_or_notify_io() {
+    let bus = PrivateBus::start();
+    let records = Records::default();
+    let _server = bus
+        .server(FakeServer {
+            records: records.clone(),
+            actions: true,
+            stall: false,
+        })
+        .await;
+    let mut deliverer = Deliverer::new(bus.connect().await, config(), NotificationState::default());
+    send(&mut deliverer, notice("shown", "one")).await;
+    let shown_id = deliverer.state.attempt("shown").unwrap().notification_id;
+    assert!(shown_id.is_some());
+    let before = records.calls.lock().unwrap().len();
+    let context = attempt();
+    let check: signal_delivery::PolicyCheck = Arc::new(|request| {
+        Box::pin(async move {
+            // Preflight already finished on the private bus. Advance only the
+            // controlled work clock while returning definite owner denial.
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(3)).await;
+            assert_eq!(request.attempt.check(), Err(Interrupted::Deadline));
+            authorize(&request.notices, SendDecision::Cancel)
+        })
+    });
+    deliverer.begin(notice("new", "two"));
+    let receipts = deliverer.send("new", check.as_ref(), &context).await;
+    assert!(receipts.iter().any(
+        |receipt| receipt.delivery_id == "new" && receipt.outcome == DeliveryOutcome::Cancelled
+    ));
+    assert!(!deliverer.state.attempt("shown").unwrap().active);
+    assert!(!deliverer.state.attempt("new").unwrap().active);
+    assert_eq!(records.calls.lock().unwrap().len(), before);
+    assert!(records.closed.lock().unwrap().is_empty());
+}
