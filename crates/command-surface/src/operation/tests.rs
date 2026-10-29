@@ -165,6 +165,19 @@ impl Operation for DurableWrite {
             {
                 gate.release.acquire().await.unwrap().forget();
             }
+            if request.value == "unknown-progress" || request.value == "zero-progress" {
+                let narrower = Some(super::tests::request("narrower", "one"));
+                if request.value == "unknown-progress" {
+                    context.progress_unknown("writer", narrower).unwrap();
+                } else {
+                    context.progress("writer", 0, narrower).unwrap();
+                }
+            }
+            if request.value == "misclassified" {
+                let mut error = Failure::new(FailureKind::BadValue, "synthetic unregistered code");
+                error.code = Some("not_registered".into());
+                return Answer::error(error);
+            }
             if request.value == "refuse" {
                 return Answer::error(Failure::new(FailureKind::BadValue, "synthetic refusal"));
             }
@@ -208,7 +221,7 @@ fn request(id: &str, value: &str) -> RunnableRequest {
     }
 }
 fn entries(table: &OperationTable) -> usize {
-    table.writes.lock().unwrap().len()
+    table.in_flight.lock().unwrap().len()
 }
 fn kind(answer: &Answer<Value>) -> FailureKind {
     match answer {
@@ -330,7 +343,7 @@ async fn existing_waiters_keep_their_result_after_registry_removal_and_new_admis
         CancellationToken::new(),
     ));
     pending(waiter.as_mut()).await;
-    let weak = Arc::downgrade(table.writes.lock().unwrap().values().next().unwrap());
+    let weak = Arc::downgrade(table.in_flight.lock().unwrap().values().next().unwrap());
     assert_eq!(store.attempts.load(Ordering::SeqCst), 1);
     gate.open();
     let first = owner.await;
@@ -432,7 +445,13 @@ async fn timeout_after_commit_replays_the_atomic_result_without_applying_twice()
     pending(owner.as_mut()).await;
     assert_eq!(store.count(), 1);
     tokio::time::advance(Duration::from_millis(2)).await;
-    assert_eq!(kind(&owner.await), FailureKind::Timeout);
+    let timed_out = owner.await;
+    assert_eq!(kind(&timed_out), FailureKind::Timeout);
+    let Answer::Error { error, .. } = &timed_out else {
+        unreachable!()
+    };
+    assert!(error.message.contains("rows scanned unknown"));
+    assert!(!error.message.contains("after 0 rows"));
     assert_eq!(entries(&table), 0);
     assert_eq!(store.active.load(Ordering::SeqCst), 0);
     gate.open();
@@ -546,4 +565,248 @@ async fn concurrent_refusals_share_one_final_error_but_sequential_refusals_execu
     assert_eq!(store.attempts.load(Ordering::SeqCst), 2);
     assert_eq!(store.count(), 0);
     assert_eq!(entries(&table), 0);
+}
+
+#[tokio::test]
+async fn authenticated_scopes_namespace_the_atomic_product_request_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("product.sqlite"));
+    let table = make_table(&store, None);
+    let mut ids = Vec::new();
+    for scope in ["person-a", "person-b", "person-a"] {
+        let answer = table
+            .call_as(
+                request("scoped", "one"),
+                Origin::Mcp,
+                Caller::authenticated(scope, ()),
+                CancellationToken::new(),
+            )
+            .await;
+        ids.push(answer.value().unwrap()["row"].as_i64().unwrap());
+        assert_eq!(entries(&table), 0);
+    }
+    assert_eq!(ids, [1, 2, 1]);
+    assert_eq!(store.count(), 2);
+    assert_eq!(store.attempts.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn normalized_failure_is_published_before_waiters_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("product.sqlite"));
+    let gate = Gate::before();
+    let table = make_table(&store, Some(gate.clone()));
+    let mut owner = Box::pin(table.call(
+        request("bad-code", "misclassified"),
+        Origin::Http,
+        CancellationToken::new(),
+    ));
+    pending(owner.as_mut()).await;
+    let mut waiter = Box::pin(table.call(
+        request("bad-code", "misclassified"),
+        Origin::Mcp,
+        CancellationToken::new(),
+    ));
+    pending(waiter.as_mut()).await;
+    let published = table
+        .in_flight
+        .lock()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap()
+        .result
+        .subscribe();
+    gate.open();
+    let answer = owner.await;
+    assert_eq!(kind(&answer), FailureKind::Io);
+    assert_eq!(
+        kind(published.borrow().as_deref().unwrap()),
+        FailureKind::Io
+    );
+    assert_eq!(waiter.await, answer);
+    assert_eq!(entries(&table), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn timeout_distinguishes_unmeasured_work_from_measured_zero_and_keeps_followups() {
+    for (value, diagnostic) in [
+        ("unknown-progress", "rows scanned unknown"),
+        ("zero-progress", "after 0 rows scanned"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("product.sqlite"));
+        let gate = Gate::after();
+        let table = make_table(&store, Some(gate));
+        let mut input = request("progress", value);
+        input.deadline = Deadline::Milliseconds(1);
+        let mut owner = Box::pin(table.call(input, Origin::Http, CancellationToken::new()));
+        pending(owner.as_mut()).await;
+        tokio::time::advance(Duration::from_millis(2)).await;
+        let Answer::Error { error, next, .. } = owner.await else {
+            panic!("expected timeout")
+        };
+        assert!(error.message.contains("writer"));
+        assert!(error.message.contains(diagnostic), "{}", error.message);
+        assert_eq!(next[0].request.request_id, "narrower");
+        assert_eq!(next[1].request.deadline, Deadline::None);
+        assert_eq!(entries(&table), 0);
+    }
+}
+
+#[tokio::test]
+async fn conflicting_in_flight_intent_is_refused_without_starting_a_second_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("product.sqlite"));
+    let gate = Gate::before();
+    let table = make_table(&store, Some(gate.clone()));
+    let mut owner = Box::pin(table.call(
+        request("intent", "one"),
+        Origin::Http,
+        CancellationToken::new(),
+    ));
+    pending(owner.as_mut()).await;
+    let mut other = Box::pin(table.call(
+        request("intent", "other"),
+        Origin::Mcp,
+        CancellationToken::new(),
+    ));
+    let answer = poll_fn(|cx| match other.as_mut().poll(cx) {
+        Poll::Ready(answer) => Poll::Ready(answer),
+        Poll::Pending => panic!("conflict must not wait for the writer"),
+    })
+    .await;
+    assert_eq!(kind(&answer), FailureKind::Conflict);
+    assert_eq!(store.attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(entries(&table), 1);
+    gate.open();
+    assert!(owner.await.value().is_some());
+    let retry = table
+        .call(
+            request("intent", "other"),
+            Origin::Mcp,
+            CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(kind(&retry), FailureKind::Conflict);
+    assert_eq!(store.attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(store.count(), 1);
+    assert_eq!(entries(&table), 0);
+}
+
+#[tokio::test]
+async fn dropped_owner_after_commit_leaves_retry_to_the_durable_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("product.sqlite"));
+    let gate = Gate::after();
+    let table = make_table(&store, Some(gate));
+    let mut owner = Box::pin(table.call(
+        request("drop-committed", "one"),
+        Origin::Http,
+        CancellationToken::new(),
+    ));
+    pending(owner.as_mut()).await;
+    assert_eq!(store.count(), 1);
+    let mut waiter = Box::pin(table.call(
+        request("drop-committed", "one"),
+        Origin::Mcp,
+        CancellationToken::new(),
+    ));
+    pending(waiter.as_mut()).await;
+    drop(owner);
+    assert_eq!(entries(&table), 0);
+    assert_eq!(kind(&waiter.await), FailureKind::Cancelled);
+    assert_eq!(store.active.load(Ordering::SeqCst), 0);
+    let retry = table
+        .call(
+            request("drop-committed", "one"),
+            Origin::Socket,
+            CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(retry.value().unwrap()["replayed"], true);
+    assert_eq!(store.count(), 1);
+}
+
+struct ReentrantWake {
+    table: Arc<OperationTable>,
+    gate: Arc<Gate>,
+    attempted: AtomicBool,
+    locked: AtomicBool,
+    unexpected_ready: AtomicBool,
+    next: Mutex<Option<OperationFuture<'static, Answer<Value>>>>,
+}
+impl std::task::Wake for ReentrantWake {
+    fn wake(self: Arc<Self>) {
+        if self.attempted.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if self.table.in_flight.try_lock().is_err() {
+            self.locked.store(true, Ordering::SeqCst);
+            return;
+        }
+        self.gate.before.store(true, Ordering::SeqCst);
+        let table = self.table.clone();
+        let mut next: OperationFuture<'static, Answer<Value>> = Box::pin(async move {
+            table
+                .call(
+                    request("wake-race", "one"),
+                    Origin::Mcp,
+                    CancellationToken::new(),
+                )
+                .await
+        });
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        if next.as_mut().poll(&mut context).is_ready() {
+            self.unexpected_ready.store(true, Ordering::SeqCst);
+        }
+        *self.next.lock().unwrap() = Some(next);
+    }
+}
+
+#[tokio::test]
+async fn waking_waiters_can_reenter_without_locking_or_removing_the_replacement_flight() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("product.sqlite"));
+    let gate = Gate::before();
+    let table = Arc::new(make_table(&store, Some(gate.clone())));
+    let mut owner = Box::pin(table.call(
+        request("wake-race", "one"),
+        Origin::Http,
+        CancellationToken::new(),
+    ));
+    pending(owner.as_mut()).await;
+    let mut waiter = Box::pin(table.call(
+        request("wake-race", "one"),
+        Origin::Socket,
+        CancellationToken::new(),
+    ));
+    let wake = Arc::new(ReentrantWake {
+        table: table.clone(),
+        gate: gate.clone(),
+        attempted: AtomicBool::new(false),
+        locked: AtomicBool::new(false),
+        unexpected_ready: AtomicBool::new(false),
+        next: Mutex::new(None),
+    });
+    let waker = std::task::Waker::from(wake.clone());
+    let mut context = std::task::Context::from_waker(&waker);
+    assert!(waiter.as_mut().poll(&mut context).is_pending());
+    gate.open();
+    let first = owner.await;
+    assert!(wake.attempted.load(Ordering::SeqCst));
+    assert!(!wake.locked.load(Ordering::SeqCst));
+    assert!(!wake.unexpected_ready.load(Ordering::SeqCst));
+    assert_eq!(
+        entries(&table),
+        1,
+        "old guard must not retire the newly admitted owner"
+    );
+    assert_eq!(waiter.await, first);
+    let next = wake.next.lock().unwrap().take().unwrap();
+    gate.open();
+    let retry = next.await;
+    assert_eq!(retry.value().unwrap()["replayed"], true);
+    assert_eq!(entries(&table), 0);
+    assert_eq!(store.count(), 1);
 }

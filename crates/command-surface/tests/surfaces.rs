@@ -245,34 +245,6 @@ async fn timeout_never_partial_and_any_caller_lifts_deadline() {
 }
 
 #[tokio::test]
-async fn retry_applies_once_and_identity_cannot_change() {
-    let (table, writes, _) = table();
-    let mut request = request("write");
-    request.operation = "record".into();
-    let (a, b) = tokio::join!(
-        table.call(request.clone(), Origin::Cli, CancellationToken::new()),
-        table.call(request.clone(), Origin::Mcp, CancellationToken::new())
-    );
-    assert_eq!(a, b);
-    assert_eq!(writes.load(Ordering::SeqCst), 1);
-    request.arguments["text"] = json!("different");
-    let answer = table
-        .call(request, Origin::Http, CancellationToken::new())
-        .await;
-    assert!(matches!(
-        answer,
-        Answer::Error {
-            error: Failure {
-                kind: FailureKind::Conflict,
-                ..
-            },
-            ..
-        }
-    ));
-    assert_eq!(writes.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
 async fn cancel_stops_work_on_socket_disconnect() {
     use tokio::io::AsyncWriteExt;
     let (table, _, active) = table();
@@ -448,8 +420,8 @@ async fn ordinary_form_posts_use_the_same_request() {
 }
 
 #[tokio::test]
-async fn trusted_identity_is_typed_and_namespaces_retries() {
-    let (table, writes, _) = table();
+async fn trusted_identity_is_typed() {
+    let (table, _, _) = table();
     let answer = table
         .call_as(
             request("identity"),
@@ -459,19 +431,6 @@ async fn trusted_identity_is_typed_and_namespaces_retries() {
         )
         .await;
     assert_eq!(answer.value().unwrap()["rows"], json!(["trusted author"]));
-    let mut request = request("write");
-    request.operation = "record".into();
-    for scope in ["person-a", "person-b", "person-a"] {
-        table
-            .call_as(
-                request.clone(),
-                Origin::Mcp,
-                Caller::authenticated(scope, ()),
-                CancellationToken::new(),
-            )
-            .await;
-    }
-    assert_eq!(writes.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

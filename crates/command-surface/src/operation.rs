@@ -13,7 +13,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 pub type OperationFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -94,7 +94,7 @@ pub enum Origin {
 #[derive(Clone, Debug, Default)]
 struct Progress {
     stage: String,
-    rows_scanned: u64,
+    rows_scanned: Option<u64>,
     narrower: Option<RunnableRequest>,
 }
 impl RequestContext {
@@ -106,6 +106,22 @@ impl RequestContext {
         &self,
         stage: impl Into<String>,
         rows_scanned: u64,
+        narrower: Option<RunnableRequest>,
+    ) -> Result<(), Failure> {
+        self.set_progress(stage, Some(rows_scanned), narrower)
+    }
+    /// Report a stage without inventing a row count when it was not measured.
+    pub fn progress_unknown(
+        &self,
+        stage: impl Into<String>,
+        narrower: Option<RunnableRequest>,
+    ) -> Result<(), Failure> {
+        self.set_progress(stage, None, narrower)
+    }
+    fn set_progress(
+        &self,
+        stage: impl Into<String>,
+        rows_scanned: Option<u64>,
         narrower: Option<RunnableRequest>,
     ) -> Result<(), Failure> {
         *self.progress.lock().unwrap_or_else(|e| e.into_inner()) = Progress {
@@ -217,16 +233,83 @@ impl Deadlines {
     }
 }
 
-type CachedAnswer = Arc<AsyncMutex<Option<(Value, Answer<Value>)>>>;
+type RequestKey = (String, String);
+type FlightRegistry = Mutex<HashMap<RequestKey, Arc<InFlight>>>;
+
+struct InFlight {
+    identity: Value,
+    result: watch::Sender<Option<Arc<Answer<Value>>>>,
+}
+impl InFlight {
+    fn new(identity: Value) -> Self {
+        let (result, _) = watch::channel(None);
+        Self { identity, result }
+    }
+    async fn wait(&self) -> Answer<Value> {
+        let mut result = self.result.subscribe();
+        loop {
+            let answer = result.borrow_and_update().clone();
+            if let Some(answer) = answer {
+                return (*answer).clone();
+            }
+            if result.changed().await.is_err() {
+                return cancelled_owner();
+            }
+        }
+    }
+}
+fn cancelled_owner() -> Answer<Value> {
+    Answer::error(Failure::new(
+        FailureKind::Cancelled,
+        "in-flight request owner was dropped",
+    ))
+}
+/// Only the admitted owner retires a flight. Waiters retain their own Arc,
+/// including its final result, after it leaves the registry.
+struct FlightOwner<'a> {
+    registry: &'a FlightRegistry,
+    key: RequestKey,
+    flight: Arc<InFlight>,
+    finished: bool,
+}
+impl FlightOwner<'_> {
+    fn publish(&mut self, answer: Answer<Value>) {
+        let answer = Arc::new(answer);
+        {
+            let mut registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+            if registry
+                .get(&self.key)
+                .is_some_and(|flight| Arc::ptr_eq(flight, &self.flight))
+            {
+                registry.remove(&self.key);
+            }
+            self.finished = true;
+        }
+        // Retire before waking. Existing waiters own the old flight, while a
+        // new admission reaches the product log. Wakers may reenter dispatch.
+        self.flight.result.send_replace(Some(answer));
+    }
+    fn finish(mut self, answer: Answer<Value>) -> Answer<Value> {
+        self.publish(answer.clone());
+        answer
+    }
+}
+impl Drop for FlightOwner<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.publish(cancelled_owner());
+        }
+    }
+}
 
 /// Heterogeneous typed table. Registration rejects ambiguity once at startup.
-/// Completed writes are coalesced in process; products persist idempotency in
-/// their own write transaction for retries after a daemon restart.
+/// Only simultaneous writes coalesce here. Products own authoritative retry
+/// identity and outcomes in the same transaction as their mutation.
 pub struct OperationTable {
     pub(crate) product: String,
     operations: Vec<Arc<dyn ErasedOperation>>,
     deadlines: Deadlines,
-    writes: Mutex<HashMap<(String, String), CachedAnswer>>,
+    in_flight: FlightRegistry,
     failure_codes: HashMap<String, FailureKind>,
 }
 impl OperationTable {
@@ -235,7 +318,7 @@ impl OperationTable {
             product: product.into(),
             operations: vec![],
             deadlines,
-            writes: Mutex::new(HashMap::new()),
+            in_flight: Mutex::new(HashMap::new()),
             failure_codes: HashMap::new(),
         }
     }
@@ -374,34 +457,38 @@ impl OperationTable {
             caller: caller.clone(),
             progress: progress.clone(),
         };
+        let mut owner = None;
+        let flight = if description.spec.write {
+            let key = (caller.scope.clone(), request.request_id.clone());
+            let identity =
+                serde_json::json!({"operation":request.operation,"arguments":request.arguments});
+            let mut registry = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(flight) = registry.get(&key) {
+                if flight.identity != identity {
+                    return Answer::error(Failure::new(
+                        FailureKind::Conflict,
+                        "request_id is in flight with different arguments",
+                    ));
+                }
+                Some(flight.clone())
+            } else {
+                let flight = Arc::new(InFlight::new(identity));
+                registry.insert(key.clone(), flight.clone());
+                owner = Some(FlightOwner {
+                    registry: &self.in_flight,
+                    key,
+                    flight: flight.clone(),
+                    finished: false,
+                });
+                Some(flight)
+            }
+        } else {
+            None
+        };
+        let is_owner = owner.is_some();
         let execution = async {
-            if description.spec.write {
-                let cache = {
-                    let mut writes = self.writes.lock().unwrap_or_else(|e| e.into_inner());
-                    writes
-                        .entry((caller.scope.clone(), request.request_id.clone()))
-                        .or_insert_with(|| Arc::new(AsyncMutex::new(None)))
-                        .clone()
-                };
-                let mut cached = cache.lock().await;
-                // Deadline and origin can change on retry. Operation and arguments cannot.
-                let identity = serde_json::json!({"operation":request.operation,"arguments":request.arguments});
-                if let Some((previous, answer)) = &*cached {
-                    return if *previous == identity {
-                        answer.clone()
-                    } else {
-                        Answer::error(Failure::new(
-                            FailureKind::Conflict,
-                            "request_id was already used for different arguments",
-                        ))
-                    };
-                }
-                let answer = operation.execute(request.arguments.clone(), context).await;
-                // A refusal is not a committed write, so a caller may retry it.
-                if !matches!(answer, Answer::Error { .. }) {
-                    *cached = Some((identity, answer.clone()));
-                }
-                answer
+            if !is_owner && let Some(flight) = &flight {
+                flight.wait().await
             } else {
                 operation.execute(request.arguments.clone(), context).await
             }
@@ -420,7 +507,8 @@ impl OperationTable {
             _ = cancellation.cancelled() => Answer::error(Failure::new(FailureKind::Cancelled,"request cancelled")),
             _ = wait_deadline => {
                 let progress = progress.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                let mut failure = Failure::new(FailureKind::Timeout, format!("deadline passed during {} after {} rows scanned", if progress.stage.is_empty(){"admission"}else{&progress.stage},progress.rows_scanned));
+                let scanned = progress.rows_scanned.map_or_else(|| "with rows scanned unknown".into(), |rows| format!("after {rows} rows scanned"));
+                let mut failure = Failure::new(FailureKind::Timeout, format!("deadline passed during {} {scanned}", if progress.stage.is_empty(){"admission"}else{&progress.stage}));
                 failure.hint = Some("narrow the request or lift its deadline".into());
                 let mut answer = Answer::error(failure);
                 if let Some(narrower) = progress.narrower {answer.next_mut().push(Next{label:"narrower request".into(),request:narrower});}
@@ -430,6 +518,14 @@ impl OperationTable {
             answer = execution => answer,
         };
         drop(guard);
+        let answer = self.checked_answer(answer, &description.spec);
+        if let Some(owner) = owner {
+            owner.finish(answer)
+        } else {
+            answer
+        }
+    }
+    fn checked_answer(&self, answer: Answer<Value>, spec: &OperationSpec) -> Answer<Value> {
         if let Answer::Error { error, .. } = &answer {
             if error
                 .code
@@ -449,12 +545,12 @@ impl OperationTable {
                     | FailureKind::Conflict
                     | FailureKind::Io
             );
-            if !infrastructure && !description.spec.failures.contains(&error.kind) {
+            if !infrastructure && !spec.failures.contains(&error.kind) {
                 return Answer::error(Failure::new(
                     FailureKind::Io,
                     format!(
                         "operation {} returned undeclared failure {:?}",
-                        description.spec.name, error.kind
+                        spec.name, error.kind
                     ),
                 ));
             }

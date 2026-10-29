@@ -149,8 +149,10 @@ both the envelope and the operation's nested type definitions.
 configuration; `Deadline::None` is JSON null. No class has a universal hard
 limit. Dispatch owns the operation future and drops it on timeout,
 cancellation or socket disconnect. `RequestContext::progress` records the
-stage, scan count and optional narrower request for the timeout answer, and
-checks cancellation. Blocking work must check its token within 100 ms and
+stage, measured scan count and optional narrower request for the timeout answer,
+and checks cancellation. `progress_unknown` reports a stage without a measured
+row count; unmeasured work, including admission, is described as unknown rather
+than zero. Blocking work must check its token within 100 ms and
 must remain owned by that request. A future which blocks its executor
 without yielding cannot satisfy the cancellation contract.
 
@@ -170,12 +172,19 @@ the request JSON. The `*_as` adapter methods preserve it while computing
 the transport origin themselves. Products use a stable authenticated scope
 for retry identity across CLI, HTTP and MCP.
 
-Completed writes with one caller scope and request ID are coalesced by the
-table, including concurrent requests. Reusing that identity with changed arguments returns
-conflict. A product writer must also commit the request identity and result
-in the same transaction as its mutation; this is what makes retries survive
-a daemon restart. A cache in the transport cannot provide transaction
-atomicity for a product database.
+The table coalesces only in-flight writes with one caller scope and request ID.
+Changed arguments conflict while that identity is in flight. On completion,
+error, timeout, cancellation or owner-future drop, the entry leaves the registry;
+already-admitted waiters retain its final normalized answer until they finish.
+Dropping or cancelling a waiter does not cancel the owner. Dropping the owner
+cancels its work and releases its waiters with a cancelled outcome.
+
+Every sequential retry reaches the product writer. The writer atomically records
+the immutable request identity, intent and committed result with its mutation;
+this makes retry and conflict checks survive a daemon restart. Publication or
+availability evidence can advance after acceptance, so the writer reads the
+current truthful outcome on retry rather than replaying a stale transport
+answer. Common retains no completed-write or refusal log.
 
 `SseEvent` encodes JSON without field injection; `SseDecoder` handles split
 UTF-8, multiline data and CRLF. `EventLog` accepts committed product events
@@ -190,7 +199,9 @@ event. The log does not infer a commit from a published event.
 
 The `surfaces` integration tests define a real typed sample table and send
 its requests through CLI parsing, a Unix socket pair, HTTP envelopes and MCP
-JSON-RPC. `protocol` tests include generated serialization cases and every
+JSON-RPC. Operation lifetime tests use an independent SQLite fixture writer
+whose request log and domain mutation commit atomically, including restart,
+concurrent waiters and timeout-after-commit retry. `protocol` tests include generated serialization cases and every
 byte boundary of SSE framing. Run `cargo xtask test -p command-surface`.
 
 ## Laws
