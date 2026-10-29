@@ -12,6 +12,13 @@ pub trait Calendar {
     fn quiet_end(&self, at: Instant, hours: QuietHours) -> Instant {
         self.next_at(at, hours.to)
     }
+    /// Named-zone adapters resolve the absolute interval here so a repeated
+    /// civil minute cannot re-enter a quiet interval that already ended.
+    fn quiet_until(&self, at: Instant, hours: QuietHours) -> Option<Instant> {
+        hours
+            .contains(self.minute(at))
+            .then(|| self.quiet_end(at, hours))
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Occurrence {

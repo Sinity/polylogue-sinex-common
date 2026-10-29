@@ -99,10 +99,9 @@ impl HostPolicy {
             let id = intent.delivery.id.clone();
             if intent.delivery.channel == Channel::Interrupt
                 && let Some(hours) = intent.quiet_hours.or(self.quiet_hours)
-                && hours.contains(calendar.minute(at))
+                && let Some(until) = calendar.quiet_until(at, hours)
             {
-                self.pending.get_mut(&id).expect("pending host intent").due =
-                    calendar.quiet_end(at, hours);
+                self.pending.get_mut(&id).expect("pending host intent").due = until;
                 continue;
             }
             self.pending.remove(&id);
