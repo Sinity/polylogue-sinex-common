@@ -1,5 +1,6 @@
 use super::LocalLink;
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -114,6 +115,35 @@ impl Fixture {
             locks: &locks,
         })
     }
+}
+
+#[test]
+fn link_roundtrip_restores_both_locks_without_leaving_auxiliary_state() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root().join(".cargo/consumer-settings.toml"),
+        b"synthetic consumer settings\n",
+    )
+    .unwrap();
+    let files = || {
+        fs::read_dir(fixture.root().join(".cargo"))
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), fs::read(entry.path()).unwrap())
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let original_files = files();
+    let locks = ["Cargo.lock", "fuzz/Cargo.lock"];
+    let original_locks = locks.map(|path| fs::read(fixture.root().join(path)).unwrap());
+    fixture.with_link(|link| link.link(&fixture.first)).unwrap();
+    fixture.with_link(|link| link.unlink()).unwrap();
+    assert_eq!(files(), original_files);
+    assert_eq!(
+        locks.map(|path| fs::read(fixture.root().join(path)).unwrap()),
+        original_locks
+    );
 }
 
 #[test]
