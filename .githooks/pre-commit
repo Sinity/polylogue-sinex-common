@@ -10,4 +10,4 @@ while IFS= read -r -d '' path; do
     # rustfmt --check on stdin does not report a formatting difference.
     git show ":$path" | "${formatter[@]}" --edition 2024 --emit stdout |
         diff -u --label "staged:$path" --label "formatted:$path" <(git show ":$path") -
-done < <(git diff --cached --name-only --diff-filter=ACM -z -- '*.rs')
+done < <(git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs')
