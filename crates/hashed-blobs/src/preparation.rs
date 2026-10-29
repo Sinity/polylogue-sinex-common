@@ -1,11 +1,11 @@
 //! Bounded frame preparation, independent of segment ownership and durability.
 use crate::{
+    DEFAULT_FRAME, DataKey, EncodedBlob, Error, Hash, Kind, ReadLimits, Result,
     codec::{self, Frame, Index},
-    DataKey, Error, Hash, Kind, Result, DEFAULT_FRAME,
 };
 use chacha20poly1305::{
-    aead::{rand_core::RngCore, Aead, OsRng, Payload},
     ChaCha20Poly1305, KeyInit, Nonce,
+    aead::{Aead, OsRng, Payload, rand_core::RngCore},
 };
 use std::{
     fs::File,
@@ -40,6 +40,72 @@ impl Prepared {
     pub fn kind(&self) -> &Kind {
         &self.kind
     }
+    pub fn descriptor(&self) -> EncodedBlob {
+        EncodedBlob {
+            hash: self.hash,
+            decoded_len: self.decoded_len,
+            stored_len: self.stored_len,
+            kind: self.kind.clone(),
+            index_hash: self.index_hash,
+            encoded_hash: self.encoded_hash,
+        }
+    }
+    /// Return ownership of the encoded inode. Products own its persistence and custody.
+    pub fn into_file(self) -> File {
+        self.file
+    }
+    pub fn reader(&self, key: Option<&DataKey>, limits: ReadLimits) -> Result<crate::BlobReader> {
+        self.descriptor().open(self.file.try_clone()?, key, limits)
+    }
+    /// Adopt an immutable owned encoding only after complete byte and decoded identity checks.
+    /// No decoded bytes are written. The file is not copied or recompressed.
+    pub fn from_encoded(
+        mut file: File,
+        descriptor: EncodedBlob,
+        key: Option<&DataKey>,
+        limits: ReadLimits,
+    ) -> Result<Self> {
+        if file.metadata()?.len() != descriptor.stored_len {
+            return Err(Error::Refused(
+                "encoded file length differs from its descriptor".into(),
+            ));
+        }
+        file.rewind()?;
+        let mut hash = blake3::Hasher::new();
+        let encoded_len = std::io::copy(&mut file, &mut hash)?;
+        if encoded_len != descriptor.stored_len
+            || Hash(*hash.finalize().as_bytes()) != descriptor.encoded_hash
+        {
+            return Err(Error::Refused(
+                "encoded bytes differ from their descriptor".into(),
+            ));
+        }
+        let mut reader = descriptor.open(file.try_clone()?, key, limits)?;
+        let mut hash = match &descriptor.kind {
+            Kind::Plain => blake3::Hasher::new(),
+            Kind::Sealed { .. } => blake3::Hasher::new_keyed(&codec::name_key(
+                key.ok_or(Error::Locked(descriptor.hash))?,
+            )),
+        };
+        let decoded_len = std::io::copy(&mut reader, &mut hash)?;
+        if decoded_len != descriptor.decoded_len
+            || Hash(*hash.finalize().as_bytes()) != descriptor.hash
+        {
+            return Err(Error::Refused(
+                "decoded bytes differ from their descriptor".into(),
+            ));
+        }
+        file.rewind()?;
+        Ok(Self {
+            file,
+            hash: descriptor.hash,
+            decoded_len: descriptor.decoded_len,
+            stored_len: descriptor.stored_len,
+            kind: descriptor.kind,
+            index_hash: descriptor.index_hash,
+            encoded_hash: descriptor.encoded_hash,
+        })
+    }
 }
 impl Preparation {
     pub fn new(scratch: impl AsRef<Path>) -> Result<Self> {
@@ -63,11 +129,26 @@ impl Preparation {
     }
     pub fn plain_checked<E: From<Error>>(
         &self,
+        reader: impl Read,
+        level: i32,
+        check: impl FnMut() -> std::result::Result<(), E>,
+    ) -> std::result::Result<Prepared, E> {
+        let file = tempfile::tempfile_in(&self.scratch).map_err(Error::Io)?;
+        self.plain_into_checked(file, reader, level, check)
+    }
+    /// Write the existing encoding to a caller-owned inode, without syncing it.
+    pub fn plain_into(&self, file: File, reader: impl Read, level: i32) -> Result<Prepared> {
+        self.plain_into_checked(file, reader, level, || Ok(()))
+    }
+    pub fn plain_into_checked<E: From<Error>>(
+        &self,
+        mut file: File,
         mut reader: impl Read,
         level: i32,
         mut check: impl FnMut() -> std::result::Result<(), E>,
     ) -> std::result::Result<Prepared, E> {
-        let mut file = tempfile::tempfile_in(&self.scratch).map_err(Error::Io)?;
+        file.set_len(0).map_err(Error::Io)?;
+        file.rewind().map_err(Error::Io)?;
         let mut compressor = compressor(level).map_err(Error::Io)?;
         let mut index = Index {
             hash: Hash([0; 32]),
@@ -107,11 +188,33 @@ impl Preparation {
     }
     pub fn sealed_checked<E: From<Error>>(
         &self,
+        reader: impl Read + Seek,
+        level: i32,
+        key: &DataKey,
+        check: impl FnMut() -> std::result::Result<(), E>,
+    ) -> std::result::Result<Prepared, E> {
+        let file = tempfile::tempfile_in(&self.scratch).map_err(Error::Io)?;
+        self.sealed_into_checked(file, reader, level, key, check)
+    }
+    pub fn sealed_into(
+        &self,
+        file: File,
+        reader: impl Read + Seek,
+        level: i32,
+        key: &DataKey,
+    ) -> Result<Prepared> {
+        self.sealed_into_checked(file, reader, level, key, || Ok(()))
+    }
+    pub fn sealed_into_checked<E: From<Error>>(
+        &self,
+        mut file: File,
         mut reader: impl Read + Seek,
         level: i32,
         key: &DataKey,
         mut check: impl FnMut() -> std::result::Result<(), E>,
     ) -> std::result::Result<Prepared, E> {
+        file.set_len(0).map_err(Error::Io)?;
+        file.rewind().map_err(Error::Io)?;
         let start = reader.stream_position().map_err(Error::Io)?;
         let mut compressor = compressor(level).map_err(Error::Io)?;
         let mut buffer = vec![0; self.frame];
@@ -153,7 +256,6 @@ impl Preparation {
         index.bind(hash);
         reader.seek(SeekFrom::Start(start)).map_err(Error::Io)?;
         let cipher = ChaCha20Poly1305::new((&codec::frame_key(key, hash, &index.salt)).into());
-        let mut file = tempfile::tempfile_in(&self.scratch).map_err(Error::Io)?;
         let mut second = blake3::Hasher::new_keyed(&naming_key);
         for number in 0..index.frames.len() {
             check()?;
