@@ -213,7 +213,6 @@ fn prefix_future_metadata_cannot_wake_private_match_only_observed_rows_wake() {
             start: at(13),
             end: at(14),
         }],
-        ..Policy::default()
     };
     let a = row("a", minute(13, 30), minute(13, 30), None);
     let mut e = evaluator(rule(), vec![a.clone()], at(9), policy.clone());
@@ -286,7 +285,6 @@ fn private_at_release_drops_pending_without_catchup() {
                 start: at(31),
                 end: at(33),
             }],
-            ..Policy::default()
         },
     );
     assert!(advance(&mut e, at(34)).is_empty());
@@ -469,7 +467,6 @@ fn resume_consumes_private_arrivals_without_catchup() {
                     start: at(13),
                     end: at(14),
                 }],
-                ..Policy::default()
             },
         );
         assert!(advance(&mut e, checkpoint).is_empty());
@@ -508,7 +505,6 @@ fn resume_drops_quiet_pending_across_private_boundary() {
                     start: at(31),
                     end: at(33),
                 }],
-                ..Policy::default()
             },
         );
         assert!(advance(&mut e, checkpoint).is_empty());
@@ -531,10 +527,7 @@ fn generated_prefix_partition_and_abstract_checkpoint_partition_invariance() {
                 let mut r = rule();
                 r.rule.duration = Duration(20 * MIN);
                 let rows = vec![row("a", at(10), seen, end)];
-                let policy = Policy {
-                    private,
-                    ..Policy::default()
-                };
+                let policy = Policy { private };
                 let mut whole = evaluator(r.clone(), rows.clone(), at(9), policy.clone());
                 let expected = advance(&mut whole, at(14));
                 for checkpoint in 9..15 {
