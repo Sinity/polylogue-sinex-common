@@ -112,11 +112,7 @@ impl Server {
         crate::owner::watch(
             std::process::id(),
             &dir,
-            &format!(
-                "kill -KILL -- -{}; rm -rf {}",
-                child.id(),
-                crate::owner::shell_quote(&dir.display().to_string())
-            ),
+            &crate::owner::group_cleanup(child.id(), &dir),
         );
         let server = Self {
             url: format!("nats://127.0.0.1:{port}"),

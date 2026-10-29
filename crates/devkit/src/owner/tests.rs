@@ -1,5 +1,25 @@
 use super::*;
-use std::time::{Duration, Instant};
+use std::{
+    process::Child,
+    time::{Duration, Instant},
+};
+
+// A failed assertion must not leave synthetic servers holding nextest's pipes.
+struct FixtureChild(Child);
+impl Drop for FixtureChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+fn fixture(command: &mut Command) -> FixtureChild {
+    let child = FixtureChild(command.spawn().unwrap());
+    eprintln!(
+        "fixture child identity: {}",
+        fs::read_to_string(format!("/proc/{}/stat", child.0.id())).unwrap()
+    );
+    child
+}
 
 fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -14,25 +34,13 @@ fn the_watchdog_stops_a_server_whose_owner_is_killed() {
     let dir = tempfile::tempdir().unwrap();
     let owned = dir.path().join("devkit-x-1-1");
     fs::create_dir(&owned).unwrap();
-    let mut owner = Command::new("sleep").arg("60").spawn().unwrap();
-    let mut server = Command::new("sleep")
-        .arg("300")
-        .process_group(0)
-        .spawn()
-        .unwrap();
-    watch(
-        owner.id(),
-        &owned,
-        &format!(
-            "kill -KILL -- -{}; rm -rf {}",
-            server.id(),
-            shell_quote(&owned.display().to_string())
-        ),
-    );
-    owner.kill().unwrap();
-    owner.wait().unwrap();
+    let mut owner = fixture(Command::new("sleep").arg("60"));
+    let mut server = fixture(Command::new("sleep").arg("300").process_group(0));
+    watch(owner.0.id(), &owned, &group_cleanup(server.0.id(), &owned));
+    owner.0.kill().unwrap();
+    owner.0.wait().unwrap();
     wait_until("the server to be stopped", || {
-        server.try_wait().unwrap().is_some()
+        server.0.try_wait().unwrap().is_some()
     });
     wait_until("the directory to be removed", || !owned.exists());
 }
@@ -43,17 +51,17 @@ fn the_watchdog_leaves_an_orderly_shutdown_alone() {
     let owned = dir.path().join("devkit-x-1-2");
     fs::create_dir(&owned).unwrap();
     let marker = dir.path().join("cleanup-ran");
-    let mut owner = Command::new("sleep").arg("60").spawn().unwrap();
+    let mut owner = fixture(Command::new("sleep").arg("60"));
     watch(
-        owner.id(),
+        owner.0.id(),
         &owned,
         &format!("touch {}", shell_quote(&marker.display().to_string())),
     );
     // The orderly path removes the directory itself, then the owner exits.
     fs::remove_dir(&owned).unwrap();
     std::thread::sleep(Duration::from_secs(3));
-    owner.kill().unwrap();
-    owner.wait().unwrap();
+    owner.0.kill().unwrap();
+    owner.0.wait().unwrap();
     std::thread::sleep(Duration::from_secs(3));
     assert!(!marker.exists());
 }

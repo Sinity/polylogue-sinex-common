@@ -61,6 +61,16 @@ pub(crate) fn watch(owner: u32, dir: &Path, cleanup: &str) {
         .spawn();
 }
 
+/// Cleanup for a server led by its own process group.
+#[cfg(any(feature = "nats", test))]
+pub(crate) fn group_cleanup(pid: u32, dir: &Path) -> String {
+    // The explicit -s form lets POSIX shells parse -- before a negative PGID.
+    format!(
+        "kill -s KILL -- -{pid}; rm -rf {}",
+        shell_quote(&dir.display().to_string())
+    )
+}
+
 /// Runs `cleanup` for every `<base>/<prefix>-<pid>-<id>` directory whose
 /// owner pid no longer exists. `cleanup` gets the directory's path as `$1`
 /// and runs as the directory's owner ([`as_owner_of`]).
