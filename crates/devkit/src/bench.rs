@@ -151,6 +151,9 @@ pub fn select(all: &[Candidate], target: u64, seed: u64) -> Vec<Candidate> {
             used += largest.size;
             files.pop();
         }
+        if files.is_empty() {
+            continue;
+        }
         let bands = 10.min(files.len()).max(1);
         let per = files.len().div_ceil(bands);
         let remaining = share.saturating_sub(used);
