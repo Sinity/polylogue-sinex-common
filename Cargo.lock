@@ -319,9 +319,11 @@ version = "0.1.0"
 dependencies = [
  "http",
  "proptest",
+ "rusqlite",
  "schemars",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
 ]

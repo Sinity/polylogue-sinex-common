@@ -63,6 +63,7 @@ mechanic and nothing else in the shared crates.
 | failure, failure kind | a typed error, and its stable name on the wire |
 | failure code | a product's precise failure name, registered once against a shared failure kind |
 | caller scope | the server's authenticated identity namespace for request retries; never supplied in request JSON |
+| in-flight coalescing | concurrent matching requests share one active execution and its final answer; sequential retries reach the product request log |
 | exit code | the CLI's process status for an answer, one per failure kind |
 | latency class | the group an operation belongs to for its default deadline: local, status, completion, read, search, aggregate |
 | deadline | how long a request may run; a default any caller can lift |
