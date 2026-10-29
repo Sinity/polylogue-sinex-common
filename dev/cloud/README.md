@@ -9,6 +9,13 @@ Run setup from the checkout you want to prepare:
 bash dev/cloud/setup.sh
 ```
 
+Command sandbox permissions and environment capabilities are separate.
+Dependency downloads may require the command tool's normal reviewed approval
+path, while retaining the inherited proxy and configured host allowlist.
+Diagnose network and namespace errors in that command's effective sandbox
+context. A proxy host-policy denial still requires the environment's normal
+review/save path for the required hosts before retrying.
+
 The default `CLOUD_BACKEND=nix` uses the repository's development shell. If
 Nix is absent, installation requires a privileged Debian/Ubuntu setup phase.
 An existing Nix installation can be used by an ordinary user. Local
@@ -23,9 +30,12 @@ CLOUD_BACKEND=native bash dev/cloud/setup.sh
 ```
 
 The base image must provide Bash, Python 3.12 or newer, C and C++ compilers, Make,
-pkg-config and Perl with its standard generator modules. The native backend downloads the SHA256-pinned artifacts in
-`pins.json`: Rust with rustfmt and Clippy, nextest, CMake, PostgreSQL 18,
-TimescaleDB and NATS. The bootstrap also pins M4, Bison and Flex, which
+pkg-config, Perl with its standard generator modules, Node.js 24 or newer and
+`dbus-daemon`. Signals tests create their own private D-Bus session; they do
+not need D-Bus development headers or an operator session bus.
+The native backend downloads the SHA256-pinned artifacts in
+`pins.json`: Rust with rustfmt and Clippy, nextest, CMake, TypeScript 7.0.2,
+esbuild 0.27.2, PostgreSQL 18, TimescaleDB and NATS. The bootstrap also pins M4, Bison and Flex, which
 PostgreSQL 18 requires even when building its release archives. Rust matches the product's `rust-toolchain.toml`.
 PostgreSQL and TimescaleDB build into the user's prefix. The toolchain does
 not need root, a writable `/nix`, user namespaces or PRoot.
@@ -33,6 +43,9 @@ not need root, a writable `/nix`, user namespaces or PRoot.
 `CLOUD_PREFIX` selects the absolute writable prefix; its default is `.cloud`
 beside the checkout. Downloads and build trees stay there for repeat setup.
 `CLOUD_BUILD_JOBS` controls native compilation concurrency (default 2).
+The frontend tools use the upstream npm tarballs directly, without npm install
+scripts or changing workspace manifests. Their versions match the shared
+development shell so the committed web-shell bundle remains reproducible.
 Every native setup checks the installed tools, starts a throwaway PostgreSQL
 cluster, creates and queries a TimescaleDB hypertable, and checks a throwaway
 NATS JetStream server. Both services stop before setup returns. The native

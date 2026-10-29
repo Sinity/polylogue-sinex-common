@@ -40,5 +40,15 @@
     "version": "2.6.4",
     "url": "https://github.com/westes/flex/releases/download/v2.6.4/flex-2.6.4.tar.gz",
     "sha256": "e87aae032bf07c26f85ac0ed3250998c37621d95f8bd748b31f15b33c45ee995"
+  },
+  "typescript": {
+    "version": "7.0.2",
+    "url": "https://registry.npmjs.org/@typescript/typescript-linux-x64/-/typescript-linux-x64-7.0.2.tgz",
+    "sha256": "7ecad6f67377e831856367ab062ef394f21506a611405bf8ac0ff039348637d3"
+  },
+  "esbuild": {
+    "version": "0.27.2",
+    "url": "https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.27.2.tgz",
+    "sha256": "4ac0a36a8573ef6b612263661e7c77343a38789485344e1875cf33a498292310"
   }
 }

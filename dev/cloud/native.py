@@ -48,6 +48,18 @@ def unpack(archive, directory, *, single_root=False):
     return directory / next(iter(roots)) if single_root else directory
 
 
+def install_frontend(pins, cache, prefix):
+    """Install compiler artifacts without npm scripts or workspace manifests."""
+    for name, relative in (("typescript", "lib/tsc"), ("esbuild", "bin/esbuild")):
+        source = unpack(artifact(name + ".tgz", pins[name], cache), prefix / name, single_root=True)
+        binary = source / relative
+        if not binary.is_file():
+            raise RuntimeError(f"missing {relative} in {name} artifact")
+        link = prefix / "bin" / ("tsc" if name == "typescript" else "esbuild")
+        link.unlink(missing_ok=True)
+        link.symlink_to(binary)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prefix", required=True, type=Path)
@@ -63,10 +75,12 @@ def main():
     jobs = str(jobs)
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         parser.error("the pinned native toolchain currently targets x86_64 Linux")
-    for tool in ("cc", "c++", "make", "pkg-config", "perl"):
+    for tool in ("cc", "c++", "make", "pkg-config", "perl", "node", "dbus-daemon"):
         if not shutil.which(tool):
             parser.error(f"native setup requires {tool} from the cloud base image")
     run(["perl", "-MGetopt::Long", "-MFindBin", "-MFile::Compare", "-e", "exit 0"])
+    run(["node", "-e", "if (Number(process.versions.node.split('.')[0]) < 24) process.exit(1)"])
+    run(["dbus-daemon", "--version"])
     pins_path = Path(__file__).with_name("pins.json")
     pins = json.loads(pins_path.read_text())
     toolchain = args.repo / "rust-toolchain.toml"
@@ -94,6 +108,7 @@ def main():
     identity = hashlib.sha256(pins_path.read_bytes()).hexdigest()
     installed = stamp.exists() and json.loads(stamp.read_text()).get("pins_sha256") == identity
     if not installed:
+        install_frontend(pins, cache, prefix)
         installer = artifact("rustup-init", pins["rustup"], cache)
         installer.chmod(0o755)
         run([installer, "-y", "--no-modify-path", "--profile", "minimal", "--default-toolchain", pins["rust"], "--component", "rustfmt,clippy"], env=env)
@@ -131,7 +146,7 @@ def main():
         run(["cmake", "--install", ts_build], env=env)
     # Check the tools again when reusing a completed prefix; a deleted binary
     # must fail setup instead of being silently accepted by a saved stamp.
-    for command in (["rustc", "--version"], ["cargo", "--version"], ["cargo", "nextest", "--version"], ["postgres", "--version"], ["nats-server", "--version"]):
+    for command in (["node", "--version"], ["tsc", "--version"], ["esbuild", "--version"], ["dbus-daemon", "--version"], ["rustc", "--version"], ["cargo", "--version"], ["cargo", "nextest", "--version"], ["postgres", "--version"], ["nats-server", "--version"]):
         run(command, env=env)
     pkglib = Path(subprocess.check_output([str(pg / "bin/pg_config"), "--pkglibdir"], text=True, env=env).strip())
     if not (pkglib / "timescaledb.so").is_file():
