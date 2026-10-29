@@ -146,7 +146,14 @@ impl Renderer<'_> {
         Ok(text)
     }
     fn saved(&self, saved: &str, arguments: &[Argument]) -> Result<String, Error> {
-        let mut text = format!("query:{}", name(saved)?);
+        if saved.is_empty() {
+            return Err(invalid("a saved query needs a literal name"));
+        }
+        let spelling = name(saved)
+            .ok()
+            .filter(|_| !saved.starts_with('$'))
+            .unwrap_or_else(|| quote(saved));
+        let mut text = format!("query:{spelling}");
         if !arguments.is_empty() {
             text.push('(');
             text.push_str(

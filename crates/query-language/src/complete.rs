@@ -45,6 +45,18 @@ pub fn requirements(text: &str, position: usize, catalog: &Catalog) -> Requireme
     let cursor = Cursor::new(text, position);
     if let Some(open) = open_quote(cursor.prefix) {
         let before = &text[..open];
+        if let Some((field, prefix, _)) = crate::parse::source_value(before, catalog)
+            && prefix.is_empty()
+        {
+            return Requirements {
+                value: Some(ValueRequirement {
+                    unit: Some(catalog.default_unit.clone()),
+                    field: field.into(),
+                    prefix: decoded_quoted_prefix(&text[open + 1..cursor.end]),
+                }),
+                ..Requirements::default()
+            };
+        }
         let scope = context(before, catalog);
         let value = value_field(before)
             .and_then(|field| scope.field(field))
@@ -57,6 +69,16 @@ pub fn requirements(text: &str, position: usize, catalog: &Catalog) -> Requireme
             sources: scope.sources,
             value,
             reference: None,
+        };
+    }
+    if let Some((field, prefix, _)) = crate::parse::source_value(cursor.prefix, catalog) {
+        return Requirements {
+            value: Some(ValueRequirement {
+                unit: Some(catalog.default_unit.clone()),
+                field: field.into(),
+                prefix,
+            }),
+            ..Requirements::default()
         };
     }
     let scope = context(cursor.before, catalog);
@@ -98,6 +120,19 @@ pub fn complete(text: &str, position: usize, catalog: &Catalog) -> Vec<Completio
     // Within a quoted value, only product-declared values can complete.
     if let Some(open) = open_quote(prefix) {
         return quoted_values(text, end, open, catalog);
+    }
+    if let Some((field, partial, mut replace)) = crate::parse::source_value(prefix, catalog) {
+        replace.end = cursor.token_end(text);
+        return source_names(field, catalog)
+            .into_iter()
+            .filter(|value| value.starts_with(&partial))
+            .map(|value| Completion {
+                value: literal_spelling(&value, &crate::catalog::UnknownRule::default()),
+                replace,
+                kind: CompletionKind::Value,
+                help: String::new(),
+            })
+            .collect();
     }
     let scope = context(before, catalog);
     let fields: Vec<_> = scope
@@ -334,7 +369,14 @@ fn quoted_values(text: &str, cursor: usize, open: usize, catalog: &Catalog) -> V
     let before = &text[..open];
     let field = value_field(before);
     let scope = context(before, catalog);
-    let Some(spec) = field.and_then(|field| scope.field(field)) else {
+    let source =
+        crate::parse::source_value(before, catalog).filter(|(_, prefix, _)| prefix.is_empty());
+    let spec = field.and_then(|field| scope.field(field));
+    let values = if let Some((field, _, _)) = source {
+        source_names(field, catalog)
+    } else if let Some(spec) = spec {
+        spec.values.clone()
+    } else {
         return Vec::new();
     };
     let partial = decoded_quoted_prefix(&text[open + 1..cursor]);
@@ -350,20 +392,40 @@ fn quoted_values(text: &str, cursor: usize, open: usize, catalog: &Catalog) -> V
             break;
         }
     }
-    let mut values: Vec<_> = spec
-        .values
+    let mut values: Vec<_> = values
         .iter()
         .filter(|value| value.starts_with(&partial))
         .map(|value| Completion {
             value: crate::format::quote(value),
             replace: Span { start: open, end },
             kind: CompletionKind::Value,
-            help: spec.help.clone(),
+            help: spec.map(|spec| spec.help.clone()).unwrap_or_default(),
         })
         .collect();
     values.sort_by(|a, b| a.value.cmp(&b.value));
     values.dedup_by(|a, b| a.value == b.value);
     values
+}
+fn source_names(field: &str, catalog: &Catalog) -> Vec<String> {
+    let mut names: Vec<String> = catalog
+        .field(&catalog.default_unit, field)
+        .map(|field| field.values.clone())
+        .unwrap_or_default();
+    for output in &catalog.source_outputs {
+        match (&output.source, field) {
+            (OutputSource::Saved { name, .. }, "query") => names.push(name.clone()),
+            (OutputSource::Result { reference, .. }, "result") => names.push(
+                reference
+                    .strip_prefix("result:")
+                    .unwrap_or(reference)
+                    .to_string(),
+            ),
+            _ => {}
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
 }
 #[derive(Default)]
 struct CompletionScope {
@@ -463,7 +525,8 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
     let inner = &text[start..];
     let explicit = stack.iter().rev().find(|(_, unit, _, _)| !unit.is_empty());
     let inner_first = inner.split_whitespace().next().unwrap_or("");
-    let inner_source = catalog.unit(inner_first).is_some() || source_prefix(inner_first);
+    let inner_source =
+        catalog.unit(inner_first).is_some() || crate::parse::starts_with_source(inner, catalog);
     let inherited_deferred = explicit.is_some_and(|(_, unit, inherited, _)| {
         *inherited && unit == "$deferred_completion" && !inner_source
     });
@@ -483,7 +546,7 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
     let parsed = parse_prefix(&current, catalog);
     // A source-like prefix cannot acquire the default unit's fields merely
     // because an unfinished suffix forced the parser to shorten its input.
-    let source_like = source_prefix(first) || inherited_deferred;
+    let source_like = crate::parse::starts_with_source(&current, catalog) || inherited_deferred;
     let mut scope = if source_like {
         CompletionScope::default()
     } else {

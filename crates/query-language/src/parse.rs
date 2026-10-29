@@ -97,7 +97,88 @@ fn tokens(text: &str, catalog: &Catalog) -> Result<Vec<Token>, Error> {
             span: Span { start, end: i },
         });
     }
-    Ok(out)
+    // Only the two source-reference namespaces permit whitespace before `:`.
+    // Keep original byte spans even when their normalized token text is shorter.
+    let mut merged: Vec<Token> = Vec::new();
+    for token in out {
+        if !token.quoted
+            && token.text.starts_with(':')
+            && let Some(previous) = merged.last_mut()
+            && !previous.quoted
+            && source_namespace(&previous.text).is_some()
+        {
+            previous.text.push_str(&token.text);
+            previous.span.end = token.span.end;
+        } else {
+            merged.push(token);
+        }
+    }
+    Ok(merged)
+}
+fn source_namespace(name: &str) -> Option<&'static str> {
+    if name.eq_ignore_ascii_case("query") {
+        Some("query")
+    } else if name.eq_ignore_ascii_case("result") {
+        Some("result")
+    } else {
+        None
+    }
+}
+/// Source-name completion uses the parser's tokens and original byte offsets.
+pub(crate) fn source_value(text: &str, catalog: &Catalog) -> Option<(&'static str, String, Span)> {
+    let words = tokens(text, catalog).ok()?;
+    let (index, token, field, raw) =
+        words.iter().enumerate().rev().find_map(|(index, token)| {
+            if token.quoted {
+                return None;
+            }
+            let (field, raw) = token.text.split_once(':')?;
+            Some((index, token, source_namespace(field)?, raw))
+        })?;
+    if raw.is_empty() {
+        match &words[index + 1..] {
+            [] => Some((
+                field,
+                String::new(),
+                Span {
+                    start: text.len(),
+                    end: text.len(),
+                },
+            )),
+            [value]
+                if !value.quoted
+                    && !text.ends_with(char::is_whitespace)
+                    && !is_symbol(&value.text) =>
+            {
+                Some((field, value.text.clone(), value.span))
+            }
+            _ => None,
+        }
+    } else if index + 1 == words.len() && !text.ends_with(char::is_whitespace) {
+        let colon = text[token.span.start..token.span.end].find(':')? + token.span.start;
+        Some((
+            field,
+            raw.into(),
+            Span {
+                start: colon + 1,
+                end: token.span.end,
+            },
+        ))
+    } else {
+        None
+    }
+}
+pub(crate) fn starts_with_source(text: &str, catalog: &Catalog) -> bool {
+    tokens(text, catalog)
+        .ok()
+        .and_then(|words| words.into_iter().next())
+        .is_some_and(|token| {
+            !token.quoted
+                && token
+                    .text
+                    .split_once(':')
+                    .is_some_and(|(field, _)| source_namespace(field).is_some())
+        })
 }
 /// Parse a complete question using one immutable vocabulary snapshot.
 pub fn parse(text: &str, catalog: &Catalog) -> Result<Query, Error> {
@@ -283,11 +364,9 @@ impl Parser<'_> {
         {
             self.at += 1;
             source = if prefix.eq_ignore_ascii_case("query") {
-                if raw.is_empty() || raw.starts_with('$') {
-                    return Err(self.error("a saved query needs a literal name"));
-                }
+                let name = self.saved_name(raw, first.span.start)?;
                 Source::Saved {
-                    name: raw.to_string(),
+                    name,
                     arguments: self.arguments()?,
                     condition: None,
                     output: OutputBinding::Deferred,
@@ -839,6 +918,18 @@ impl Parser<'_> {
             ));
         }
         if let Some((field, raw)) = token.text.split_once(':') {
+            if field.eq_ignore_ascii_case("result") && raw.is_empty() {
+                let value = self.next()?;
+                if !value.quoted && is_symbol(&value.text) {
+                    return Err(self.error("a kept result needs a literal identity"));
+                }
+                return Ok(self.cond(
+                    start,
+                    ConditionKind::Reference {
+                        reference: format!("result:{}", value.text),
+                    },
+                ));
+            }
             if is_reference(&token.text) || self.catalog.is_reference(&token.text) {
                 return Ok(self.cond(
                     start,
@@ -848,14 +939,7 @@ impl Parser<'_> {
                 ));
             }
             if field.eq_ignore_ascii_case("query") {
-                if raw.is_empty() || raw.starts_with('$') {
-                    return Err(Error::new(
-                        ErrorKind::BadValue,
-                        "a saved query needs a literal name; parameters stand only for values",
-                        start,
-                    ));
-                }
-                let name = raw.to_string();
+                let name = self.saved_name(raw, start)?;
                 let arguments = self.arguments()?;
                 return Ok(self.cond(start, ConditionKind::Saved { name, arguments }));
             }
@@ -866,6 +950,12 @@ impl Parser<'_> {
                         reference: token.text,
                     },
                 ));
+            }
+            if !["similar", "in", "since", "until"]
+                .iter()
+                .any(|name| field.eq_ignore_ascii_case(name))
+            {
+                self.check_field(scope, field, start)?;
             }
             let mut value = if raw.is_empty() {
                 if self
@@ -917,7 +1007,10 @@ impl Parser<'_> {
         }
         // Function operands and field syntax take precedence over text and keyword positions.
         self.at -= 1;
-        let has_operand = self.field_syntax() || (self.next_is(1, "(") && is_function(&token.text));
+        let has_operand = self.field_syntax()
+            || (self.next_is(1, "(")
+                && builtin(&token.text, crate::catalog::KEY_FUNCTIONS, token.span.start)?
+                    .is_some());
         if has_operand {
             let operand = self.operand(scope)?;
             if self.take("exists") {
@@ -1372,16 +1465,32 @@ impl Parser<'_> {
             Ok(())
         }
     }
+    fn saved_name(&mut self, raw: &str, position: usize) -> Result<String, Error> {
+        let (name, quoted) = if raw.is_empty() {
+            let token = self.next()?;
+            (token.text, token.quoted)
+        } else {
+            (raw.to_string(), false)
+        };
+        if name.is_empty() || (!quoted && (name.starts_with('$') || is_symbol(&name))) {
+            return Err(Error::new(
+                ErrorKind::BadValue,
+                "a saved query needs a literal name; parameters stand only for values",
+                position,
+            ));
+        }
+        Ok(name)
+    }
     fn operand(&mut self, scope: &Scope) -> Result<Operand, Error> {
         let t = self.name()?;
         if self.take("(") {
-            if !is_function(&t.text) {
+            let Some(name) = builtin(&t.text, crate::catalog::KEY_FUNCTIONS, t.span.start)? else {
                 return Err(Error::new(
                     ErrorKind::InvalidQuery,
                     format!("unknown key function `{}`", t.text),
                     t.span.start,
                 ));
-            }
+            };
             let mut arguments = Vec::new();
             if !self.is(")") {
                 loop {
@@ -1393,7 +1502,7 @@ impl Parser<'_> {
             }
             self.expect(")")?;
             return Ok(Operand::Function {
-                name: t.text,
+                name: name.into(),
                 arguments,
             });
         }
@@ -1942,9 +2051,28 @@ fn is_clock(text: &str) -> bool {
         && text.as_bytes().get(2) == Some(&b':')
         && text[..2].chars().all(|c| c.is_ascii_digit())
 }
-fn is_function(name: &str) -> bool {
-    crate::catalog::KEY_FUNCTIONS.contains(&name)
+fn builtin<'a>(
+    name: &str,
+    declarations: &'a [&str],
+    position: usize,
+) -> Result<Option<&'a str>, Error> {
+    let mut matches = declarations
+        .iter()
+        .copied()
+        .filter(|value| value.eq_ignore_ascii_case(name));
+    let found = matches.next();
+    if matches.next().is_some() {
+        return Err(Error::new(
+            ErrorKind::Ambiguous,
+            format!("ambiguous builtin declaration `{name}`"),
+            position,
+        ));
+    }
+    Ok(found)
 }
+#[cfg(test)]
+mod tests;
+
 fn is_aggregate(text: &str) -> bool {
     let name = text.split(':').next().unwrap_or(text);
     crate::catalog::AGGREGATES.contains(&name)
