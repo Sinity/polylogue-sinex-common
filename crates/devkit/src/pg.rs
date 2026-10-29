@@ -41,6 +41,8 @@ const DAY_SECONDS: u64 = 86_400;
 /// Settings for a throwaway cluster.
 #[derive(Debug, Clone, Default)]
 pub struct ClusterOptions {
+    /// Extensions that the server must offer for schema bootstrap.
+    pub required_extensions: Vec<String>,
     /// `shared_preload_libraries`, such as `timescaledb`.
     pub preload: Vec<String>,
     /// Further `-c name=value` server settings.

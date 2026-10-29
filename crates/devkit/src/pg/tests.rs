@@ -1,5 +1,7 @@
 use super::*;
 
+mod capabilities;
+
 #[test]
 fn schema_template_and_test_clones() {
     let server = Server::start(&ClusterOptions::default()).unwrap();
