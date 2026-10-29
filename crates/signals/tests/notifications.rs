@@ -932,7 +932,6 @@ async fn explicit_dbus_error_retries_on_new_owner_but_not_same_server_restart() 
     worker.await.unwrap().unwrap();
 }
 
-
 #[tokio::test]
 async fn missing_bus_records_dbus_failure_and_still_runs_both_route_command() {
     for route in [Route::Dbus, Route::Both] {
@@ -940,24 +939,43 @@ async fn missing_bus_records_dbus_failure_and_still_runs_both_route_command() {
         let path = directory.path().join("notice.json");
         let mut configured = config();
         configured.route = route;
-        configured.command = Some(RouteCommand { program: "sh".into(), arguments: vec![
-            "-c".into(), "cat > \"$1\"".into(), "notice-route".into(), path.to_string_lossy().into_owned()] });
+        configured.command = Some(RouteCommand {
+            program: "sh".into(),
+            arguments: vec![
+                "-c".into(),
+                "cat > \"$1\"".into(),
+                "notice-route".into(),
+                path.to_string_lossy().into_owned(),
+            ],
+        });
         let deliverer = Deliverer::new(None, configured, NotificationState::default());
         let (requests, received) = mpsc::unbounded_channel();
         let (updates, mut updated) = mpsc::unbounded_channel();
         let worker = tokio::spawn(run(deliverer, received, updates, Arc::new(|_| true)));
-        requests.send(NotificationRequest::Deliver(Box::new(notice("headless", "source-a")))).unwrap();
+        requests
+            .send(NotificationRequest::Deliver(Box::new(notice(
+                "headless", "source-a",
+            ))))
+            .unwrap();
         let initial = update(&mut updated).await;
         let expected_routes = if route == Route::Both { 2 } else { 1 };
         assert_eq!(initial.receipts.len(), expected_routes);
-        assert!(initial.receipts.iter().all(|r| r.outcome == DeliveryOutcome::Unknown));
+        assert!(
+            initial
+                .receipts
+                .iter()
+                .all(|r| r.outcome == DeliveryOutcome::Unknown)
+        );
         assert!(!path.exists());
         initial.persisted.send(()).unwrap();
         let delivered = update(&mut updated).await;
         assert_eq!(delivered.receipts.len(), expected_routes);
         assert_eq!(delivered.receipts[0].delivery_id, "headless");
         assert_eq!(delivered.receipts[0].route, Route::Dbus);
-        assert_eq!(delivered.receipts[0].outcome, DeliveryOutcome::NotSent("no_notification_server".into()));
+        assert_eq!(
+            delivered.receipts[0].outcome,
+            DeliveryOutcome::NotSent("no_notification_server".into())
+        );
         assert!(!delivered.state.attempts["headless"].retried);
         if route == Route::Both {
             assert_eq!(delivered.receipts[1].route, Route::Command);
