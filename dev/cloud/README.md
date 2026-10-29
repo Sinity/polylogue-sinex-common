@@ -82,10 +82,18 @@ committed dependency graph, without auto-linking a sibling common checkout.
 Use `cargo xtask link-common` explicitly when changing shared crates; that
 operation owns its patch and lock changes.
 
-Configure `BASH_ENV` to the printed absolute `env.sh` path so later Bash
-commands load the prepared tools, and have the environment's start
-instructions source it explicitly. The privileged Nix backend also keeps
-`/etc/devenv.sh` for existing profiles. `CLOUD_PREBUILD=1` builds all test
+The repository's `AGENTS.md` owns startup discovery. From the checkout root,
+source the existing `${CLOUD_PREFIX:-../.cloud}/env.sh` in every cloud command
+shell before development commands. An existing prepared prefix is reused;
+new and resumed tasks do not rerun installation just to initialize a shell.
+If the prefix is absent, choose the appropriate backend from this guide.
+
+Explicit sourcing is the supported initialization route in current Codex
+Cloud. `BASH_ENV` may point to the printed absolute `env.sh` path only where
+the provider supports that variable; it is optional. Provider startup fields
+can point to the repository instructions, which remain available in the
+checkout. The privileged Nix backend also keeps `/etc/devenv.sh` for existing
+profiles. `CLOUD_PREBUILD=1` builds all test
 binaries after fetching; the default leaves builds to the requested task.
 Run `cargo xtask` commands directly in cloud sessions. Each test run owns its
 throwaway services; no operator host services are required.

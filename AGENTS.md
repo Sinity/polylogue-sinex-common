@@ -133,12 +133,18 @@ nothing names a particular host, path or person.
 
 ## Cloud sessions and changes the products need
 
-Cloud sessions run `cargo xtask` directly without AgentCTL or operator
-services. Run `bash dev/cloud/setup.sh`; [the cloud setup guide](dev/cloud/README.md)
-owns backend selection, pinned tools, shell startup and readiness checks.
-The explicit native backend supports restricted rootless cloud runtimes;
-the default Nix backend uses the repository's development shell. Push a
-branch and open a pull request; do not merge.
+In cloud sessions, check for `${CLOUD_PREFIX:-../.cloud}/env.sh` from the
+checkout root before Cargo or other development commands. When present,
+source it in every command shell:
+
+```sh
+. "${CLOUD_PREFIX:-../.cloud}/env.sh"
+```
+
+If absent, read [the cloud setup guide](dev/cloud/README.md) before choosing
+a backend or installing tools. Preserve a resumed task's branch, commits and
+uncommitted work; sourcing initializes tools. Run `cargo xtask` directly;
+each run owns its services. Push a branch and open a pull request; do not merge.
 
 Polylogue and Sinex follow this repository's `master`, and their Cargo.lock
 pins the commit. To change a crate here together with its callers, check
