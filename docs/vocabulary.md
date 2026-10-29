@@ -78,6 +78,8 @@ mechanic and nothing else in the shared crates.
 | baseline | the matches a rule starts from, which never fire |
 | handoff | the moment a delivery leaves the evaluator |
 | delivery | the record of one firing: rule, revision, rows, channel, outcome |
+| delivery receipt | the returned outcome of one route attempt, recorded against its delivery identity |
+| attempt | one execution of a delivery route, initially unknown until a returned receipt |
 | notice, value, action | the three kinds of delivery: a message, a number written to a target, a command run |
 | interrupting, passive | a notice shown as a desktop notification, or one that waits in status and briefs |
 | interrupt budget | how many interrupting notices per hour rules not authored by the operator may cause |

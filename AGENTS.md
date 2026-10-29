@@ -33,7 +33,7 @@ in both products before changing a shared interface.
   product, from which every transport is generated; one failure table.
 - [`web-shell`](docs/web-shell.md): server-rendered HTML from typed answers,
   one TypeScript shell, one visual language.
-- [`signals`](docs/signals.md): one rule schema and evaluator, one interrupt
+- [`signals`](crates/signals/README.md): one rule schema and evaluator, one interrupt
   budget, freedesktop notifications.
 - [`devkit`](crates/devkit/README.md): the core of each product's `xtask`. It
   starts what a run needs and stops it on drop, and names its interfaces

@@ -175,6 +175,96 @@ environment) names the value targets, action commands and the notification
 route; a rule can reach only those. Quiet hours and the interrupt budget are
 changeable settings of the deliverer's product.
 
+## Rust interface and product adoption
+
+`Rule` contains only authored fields. Products stamp `ActiveRule.version`,
+`author` and `via` from their write path and set `live` when the query reads
+current state. `Rule::validate` checks deployment target and command names;
+`effective_rules` overlays authored rules on shipped defaults by product and
+name. An authored disabled revision overrides its shipped default too.
+
+`FIELDS` is the authored field table for help and schema rendering. Identity
+and authorship are separate because they must never be client supplied.
+`fires` serializes as `"on_new"`, `{"on_change":{"what":"membership","k":null}}`,
+`{"on_threshold":{"value":10,"compare":">"}}` or `{"at":{"minute":600}}`.
+Durations accept milliseconds or strings such as `20m`; quiet hours are
+`{"from":1320,"to":480}` in local civil minutes. Local times use the product's
+configured logical day, resolved through the common query language's
+`DaySetting`. `DayCalendar` is its shared adapter for both products, including
+scheduled gaps, earlier folds, skipped dates and complete quiet intervals.
+Repeated civil minutes cannot re-enter an interval whose earlier-fold end
+already passed. `Calendar` remains the test seam. Neither reads the system
+zone or environment. Duration text uses the query language's duration parser
+and must resolve to whole milliseconds, the evaluator clock's precision.
+
+A product queues a complete `Evaluation` for each watched query, with all
+pages joined in query order. Its `at` is the observation checkpoint, and each
+`Row` names the logical `Occurrence` and episode, its original observation,
+its effective start and optional end, a reference, and evidence. A new reading
+keeps that occurrence and episode. New stretches use a new episode. Delivered
+signals and injected context are marked by `Origin` and excluded before any
+mode evaluates. A complete evaluation replaces the current matches; an
+incomplete evaluation preserves them and prevents handoffs until a complete
+one arrives. A newly installed query is incomplete until its first complete
+evaluation, including scheduled rules. Numeric threshold samples use `value`.
+
+`Evaluator::advance` visits every known causal boundary; `resume` folds
+observations during downtime and hands overdue work off at the resumed
+clock. Products persist the serializable evaluator checkpoint with the
+owning query/delivery state. Revisions replace the observed baseline and
+cancel pending work; withdrawal removes it. Private intervals consume their
+observations and cancel pending outward work, including quiet-held work.
+The evaluator's deterministic delivery ID hashes the product, rule ID and
+revision, occurrence and episode. Evidence and reading IDs never enter it.
+Change and threshold crossings use evaluator episodes; scheduled rules use
+the logical day. Keep consumed triggers when rebuilding indexes.
+
+The host deliverer's one `HostPolicy` owns quiet hours, the `InterruptBudget`,
+actual handoff rate limits, pending intents and consumed delivery IDs. Persist
+it atomically with emitted deliveries. `Evaluator::advance` and `resume` apply
+this policy for a standalone product. Runtime wakeups combine the evaluator's
+and host policy's `next_due`; neither is a polling interval.
+
+In primary mode Polylogue uses the trusted `EvaluationMode::Forward`, which
+emits `FiredIntent`s and spends no host budget. Sinex submits those intents to
+its one `HostPolicy`, alongside its own local rules. Its `EvaluationMode::Local`
+receives a trusted forwarded-condition callback for other products; its own
+conditions use `Evaluator::condition`. The callback returns `Matching`,
+`Ended` or `Incomplete`, checking enabled revision, current condition and source
+freshness. Incomplete intents wait; ended intents are consumed without an
+outward handoff. These modes are Rust runtime choices and cannot be supplied
+in an authored rule or deserialized from a client request. The forwarding
+adapter obtains authorship from authenticated product context. Duplicate
+submissions preserve the first immutable basis and cannot consume the host
+budget twice, including after a checkpoint restore. Commit the source evaluator
+checkpoint and forwarded intent to its durable outbox together; commit the host
+policy checkpoint and emitted delivery together. Transport retries reuse that
+intent identity. The desktop worker then owns per-route attempt receipts under
+the same identity.
+
+Products execute `value` and `action` handoffs through the configured target
+and command, outside their writer. The action reference is the last command
+argument. No signal command is an agent launch.
+
+A durable effect starts with an unknown `DeliveryReceipt`. The desktop
+`notifications::Deliverer` additionally persists `NotificationState` and
+per-route `NotificationReceipt`s. Call `begin`, commit the unknown receipts
+and state, then call `send`. Restored unknown attempts cannot become eligible
+for a send. The asynchronous `notifications::run` worker enforces this order
+with a persistence acknowledgement and handles service appearance and desktop
+protocol signals. It receives committed notices through a channel, never
+through a writer lock. Products apply returned desktop actions through their
+operation table as operator acts with `via: desktop`. The worker receives a
+current-condition callback and rechecks it before sending or retrying.
+
+When adopting, Polylogue removes its old signal evaluator and `notify-send`
+command path, maps logical sessions/notes to occurrences, and saves checkpoints
+with deliveries. Sinex maps citations to occurrences and uses the same worker
+for its own and forwarded deliveries. Both run the shared reference/law cases
+against their catalog adapters and retain the delivery outlets their product
+docs own. Rule target execution and product routing are adapters, not a second
+evaluator or notification implementation.
+
 ## Laws
 
 - **trigger-fires-once**: a trigger fires at most once, and new readings of
