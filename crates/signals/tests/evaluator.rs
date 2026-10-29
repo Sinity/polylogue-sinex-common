@@ -419,8 +419,9 @@ fn budget_shared_and_operator_exempt_at_handoff_budget_spares_operator_rules() {
             }
         );
     }
-    for author in [Author::Operator, Author::Shipped] {
+    for (index, author) in [Author::Operator, Author::Shipped].into_iter().enumerate() {
         let mut r = rule();
+        r.version.id = format!("exempt-{index}");
         r.rule.interrupt = true;
         r.author = author;
         let mut e = evaluator(
@@ -1022,4 +1023,47 @@ fn budget_spares_operator_rules_after_forwarding_and_host_rechecks_current_condi
         host.advance(at(13), &CalendarUtc, |_| Condition::Matching)
             .is_empty()
     );
+}
+#[test]
+fn rate_limit_counts_actual_handoffs_when_a_revision_lengthens_its_window() {
+    let mut r = rule();
+    r.rule.rate_limit = Some(RateLimit {
+        count: 100,
+        window: Duration(HOUR),
+    });
+    let mut source = evaluator(
+        r,
+        vec![
+            row("a", at(10), at(10), None),
+            row("b", at(12), at(12), None),
+        ],
+        at(9),
+        Policy::default(),
+    );
+    let intents = source
+        .advance_in_mode(at(12), &CalendarUtc, EvaluationMode::Forward)
+        .unwrap()
+        .intents;
+    let mut host = HostPolicy::default();
+    for intent in &intents {
+        let time = intent.delivery.at;
+        host.submit(intent.clone(), time);
+        assert_eq!(
+            host.advance(time, &CalendarUtc, |_| Condition::Matching)
+                .len(),
+            1
+        );
+    }
+    let mut revised = intents[0].clone();
+    revised.delivery.trigger.rule.revision = 2;
+    revised.delivery.trigger.occurrence.id = "c".into();
+    revised.delivery.id = revised.delivery.trigger.delivery_id();
+    revised.rate_limit = Some(RateLimit {
+        count: 2,
+        window: Duration(24 * HOUR),
+    });
+    host.submit(revised, at(13));
+    let got = host.advance(at(13), &CalendarUtc, |_| Condition::Matching);
+    assert_eq!(got[0].channel, Channel::Brief);
+    assert_eq!(got[0].downgrade, Some(Downgrade::RateLimit));
 }

@@ -258,10 +258,11 @@ async fn grouping_replaces_rule_summary_and_budget_summary() {
     let mut budget = notice("budget-1", "source-a");
     budget.interrupt = false;
     budget.budget_passive_count = Some(1);
-    let budget1 = send(&mut deliverer, budget.clone()).await;
-    budget.delivery_id = "budget-2".into();
-    budget.budget_passive_count = Some(2);
-    let budget2 = send(&mut deliverer, budget).await;
+    let budget1 = send(&mut deliverer, budget).await;
+    let mut budget_update = notice("budget-2", "source-a");
+    budget_update.interrupt = false;
+    budget_update.budget_passive_count = Some(2);
+    let budget2 = send(&mut deliverer, budget_update).await;
     assert_eq!(budget1[0].notification_id, budget2[0].notification_id);
     assert!(deliverer.state.attempts["a"].active);
     let calls = records.calls.lock().unwrap().clone();
@@ -273,6 +274,7 @@ async fn grouping_replaces_rule_summary_and_budget_summary() {
         calls[4].summary,
         "2 notices held passive (interrupt budget spent)"
     );
+    assert!(calls[4].body.ends_with("example read notice:budget-2"));
     assert_eq!(calls[2].urgency, 2);
     assert_eq!(calls[2].expire, 0);
     let shrink = deliverer.cancel("b").await;
@@ -287,6 +289,20 @@ async fn grouping_replaces_rule_summary_and_budget_summary() {
     assert_eq!(
         deliverer.state.attempts["budget-2"].notification_id,
         budget2[0].notification_id
+    );
+    let summary_open = deliverer.desktop_event(
+        second[0].notification_id.unwrap(),
+        DesktopEvent::OpenReference {
+            reference: String::new(),
+        },
+    );
+    assert_eq!(summary_open.len(), 1);
+    assert_eq!(summary_open[0].delivery_id, "c");
+    assert_eq!(
+        summary_open[0].event,
+        Some(DesktopEvent::OpenReference {
+            reference: "https://example.invalid/notices/c".into()
+        })
     );
     let budget_open = deliverer.desktop_event(
         budget2[0].notification_id.unwrap(),

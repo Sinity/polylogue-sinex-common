@@ -233,7 +233,11 @@ outward handoff. These modes are Rust runtime choices and cannot be supplied
 in an authored rule or deserialized from a client request. The forwarding
 adapter obtains authorship from authenticated product context. Duplicate
 submissions preserve the first immutable basis and cannot consume the host
-budget twice, including after a checkpoint restore.
+budget twice, including after a checkpoint restore. Commit the source evaluator
+checkpoint and forwarded intent to its durable outbox together; commit the host
+policy checkpoint and emitted delivery together. Transport retries reuse that
+intent identity. The desktop worker then owns per-route attempt receipts under
+the same identity.
 
 Products execute `value` and `action` handoffs through the configured target
 and command, outside their writer. The action reference is the last command

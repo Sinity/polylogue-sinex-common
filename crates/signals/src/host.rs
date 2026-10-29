@@ -114,14 +114,12 @@ impl HostPolicy {
                 serde_json::to_string(&(&delivery.trigger.rule.product, &delivery.trigger.rule.id))
                     .expect("rule key");
             let sent = self.sent.entry(key).or_default();
-            if let Some(limit) = intent.rate_limit.as_ref() {
-                sent.retain(|sent| at.saturating_sub(*sent) < limit.window.0);
-            }
-            if intent
-                .rate_limit
-                .as_ref()
-                .is_some_and(|limit| sent.len() >= limit.count)
-            {
+            if intent.rate_limit.as_ref().is_some_and(|limit| {
+                sent.iter()
+                    .filter(|sent| at.saturating_sub(**sent) < limit.window.0)
+                    .count()
+                    >= limit.count
+            }) {
                 delivery.channel = Channel::Brief;
                 delivery.downgrade = Some(Downgrade::RateLimit);
             } else {
