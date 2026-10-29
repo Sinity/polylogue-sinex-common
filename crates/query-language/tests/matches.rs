@@ -355,8 +355,8 @@ fn selections_preserve_the_actual_relation_qualifier_and_declared_shape() {
             );
             let text = format!("{entering} | matches | where probe > 0");
             assert_eq!(
-                matches_requirements(&text, &catalog).unwrap(),
-                [source.clone()]
+                matches_requirements(&text, &catalog).unwrap().as_slice(),
+                std::slice::from_ref(&source)
             );
             bind(&parse(&text, &catalog).unwrap(), &catalog).unwrap();
         }
