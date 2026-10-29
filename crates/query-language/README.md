@@ -240,3 +240,7 @@ its own laws.
   are neither skipped nor repeated.
 
 Completion inside an unfinished quoted field value offers only declared catalog values. Replacements include the literal quotes and escapes and use UTF-8 byte spans; applying a candidate preserves the value as data. Grouped output includes the implicit numeric `count` alongside its group keys before any explicit aggregation, for filtering, sorting and completion.
+
+Declared neutral builtin key functions are case-insensitive at their function-call position and are stored under their registered spelling (`DAY(when)` becomes `day(when)`). Builtin declarations with colliding case-insensitive names are ambiguous. Field names, scalar data, saved identities and product extension names retain their declared case. Boolean operators remain `AND`, `OR` and `NOT`; an unknown colon field such as `TODO:` is a typed field error, while `"TODO:"` is text.
+
+Saved and kept reference prefixes accept optional whitespace around the colon (`QUERY : name`, `result: name`), including quoted names. Canonical formatting remains `query:name` and `result:name`. Parsing and completion share these tokens and preserve original UTF-8 byte spans.

@@ -385,3 +385,34 @@ fn mixed_sequences_bind_each_scopes_own_relation_domain() {
         query_language::identity::normal_form(&parsed, &catalog).unwrap()
     );
 }
+
+#[test]
+fn both_product_catalogs_share_builtin_spelling_and_reference_spacing() {
+    use query_language::{format::format_query, identity::question_id};
+    use std::collections::BTreeMap;
+    for catalog in [support::polylogue(), support::sinex()] {
+        let unit = catalog
+            .units
+            .iter()
+            .find(|unit| unit.main_time.is_some())
+            .unwrap();
+        let time = unit.main_time.as_ref().unwrap();
+        let lower = parse(&format!("{} | group by day({time})", unit.name), &catalog).unwrap();
+        let upper = parse(&format!("{} | group by DAY({time})", unit.name), &catalog).unwrap();
+        assert_eq!(
+            question_id(&lower, &catalog, &BTreeMap::new()).unwrap(),
+            question_id(&upper, &catalog, &BTreeMap::new()).unwrap()
+        );
+        for (attached, spaced) in [
+            ("query:Case", "QUERY : Case"),
+            ("result:Case", "RESULT : Case"),
+        ] {
+            let a = parse(attached, &catalog).unwrap();
+            let b = parse(spaced, &catalog).unwrap();
+            assert_eq!(
+                format_query(&a, &catalog).unwrap(),
+                format_query(&b, &catalog).unwrap()
+            );
+        }
+    }
+}
