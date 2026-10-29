@@ -27,7 +27,8 @@ fresh random salt per encoding; the nonce is the frame index, and each frame's
 associated data binds its position, its lengths and the blob's frame table, so
 a frame moved, cut short or swapped fails authentication. A BLAKE3 hash of the
 ciphertext lets integrity be checked without the key. No plaintext of a
-sealed blob reaches the disk.
+sealed blob reaches the disk. The naming key uses HKDF-SHA256 with the
+`hashed-blobs name v1` context, preserving byte identities across encodings.
 
 An **extent** is the byte range in one segment that holds one blob's frames.
 A product's rows cite extents; a list of extents read in order is one stream.
@@ -82,7 +83,9 @@ against another blob, and there is no second file-per-blob layout to read.
   never returned, and a damaged extent is never replaced by bytes from
   elsewhere.
 - Sealed reads take the data key from the caller for the duration of the read.
-  Nothing decrypted is cached between calls.
+  A reader holds at most its current decoded frame. Decrypted frames stay
+  within that reader and are dropped with it; a cancellation callback runs
+  before each read and seek. No plaintext is shared between readers.
 - Reads never block the writer: committed extents never move, so a reader
   needs no lock beyond the segment file it holds open.
 
@@ -112,6 +115,73 @@ damaged extent is restored from a backup by the operator.
 - its durability order around these steps (where derived stores and source
   positions are saved).
 
+## Rust API and durability order
+
+`Preparation::new(scratch)` creates anonymous scratch files, independently of
+any store. `plain(Read, level)` and `sealed(Read + Seek, level, &DataKey)`
+return `Prepared`; their checked forms accept cancellation callbacks. The
+sealed input is read twice from its current position, with its identity
+checked across passes. Only encrypted frames reach the scratch file.
+Dropping a preparation closes its already unlinked file. Preparation never
+syncs a blob separately. Frame size defaults to 4 MiB.
+
+A product opens `SegmentWriter::open(root, segment, committed_end, punches,
+mode)`. The segment identifier is a relative path below `root`. The writer
+holds an exclusive file lock until it and its sync thread close. Readers
+hold separate file descriptors and take no lock.
+
+```rust,ignore
+let pending = writer.append_group(prepared, |hash| product_index.lookup(hash))?;
+// Preparation of another group can proceed while the dedicated worker syncs.
+let group = pending.wait()?;
+product_database.commit(&group.extents, group.end)?;
+writer.acknowledge(&group)?;
+```
+
+The returned extents have the same order and multiplicity as the inputs;
+deduplication returns an existing descriptor. The database commits the full
+descriptors and the group's end together with the rows referring to them.
+`Extent::encode` and `Extent::decode` provide a binary column representation.
+Acknowledgments must follow append order. An append or sync failure stops
+further appends; the product reopens at its database's committed end.
+Dropping a pending handle cannot commit its bytes. The product retains the
+recorded punch list until its own retention policy allows removing it.
+
+`Reader::new(root)` addresses every operation by `&[Extent]`. `read` verifies
+each blob's whole plain or keyed name before returning a value. `open` and
+`open_checked` return a `BlobReader` implementing `Read + Seek`;
+`read_range` decodes only intersecting frames.
+`open_checked_with_limits` accepts operation-specific `ReadLimits` for
+encoded index size and frame size, checked before allocating those buffers. Each descriptor authenticates
+the frame index, including the blob name; each frame has a digest, and
+sealed frames also authenticate their position and a commitment to the complete
+length table. That commitment is computed once, so encoding and reading stay
+linear in the frame count.
+Plain extents end in the standard zstd seek table and decode with stock
+zstd. No range read needs a scan or hash lookup. `stats` reports decoded
+frames, decoded bytes, encoded bytes and index bytes.
+
+`Reader::scan` takes the product's complete list of live committed extents.
+It checks encoded digests and frame indices, decodes plain frames and checks
+plain names. Sealed frames are checked by their ciphertext digests without
+requiring keys. It returns all mismatches and opens files read only.
+`scan_checked` additionally accepts cancellation. Recorded punched extents
+are excluded from the live scan list by the product.
+
+`PaxArchive::open(reader)` indexes a tar stream without reading dense member
+bodies. `members` retains raw byte names and link names, mode, ownership,
+nanosecond timestamps, all PAX fields, xattrs, ACLs and GNU sparse maps
+(versions 0.0, 0.1 and 1.0). `read_range` and `read_range_into` expose a
+member's logical bytes, including zero-filled holes. Link entries retain
+their own payload and metadata; extraction and link policy belong to the
+product. `header_offset` and `data_offset` anchor original stream bytes.
+
+`cargo run -p hashed-blobs --example group_metrics -- 10000` reports material
+throughput, group count, input bytes, appended bytes and byte amplification
+with a one-second group cadence. These synthetic figures qualify the shared
+container. Product first-build amplification is measured by the product's
+integration run.
+
 ## Laws
 
 - **crash-leaves-only-a-tail**: killing the writer at every point between
@@ -139,6 +209,7 @@ damaged extent is restored from a backup by the operator.
   frame-table entry fails authentication on read.
 - **sealed-check-without-key**: the scan detects damage to a sealed blob
   without its key.
-- **pax-members-match-gnu-tar**: every member read through the crate equals
-  GNU tar's extraction of the same stream, including byte names, extended
-  attributes, ACLs and sparse maps.
+- **pax-members-match-gnu-tar**: members in GNU-produced streams and current directory captures equal GNU
+  tar's extraction, including byte names, extended attributes, ACLs and sparse
+  maps. Independent byte-range oracles establish the logical bytes of
+  arbitrary sparse extent maps.
