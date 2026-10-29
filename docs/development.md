@@ -27,6 +27,14 @@ remains the full native check. Database service tools stay in the shell:
 PostgreSQL 18 with TimescaleDB and pgvector, and NATS. DBus and the frontend
 tools support the existing notification and browser checks.
 
+The shell installs this checkout's Git hooks when `core.hooksPath` is unset.
+An explicitly configured hook path is preserved. The hooks check staged
+whitespace and staged Rust formatting before a commit. Before a push they check
+Rust formatting when Rust build inputs changed. They use the loaded shell's
+tools when available, or enter the declared shell. Clippy and tests remain in
+the native full check. Timezone tests use the shell's declared tzdata,
+and notification tests start their own configured private D-Bus service.
+
 `nix fmt` uses nixfmt. The shell also provides cargo-llvm-cov, cargo-fuzz,
 cargo-deny, mold, sqlite and jq. Coverage uses the LLVM tools from the declared
 Rust toolchain.

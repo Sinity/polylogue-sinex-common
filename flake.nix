@@ -76,6 +76,7 @@
               pkgs.dbus
             ];
             doInstallCargoArtifacts = false;
+            TZDIR = "${pkgs.tzdata}/share/zoneinfo";
             preCheck = ''
               export XDG_STATE_HOME="$TMPDIR/state"
             '';
@@ -118,9 +119,16 @@
           pkgs.esbuild
         ];
         CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
+        TZDIR = "${pkgs.tzdata}/share/zoneinfo";
         RUST_SRC_PATH = "${toolchain}/lib/rustlib/src/rust/library";
         LLVM_COV = "${toolchain}/lib/rustlib/${system}/bin/llvm-cov";
         LLVM_PROFDATA = "${toolchain}/lib/rustlib/${system}/bin/llvm-profdata";
+        shellHook = ''
+          if [ -d .githooks ] && git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+            && ! git config --get core.hooksPath >/dev/null; then
+            git config --local core.hooksPath .githooks
+          fi
+        '';
       };
     };
 }
