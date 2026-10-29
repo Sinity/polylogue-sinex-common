@@ -233,3 +233,5 @@ its own laws.
   past its read position is `stale_cursor`.
 - **cursor-keeps-rows**: rows whose order key did not change between pages
   are neither skipped nor repeated.
+
+Completion inside an unfinished quoted field value offers only declared catalog values. Replacements include the literal quotes and escapes and use UTF-8 byte spans; applying a candidate preserves the value as data. Grouped output includes the implicit numeric `count` alongside its group keys before any explicit aggregation, for filtering, sorting and completion.

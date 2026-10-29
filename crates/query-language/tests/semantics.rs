@@ -538,3 +538,36 @@ compiler_law!(three_valued_filters, "three-valued-filters");
 compiler_law!(grouped_rows_are_a_relation, "grouped-rows-are-a-relation");
 compiler_law!(match_order_independent, "join-match-order-independent");
 compiler_law!(page_is_not_the_answer, "page-is-not-the-answer");
+
+#[test]
+fn parsed_grouped_implicit_count_can_filter_and_sort_in_both_catalogs() {
+    for (catalog, unit, field) in [
+        (support::polylogue(), "sessions", "origin"),
+        (support::sinex(), "events", "kind"),
+    ] {
+        let data = BTreeMap::from([(
+            unit.into(),
+            vec![
+                Row::new("a").with(field, "same"),
+                Row::new("b").with(field, "same"),
+                Row::new("c").with(field, "other"),
+            ],
+        )]);
+        let parsed = query_language::parse::parse(
+            &format!("{unit} | group by {field} | where count > 1 | sort by count desc"),
+            &catalog,
+        )
+        .unwrap();
+        let answer = ReferenceEvaluator { data: &data }.execute(&parsed).unwrap();
+        assert_eq!(answer.rows.len(), 1);
+        assert_eq!(answer.rows[0].value(field), Scalar::Text("same".into()));
+        assert_eq!(answer.rows[0].value("count"), Scalar::Number(2.));
+        assert!(
+            query_language::parse::parse(
+                &format!("{unit} | group by {field} | where absent > 1"),
+                &catalog
+            )
+            .is_err()
+        );
+    }
+}

@@ -169,3 +169,95 @@ fn closed_literal_completion_respects_custom_unknown_words_and_calendar_keywords
         assert!(matches!(value,Value::Scalar{text,..} if text==literal));
     }
 }
+
+#[test]
+fn declared_values_complete_inside_open_quotes_with_escaped_replacements() {
+    use query_language::{
+        ast::{ConditionKind, Source, Value},
+        parse::parse,
+    };
+    for (mut catalog, unit, field) in [
+        (support::polylogue(), "sessions", "origin"),
+        (support::sinex(), "runs", "status"),
+    ] {
+        catalog
+            .units
+            .iter_mut()
+            .find(|u| u.name == unit)
+            .unwrap()
+            .fields
+            .iter_mut()
+            .find(|f| f.name == field)
+            .unwrap()
+            .values = vec![
+            "two words".into(),
+            r#"a"quote\path"#.into(),
+            "λ value".into(),
+        ];
+        for (prefix, wanted) in [
+            (format!("{unit} where {field}:\"two"), "two words"),
+            (format!("{unit} where {field} = \"two"), "two words"),
+            (format!("{unit} where {field}:\"λ"), "λ value"),
+            (format!(r#"{unit} where {field}:"a\"q"#), r#"a"quote\path"#),
+        ] {
+            let completion = complete(&prefix, prefix.len(), &catalog)
+                .into_iter()
+                .find(|c| c.kind == query_language::complete::CompletionKind::Value)
+                .unwrap();
+            assert_eq!(completion.replace.start, prefix.find('"').unwrap());
+            assert_eq!(completion.replace.end, prefix.len());
+            let applied = format!(
+                "{}{}",
+                &prefix[..completion.replace.start],
+                completion.value
+            );
+            let parsed = parse(&applied, &catalog).unwrap();
+            let Source::Unit {
+                condition: Some(condition),
+                ..
+            } = parsed.source
+            else {
+                panic!("missing condition")
+            };
+            let value = match condition.kind {
+                ConditionKind::Match { value, .. } | ConditionKind::Compare { value, .. } => value,
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(
+                value,
+                Value::Scalar {
+                    text: wanted.into(),
+                    quoted: true
+                }
+            );
+        }
+        let text = format!("{unit} where {field}:\"two wo\"");
+        let cursor = text.find("two").unwrap() + 3;
+        let completion = complete(&text, cursor, &catalog)
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(completion.replace.end, text.len());
+        let applied = format!(
+            "{}{}{}",
+            &text[..completion.replace.start],
+            completion.value,
+            &text[completion.replace.end..]
+        );
+        assert!(parse(&applied, &catalog).is_ok());
+    }
+}
+
+#[test]
+fn grouped_completion_includes_implicit_count_before_explicit_aggregation() {
+    assert!(
+        values(
+            "sessions | group by origin | where co",
+            &support::polylogue()
+        )
+        .contains(&"count".into())
+    );
+    assert!(
+        values("events | group by kind | sort by co", &support::sinex()).contains(&"count".into())
+    );
+}

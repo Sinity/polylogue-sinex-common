@@ -1524,7 +1524,12 @@ impl Parser<'_> {
                     }
                 }
                 scope.bucketed=keys.iter().any(|k|matches!(k,Operand::Function{name,..} if matches!(name.as_str(),"day"|"hour"|"week"|"month")));
-                scope.columns = Some(keys.iter().map(Operand::column).collect());
+                scope.columns = Some(
+                    keys.iter()
+                        .map(Operand::column)
+                        .chain(std::iter::once("count".into()))
+                        .collect(),
+                );
                 StageKind::Group { keys }
             }
             "agg" => {

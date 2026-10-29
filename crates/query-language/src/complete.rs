@@ -34,9 +34,9 @@ pub fn complete(text: &str, position: usize, catalog: &Catalog) -> Vec<Completio
         .map_or(0, |(i, c)| i + c.len_utf8());
     let fragment = &prefix[start..];
     let before = &prefix[..start];
-    // Quotes contain data; syntax completion does not invent words within them.
-    if unclosed_quote(prefix) {
-        return Vec::new();
+    // Within a quoted value, only product-declared values can complete.
+    if let Some(open) = open_quote(prefix) {
+        return quoted_values(text, end, open, catalog);
     }
     let (unit, fields) = context(before, catalog);
     let mut out = Vec::new();
@@ -178,19 +178,83 @@ pub fn complete(text: &str, position: usize, catalog: &Catalog) -> Vec<Completio
     out.dedup_by(|a, b| a.value == b.value && a.replace == b.replace);
     out
 }
-fn unclosed_quote(text: &str) -> bool {
-    let mut quote = false;
+fn open_quote(text: &str) -> Option<usize> {
+    let mut quote = None;
     let mut escaped = false;
-    for c in text.chars() {
+    for (at, c) in text.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' && quote.is_some() {
+            escaped = true;
+        } else if c == '"' {
+            quote = if quote.is_some() { None } else { Some(at) };
+        }
+    }
+    quote
+}
+
+fn quoted_values(text: &str, cursor: usize, open: usize, catalog: &Catalog) -> Vec<Completion> {
+    let before = &text[..open];
+    let words: Vec<_> = before.split_whitespace().collect();
+    let last = words.last().copied().unwrap_or("");
+    let field = set_field(before)
+        .or_else(|| last.strip_suffix(':'))
+        .or_else(|| {
+            ["=", "!=", ">", ">=", "<", "<=", "~", "^", "between"]
+                .contains(&last)
+                .then(|| words.iter().rev().nth(1).copied())
+                .flatten()
+        });
+    let (unit, _) = context(before, catalog);
+    let Some(spec) = field.and_then(|field| catalog.field(&unit, field)) else {
+        return Vec::new();
+    };
+    let mut partial = String::new();
+    let mut escaped = false;
+    for c in text[open + 1..cursor].chars() {
+        if escaped {
+            partial.push(match c {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                other => other,
+            });
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else {
+            partial.push(c);
+        }
+    }
+    if escaped {
+        partial.push('\\');
+    }
+    let mut end = cursor;
+    let mut escaped = false;
+    for (offset, c) in text[open + 1..].char_indices() {
         if escaped {
             escaped = false;
         } else if c == '\\' {
             escaped = true;
         } else if c == '"' {
-            quote = !quote;
+            end = open + 1 + offset + 1;
+            break;
         }
     }
-    quote
+    let mut values: Vec<_> = spec
+        .values
+        .iter()
+        .filter(|value| value.starts_with(&partial))
+        .map(|value| Completion {
+            value: crate::format::quote(value),
+            replace: Span { start: open, end },
+            kind: CompletionKind::Value,
+            help: spec.help.clone(),
+        })
+        .collect();
+    values.sort_by(|a, b| a.value.cmp(&b.value));
+    values.dedup_by(|a, b| a.value == b.value);
+    values
 }
 fn context(text: &str, catalog: &Catalog) -> (String, Vec<(String, String)>) {
     use crate::ast::{Source, StageKind};
@@ -295,7 +359,12 @@ fn context(text: &str, catalog: &Catalog) -> (String, Vec<(String, String)>) {
                     columns = None;
                 }
                 StageKind::Group { keys } => {
-                    columns = Some(keys.iter().map(|key| key.column()).collect())
+                    columns = Some(
+                        keys.iter()
+                            .map(|key| key.column())
+                            .chain(std::iter::once("count".into()))
+                            .collect(),
+                    )
                 }
                 StageKind::Aggregate { aggregates } => {
                     let c = columns.get_or_insert_with(Vec::new);
