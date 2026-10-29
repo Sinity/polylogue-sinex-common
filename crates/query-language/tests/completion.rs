@@ -491,3 +491,287 @@ fn nested_implicit_completion_uses_saved_actual_row_domain_and_defers_unknown_do
         );
     }
 }
+
+#[test]
+fn requirements_load_active_source_schema_before_its_value_section() {
+    use query_language::{
+        catalog::{Field, OutputSchema, OutputSource, SourceOutput},
+        complete::{ValueRequirement, requirements},
+    };
+    for (mut catalog, unit) in [
+        (support::polylogue(), "tool_calls"),
+        (support::sinex(), "commands"),
+    ] {
+        let text = "query:failing | where promoted_alias:pre";
+        let source = OutputSource::Saved {
+            name: "failing".into(),
+            arguments: vec![],
+        };
+        let missing = requirements(text, text.len(), &catalog);
+        assert_eq!(missing.sources, [source.clone()]);
+        assert!(missing.value.is_none());
+        catalog.source_outputs.push(SourceOutput {
+            source: source.clone(),
+            schema: OutputSchema {
+                unit: Some(unit.into()),
+                main_time: None,
+                fields: vec![Field {
+                    name: "promoted_alias".into(),
+                    values: vec!["prefix value".into()],
+                    ..Field::default()
+                }],
+            },
+        });
+        let loaded = requirements(text, text.len(), &catalog);
+        assert_eq!(loaded.sources, [source]);
+        assert_eq!(
+            loaded.value,
+            Some(ValueRequirement {
+                unit: Some(unit.into()),
+                field: "promoted_alias".into(),
+                prefix: "pre".into()
+            })
+        );
+        assert!(loaded.reference.is_none());
+        assert!(values(text, &catalog).contains(&"\"prefix value\"".into()));
+    }
+}
+
+#[test]
+fn requirements_decode_quotes_and_stop_at_the_byte_cursor_in_every_value_position() {
+    use query_language::{
+        catalog::{Field, OutputSchema, OutputSource, SourceOutput},
+        complete::requirements,
+    };
+    let mut catalog = support::polylogue();
+    catalog.source_outputs.push(SourceOutput {
+        source: OutputSource::Saved {
+            name: "failing".into(),
+            arguments: vec![],
+        },
+        schema: OutputSchema {
+            unit: Some("tool_calls".into()),
+            main_time: None,
+            fields: vec![Field {
+                name: "session.repo".into(),
+                ..Field::default()
+            }],
+        },
+    });
+    for (text, cursor, expected) in [
+        (
+            "query:failing | where session.repo:λtail",
+            "query:failing | where session.repo:λ".len(),
+            "λ",
+        ),
+        (
+            "query:failing | where session.repo = λtail",
+            "query:failing | where session.repo = λ".len(),
+            "λ",
+        ),
+        (
+            "query:failing | where session.repo:(λtail)",
+            "query:failing | where session.repo:(λ".len(),
+            "λ",
+        ),
+        (
+            r#"query:failing | where session.repo:"a\"quote tail" | sort by id"#,
+            r#"query:failing | where session.repo:"a\"q"#.len(),
+            "a\"q",
+        ),
+        (
+            r#"query:failing | where session.repo = "line\nλ tail""#,
+            r#"query:failing | where session.repo = "line\nλ"#.len(),
+            "line\nλ",
+        ),
+    ] {
+        let request = requirements(text, cursor, &catalog);
+        let value = request
+            .value
+            .as_ref()
+            .unwrap_or_else(|| panic!("{text}: {request:?}"));
+        assert_eq!(value.unit.as_deref(), Some("tool_calls"));
+        assert_eq!(value.field, "session.repo");
+        assert_eq!(value.prefix, expected);
+        assert!(request.reference.is_none());
+    }
+    let text = "query:failing | where session.repo:λtail";
+    let before_lambda = text.find('λ').unwrap();
+    assert_eq!(
+        requirements(text, before_lambda + 1, &catalog)
+            .value
+            .unwrap()
+            .prefix,
+        ""
+    );
+}
+
+#[test]
+fn requirements_keep_result_parts_and_nested_source_dependencies_typed() {
+    use query_language::{
+        ast::ResultPart,
+        catalog::{Field, OutputSchema, OutputSource, SourceOutput},
+        complete::requirements,
+    };
+    let mut catalog = support::polylogue();
+    for (part, field) in [
+        (ResultPart::Rows, "row_alias"),
+        (ResultPart::Matches, "match_alias"),
+    ] {
+        catalog.source_outputs.push(SourceOutput {
+            source: OutputSource::Result {
+                reference: "result:kept".into(),
+                part,
+            },
+            schema: OutputSchema {
+                unit: Some("tool_calls".into()),
+                main_time: None,
+                fields: vec![Field {
+                    name: field.into(),
+                    ..Field::default()
+                }],
+            },
+        });
+    }
+    for (text, part, field) in [
+        (
+            "result:kept.rows | where row_alias:r",
+            ResultPart::Rows,
+            "row_alias",
+        ),
+        (
+            "result:kept.matches | where match_alias:m",
+            ResultPart::Matches,
+            "match_alias",
+        ),
+    ] {
+        let request = requirements(text, text.len(), &catalog);
+        assert_eq!(
+            request.sources,
+            [OutputSource::Result {
+                reference: "result:kept".into(),
+                part
+            }]
+        );
+        assert_eq!(request.value.unwrap().field, field);
+    }
+    let nested = "result:kept.matches | where match_alias in (outcome:er";
+    let request = requirements(nested, nested.len(), &catalog);
+    assert_eq!(
+        request.sources,
+        [OutputSource::Result {
+            reference: "result:kept".into(),
+            part: ResultPart::Matches
+        }]
+    );
+    let value = request.value.unwrap();
+    assert_eq!(value.unit.as_deref(), Some("tool_calls"));
+    assert_eq!(value.field, "outcome");
+    let literal = r#"result:"literal.matches" | where row_alias:r"#;
+    assert_eq!(
+        requirements(literal, literal.len(), &catalog).sources,
+        [OutputSource::Result {
+            reference: "result:literal.matches".into(),
+            part: ResultPart::Rows
+        }]
+    );
+}
+
+#[test]
+fn reference_requirements_are_neutral_and_replace_the_whole_middle_token() {
+    use query_language::{
+        ast::Span,
+        complete::{ReferenceRequirement, requirements},
+    };
+    let catalog = support::polylogue();
+    let text = "sessions where synthetic:native-tail | sort by id";
+    let cursor = "sessions where synthetic:nat".len();
+    let request = requirements(text, cursor, &catalog);
+    assert_eq!(
+        request.reference,
+        Some(ReferenceRequirement {
+            prefix: "synthetic:nat".into(),
+            replace: Span {
+                start: "sessions where ".len(),
+                end: "sessions where synthetic:native-tail".len()
+            }
+        })
+    );
+    assert!(request.value.is_none());
+    for text in [
+        "sessions | sort by ",
+        "sessions | fields ",
+        "sessions where origin = ",
+        "sessions where origin:\"",
+        "query:fai",
+        "sessions ",
+    ] {
+        assert!(
+            requirements(text, text.len(), &catalog).reference.is_none(),
+            "{text}"
+        );
+    }
+    let empty = requirements("", 0, &catalog);
+    assert_eq!(empty.reference.unwrap().prefix, "");
+    assert_eq!(
+        serde_json::from_value::<query_language::complete::Requirements>(
+            serde_json::to_value(&request).unwrap()
+        )
+        .unwrap(),
+        request
+    );
+}
+
+#[test]
+fn requirements_keep_group_aliases_and_exclude_stage_reference_requests() {
+    use query_language::{
+        catalog::{Field, OutputSchema, OutputSource, SourceOutput},
+        complete::requirements,
+    };
+    let mut catalog = support::sinex();
+    catalog.source_outputs.push(SourceOutput {
+        source: OutputSource::Saved {
+            name: "grouped".into(),
+            arguments: vec![],
+        },
+        schema: OutputSchema {
+            unit: Some("commands".into()),
+            main_time: None,
+            fields: vec![Field {
+                name: "promoted_alias".into(),
+                values: vec!["prefix".into()],
+                ..Field::default()
+            }],
+        },
+    });
+    for (text, field, prefix) in [
+        (
+            "query:grouped | group by promoted_alias | where promoted_alias:p",
+            "promoted_alias",
+            "p",
+        ),
+        (
+            "query:grouped | group by promoted_alias | where count > 2",
+            "count",
+            "2",
+        ),
+    ] {
+        let request = requirements(text, text.len(), &catalog);
+        assert_eq!(request.sources.len(), 1);
+        let value = request.value.unwrap();
+        assert_eq!(value.unit.as_deref(), Some("commands"));
+        assert_eq!(value.field, field);
+        assert_eq!(value.prefix, prefix);
+        assert!(request.reference.is_none());
+    }
+    for text in [
+        "events limit 1 ",
+        "events | limit 1 ",
+        "events | sort by when ",
+    ] {
+        assert!(
+            requirements(text, text.len(), &catalog).reference.is_none(),
+            "{text}"
+        );
+    }
+}
