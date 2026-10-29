@@ -137,6 +137,8 @@ establish 60-second proximity), then as its whole period; the match is marked
 coarse and ranks after precise matches. A row whose time is unknown never
 matches a time condition.
 
+A bare four-digit value denotes a calendar year (`2026` covers that configured logical year). Explicit `20:26` and `T2026` denote a local clock time. Calendar years take precedence over the underlying basic `HHMM` clock spelling; invalid or unrepresentable calendar boundaries return a typed time error.
+
 ## Cursors
 
 A cursor continues one question by key, never by offset. It holds the last

@@ -416,7 +416,11 @@ pub fn resolve(text: &str, clock: &Clock) -> Result<ResolvedTime, Error> {
         Time::Instant { at }
     } else if let Ok(dt) = text.trim().parse::<DateTime>() {
         local(dt)?
-    } else if let Ok(time) = normalized.parse::<CivilTime>() {
+    } else if !(normalized.len() == 4 && normalized.bytes().all(|byte| byte.is_ascii_digit()))
+        && let Ok(time) = normalized.parse::<CivilTime>()
+    {
+        // Basic civil-clock parsing also accepts HHMM. Four digits denote a
+        // calendar year here; explicit HH:MM and T-prefixed clocks stay clocks.
         let date = if time < day.start {
             today.tomorrow().map_err(bad)?
         } else {

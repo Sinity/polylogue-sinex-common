@@ -584,3 +584,46 @@ fn precision_catalog_vocabulary_matches_canonical_wire_values() {
         );
     }
 }
+
+#[test]
+fn four_digit_years_precede_basic_clock_parsing_with_explicit_clock_forms_preserved() {
+    let utc = Clock::new(ts("2026-10-07T10:00:00Z"), setting("Etc/UTC", "00:00"));
+    for year in ["0000", "1234", "2024", "2026", "2359"] {
+        let next = format!("{:04}", year.parse::<u16>().unwrap() + 1);
+        assert_eq!(
+            time::resolve(year, &utc).unwrap().value,
+            time::Time::Span {
+                start: ts(&format!("{year}-01-01T00:00:00Z")),
+                end: ts(&format!("{next}-01-01T00:00:00Z")),
+            },
+            "{year}"
+        );
+    }
+    let warsaw = clock();
+    assert_eq!(
+        time::resolve("2026", &warsaw).unwrap().value,
+        time::Time::Span {
+            start: ts("2026-01-01T03:00:00Z"),
+            end: ts("2027-01-01T03:00:00Z")
+        }
+    );
+    for (clock, expected) in [
+        (&utc, "2026-10-07T20:26:00Z"),
+        (&warsaw, "2026-10-07T18:26:00Z"),
+    ] {
+        for text in ["20:26", "T2026"] {
+            assert_eq!(
+                time::resolve(text, clock).unwrap().value,
+                time::Time::Instant { at: ts(expected) },
+                "{text}"
+            );
+        }
+    }
+    for invalid in ["9999", "10000", "-001", "2026.0"] {
+        assert_eq!(
+            time::resolve(invalid, &utc).unwrap_err().kind,
+            query_language::ErrorKind::BadValue,
+            "{invalid}"
+        );
+    }
+}
