@@ -313,10 +313,9 @@ impl Parser<'_> {
                 } else if let Some(selector) = self.peek()
                     && selector.span.start == end
                     && matches!(selector.text.as_str(), ".rows" | ".matches")
+                    && self.next()?.text == ".matches"
                 {
-                    if self.next()?.text == ".matches" {
-                        part = ResultPart::Matches;
-                    }
+                    part = ResultPart::Matches;
                 }
                 if id.is_empty() {
                     return Err(self.error("a kept result needs a literal identity"));
