@@ -1,3 +1,4 @@
+mod support;
 use query_language::{
     ast::*,
     bind::{BoundQuery, bind},
@@ -367,5 +368,44 @@ fn fixed_results_discard_discrete_values_and_min_preserves_them() {
     }
     for name in ["histogram_state", "avg_n", "sum_n"] {
         assert!(scope.field(name).unwrap().field.values.is_empty());
+    }
+}
+
+#[test]
+fn both_catalogs_keep_calendar_labels_and_hour_numbers_through_binding() {
+    for catalog in [support::polylogue(), support::sinex()] {
+        let unit = catalog
+            .units
+            .iter()
+            .find(|unit| unit.main_time.is_some())
+            .unwrap();
+        let time = unit.main_time.as_ref().unwrap();
+        for (function, label, kind) in [
+            ("weekday", "mon", FieldKind::Text),
+            ("month_day", "09-14", FieldKind::Text),
+            ("hour", "10", FieldKind::Integer),
+        ] {
+            let text = format!(
+                "{} | group by {function}({time}) | where {function}:{label}",
+                unit.name
+            );
+            let bound = checked(&text, &catalog);
+            let output = bound.typing().query(&NodePath::default()).unwrap().stages[0]
+                .after
+                .field(function)
+                .unwrap();
+            assert_eq!(output.field.kind, kind, "{text}");
+            let StageKind::Where { condition } = &bound.query().stages[1].kind else {
+                panic!()
+            };
+            assert!(matches!(&condition.kind, ConditionKind::Match {
+                value: Value::Scalar { text, .. }, ..
+            } if text == label));
+            let rebound = bind(bound.query(), &catalog).unwrap();
+            assert_eq!(
+                question_id(bound.query(), &catalog, &BTreeMap::new()).unwrap(),
+                question_id(rebound.query(), &catalog, &BTreeMap::new()).unwrap()
+            );
+        }
     }
 }

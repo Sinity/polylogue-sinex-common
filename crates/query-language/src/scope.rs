@@ -151,9 +151,9 @@ pub(crate) fn aggregate_kind(
 pub(crate) fn function_kind(name: &str) -> crate::catalog::FieldKind {
     use crate::catalog::FieldKind;
     match name {
-        "day" | "hour" | "week" | "month" => FieldKind::Time,
-        "weekday" | "month_day" => FieldKind::Integer,
-        "program" | "fingerprint" => FieldKind::Text,
+        "day" | "week" | "month" => FieldKind::Time,
+        "hour" => FieldKind::Integer,
+        "weekday" | "month_day" | "program" | "fingerprint" => FieldKind::Text,
         "random" => FieldKind::Number,
         _ => FieldKind::Json,
     }
