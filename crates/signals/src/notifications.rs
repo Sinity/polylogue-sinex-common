@@ -397,15 +397,16 @@ impl Deliverer {
         }
     }
 
-    /// Called on service appearance, never on a timer. Only one retry is allowed,
-    /// under the original identity, and current state is checked immediately.
+    /// Called on service appearance, never on a timer. Any explicit DBus error
+    /// may recover under a new server. Only one retry is allowed under the
+    /// original identity, and current state is checked immediately.
     pub fn server_appeared(&mut self) -> Vec<NotificationReceipt> {
         self.invalidate_server();
         let mut receipts = Vec::new();
         for (id, attempt) in &mut self.state.attempts {
             if attempt.active
                 && !attempt.retried
-                && attempt.dbus == Some(DeliveryOutcome::NotSent("no_notification_server".into()))
+                && matches!(&attempt.dbus, Some(DeliveryOutcome::NotSent(_)))
             {
                 attempt.retried = true;
                 attempt.dbus = Some(DeliveryOutcome::Unknown);
@@ -729,6 +730,8 @@ pub async fn run(
     let owner = owner_reply
         .ok()
         .and_then(|message| message.body().deserialize::<String>().ok());
+    // A missing-service result proves an appearance even if the same bus
+    // connection later reclaimed its name. Other errors require an owner change.
     let retry_waiting = deliverer.state.attempts.values().any(|a| {
         a.active
             && !a.retried

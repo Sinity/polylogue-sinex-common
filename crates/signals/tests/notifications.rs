@@ -71,6 +71,7 @@ struct Records {
     closed: Arc<Mutex<Vec<u32>>>,
     entered: Arc<tokio::sync::Notify>,
     stall: Arc<std::sync::atomic::AtomicBool>,
+    reject: Arc<std::sync::atomic::AtomicBool>,
 }
 struct FakeServer {
     records: Records,
@@ -97,7 +98,7 @@ impl FakeServer {
         actions: Vec<String>,
         hints: HashMap<String, OwnedValue>,
         expire: i32,
-    ) -> u32 {
+    ) -> zbus::fdo::Result<u32> {
         let id = {
             let mut calls = self.records.calls.lock().unwrap();
             calls.push(Call {
@@ -120,10 +121,13 @@ impl FakeServer {
             }
         };
         self.records.entered.notify_one();
+        if self.records.reject.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(zbus::fdo::Error::Failed("synthetic notification refusal".into()));
+        }
         if self.stall || self.records.stall.load(std::sync::atomic::Ordering::SeqCst) {
             std::future::pending::<()>().await;
         }
-        id
+        Ok(id)
     }
     fn close_notification(&self, id: u32) {
         self.records.closed.lock().unwrap().push(id);
@@ -826,4 +830,58 @@ async fn failed_replacement_keeps_prior_notification_actionable_until_condition_
         [first[0].notification_id.unwrap()]
     );
     assert!(deliverer.server_appeared().is_empty());
+}
+
+
+#[tokio::test]
+async fn explicit_dbus_error_retries_on_new_owner_but_not_same_server_restart() {
+    let bus = PrivateBus::start();
+    let refused = Records::default();
+    refused.reject.store(true, std::sync::atomic::Ordering::SeqCst);
+    let old_server = bus.server(FakeServer { records: refused.clone(), actions: true, stall: false }).await;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("notice.json");
+    let mut configured = config();
+    configured.route = Route::Both;
+    configured.command = Some(RouteCommand { program: "sh".into(), arguments: vec![
+        "-c".into(), "cat >> \"$1\"".into(), "notice-route".into(), path.to_string_lossy().into_owned()] });
+    let mut initial = Deliverer::new(bus.connect().await, configured.clone(), NotificationState::default());
+    let sent = send(&mut initial, notice("a", "source-a")).await;
+    assert!(matches!(&sent[0].outcome, DeliveryOutcome::NotSent(reason) if reason.contains("synthetic notification refusal")));
+    assert_eq!(sent[1].outcome, DeliveryOutcome::Delivered);
+    let command_bytes = std::fs::read(&path).unwrap();
+    let checkpoint = serde_json::from_slice(&serde_json::to_vec(&initial.state).unwrap()).unwrap();
+    let restored = Deliverer::new(bus.connect().await, configured, checkpoint);
+    let (requests, received) = mpsc::unbounded_channel();
+    let (updates, mut updated) = mpsc::unbounded_channel();
+    let worker = tokio::spawn(run(restored, received, updates, Arc::new(|_| true)));
+    // This empty update is a FIFO barrier after worker startup. The same owner
+    // must retain the explicit error until the service actually reappears.
+    requests.send(NotificationRequest::Clear("absent".into())).unwrap();
+    let barrier = tokio::time::timeout(Duration::from_secs(5), updated.recv()).await.unwrap().unwrap();
+    assert!(barrier.receipts.is_empty());
+    assert!(!barrier.state.attempts["a"].retried);
+    assert_eq!(barrier.state.attempts["a"].dbus, Some(sent[0].outcome.clone()));
+    barrier.persisted.send(()).unwrap();
+    assert_eq!(refused.calls.lock().unwrap().len(), 1);
+    old_server.release_name("org.freedesktop.Notifications").await.unwrap();
+    let accepted = Records::default();
+    let _new_server = bus.server(FakeServer { records: accepted.clone(), actions: true, stall: false }).await;
+    let retry = update(&mut updated).await;
+    assert_eq!(retry.receipts.len(), 1);
+    assert_eq!(retry.receipts[0].delivery_id, "a");
+    assert_eq!(retry.receipts[0].route, Route::Dbus);
+    assert_eq!(retry.receipts[0].outcome, DeliveryOutcome::Unknown);
+    retry.persisted.send(()).unwrap();
+    let delivered = update(&mut updated).await;
+    assert_eq!(delivered.receipts.len(), 1);
+    assert_eq!(delivered.receipts[0].delivery_id, "a");
+    assert_eq!(delivered.receipts[0].outcome, DeliveryOutcome::Delivered);
+    assert!(delivered.state.attempts["a"].retried);
+    assert_eq!(delivered.state.attempts["a"].command, Some(DeliveryOutcome::Delivered));
+    delivered.persisted.send(()).unwrap();
+    assert_eq!(accepted.calls.lock().unwrap().len(), 1);
+    assert_eq!(std::fs::read(path).unwrap(), command_bytes);
+    drop(requests);
+    worker.await.unwrap().unwrap();
 }
