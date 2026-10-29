@@ -45,8 +45,9 @@ in both products before changing a shared interface.
 ## Building and testing
 
 Enter the development shell with `direnv allow` (the `.envrc` loads the
-flake) or `nix develop`. It carries the Rust toolchain, nextest, PostgreSQL
-and `nats-server`.
+flake) or `nix develop`. The flake reads `rust-toolchain.toml`, the same pin
+rustup uses; it also carries nextest, PostgreSQL and `nats-server`.
+[Development](docs/development.md) owns local overrides and plain commands.
 
 | Command | Does |
 |---|---|

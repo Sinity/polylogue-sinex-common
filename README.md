@@ -39,6 +39,9 @@ can take a new commit of this repository on its own schedule.
 
 ## Conventions
 
+[Development](docs/development.md) describes the declared Rust toolchain,
+development shell and local overrides.
+
 - Every crate page ends with `## Laws`: one bullet per law, a stable key in
   bold, then the property and its oracle. A test that checks a law carries the
   key in its name (`cursor_refusals` for `cursor-refusals`), and
