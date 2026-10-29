@@ -72,6 +72,7 @@ fn query(unit: &str, condition: Option<Condition>, stages: Vec<Stage>) -> Query 
     Query {
         source: Source::Unit {
             unit: unit.into(),
+            implicit: false,
             condition,
         },
         attach: vec![],

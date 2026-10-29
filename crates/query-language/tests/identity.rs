@@ -47,6 +47,7 @@ fn query(conditions: Vec<Condition>) -> Query {
     Query {
         source: Source::Unit {
             unit: "events".into(),
+            implicit: false,
             condition: Some(Condition {
                 span: Span::default(),
                 kind: ConditionKind::And { conditions },
@@ -190,6 +191,7 @@ fn duration_gap_spellings_and_catalog_unknown_words_share_identity() {
     let sequence = |duration| Query {
         source: Source::Unit {
             unit: "events".into(),
+            implicit: false,
             condition: Some(Condition {
                 span: Span::default(),
                 kind: ConditionKind::Sequence {

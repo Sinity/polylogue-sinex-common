@@ -24,13 +24,18 @@ pub fn bind(query: &Query, catalog: &Catalog) -> Result<BoundQuery, Error> {
     for (index, output) in catalog.source_outputs.iter().enumerate() {
         if catalog.source_outputs[..index]
             .iter()
-            .any(|other| other.source == output.source)
+            .any(|other| crate::catalog::same_output_source(&other.source, &output.source))
         {
             return Err(Error::new(
                 ErrorKind::Ambiguous,
                 "duplicate source output schema",
                 0,
             ));
+        }
+        if let Some(unit) = &output.schema.unit
+            && catalog.unit(unit).is_none()
+        {
+            return Err(unbound(format!("output row domain {unit:?}")));
         }
         let mut names = BTreeSet::new();
         for field in &output.schema.fields {
@@ -57,10 +62,15 @@ pub fn bind(query: &Query, catalog: &Catalog) -> Result<BoundQuery, Error> {
     }
     let text = crate::format::render_query(query, catalog)?;
     let query = crate::parse::parse(&text, catalog)?;
-    check_query(&query)?;
+    check_query(&query, catalog)?;
     Ok(BoundQuery { query })
 }
-fn check_query(query: &Query) -> Result<(), Error> {
+fn check_query(query: &Query, catalog: &Catalog) -> Result<(), Error> {
+    if let Source::Unit { unit, .. } = &query.source
+        && catalog.unit(unit).is_none()
+    {
+        return Err(unbound(format!("implicit row domain {unit:?}")));
+    }
     match &query.source {
         Source::Saved {
             output: OutputBinding::Deferred,
@@ -79,13 +89,21 @@ fn check_query(query: &Query) -> Result<(), Error> {
         | Source::RecallLast {
             condition: Some(condition),
             ..
-        } => check_condition(condition)?,
+        }
+        | Source::Saved {
+            condition: Some(condition),
+            ..
+        }
+        | Source::Result {
+            condition: Some(condition),
+            ..
+        } => check_condition(condition, catalog)?,
         _ => {}
     }
     for attachment in &query.attach {
         for window in &attachment.windows {
             if let Window::Where(condition) = window {
-                check_condition(condition)?;
+                check_condition(condition, catalog)?;
             }
         }
     }
@@ -95,11 +113,11 @@ fn check_query(query: &Query) -> Result<(), Error> {
             | StageKind::Scope {
                 condition: Some(condition),
                 ..
-            } => check_condition(condition)?,
+            } => check_condition(condition, catalog)?,
             StageKind::Combine { query, .. } | StageKind::Temporal { query, .. } => {
-                check_query(query)?
+                check_query(query, catalog)?
             }
-            StageKind::Extension { arguments, .. } => check_arguments(arguments)?,
+            StageKind::Extension { arguments, .. } => check_arguments(arguments, catalog)?,
             _ => {}
         }
     }
@@ -113,14 +131,14 @@ fn unbound(source: String) -> Error {
     )
     .hint("Supply its expanded or kept typed output before execution")
 }
-fn check_condition(condition: &Condition) -> Result<(), Error> {
+fn check_condition(condition: &Condition, catalog: &Catalog) -> Result<(), Error> {
     match &condition.kind {
         ConditionKind::And { conditions } | ConditionKind::Or { conditions } => {
             for condition in conditions {
-                check_condition(condition)?;
+                check_condition(condition, catalog)?;
             }
         }
-        ConditionKind::Not { condition } => check_condition(condition)?,
+        ConditionKind::Not { condition } => check_condition(condition, catalog)?,
         ConditionKind::Exists {
             condition: Some(condition),
             ..
@@ -128,24 +146,24 @@ fn check_condition(condition: &Condition) -> Result<(), Error> {
         | ConditionKind::Count {
             condition: Some(condition),
             ..
-        } => check_condition(condition)?,
-        ConditionKind::In { query, .. } => check_query(query)?,
+        } => check_condition(condition, catalog)?,
+        ConditionKind::In { query, .. } => check_query(query, catalog)?,
         ConditionKind::Sequence { steps, .. } => {
             for condition in steps {
-                check_condition(condition)?;
+                check_condition(condition, catalog)?;
             }
         }
-        ConditionKind::Extension { arguments, .. } => check_arguments(arguments)?,
+        ConditionKind::Extension { arguments, .. } => check_arguments(arguments, catalog)?,
         _ => {}
     }
     Ok(())
 }
-fn check_arguments(arguments: &[ExtensionArgument]) -> Result<(), Error> {
+fn check_arguments(arguments: &[ExtensionArgument], catalog: &Catalog) -> Result<(), Error> {
     for argument in arguments {
         match argument {
-            ExtensionArgument::Query(query) => check_query(query)?,
-            ExtensionArgument::Condition(condition) => check_condition(condition)?,
-            ExtensionArgument::Optional(arguments) => check_arguments(arguments)?,
+            ExtensionArgument::Query(query) => check_query(query, catalog)?,
+            ExtensionArgument::Condition(condition) => check_condition(condition, catalog)?,
+            ExtensionArgument::Optional(arguments) => check_arguments(arguments, catalog)?,
             _ => {}
         }
     }

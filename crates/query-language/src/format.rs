@@ -3,7 +3,8 @@ use crate::ast::*;
 use crate::catalog::{Catalog, ExtensionPosition, ExtensionSlot};
 use crate::{Error, ErrorKind};
 
-/// Render using explicit units, capital boolean operators and piped stages.
+/// Render capital boolean operators and piped stages while preserving whether
+/// a source unit was explicit or inherited.
 /// A round trip through this catalog must preserve the canonical question. This
 /// also refuses manually constructed trees the language cannot express.
 pub fn format_query(query: &Query, catalog: &Catalog) -> Result<String, Error> {
@@ -31,24 +32,47 @@ struct Renderer<'a> {
 impl Renderer<'_> {
     fn query(&self, query: &Query) -> Result<String, Error> {
         let mut text = match &query.source {
-            Source::Unit { unit, condition } => {
-                let mut text = name(unit)?;
+            Source::Unit {
+                unit,
+                implicit,
+                condition,
+            } => {
+                let mut text = if *implicit {
+                    String::new()
+                } else {
+                    name(unit)?
+                };
                 if let Some(condition) = condition {
-                    text.push_str(" where ");
+                    if !*implicit {
+                        text.push_str(" where ");
+                    }
                     text.push_str(&self.condition(condition)?);
                 }
                 text
             }
             Source::Saved {
-                name, arguments, ..
-            } => self.saved(name, arguments)?,
+                name,
+                arguments,
+                condition,
+                ..
+            } => {
+                let mut text = self.saved(name, arguments)?;
+                if let Some(condition) = condition {
+                    text.push(' ');
+                    text.push_str(&self.condition(condition)?);
+                }
+                text
+            }
             Source::Result {
-                reference, part, ..
+                reference,
+                part,
+                condition,
+                ..
             } => {
                 let id = reference
                     .strip_prefix("result:")
                     .ok_or_else(|| invalid("a result source needs the result: prefix"))?;
-                format!(
+                let mut text = format!(
                     "result:{}{}",
                     quote(id),
                     if *part == ResultPart::Matches {
@@ -56,7 +80,12 @@ impl Renderer<'_> {
                     } else {
                         ""
                     }
-                )
+                );
+                if let Some(condition) = condition {
+                    text.push(' ');
+                    text.push_str(&self.condition(condition)?);
+                }
+                text
             }
             Source::Walk {
                 direction,

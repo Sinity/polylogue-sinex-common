@@ -555,7 +555,10 @@ impl<'a> ReferenceEvaluator<'a> {
         if !query.attach.is_empty() {
             return Err(unsupported("attachments", query.attach[0].span.start));
         }
-        let Source::Unit { unit, condition } = &query.source else {
+        let Source::Unit {
+            unit, condition, ..
+        } = &query.source
+        else {
             return Err(unsupported("non-unit source", 0));
         };
         validate_query(query)?;

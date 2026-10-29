@@ -30,6 +30,8 @@ pub enum OutputSource {
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutputSchema {
+    /// Actual row domain supplied by the product, used for nested implicit sources.
+    pub unit: Option<String>,
     pub fields: Vec<Field>,
     pub main_time: Option<String>,
 }
@@ -49,7 +51,7 @@ impl Catalog {
                         arguments: actual,
                         ..
                     },
-                ) => name == other && arguments == actual,
+                ) => name == other && arguments_equal(arguments, actual),
                 (
                     OutputSource::Result { reference, part },
                     Source::Result {
@@ -399,3 +401,47 @@ pub const KEY_FUNCTIONS: &[&str] = &[
     "program",
     "fingerprint",
 ];
+
+fn arguments_equal(a: &[Argument], b: &[Argument]) -> bool {
+    a.len() == b.len()
+        && a.iter().all(|arg| {
+            b.iter().any(|other| {
+                arg.parameter == other.parameter && values_equal(&arg.value, &other.value)
+            })
+        })
+}
+fn values_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Scalar { text: a, .. }, Value::Scalar { text: b, .. }) => a == b,
+        (Value::Set { values: a }, Value::Set { values: b }) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| values_equal(a, b))
+        }
+        _ => a == b,
+    }
+}
+
+pub(crate) fn same_output_source(a: &OutputSource, b: &OutputSource) -> bool {
+    match (a, b) {
+        (
+            OutputSource::Saved {
+                name: a,
+                arguments: av,
+            },
+            OutputSource::Saved {
+                name: b,
+                arguments: bv,
+            },
+        ) => a == b && arguments_equal(av, bv),
+        (
+            OutputSource::Result {
+                reference: a,
+                part: ap,
+            },
+            OutputSource::Result {
+                reference: b,
+                part: bp,
+            },
+        ) => a == b && ap == bp,
+        _ => false,
+    }
+}

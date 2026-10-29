@@ -48,6 +48,7 @@ mechanic and nothing else in the shared crates.
 | precision | how exact a time is: `instant` to `year`, or `bounded` with an end |
 | coarse time | a time whose precision is a period rather than an instant |
 | output schema | the typed fields and optional main time of an expanded saved question or kept result |
+| implicit source | a source whose omitted unit inherits the enclosing actual row domain |
 | bound query | a query whose source output scopes and suffix fields have passed shared binding |
 | time bound | a `since` lower bound or `until` exclusive upper bound, preserved as its own query operation |
 

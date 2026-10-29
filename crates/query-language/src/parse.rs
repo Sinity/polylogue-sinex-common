@@ -258,25 +258,38 @@ impl Parser<'_> {
         )
     }
     fn query(&mut self) -> Result<Query, Error> {
-        let mut scope = Scope::new(self.catalog.default_unit.clone());
+        self.query_in(None)
+    }
+    fn query_in(&mut self, inherited: Option<&Scope>) -> Result<Query, Error> {
+        let mut scope = if let Some(parent) = inherited {
+            // An omitted nested source inherits the row domain, rather than
+            // the enclosing grouping/projection's visible output columns.
+            let mut rows = Scope::new(parent.unit.clone());
+            rows.deferred = self.catalog.unit(&parent.unit).is_none();
+            rows
+        } else {
+            Scope::new(self.catalog.default_unit.clone())
+        };
         let mut source = Source::Unit {
             unit: scope.unit.clone(),
+            implicit: true,
             condition: None,
         };
         let mut consumed_source = false;
         if let Some(first) = self.peek().cloned()
             && !first.quoted
             && let Some((prefix, raw)) = first.text.split_once(':')
-            && matches!(prefix, "query" | "result")
+            && (prefix.eq_ignore_ascii_case("query") || prefix.eq_ignore_ascii_case("result"))
         {
             self.at += 1;
-            source = if prefix == "query" {
+            source = if prefix.eq_ignore_ascii_case("query") {
                 if raw.is_empty() || raw.starts_with('$') {
                     return Err(self.error("a saved query needs a literal name"));
                 }
                 Source::Saved {
                     name: raw.to_string(),
                     arguments: self.arguments()?,
+                    condition: None,
                     output: OutputBinding::Deferred,
                 }
             } else {
@@ -311,6 +324,7 @@ impl Parser<'_> {
                 Source::Result {
                     reference: format!("result:{id}"),
                     part,
+                    condition: None,
                     output: OutputBinding::Deferred,
                 }
             };
@@ -382,7 +396,7 @@ impl Parser<'_> {
             } else if let Some(unit) = self.catalog.unit(&first.text) {
                 self.at += 1;
                 consumed_source = true;
-                scope.unit = unit.name.clone();
+                scope = Scope::new(unit.name.clone());
                 let condition = if self.take("where") {
                     Some(self.condition(&scope)?)
                 } else {
@@ -390,6 +404,7 @@ impl Parser<'_> {
                 };
                 source = Source::Unit {
                     unit: scope.unit.clone(),
+                    implicit: false,
                     condition,
                 };
             } else if self
@@ -469,6 +484,7 @@ impl Parser<'_> {
             } => Source::Saved {
                 name,
                 arguments,
+                condition: None,
                 output: OutputBinding::Deferred,
             },
             Source::Unit {
@@ -481,6 +497,7 @@ impl Parser<'_> {
             } if reference.starts_with("result:") => Source::Result {
                 reference,
                 part: ResultPart::Rows,
+                condition: None,
                 output: OutputBinding::Deferred,
             },
             other => other,
@@ -488,7 +505,6 @@ impl Parser<'_> {
         if matches!(source, Source::Saved { .. } | Source::Result { .. }) {
             self.output_scope(&mut source, &mut scope);
         }
-        let mut source_suffix = None;
         if matches!(source, Source::Saved { .. } | Source::Result { .. })
             && !self.query_end()
             && !self.is("|")
@@ -496,19 +512,17 @@ impl Parser<'_> {
             && !self.stage_start()
         {
             self.take("where");
-            source_suffix = Some(self.condition(&scope)?);
+            let inline = Some(self.condition(&scope)?);
+            if let Source::Saved { condition, .. } | Source::Result { condition, .. } = &mut source
+            {
+                *condition = inline;
+            }
         }
         let mut attach = Vec::new();
         if self.take("with") {
             attach = self.attachments()?;
         }
         let mut stages = Vec::new();
-        if let Some(condition) = source_suffix {
-            stages.push(Stage {
-                span: condition.span,
-                kind: StageKind::Where { condition },
-            });
-        }
         while !self.query_end() {
             if self.take("|") {
             } else if !self.catalog.unpiped_stages {
@@ -529,6 +543,13 @@ impl Parser<'_> {
             _ => return,
         };
         scope.output = self.catalog.source_output(source).cloned();
+        if let Some(unit) = scope
+            .output
+            .as_ref()
+            .and_then(|output| output.unit.as_ref())
+        {
+            scope.unit = unit.clone();
+        }
         scope.deferred = scope.output.is_none();
         scope.columns = scope
             .output
@@ -913,7 +934,7 @@ impl Parser<'_> {
             }
             if self.take("in") {
                 if self.take("(") {
-                    let query = Box::new(self.query()?);
+                    let query = Box::new(self.query_in(Some(scope))?);
                     self.expect(")")?;
                     return Ok(self.cond(start, ConditionKind::In { operand, query }));
                 }
@@ -1581,7 +1602,7 @@ impl Parser<'_> {
             }
             "union" | "intersect" | "except" | "fuse" => {
                 self.expect("(")?;
-                let query = Box::new(self.query()?);
+                let query = Box::new(self.query_in(Some(scope))?);
                 self.expect(")")?;
                 StageKind::Combine {
                     how: match word.as_str() {
@@ -1596,7 +1617,7 @@ impl Parser<'_> {
             "near" | "before" | "after" | "during" | "containing" => {
                 let all = self.take("all");
                 self.expect("(")?;
-                let query = Box::new(self.query()?);
+                let query = Box::new(self.query_in(Some(scope))?);
                 self.expect(")")?;
                 let at = if self.take("at") {
                     let point = self.next()?;
@@ -1842,7 +1863,7 @@ impl Parser<'_> {
                 }
                 ExtensionSlot::Query => {
                     self.expect("(")?;
-                    let query = self.query()?;
+                    let query = self.query_in(Some(scope))?;
                     self.expect(")")?;
                     ExtensionArgument::Query(Box::new(query))
                 }

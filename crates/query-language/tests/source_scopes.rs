@@ -29,6 +29,7 @@ fn saved(name: &str, fields: Vec<Field>) -> SourceOutput {
             arguments: vec![],
         },
         schema: OutputSchema {
+            unit: Some("sessions".into()),
             fields,
             main_time: None,
         },
@@ -41,6 +42,7 @@ fn result(reference: &str, part: ResultPart, fields: Vec<Field>) -> SourceOutput
             part,
         },
         schema: OutputSchema {
+            unit: Some("sessions".into()),
             fields,
             main_time: None,
         },
@@ -166,7 +168,7 @@ fn kept_columns_and_quoted_literal_ids_keep_rows_and_matches_distinct() {
     )
     .unwrap();
     assert!(
-        matches!(&query.source, Source::Result { reference: value, part: ResultPart::Rows, output: OutputBinding::Known } if value == reference)
+        matches!(&query.source, Source::Result { reference: value, part: ResultPart::Rows, output: OutputBinding::Known, .. } if value == reference)
     );
     let text = format_query(&query, &catalog).unwrap();
     assert_eq!(
@@ -215,4 +217,146 @@ fn binding_checks_nested_sources_and_never_trusts_serialized_known_marker() {
     }
     let forged: Query = serde_json::from_value(serde_json::to_value(forged).unwrap()).unwrap();
     assert!(bind(&forged, &catalog).is_err());
+}
+
+#[test]
+fn inline_saved_conditions_remain_distinct_from_piped_filters() {
+    let mut catalog = catalog();
+    catalog
+        .source_outputs
+        .push(saved("named", vec![field("hidden", FieldKind::Bool)]));
+    let inline = parse("query:named hidden:true", &catalog).unwrap();
+    let piped = parse("query:named | where hidden:true", &catalog).unwrap();
+    assert!(matches!(
+        inline.source,
+        Source::Saved {
+            condition: Some(_),
+            ..
+        }
+    ));
+    assert!(inline.stages.is_empty());
+    assert!(matches!(
+        piped.source,
+        Source::Saved {
+            condition: None,
+            ..
+        }
+    ));
+    assert_eq!(piped.stages.len(), 1);
+    assert_ne!(
+        question_id(&inline, &catalog, &BTreeMap::new()).unwrap(),
+        question_id(&piped, &catalog, &BTreeMap::new()).unwrap()
+    );
+    assert!(matches!(
+        bind(&inline, &catalog).unwrap().query().source,
+        Source::Saved {
+            condition: Some(_),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn saved_argument_snapshot_matching_ignores_quoted_spelling_and_parameter_order() {
+    let mut catalog = catalog();
+    let parsed = parse(
+        "QUERY:named(period=last 7d,kind=demo) | sort by count",
+        &catalog,
+    )
+    .unwrap();
+    catalog.source_outputs.push(SourceOutput {
+        source: OutputSource::Saved {
+            name: "named".into(),
+            arguments: vec![
+                Argument {
+                    parameter: "kind".into(),
+                    value: Value::scalar("demo"),
+                },
+                Argument {
+                    parameter: "period".into(),
+                    value: Value::scalar("last 7d"),
+                },
+            ],
+        },
+        schema: OutputSchema {
+            unit: Some("sessions".into()),
+            fields: vec![field("count", FieldKind::Integer)],
+            main_time: None,
+        },
+    });
+    assert!(bind(&parsed, &catalog).is_ok());
+}
+
+#[test]
+fn nested_implicit_units_inherit_the_row_domain_and_explicit_units_keep_their_own() {
+    let mut catalog = catalog();
+    catalog.units.push(Unit {
+        name: "commands".into(),
+        fields: vec![
+            field("id", FieldKind::Reference),
+            field("repo", FieldKind::Text),
+            field("outcome", FieldKind::Text),
+        ],
+        ..Unit::default()
+    });
+    let query = parse(
+        "commands | group by repo | where repo in (outcome:error)",
+        &catalog,
+    )
+    .unwrap();
+    let StageKind::Where { condition } = &query.stages[1].kind else {
+        panic!("where")
+    };
+    let ConditionKind::In { query: inner, .. } = &condition.kind else {
+        panic!("in")
+    };
+    assert!(
+        matches!(&inner.source, Source::Unit { unit, implicit: true, .. } if unit == "commands")
+    );
+    let text = format_query(&query, &catalog).unwrap();
+    assert!(!text.contains("(commands where"));
+    assert!(bind(&query, &catalog).is_ok());
+    let explicit = parse(
+        "commands where id in (sessions where default_only:yes)",
+        &catalog,
+    )
+    .unwrap();
+    let Source::Unit {
+        condition: Some(condition),
+        ..
+    } = &explicit.source
+    else {
+        panic!("condition")
+    };
+    let ConditionKind::In { query: inner, .. } = &condition.kind else {
+        panic!("in")
+    };
+    assert!(
+        matches!(&inner.source, Source::Unit { unit, implicit: false, .. } if unit == "sessions")
+    );
+    assert!(bind(&explicit, &catalog).is_ok());
+
+    let deferred = parse("result:kept | where id in (outcome:error)", &catalog).unwrap();
+    assert!(bind(&deferred, &catalog).is_err());
+    catalog.source_outputs.push(SourceOutput {
+        source: OutputSource::Result {
+            reference: "result:kept".into(),
+            part: ResultPart::Rows,
+        },
+        schema: OutputSchema {
+            unit: Some("commands".into()),
+            fields: vec![field("id", FieldKind::Reference)],
+            main_time: None,
+        },
+    });
+    let bound = bind(&deferred, &catalog).unwrap();
+    let StageKind::Where { condition } = &bound.query().stages[0].kind else {
+        panic!("where")
+    };
+    let ConditionKind::In { query: inner, .. } = &condition.kind else {
+        panic!("in")
+    };
+    assert!(
+        matches!(&inner.source, Source::Unit { unit, implicit: true, .. } if unit == "commands")
+    );
 }

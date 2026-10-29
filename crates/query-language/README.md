@@ -153,9 +153,13 @@ the resolved question. It is sealed: opaque to the caller and checked on use.
 
 ## Saved and kept output binding
 
-`Source::Saved` and `Source::Result` carry `OutputBinding::Deferred` until the product supplies their output in the immutable catalog's `source_outputs`. A `SourceOutput` identifies the saved name and arguments, or kept reference and `ResultPart`, and provides an `OutputSchema` of typed fields and optional main time. Products derive these schemas from expanded saved definitions or stored result columns. The parser performs no reads and never borrows the default unit's fields for either source.
+`Source::Saved` and `Source::Result` carry `OutputBinding::Deferred` until the product supplies their output in the immutable catalog's `source_outputs`. A `SourceOutput` identifies the saved name and arguments, or kept reference and `ResultPart`, and provides an `OutputSchema` of typed fields, optional main time and optional actual row unit. Products derive these schemas from expanded saved definitions or stored result columns. The parser performs no reads and never borrows the default unit's fields for either source.
 
 A deferred tree is syntax only. Before execution, the product calls `bind::bind` with the derived snapshot; the resulting `BoundQuery` contains a tree whose saved and kept scopes are all known, including nested sources. Binding reuses the shared parser's field, type and closed-set checks and refuses missing schemas, unknown suffix fields and invalid values. Products use that same snapshot for canonical identity. The binding marker is validation state and does not enter question identity; the `since`, `until`, source identity and kept result part do.
+
+Inline conditions on saved and kept sources are stored in their source's `condition`, separately from a piped `StageKind::Where`. This preserves the product's distinction between conditions applied to an expanded base relation and filters applied after that relation's output has been selected.
+
+`Source::Unit.implicit` records whether the unit was omitted. An omitted nested source inherits its enclosing actual row unit and uses that unit's underlying catalog fields, even after grouping or projection; an explicit unit keeps its own row domain. Products supply `OutputSchema.unit` when a saved or kept source can contain such nested questions. Missing source schemas or unresolved inherited row domains cannot bind. Formatting preserves the omission, transport carries the marker, and canonical identity drops it once the actual unit is known.
 
 A kept reference's `.rows` or `.matches` selector is a typed `ResultPart`. A quoted identity retains those characters as literal data: `result:"example.matches"` reads rows from that identity, while `result:"example".matches` selects matches from `example`.
 

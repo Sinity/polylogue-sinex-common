@@ -173,15 +173,26 @@ pub(super) fn canonicalize(query: &mut Query, catalog: &Catalog) {
         _ => fields(catalog, &catalog.default_unit),
     };
     match &mut query.source {
-        Source::Unit { unit, condition: c } => {
+        Source::Unit {
+            unit,
+            implicit,
+            condition: c,
+        } => {
             if let Some(u) = catalog.unit(unit) {
                 *unit = u.name.clone();
+                *implicit = false;
             }
             if let Some(c) = c {
                 condition(c, &scope, catalog);
             }
         }
         Source::RecallLast {
+            condition: Some(c), ..
+        }
+        | Source::Saved {
+            condition: Some(c), ..
+        }
+        | Source::Result {
             condition: Some(c), ..
         } => condition(c, &scope, catalog),
         Source::Recall {

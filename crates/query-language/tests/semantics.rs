@@ -24,6 +24,7 @@ fn query(unit: &str, stages: Vec<StageKind>) -> Query {
     Query {
         source: Source::Unit {
             unit: unit.into(),
+            implicit: false,
             condition: None,
         },
         attach: vec![],
@@ -475,6 +476,7 @@ fn empty_outer_relation_does_not_hide_unsupported_nested_membership() {
     let mut outer = query("outer", vec![]);
     outer.source = Source::Unit {
         unit: "outer".into(),
+        implicit: false,
         condition: Some(condition(ConditionKind::In {
             operand: Operand::field("key"),
             query: Box::new(inner),
