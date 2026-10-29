@@ -1,6 +1,6 @@
 //! Pure grammar-position completion against a product catalog.
 use crate::ast::Span;
-use crate::catalog::{Catalog, Field, FieldKind};
+use crate::catalog::{Catalog, Field, FieldKind, OutputSource};
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Completion {
@@ -20,20 +20,81 @@ pub enum CompletionKind {
     Keyword,
     Command,
 }
+/// Pure catalog sections needed at one completion cursor. Products load the
+/// active source schemas first, repeat this call with that snapshot, then load
+/// only the requested value or reference section. This function performs no I/O.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Requirements {
+    pub sources: Vec<OutputSource>,
+    pub value: Option<ValueRequirement>,
+    pub reference: Option<ReferenceRequirement>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValueRequirement {
+    pub unit: Option<String>,
+    pub field: String,
+    pub prefix: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReferenceRequirement {
+    pub prefix: String,
+    pub replace: Span,
+}
+/// Inspect the same cursor, value position and active typed scope as `complete`.
+pub fn requirements(text: &str, position: usize, catalog: &Catalog) -> Requirements {
+    let cursor = Cursor::new(text, position);
+    if let Some(open) = open_quote(cursor.prefix) {
+        let before = &text[..open];
+        let scope = context(before, catalog);
+        let value = value_field(before)
+            .and_then(|field| scope.field(field))
+            .map(|field| ValueRequirement {
+                unit: scope.unit.clone(),
+                field: field.name.clone(),
+                prefix: decoded_quoted_prefix(&text[open + 1..cursor.end]),
+            });
+        return Requirements {
+            sources: scope.sources,
+            value,
+            reference: None,
+        };
+    }
+    let scope = context(cursor.before, catalog);
+    let target = unquoted_value(&cursor);
+    let value = target.as_ref().and_then(|target| {
+        scope.field(target.field).map(|field| ValueRequirement {
+            unit: scope.unit.clone(),
+            field: field.name.clone(),
+            prefix: target.prefix.to_string(),
+        })
+    });
+    let reference = (value.is_none()
+        && scope.reference_allowed
+        && !source_prefix(cursor.fragment)
+        && (target.is_none() || cursor.fragment.contains(':')))
+    .then(|| ReferenceRequirement {
+        prefix: cursor.fragment.to_string(),
+        replace: Span {
+            start: cursor.start,
+            end: cursor.token_end(text),
+        },
+    });
+    Requirements {
+        sources: scope.sources,
+        value,
+        reference,
+    }
+}
 /// Complete at a UTF-8 byte position. A replacement covers the unfinished token.
 pub fn complete(text: &str, position: usize, catalog: &Catalog) -> Vec<Completion> {
-    let mut end = position.min(text.len());
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    let prefix = &text[..end];
-    let start = prefix
-        .char_indices()
-        .rev()
-        .find(|(_, c)| c.is_whitespace() || "|(),[]".contains(*c))
-        .map_or(0, |(i, c)| i + c.len_utf8());
-    let fragment = &prefix[start..];
-    let before = &prefix[..start];
+    let cursor = Cursor::new(text, position);
+    let Cursor {
+        end,
+        start,
+        prefix,
+        fragment,
+        before,
+    } = cursor;
     // Within a quoted value, only product-declared values can complete.
     if let Some(open) = open_quote(prefix) {
         return quoted_values(text, end, open, catalog);
@@ -56,72 +117,35 @@ pub fn complete(text: &str, position: usize, catalog: &Catalog) -> Vec<Completio
         }
     };
     let span = Span { start, end };
-    if let Some(field) = set_field(before) {
-        if let Some(spec) = scope.field(field) {
+    if let Some(target) = unquoted_value(&cursor) {
+        if let Some(spec) = scope.field(target.field) {
             for value in &spec.values {
-                if value.starts_with(fragment) {
+                if value.starts_with(target.prefix) {
                     add(
                         &literal_spelling(value, &spec.unknown),
                         CompletionKind::Value,
                         &spec.help,
-                        span,
+                        target.replace,
                         "",
                     );
                 }
             }
-        }
-    } else if let Some((field, partial)) = fragment.split_once(':') {
-        if let Some(spec) = scope.field(field) {
-            for value in &spec.values {
-                if value.starts_with(partial) {
+            if target.unknown {
+                for value in ["unknown", "*"] {
                     add(
-                        &literal_spelling(value, &spec.unknown),
+                        value,
                         CompletionKind::Value,
-                        &spec.help,
-                        Span {
-                            start: start + field.len() + 1,
-                            end,
-                        },
                         "",
+                        target.replace,
+                        target.prefix,
                     );
                 }
-            }
-            for value in ["unknown", "*"] {
-                add(
-                    value,
-                    CompletionKind::Value,
-                    "",
-                    Span {
-                        start: start + field.len() + 1,
-                        end,
-                    },
-                    partial,
-                );
             }
         }
     } else {
         let words: Vec<&str> = before.split_whitespace().collect();
         let last = words.last().copied().unwrap_or("");
-        let field_before = words.iter().rev().nth(1).copied();
-        if ["=", "!=", ">", ">=", "<", "<=", "~", "^", "between"].contains(&last) {
-            let field = field_before.unwrap_or("");
-            if let Some(spec) = scope.field(field) {
-                for value in &spec.values {
-                    if value.starts_with(fragment) {
-                        add(
-                            &literal_spelling(value, &spec.unknown),
-                            CompletionKind::Value,
-                            &spec.help,
-                            span,
-                            "",
-                        );
-                    }
-                }
-                for value in ["unknown", "*"] {
-                    add(value, CompletionKind::Value, "", span, fragment);
-                }
-            }
-        } else if scope.field(last).is_some() {
+        if scope.field(last).is_some() {
             for op in [
                 ":", "=", "!=", ">", ">=", "<", "<=", "~", "^", "between", "in", "exists",
             ] {
@@ -183,40 +207,95 @@ pub fn complete(text: &str, position: usize, catalog: &Catalog) -> Vec<Completio
     out.dedup_by(|a, b| a.value == b.value && a.replace == b.replace);
     out
 }
-fn open_quote(text: &str) -> Option<usize> {
-    let mut quote = None;
-    let mut escaped = false;
-    for (at, c) in text.char_indices() {
-        if escaped {
-            escaped = false;
-        } else if c == '\\' && quote.is_some() {
-            escaped = true;
-        } else if c == '"' {
-            quote = if quote.is_some() { None } else { Some(at) };
+#[derive(Clone, Copy)]
+struct Cursor<'a> {
+    end: usize,
+    start: usize,
+    prefix: &'a str,
+    fragment: &'a str,
+    before: &'a str,
+}
+impl<'a> Cursor<'a> {
+    fn token_end(self, text: &str) -> usize {
+        text[self.end..]
+            .find(|c: char| c.is_whitespace() || "|(),[]\"=<>!".contains(c))
+            .map_or(text.len(), |offset| self.end + offset)
+    }
+    fn new(text: &'a str, position: usize) -> Self {
+        let mut end = position.min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let prefix = &text[..end];
+        let start = prefix
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_whitespace() || "|(),[]".contains(*c))
+            .map_or(0, |(i, c)| i + c.len_utf8());
+        Self {
+            end,
+            start,
+            prefix,
+            fragment: &prefix[start..],
+            before: &prefix[..start],
         }
     }
-    quote
 }
-
-fn quoted_values(text: &str, cursor: usize, open: usize, catalog: &Catalog) -> Vec<Completion> {
-    let before = &text[..open];
+struct ValueTarget<'a> {
+    field: &'a str,
+    prefix: &'a str,
+    replace: Span,
+    unknown: bool,
+}
+fn unquoted_value<'a>(cursor: &Cursor<'a>) -> Option<ValueTarget<'a>> {
+    if let Some(field) = set_field(cursor.before) {
+        return Some(ValueTarget {
+            field,
+            prefix: cursor.fragment,
+            replace: Span {
+                start: cursor.start,
+                end: cursor.end,
+            },
+            unknown: false,
+        });
+    }
+    if let Some((field, prefix)) = cursor.fragment.split_once(':') {
+        return Some(ValueTarget {
+            field,
+            prefix,
+            replace: Span {
+                start: cursor.start + field.len() + 1,
+                end: cursor.end,
+            },
+            unknown: true,
+        });
+    }
+    value_field(cursor.before).map(|field| ValueTarget {
+        field,
+        prefix: cursor.fragment,
+        replace: Span {
+            start: cursor.start,
+            end: cursor.end,
+        },
+        unknown: true,
+    })
+}
+fn value_field(before: &str) -> Option<&str> {
     let words: Vec<_> = before.split_whitespace().collect();
     let last = words.last().copied().unwrap_or("");
-    let field = set_field(before)
+    set_field(before)
         .or_else(|| last.strip_suffix(':'))
         .or_else(|| {
             ["=", "!=", ">", ">=", "<", "<=", "~", "^", "between"]
                 .contains(&last)
                 .then(|| words.iter().rev().nth(1).copied())
                 .flatten()
-        });
-    let scope = context(before, catalog);
-    let Some(spec) = field.and_then(|field| scope.field(field)) else {
-        return Vec::new();
-    };
+        })
+}
+fn decoded_quoted_prefix(text: &str) -> String {
     let mut partial = String::new();
     let mut escaped = false;
-    for c in text[open + 1..cursor].chars() {
+    for c in text.chars() {
         if escaped {
             partial.push(match c {
                 'n' => '\n',
@@ -234,6 +313,31 @@ fn quoted_values(text: &str, cursor: usize, open: usize, catalog: &Catalog) -> V
     if escaped {
         partial.push('\\');
     }
+    partial
+}
+fn open_quote(text: &str) -> Option<usize> {
+    let mut quote = None;
+    let mut escaped = false;
+    for (at, c) in text.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' && quote.is_some() {
+            escaped = true;
+        } else if c == '"' {
+            quote = if quote.is_some() { None } else { Some(at) };
+        }
+    }
+    quote
+}
+
+fn quoted_values(text: &str, cursor: usize, open: usize, catalog: &Catalog) -> Vec<Completion> {
+    let before = &text[..open];
+    let field = value_field(before);
+    let scope = context(before, catalog);
+    let Some(spec) = field.and_then(|field| scope.field(field)) else {
+        return Vec::new();
+    };
+    let partial = decoded_quoted_prefix(&text[open + 1..cursor]);
     let mut end = cursor;
     let mut escaped = false;
     for (offset, c) in text[open + 1..].char_indices() {
@@ -264,6 +368,9 @@ fn quoted_values(text: &str, cursor: usize, open: usize, catalog: &Catalog) -> V
 #[derive(Default)]
 struct CompletionScope {
     fields: Vec<Field>,
+    unit: Option<String>,
+    sources: Vec<OutputSource>,
+    reference_allowed: bool,
 }
 impl CompletionScope {
     fn field(&self, name: &str) -> Option<&Field> {
@@ -271,6 +378,9 @@ impl CompletionScope {
     }
     fn unit(name: &str, catalog: &Catalog) -> Self {
         Self {
+            unit: catalog.unit(name).map(|unit| unit.name.clone()),
+            sources: Vec::new(),
+            reference_allowed: true,
             fields: catalog
                 .unit(name)
                 .map(|unit| unit.fields.clone())
@@ -282,10 +392,11 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
     use crate::ast::{Source, StageKind};
     // Pick the innermost query/exists scope from delimiter tokens, while quoted data
     // contributes no grammar. Function and set parentheses retain the outer scope.
-    let mut stack: Vec<(usize, String, bool)> = Vec::new();
+    let mut stack: Vec<(usize, String, bool, Vec<OutputSource>)> = Vec::new();
     let mut quote = false;
     let mut escape = false;
     let mut words: Vec<String> = Vec::new();
+    let mut pipes = Vec::new();
     let mut word = String::new();
     let mut start = 0;
     for (at, c) in text.char_indices() {
@@ -308,10 +419,14 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
             if !word.is_empty() {
                 words.push(std::mem::take(&mut word));
             }
+            if c == '|' {
+                words.push("|".into());
+                pipes.push((at, words.len() - 1));
+            }
             if c == '(' {
                 let preceding = words.last().cloned().unwrap_or_default();
                 let relation = words.iter().rev().nth(1).is_some_and(|s| s == "exists");
-                stack.push((start, String::new(), false));
+                stack.push((start, String::new(), false, Vec::new()));
                 if relation && catalog.unit(&preceding).is_some() {
                     stack.last_mut().unwrap().1 = preceding;
                     start = at + 1;
@@ -328,15 +443,16 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
                         | "fuse"
                         | "in"
                 ) {
-                    let unit = row_unit(&text[start..at], catalog)
-                        .unwrap_or_else(|| "$deferred_completion".into());
+                    let (unit, sources) = row_scope(&text[start..at], catalog);
+                    let unit = unit.unwrap_or_else(|| "$deferred_completion".into());
                     let entry = stack.last_mut().unwrap();
                     entry.1 = unit;
                     entry.2 = true;
+                    entry.3 = sources;
                     start = at + 1;
                 }
             } else if c == ')'
-                && let Some((outer, _, _)) = stack.pop()
+                && let Some((outer, _, _, _)) = stack.pop()
             {
                 start = outer;
             }
@@ -345,13 +461,13 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
         }
     }
     let inner = &text[start..];
-    let explicit = stack.iter().rev().find(|(_, unit, _)| !unit.is_empty());
+    let explicit = stack.iter().rev().find(|(_, unit, _, _)| !unit.is_empty());
     let inner_first = inner.split_whitespace().next().unwrap_or("");
     let inner_source = catalog.unit(inner_first).is_some() || source_prefix(inner_first);
-    let inherited_deferred = explicit.is_some_and(|(_, unit, inherited)| {
+    let inherited_deferred = explicit.is_some_and(|(_, unit, inherited, _)| {
         *inherited && unit == "$deferred_completion" && !inner_source
     });
-    let current = if let Some((_, unit, inherited)) = explicit {
+    let current = if let Some((_, unit, inherited, _)) = explicit {
         if *inherited && inner_source {
             inner.to_string()
         } else {
@@ -374,6 +490,7 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
         CompletionScope::unit(&unit, catalog)
     };
     let mut group_input = None;
+    let mut condition_scope = true;
     if let Some(q) = parsed {
         match &q.source {
             Source::Unit { unit: source, .. } if !source_like => {
@@ -385,10 +502,26 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
                     .source_output(&q.source)
                     .map(|output| output.fields.clone())
                     .unwrap_or_default();
+                scope.unit = catalog
+                    .source_output(&q.source)
+                    .and_then(|output| output.unit.as_deref())
+                    .and_then(|unit| catalog.unit(unit))
+                    .map(|unit| unit.name.clone());
+                if let Some(source) = output_source(&q.source) {
+                    scope.sources.push(source);
+                }
             }
             _ => {}
         }
         for stage in q.stages {
+            condition_scope = matches!(
+                &stage.kind,
+                StageKind::Where { .. }
+                    | StageKind::Scope {
+                        condition: Some(_),
+                        ..
+                    }
+            );
             match stage.kind {
                 StageKind::Scope { unit: source, .. } => {
                     unit = source;
@@ -453,6 +586,36 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
             }
         }
     }
+    if let Some((_, _, inherited, sources)) = explicit
+        && *inherited
+        && !inner_source
+    {
+        for source in sources {
+            if !scope.sources.contains(source) {
+                scope.sources.push(source.clone());
+            }
+        }
+    }
+    let stage = pipes
+        .iter()
+        .rev()
+        .find(|(at, _)| *at >= start)
+        .and_then(|(_, index)| words.get(index + 1));
+    let last = words.last().map(String::as_str).unwrap_or("");
+    let non_condition_stage =
+        stage.is_some_and(|stage| stage != "where" && catalog.unit(stage).is_none());
+    let operator_expected = scope.field(last).is_some();
+    let explicit_unit_only = words.len() == 1 && catalog.unit(last).is_some();
+    scope.reference_allowed =
+        (condition_scope || stage.is_some_and(|stage| stage == "where") || last == "where")
+            && !non_condition_stage
+            && !operator_expected
+            && !explicit_unit_only
+            && !matches!(
+                last,
+                "|" | "sort" | "group" | "fields" | "by" | "exists" | "as" | "of"
+            )
+            && !["=", "!=", ">", ">=", "<", "<=", "~", "^", "between"].contains(&last);
     scope
 }
 
@@ -474,9 +637,12 @@ fn parse_prefix(text: &str, catalog: &Catalog) -> Option<crate::ast::Query> {
         candidate = candidate[..at].trim_end();
     }
 }
-fn row_unit(text: &str, catalog: &Catalog) -> Option<String> {
+fn row_scope(text: &str, catalog: &Catalog) -> (Option<String>, Vec<OutputSource>) {
     use crate::ast::{Source, StageKind};
-    let query = parse_prefix(text, catalog)?;
+    let Some(query) = parse_prefix(text, catalog) else {
+        return (None, Vec::new());
+    };
+    let mut sources = output_source(&query.source).into_iter().collect::<Vec<_>>();
     let mut unit = match &query.source {
         Source::Unit { unit, .. } => Some(unit.clone()),
         Source::Saved { .. } | Source::Result { .. } => catalog
@@ -487,9 +653,27 @@ fn row_unit(text: &str, catalog: &Catalog) -> Option<String> {
     for stage in query.stages {
         if let StageKind::Scope { unit: next, .. } = stage.kind {
             unit = Some(next);
+            sources.clear();
         }
     }
-    unit
+    (unit, sources)
+}
+fn output_source(source: &crate::ast::Source) -> Option<OutputSource> {
+    match source {
+        crate::ast::Source::Saved {
+            name, arguments, ..
+        } => Some(OutputSource::Saved {
+            name: name.clone(),
+            arguments: arguments.clone(),
+        }),
+        crate::ast::Source::Result {
+            reference, part, ..
+        } => Some(OutputSource::Result {
+            reference: reference.clone(),
+            part: *part,
+        }),
+        _ => None,
+    }
 }
 
 fn set_field(before: &str) -> Option<&str> {

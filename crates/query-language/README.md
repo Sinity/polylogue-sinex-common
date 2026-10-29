@@ -167,6 +167,9 @@ A kept reference's `.rows` or `.matches` selector is a typed `ResultPart`. A quo
 
 Completion uses the same typed output-schema snapshot as parsing and binding. Saved and kept sources offer their actual fields, help and closed-set values, including promoted or grouped aliases; rows and matches use separate schemas. Missing output schemas offer no default-unit fields. Every value position, including an open quote, reads the active schema's field declaration. Nested omitted sources use the enclosing actual row unit rather than its shaped output columns.
 
+`complete::requirements(text, byte_position, catalog)` reports the active `OutputSource` keys and optional value/reference input before completion. The caller loads missing saved/kept schemas first, repeats the pure request with that snapshot, then reads only the requested value or reference catalog section before calling `complete` as usual. A value request carries the canonical actual unit when known, exact field or output alias, and decoded literal prefix up to the UTF-8 cursor. A neutral reference request carries the raw prefix and a replacement span covering the whole current token, including an obsolete suffix after the cursor. Reference positions exclude quoted values, operators and stage arguments. Products decide which declared fields or reference prefixes map to their own catalog sections; the shared helper has no session naming rules or I/O. Both APIs use the same cursor, value-position, quote decoding and typed context helpers.
+
+
 The completer proposes what may come next at a grammar position (units,
 fields, closed-set values, stages, operators) from the catalog it is given.
 It does no I/O, so a product can run it inside its CLI process from a catalog
