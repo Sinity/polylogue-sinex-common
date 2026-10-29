@@ -2,7 +2,7 @@
 use crate::{
     Error, ErrorKind,
     identity::QuestionId,
-    time::{Clock, ResolvedTime},
+    time::{Clock, ClockWire, ResolvedTime},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -18,9 +18,9 @@ pub struct PageRequest {
 /// versions and every read position here, and check their continued availability.
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct CursorContext {
+pub struct CursorContext<C = Clock> {
     pub question: QuestionId,
-    pub clock: Clock,
+    pub clock: C,
     pub resolved_times: Vec<ResolvedTime>,
     pub random_seed: u64,
     pub read_positions: BTreeMap<String, String>,
@@ -37,8 +37,8 @@ pub struct OrderPosition {
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Continuation {
-    pub context: CursorContext,
+pub struct Continuation<C = Clock> {
+    pub context: CursorContext<C>,
     pub after: OrderPosition,
 }
 
@@ -87,10 +87,13 @@ impl CursorSeal {
     }
     /// Authenticate before decoding. The product's callback checks retained read
     /// positions and compatible versions against its own authoritative state.
+    /// Zone resolution is supplied explicitly and runs only after authentication
+    /// and question binding; the library never consults a global zone database.
     pub fn open(
         &self,
         cursor: &SealedCursor,
         question: QuestionId,
+        resolve_zone: impl FnOnce(&str) -> Result<jiff::tz::TimeZone, Error>,
         available: impl FnOnce(&CursorContext) -> bool,
     ) -> Result<Continuation, Error> {
         let bytes =
@@ -107,21 +110,38 @@ impl CursorSeal {
         if payload[0] != 1 {
             return Err(invalid("the cursor version is unsupported"));
         }
-        let continuation: Continuation = serde_json::from_slice(&payload[1..])
+        let record: Continuation<ClockWire> = serde_json::from_slice(&payload[1..])
             .map_err(|_| invalid("the cursor payload is invalid"))?;
-        if continuation.context.question != question {
+        if record.context.question != question {
             return Err(invalid("the cursor belongs to a different question"));
         }
+        let zone = resolve_zone(&record.context.clock.day.zone)
+            .map_err(|error| stale(format!("the cursor zone cannot be resolved: {error}")))?;
+        let context = record.context;
+        let continuation = Continuation {
+            after: record.after,
+            context: CursorContext {
+                question: context.question,
+                clock: context
+                    .clock
+                    .resolve(zone)
+                    .map_err(|error| stale(format!("the cursor zone no longer agrees: {error}")))?,
+                resolved_times: context.resolved_times,
+                random_seed: context.random_seed,
+                read_positions: context.read_positions,
+                versions: context.versions,
+            },
+        };
         if !available(&continuation.context) {
-            return Err(Error::new(
-                ErrorKind::StaleCursor,
+            return Err(stale(
                 "the cursor read position or query context is no longer available",
-                0,
-            )
-            .hint("restart the question without its cursor"));
+            ));
         }
         Ok(continuation)
     }
+}
+fn stale(message: impl Into<String>) -> Error {
+    Error::new(ErrorKind::StaleCursor, message, 0).hint("restart the question without its cursor")
 }
 fn invalid(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::InvalidQuery, message, 0)

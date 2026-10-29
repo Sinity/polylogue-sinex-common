@@ -244,7 +244,10 @@ fn independent_discrete_oracle_for_whole_period_comparison() {
 fn serialization_preserves_resolved_clock_and_rejects_invalid_periods() {
     let c = clock();
     assert_eq!(
-        serde_json::from_str::<Clock>(&serde_json::to_string(&c).unwrap()).unwrap(),
+        serde_json::from_str::<time::ClockWire>(&serde_json::to_string(&c).unwrap())
+            .unwrap()
+            .resolve(c.day.zone().clone())
+            .unwrap(),
         c
     );
     let resolved = time::resolve("last month", &c).unwrap();
@@ -358,7 +361,11 @@ fn precision_widths_refuse_mislabeled_periods_in_constructors_and_json() {
             .unwrap();
         let valid = TimeValue::new(time::Time::Span { start, end }, precision, None).unwrap();
         assert_eq!(
-            serde_json::from_value::<TimeValue>(serde_json::to_value(&valid).unwrap()).unwrap(),
+            deserialize_time_value(
+                serde_json::to_value(&valid).unwrap(),
+                valid.boundary.as_ref().map(|day| day.zone().clone())
+            )
+            .unwrap(),
             valid
         );
         for invalid_seconds in [0, seconds - 1, seconds + 1, 3600] {
@@ -378,7 +385,10 @@ fn precision_widths_refuse_mislabeled_periods_in_constructors_and_json() {
             );
             let mut json = serde_json::to_value(&valid).unwrap();
             json["period"]["end"] = serde_json::to_value(invalid_end).unwrap();
-            assert!(serde_json::from_value::<TimeValue>(json).is_err());
+            assert!(
+                deserialize_time_value(json, valid.boundary.as_ref().map(|day| day.zone().clone()))
+                    .is_err()
+            );
         }
     }
 }
@@ -397,7 +407,11 @@ fn calendar_precision_requires_the_complete_period_under_its_recorded_setting() 
         };
         let valid = TimeValue::new(period, precision, Some(day.clone())).unwrap();
         assert_eq!(
-            serde_json::from_value::<TimeValue>(serde_json::to_value(&valid).unwrap()).unwrap(),
+            deserialize_time_value(
+                serde_json::to_value(&valid).unwrap(),
+                valid.boundary.as_ref().map(|day| day.zone().clone())
+            )
+            .unwrap(),
             valid
         );
         assert!(TimeValue::new(period, precision, None).is_err());
@@ -408,7 +422,10 @@ fn calendar_precision_requires_the_complete_period_under_its_recorded_setting() 
         json["period"]["end"] =
             serde_json::to_value(ts(end).checked_sub(SignedDuration::from_nanos(1)).unwrap())
                 .unwrap();
-        assert!(serde_json::from_value::<TimeValue>(json).is_err());
+        assert!(
+            deserialize_time_value(json, valid.boundary.as_ref().map(|day| day.zone().clone()))
+                .is_err()
+        );
     }
     let apia = setting("Pacific/Apia", "04:00");
     let skipped = time::Time::Span {
@@ -417,7 +434,11 @@ fn calendar_precision_requires_the_complete_period_under_its_recorded_setting() 
     };
     let empty = TimeValue::new(skipped, Precision::Day, Some(apia)).unwrap();
     assert_eq!(
-        serde_json::from_value::<TimeValue>(serde_json::to_value(&empty).unwrap()).unwrap(),
+        deserialize_time_value(
+            serde_json::to_value(&empty).unwrap(),
+            empty.boundary.as_ref().map(|day| day.zone().clone())
+        )
+        .unwrap(),
         empty
     );
     let arbitrary_empty = time::Time::Span {
@@ -484,4 +505,44 @@ fn bare_dates_are_whole_logical_days_and_datetimes_keep_their_clock_time() {
             at: ts("2026-10-04T22:00Z"),
         }
     );
+}
+
+fn deserialize_time_value(
+    value: serde_json::Value,
+    zone: Option<TimeZone>,
+) -> Result<TimeValue, Box<dyn std::error::Error>> {
+    Ok(serde_json::from_value::<time::TimeValueWire>(value)?.resolve(zone)?)
+}
+
+#[test]
+fn wire_deserialization_never_resolves_a_zone_and_callers_must_supply_its_identity() {
+    let source = r#"{"zone":"Synthetic/Uninstalled","start":"04:00:00"}"#;
+    let wire: time::DaySettingWire = serde_json::from_str(source).unwrap();
+    assert_eq!(wire.zone, "Synthetic/Uninstalled");
+    assert!(wire.resolve(TimeZone::UTC).is_err());
+
+    let day = setting("Europe/Warsaw", "04:00");
+    let wire: time::DaySettingWire =
+        serde_json::from_value(serde_json::to_value(&day).unwrap()).unwrap();
+    assert!(wire.clone().resolve(TimeZone::UTC).is_err());
+    assert!(
+        wire.clone()
+            .resolve(TimeZone::fixed(
+                jiff::tz::Offset::from_seconds(3600).unwrap()
+            ))
+            .is_err()
+    );
+    assert_eq!(wire.resolve(day.zone().clone()).unwrap(), day);
+
+    let value = TimeValue::new(
+        day.day(date("2026-03-28")).unwrap().into(),
+        Precision::Day,
+        Some(day.clone()),
+    )
+    .unwrap();
+    let wire: time::TimeValueWire =
+        serde_json::from_value(serde_json::to_value(&value).unwrap()).unwrap();
+    assert!(wire.clone().resolve(None).is_err());
+    assert!(wire.clone().resolve(Some(TimeZone::UTC)).is_err());
+    assert_eq!(wire.resolve(Some(day.zone().clone())).unwrap(), value);
 }

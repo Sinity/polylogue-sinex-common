@@ -143,3 +143,16 @@ proptest! {
         let rendered=format_query(&query,&catalog).unwrap();let parsed=parse(&rendered,&catalog).unwrap();prop_assert_eq!(normal_form(&query,&catalog).unwrap(),normal_form(&parsed,&catalog).unwrap());
     }
 }
+
+#[test]
+fn quoted_comparison_symbols_remain_scalar_values() {
+    let catalog = support::polylogue();
+    for text in ["<", ">", "<=", ">=", "=", "!=", "~", "^"] {
+        let source = format!("title:\"{text}\"");
+        roundtrip(&source, &catalog);
+        let query = parse(&source, &catalog).unwrap();
+        assert!(
+            matches!(query.source,Source::Unit{condition:Some(Condition{kind:ConditionKind::Match{value:Value::Scalar{text:ref literal,..},..},..}),..} if literal.as_str()==text)
+        );
+    }
+}

@@ -14,37 +14,44 @@ fn bad(message: impl ToString) -> Error {
 }
 
 /// A resolved named zone and a valid wall-clock start. Deployment owns defaults.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(try_from = "DaySettingWire", into = "DaySettingWire")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(into = "DaySettingWire")]
 pub struct DaySetting {
     #[schemars(with = "String")]
     zone: TimeZone,
     #[schemars(with = "String")]
     start: CivilTime,
 }
-#[derive(Serialize, Deserialize, schemars::JsonSchema)]
-struct DaySettingWire {
-    #[serde(with = "jiff::fmt::serde::tz::required")]
+/// Pure transport data. The caller resolves the named zone before constructing
+/// a runtime setting; deserialization performs no zone database lookup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DaySettingWire {
+    pub zone: String,
     #[schemars(with = "String")]
-    zone: TimeZone,
-    #[schemars(with = "String")]
-    start: CivilTime,
+    pub start: CivilTime,
 }
-impl TryFrom<DaySettingWire> for DaySetting {
-    type Error = Error;
-    fn try_from(value: DaySettingWire) -> Result<Self, Error> {
-        Self::new(value.zone, value.start)
+impl DaySettingWire {
+    pub fn resolve(self, zone: TimeZone) -> Result<DaySetting, Error> {
+        if zone.iana_name() != Some(self.zone.as_str()) {
+            return Err(bad(
+                "the supplied resolved zone does not match the day setting's name",
+            ));
+        }
+        DaySetting::new(zone, self.start)
     }
 }
 impl From<DaySetting> for DaySettingWire {
     fn from(value: DaySetting) -> Self {
         Self {
-            zone: value.zone,
+            zone: value.zone_name().to_string(),
             start: value.start,
         }
     }
 }
 impl DaySetting {
+    pub fn wire(&self) -> DaySettingWire {
+        self.clone().into()
+    }
     pub fn new(zone: TimeZone, start: CivilTime) -> Result<Self, Error> {
         if zone.iana_name().is_none() {
             return Err(bad("a day setting requires a resolved IANA zone"));
@@ -271,13 +278,36 @@ impl From<TimeRange> for Time {
         }
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(into = "ClockWire")]
 pub struct Clock {
     #[schemars(with = "String")]
     pub now: Timestamp,
     pub day: DaySetting,
 }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ClockWire {
+    #[schemars(with = "String")]
+    pub now: Timestamp,
+    pub day: DaySettingWire,
+}
+impl ClockWire {
+    pub fn resolve(self, zone: TimeZone) -> Result<Clock, Error> {
+        Ok(Clock::new(self.now, self.day.resolve(zone)?))
+    }
+}
+impl From<Clock> for ClockWire {
+    fn from(value: Clock) -> Self {
+        Self {
+            now: value.now,
+            day: value.day.into(),
+        }
+    }
+}
 impl Clock {
+    pub fn wire(&self) -> ClockWire {
+        self.clone().into()
+    }
     pub fn new(now: Timestamp, day: DaySetting) -> Self {
         Self { now, day }
     }
@@ -559,23 +589,28 @@ pub enum Precision {
 }
 /// Boundary provenance is mandatory for day and hour-derived values. Hour
 /// grains may use bounded precision and retain the same setting here.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(try_from = "TimeValueWire", into = "TimeValueWire")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(into = "TimeValueWire")]
 pub struct TimeValue {
     pub period: Time,
     pub precision: Precision,
     pub boundary: Option<DaySetting>,
 }
-#[derive(Serialize, Deserialize, schemars::JsonSchema)]
-struct TimeValueWire {
-    period: Time,
-    precision: Precision,
-    boundary: Option<DaySetting>,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TimeValueWire {
+    pub period: Time,
+    pub precision: Precision,
+    pub boundary: Option<DaySettingWire>,
 }
-impl TryFrom<TimeValueWire> for TimeValue {
-    type Error = Error;
-    fn try_from(v: TimeValueWire) -> Result<Self, Error> {
-        Self::new(v.period, v.precision, v.boundary)
+impl TimeValueWire {
+    pub fn resolve(self, zone: Option<TimeZone>) -> Result<TimeValue, Error> {
+        let boundary = match self.boundary {
+            Some(boundary) => Some(boundary.resolve(zone.ok_or_else(|| {
+                bad("the caller must supply the boundary's resolved named zone")
+            })?)?),
+            None => None,
+        };
+        TimeValue::new(self.period, self.precision, boundary)
     }
 }
 impl From<TimeValue> for TimeValueWire {
@@ -583,11 +618,14 @@ impl From<TimeValue> for TimeValueWire {
         Self {
             period: v.period,
             precision: v.precision,
-            boundary: v.boundary,
+            boundary: v.boundary.map(Into::into),
         }
     }
 }
 impl TimeValue {
+    pub fn wire(&self) -> TimeValueWire {
+        self.clone().into()
+    }
     pub fn new(
         period: Time,
         precision: Precision,

@@ -7,6 +7,10 @@ use query_language::{
 };
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
+fn resolve_zone(name: &str) -> Result<jiff::tz::TimeZone, query_language::Error> {
+    jiff::tz::TimeZone::get(name)
+        .map_err(|error| query_language::Error::new(ErrorKind::BadValue, error.to_string(), 0))
+}
 fn continuation() -> Continuation {
     Continuation {
         context: CursorContext {
@@ -37,7 +41,7 @@ fn cursor_refusals() {
     let data = continuation();
     let cursor = seal.seal(&data).unwrap();
     let opened = seal
-        .open(&cursor, data.context.question, |context| {
+        .open(&cursor, data.context.question, resolve_zone, |context| {
             context.read_positions["sx"] == "commit:43"
         })
         .unwrap();
@@ -45,20 +49,20 @@ fn cursor_refusals() {
     assert_eq!(opened.context.clock, data.context.clock);
     assert_eq!(opened.context.random_seed, 47);
     assert_eq!(
-        seal.open(&cursor, QuestionId([9; 32]), |_| true)
+        seal.open(&cursor, QuestionId([9; 32]), resolve_zone, |_| true)
             .unwrap_err()
             .kind,
         ErrorKind::InvalidQuery
     );
     assert_eq!(
-        seal.open(&cursor, data.context.question, |_| false)
+        seal.open(&cursor, data.context.question, resolve_zone, |_| false)
             .unwrap_err()
             .kind,
         ErrorKind::StaleCursor
     );
     assert_eq!(
         CursorSeal::new([4; 32])
-            .open(&cursor, data.context.question, |_| true)
+            .open(&cursor, data.context.question, resolve_zone, |_| true)
             .unwrap_err()
             .kind,
         ErrorKind::InvalidQuery
@@ -67,9 +71,12 @@ fn cursor_refusals() {
     changed[10] = if changed[10] == b'0' { b'1' } else { b'0' };
     let changed = SealedCursor::from_wire(String::from_utf8(changed).unwrap());
     assert_eq!(
-        seal.open(&changed, data.context.question, |_| panic!(
-            "unverified payload reached authority"
-        ))
+        seal.open(
+            &changed,
+            data.context.question,
+            |_| panic!("unverified zone reached resolver"),
+            |_| panic!("unverified payload reached authority")
+        )
         .unwrap_err()
         .kind,
         ErrorKind::InvalidQuery
@@ -90,6 +97,7 @@ fn page_is_not_the_answer_context() {
             .open(
                 request.cursor.as_ref().unwrap(),
                 data.context.question,
+                resolve_zone,
                 |_| true,
             )
             .unwrap();
@@ -104,12 +112,12 @@ proptest! {
         let mut data=continuation(); data.after.row_identity=identity;
         data.after.values=values.into_iter().map(serde_json::Value::from).collect(); data.context.random_seed=seed;
         let seal=CursorSeal::new([3;32]); let cursor=seal.seal(&data).unwrap();
-        let decoded=seal.open(&cursor,data.context.question, |_|true).unwrap();
+        let decoded=seal.open(&cursor,data.context.question, resolve_zone, |_|true).unwrap();
         prop_assert_eq!(decoded.after,data.after);prop_assert_eq!(decoded.context.random_seed,seed);
     }
     #[test]
     fn arbitrary_cursor_bytes_never_panic(text in ".*") {
-        let _=CursorSeal::new([3;32]).open(&SealedCursor::from_wire(text),QuestionId([0;32]), |_|true);
+        let _=CursorSeal::new([3;32]).open(&SealedCursor::from_wire(text),QuestionId([0;32]), resolve_zone, |_|true);
     }
 }
 
@@ -219,4 +227,47 @@ fn composite_order_keys_refuse_even_when_the_other_key_is_unknown() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn cursor_zone_resolution_is_explicit_and_mismatches_are_stale() {
+    let seal = CursorSeal::new([3; 32]);
+    let data = continuation();
+    let token = seal.seal(&data).unwrap();
+    let error = seal
+        .open(
+            &token,
+            data.context.question,
+            |name| {
+                assert_eq!(name, "Europe/Warsaw");
+                Ok(jiff::tz::TimeZone::get("America/New_York").unwrap())
+            },
+            |_| true,
+        )
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::StaleCursor);
+    let error = seal
+        .open(
+            &token,
+            data.context.question,
+            |_| {
+                Err(query_language::Error::new(
+                    ErrorKind::BadValue,
+                    "zone no longer retained",
+                    0,
+                ))
+            },
+            |_| true,
+        )
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::StaleCursor);
+    let error = seal
+        .open(
+            &token,
+            QuestionId([0; 32]),
+            |_| panic!("another question reached zone resolution"),
+            |_| true,
+        )
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::InvalidQuery);
 }
