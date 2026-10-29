@@ -191,6 +191,17 @@ fn mutation_after_adoption_leaves_only_an_uncommitted_tail_and_retry_uses_the_sa
         .unwrap();
     let mut writer = SegmentWriter::open(dir.path(), "segment", 0, &[], 0o600).unwrap();
     assert!(writer.append_group(vec![adopted], |_| Ok(None)).is_err());
+    let failed_end = std::fs::metadata(dir.path().join("segment")).unwrap().len();
+    let next = p.plain(&b"a later valid group"[..], 3).unwrap();
+    let error = writer
+        .append_group(vec![next], |_| Ok(None))
+        .err()
+        .expect("a failed writer cannot publish a later group");
+    assert!(error.to_string().contains("writer failed"));
+    assert_eq!(
+        std::fs::metadata(dir.path().join("segment")).unwrap().len(),
+        failed_end
+    );
     drop(writer);
     staged.as_file().write_all_at(&original, 0).unwrap();
     let mut writer = SegmentWriter::open(dir.path(), "segment", 0, &[], 0o600).unwrap();
@@ -236,4 +247,42 @@ fn mutation_after_adoption_leaves_only_an_uncommitted_tail_and_retry_uses_the_sa
             .unwrap(),
         b"durable synthetic custody"
     );
+}
+
+#[test]
+fn serializers_write_directly_to_bounded_encoded_custody() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let target = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+    let p = Preparation::new(dir.path())
+        .unwrap()
+        .with_frame_size(1024)
+        .unwrap();
+    let mut writer = p.plain_writer(target.reopen().unwrap(), 3).unwrap();
+    let mut oracle = Vec::new();
+    for value in 0..10_000 {
+        write!(
+            writer,
+            "{{\"value\":{value},\"body\":\"synthetic repeated field\"}}\n"
+        )
+        .unwrap();
+        write!(
+            oracle,
+            "{{\"value\":{value},\"body\":\"synthetic repeated field\"}}\n"
+        )
+        .unwrap();
+    }
+    let prepared = writer.finish().unwrap();
+    assert_eq!(prepared.hash(), Hash::of(&oracle));
+    assert_eq!(prepared.decoded_len(), oracle.len() as u64);
+    assert!(prepared.stored_len() < prepared.decoded_len());
+    let mut actual = Vec::new();
+    prepared
+        .reader(None, ReadLimits::default())
+        .unwrap()
+        .read_to_end(&mut actual)
+        .unwrap();
+    assert_eq!(actual, oracle);
+    let encoded = std::fs::read(target.path()).unwrap();
+    assert!(!encoded.windows(4096).any(|bytes| bytes == &oracle[..4096]));
 }

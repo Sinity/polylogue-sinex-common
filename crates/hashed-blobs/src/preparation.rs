@@ -140,48 +140,51 @@ impl Preparation {
     pub fn plain_into(&self, file: File, reader: impl Read, level: i32) -> Result<Prepared> {
         self.plain_into_checked(file, reader, level, || Ok(()))
     }
+    /// Stream a serializer directly into the existing encoded frames.
+    /// Finish returns the appendable descriptor; the product owns durability.
+    pub fn plain_writer(&self, mut file: File, level: i32) -> Result<PlainWriter> {
+        file.set_len(0)?;
+        file.rewind()?;
+        Ok(PlainWriter {
+            file,
+            compressor: compressor(level)?,
+            frame: self.frame,
+            buffer: Vec::with_capacity(self.frame),
+            index: Index {
+                hash: Hash([0; 32]),
+                binding: Hash([0; 32]),
+                kind: Kind::Plain,
+                salt: [0; 32],
+                frames: Vec::new(),
+            },
+            hash: blake3::Hasher::new(),
+            decoded_len: 0,
+            failed: false,
+        })
+    }
     pub fn plain_into_checked<E: From<Error>>(
         &self,
-        mut file: File,
+        file: File,
         mut reader: impl Read,
         level: i32,
         mut check: impl FnMut() -> std::result::Result<(), E>,
     ) -> std::result::Result<Prepared, E> {
-        file.set_len(0).map_err(Error::Io)?;
-        file.rewind().map_err(Error::Io)?;
-        let mut compressor = compressor(level).map_err(Error::Io)?;
-        let mut index = Index {
-            hash: Hash([0; 32]),
-            binding: Hash([0; 32]),
-            kind: Kind::Plain,
-            salt: [0; 32],
-            frames: Vec::new(),
-        };
-        let mut hasher = blake3::Hasher::new();
-        let mut total = 0;
-        let mut buffer = vec![0; self.frame];
+        let mut writer = self.plain_writer(file, level)?;
+        let mut buffer = [0; 65536];
         loop {
             check()?;
-            let n = read_frame(&mut reader, &mut buffer).map_err(Error::Io)?;
-            check()?;
-            if n == 0 && !index.frames.is_empty() {
+            let n = match reader.read(&mut buffer) {
+                Ok(n) => n,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(Error::Io(error).into()),
+            };
+            if n == 0 {
                 break;
             }
-            hasher.update(&buffer[..n]);
-            total += n as u64;
-            let encoded = compressor.compress(&buffer[..n]).map_err(Error::Io)?;
-            file.write_all(&encoded).map_err(Error::Io)?;
-            index.frames.push(Frame {
-                stored: encoded.len() as u64,
-                decoded: n as u64,
-                digest: Hash::of(&encoded),
-            });
-            if n < self.frame {
-                break;
-            }
+            writer.write_all(&buffer[..n]).map_err(Error::Io)?;
         }
         check()?;
-        finish(file, Hash(*hasher.finalize().as_bytes()), total, index).map_err(E::from)
+        writer.finish().map_err(E::from)
     }
     pub fn sealed(&self, reader: impl Read + Seek, level: i32, key: &DataKey) -> Result<Prepared> {
         self.sealed_checked(reader, level, key, || Ok(()))
@@ -293,6 +296,86 @@ impl Preparation {
         Hash(*blake3::keyed_hash(&codec::name_key(key), bytes).as_bytes())
     }
 }
+/// A bounded plain frame encoder implementing `Write` for streaming serializers.
+/// Dropping it abandons the incomplete encoding. Call `finish` before persistence.
+pub struct PlainWriter {
+    file: File,
+    compressor: zstd::bulk::Compressor<'static>,
+    frame: usize,
+    buffer: Vec<u8>,
+    index: Index,
+    hash: blake3::Hasher,
+    decoded_len: u64,
+    failed: bool,
+}
+impl PlainWriter {
+    fn emit(&mut self) -> std::io::Result<()> {
+        if self.buffer.is_empty() && !self.index.frames.is_empty() {
+            return Ok(());
+        }
+        let encoded = self.compressor.compress(&self.buffer)?;
+        self.file.write_all(&encoded)?;
+        self.index.frames.push(Frame {
+            stored: encoded.len() as u64,
+            decoded: self.buffer.len() as u64,
+            digest: Hash::of(&encoded),
+        });
+        self.buffer.clear();
+        Ok(())
+    }
+    fn write_inner(&mut self, mut bytes: &[u8]) -> std::io::Result<usize> {
+        let length = bytes.len();
+        while !bytes.is_empty() {
+            let n = bytes.len().min(self.frame - self.buffer.len());
+            self.decoded_len = self
+                .decoded_len
+                .checked_add(n as u64)
+                .ok_or_else(|| std::io::Error::other("decoded length overflows"))?;
+            self.hash.update(&bytes[..n]);
+            self.buffer.extend_from_slice(&bytes[..n]);
+            bytes = &bytes[n..];
+            if self.buffer.len() == self.frame {
+                self.emit()?;
+            }
+        }
+        Ok(length)
+    }
+    pub fn finish(mut self) -> Result<Prepared> {
+        if self.failed {
+            return Err(Error::Refused("plain encoder failed before finish".into()));
+        }
+        self.emit()?;
+        finish(
+            self.file,
+            Hash(*self.hash.finalize().as_bytes()),
+            self.decoded_len,
+            self.index,
+        )
+    }
+}
+impl Write for PlainWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.failed {
+            return Err(std::io::Error::other("plain encoder failed"));
+        }
+        let result = self.write_inner(bytes);
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.failed {
+            return Err(std::io::Error::other("plain encoder failed"));
+        }
+        let result = self.emit();
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
+}
+
 fn compressor(level: i32) -> std::io::Result<zstd::bulk::Compressor<'static>> {
     let mut c = zstd::bulk::Compressor::new(level)?;
     c.set_parameter(zstd::zstd_safe::CParameter::ChecksumFlag(true))?;

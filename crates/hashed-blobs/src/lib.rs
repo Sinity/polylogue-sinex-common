@@ -11,7 +11,7 @@ pub use pax::{PaxArchive, PaxMember, PaxSparseExtent, PaxTime};
 mod preparation;
 mod reader;
 mod writer;
-pub use preparation::{Preparation, Prepared};
+pub use preparation::{PlainWriter, Preparation, Prepared};
 pub use reader::{BlobReader, Mismatch, ReadLimits, Reader, VerificationStats};
 pub use writer::{GroupMetrics, PendingGroup, SegmentWriter, SyncedGroup};
 
