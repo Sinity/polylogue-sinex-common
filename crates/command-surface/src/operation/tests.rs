@@ -474,3 +474,76 @@ async fn refusals_are_shared_only_while_in_flight_and_unique_completed_ids_do_no
     }
     assert_eq!(store.count(), 32);
 }
+
+#[tokio::test]
+async fn owner_cancellation_retires_the_flight_and_releases_existing_waiters() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("product.sqlite"));
+    let gate = Gate::before();
+    let table = make_table(&store, Some(gate.clone()));
+    let token = CancellationToken::new();
+    let mut owner = Box::pin(table.call(request("cancel", "one"), Origin::Http, token.clone()));
+    pending(owner.as_mut()).await;
+    let mut waiter = Box::pin(table.call(
+        request("cancel", "one"),
+        Origin::Socket,
+        CancellationToken::new(),
+    ));
+    pending(waiter.as_mut()).await;
+    token.cancel();
+    let answer = owner.await;
+    assert_eq!(kind(&answer), FailureKind::Cancelled);
+    assert_eq!(entries(&table), 0);
+    assert_eq!(store.active.load(Ordering::SeqCst), 0);
+    assert_eq!(waiter.await, answer);
+    gate.open();
+    assert!(
+        table
+            .call(
+                request("cancel", "one"),
+                Origin::Mcp,
+                CancellationToken::new()
+            )
+            .await
+            .value()
+            .is_some()
+    );
+    assert_eq!(store.count(), 1);
+}
+
+#[tokio::test]
+async fn concurrent_refusals_share_one_final_error_but_sequential_refusals_execute_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("product.sqlite"));
+    let gate = Gate::before();
+    let table = make_table(&store, Some(gate.clone()));
+    let mut owner = Box::pin(table.call(
+        request("refusal", "refuse"),
+        Origin::Http,
+        CancellationToken::new(),
+    ));
+    pending(owner.as_mut()).await;
+    let mut waiter = Box::pin(table.call(
+        request("refusal", "refuse"),
+        Origin::Socket,
+        CancellationToken::new(),
+    ));
+    pending(waiter.as_mut()).await;
+    gate.open();
+    let answer = owner.await;
+    assert_eq!(kind(&answer), FailureKind::BadValue);
+    assert_eq!(entries(&table), 0);
+    assert_eq!(waiter.await, answer);
+    assert_eq!(store.attempts.load(Ordering::SeqCst), 1);
+    let again = table
+        .call(
+            request("refusal", "refuse"),
+            Origin::Mcp,
+            CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(kind(&again), FailureKind::BadValue);
+    assert_eq!(store.attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(store.count(), 0);
+    assert_eq!(entries(&table), 0);
+}
