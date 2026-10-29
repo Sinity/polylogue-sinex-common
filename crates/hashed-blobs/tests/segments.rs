@@ -15,7 +15,10 @@ fn prep(root: &std::path::Path) -> Preparation {
 }
 fn put(writer: &mut SegmentWriter, p: &Preparation, bytes: &[u8]) -> Extent {
     let group = writer
-        .append_group(vec![p.plain(bytes, 3).unwrap()], |_| Ok(None))
+        .append_group(
+            (vec![p.plain(bytes, 3).unwrap()]).into_iter().map(Ok),
+            |_| Ok(None),
+        )
         .unwrap()
         .wait()
         .unwrap();
@@ -31,7 +34,12 @@ fn open_truncates_uncommitted_tail_and_committed_extents_never_move() {
     let first = put(&mut writer, &p, b"committed bytes");
     let original = std::fs::read(dir.path().join("segment.zst")).unwrap();
     let tail = writer
-        .append_group(vec![p.plain(&b"uncommitted"[..], 3).unwrap()], |_| Ok(None))
+        .append_group(
+            (vec![p.plain(&b"uncommitted"[..], 3).unwrap()])
+                .into_iter()
+                .map(Ok),
+            |_| Ok(None),
+        )
         .unwrap()
         .wait()
         .unwrap();
@@ -56,15 +64,22 @@ fn one_sync_per_group_and_dedup_across_uncommitted_groups() {
     let mut writer = open(dir.path(), 0);
     let first = writer
         .append_group(
-            vec![
+            (vec![
                 p.plain(&b"same"[..], 3).unwrap(),
                 p.plain(&b"same"[..], 3).unwrap(),
-            ],
+            ])
+            .into_iter()
+            .map(Ok),
             |_| Ok(None),
         )
         .unwrap();
     let second = writer
-        .append_group(vec![p.plain(&b"same"[..], 3).unwrap()], |_| Ok(None))
+        .append_group(
+            (vec![p.plain(&b"same"[..], 3).unwrap()])
+                .into_iter()
+                .map(Ok),
+            |_| Ok(None),
+        )
         .unwrap()
         .wait()
         .unwrap();
@@ -81,10 +96,15 @@ fn one_sync_per_group_and_dedup_across_uncommitted_groups() {
     writer.acknowledge(&second).unwrap();
     let committed = first.extents[0].clone();
     let third = writer
-        .append_group(vec![p.plain(&b"same"[..], 3).unwrap()], |hash| {
-            assert_eq!(*hash, Hash::of(b"same"));
-            Ok(Some(committed.clone()))
-        })
+        .append_group(
+            (vec![p.plain(&b"same"[..], 3).unwrap()])
+                .into_iter()
+                .map(Ok),
+            |hash| {
+                assert_eq!(*hash, Hash::of(b"same"));
+                Ok(Some(committed.clone()))
+            },
+        )
         .unwrap()
         .wait()
         .unwrap();
@@ -172,7 +192,7 @@ fn sealed_no_plaintext_on_disk_sealed_tamper_fails_sealed_check_without_key() {
     );
     let mut writer = open(dir.path(), 0);
     let group = writer
-        .append_group(vec![prepared], |_| Ok(None))
+        .append_group((vec![prepared]).into_iter().map(Ok), |_| Ok(None))
         .unwrap()
         .wait()
         .unwrap();
@@ -244,7 +264,7 @@ fn frame_serialization_round_trips_independent_inputs_and_empty_extents() {
             let plain = p.plain(&bytes[..], 1).unwrap();
             let sealed = p.sealed(std::io::Cursor::new(&bytes), 1, &key).unwrap();
             let group = writer
-                .append_group(vec![plain, sealed], |_| Ok(None))
+                .append_group((vec![plain, sealed]).into_iter().map(Ok), |_| Ok(None))
                 .unwrap()
                 .wait()
                 .unwrap();
@@ -287,11 +307,16 @@ fn lookup_failure_poison_requires_reopen() {
     let p = prep(dir.path());
     let mut writer = open(dir.path(), 0);
     assert!(writer
-        .append_group(vec![p.plain(&b"input"[..], 3).unwrap()], |_| Err(
-            hashed_blobs::Error::Refused("index unavailable".into())
-        ))
+        .append_group(
+            (vec![p.plain(&b"input"[..], 3).unwrap()])
+                .into_iter()
+                .map(Ok),
+            |_| Err(hashed_blobs::Error::Refused("index unavailable".into()))
+        )
         .is_err());
-    assert!(writer.append_group(vec![], |_| Ok(None)).is_err());
+    assert!(writer
+        .append_group((vec![]).into_iter().map(Ok), |_| Ok(None))
+        .is_err());
     drop(writer);
     assert!(SegmentWriter::open(dir.path(), "segment.zst", 0, &[], 0o600).is_ok());
 }
@@ -425,7 +450,9 @@ fn locked_sealed_reader_cancels_even_with_a_cached_frame() {
     let mut writer = open(dir.path(), 0);
     let group = writer
         .append_group(
-            vec![p.sealed(std::io::Cursor::new([42; 97]), 3, &key).unwrap()],
+            (vec![p.sealed(std::io::Cursor::new([42; 97]), 3, &key).unwrap()])
+                .into_iter()
+                .map(Ok),
             |_| Ok(None),
         )
         .unwrap()

@@ -42,7 +42,7 @@ fn a_durable_prepared_inode_is_adopted_and_appended_without_a_plaintext_copy() {
     .unwrap();
     let mut writer = SegmentWriter::open(dir.path(), "segment", 0, &[], 0o600).unwrap();
     let group = writer
-        .append_group(vec![adopted], |_| Ok(None))
+        .append_group((vec![adopted]).into_iter().map(Ok), |_| Ok(None))
         .unwrap()
         .wait()
         .unwrap();
@@ -64,7 +64,9 @@ fn a_durable_prepared_inode_is_adopted_and_appended_without_a_plaintext_copy() {
     )
     .unwrap();
     let duplicate = writer
-        .append_group(vec![retry], |_| Ok(Some(group.extents[0].clone())))
+        .append_group((vec![retry]).into_iter().map(Ok), |_| {
+            Ok(Some(group.extents[0].clone()))
+        })
         .unwrap()
         .wait()
         .unwrap();
@@ -188,11 +190,13 @@ fn mutation_after_adoption_leaves_only_an_uncommitted_tail_and_retry_uses_the_sa
         .write_all_at(&[original[0] ^ 1], 0)
         .unwrap();
     let mut writer = SegmentWriter::open(dir.path(), "segment", 0, &[], 0o600).unwrap();
-    assert!(writer.append_group(vec![adopted], |_| Ok(None)).is_err());
+    assert!(writer
+        .append_group((vec![adopted]).into_iter().map(Ok), |_| Ok(None))
+        .is_err());
     let failed_end = std::fs::metadata(dir.path().join("segment")).unwrap().len();
     let next = p.plain(&b"a later valid group"[..], 3).unwrap();
     let error = writer
-        .append_group(vec![next], |_| Ok(None))
+        .append_group((vec![next]).into_iter().map(Ok), |_| Ok(None))
         .err()
         .expect("a failed writer cannot publish a later group");
     assert!(error.to_string().contains("writer failed"));
@@ -215,7 +219,7 @@ fn mutation_after_adoption_leaves_only_an_uncommitted_tail_and_retry_uses_the_sa
     )
     .unwrap();
     let uncommitted = writer
-        .append_group(vec![adopted], |_| Ok(None))
+        .append_group((vec![adopted]).into_iter().map(Ok), |_| Ok(None))
         .unwrap()
         .wait()
         .unwrap();
@@ -234,7 +238,7 @@ fn mutation_after_adoption_leaves_only_an_uncommitted_tail_and_retry_uses_the_sa
     )
     .unwrap();
     let committed = writer
-        .append_group(vec![adopted], |_| Ok(None))
+        .append_group((vec![adopted]).into_iter().map(Ok), |_| Ok(None))
         .unwrap()
         .wait()
         .unwrap();
@@ -313,4 +317,110 @@ fn a_single_encoded_journal_reopens_without_a_second_metadata_commit() {
     let broken = p.plain(data.as_slice(), 3).unwrap().into_file();
     broken.write_all_at(&[0; 8], 0).unwrap();
     assert!(Prepared::inspect(broken, None, ReadLimits::default()).is_err());
+}
+
+#[test]
+fn a_mid_group_preparation_failure_cannot_make_partial_custody_committable() {
+    let dir = tempfile::tempdir().unwrap();
+    let preparation = Preparation::new(dir.path()).unwrap();
+    let mut writer = SegmentWriter::open(dir.path(), "segment", 0, &[], 0o600).unwrap();
+    let previous = writer
+        .append_group(
+            std::iter::once(preparation.plain(&b"previous synced group"[..], 3)),
+            |_| Ok(None),
+        )
+        .unwrap()
+        .wait()
+        .unwrap();
+    let visited = std::cell::Cell::new(0usize);
+    let items = (0..3).map(|index| {
+        visited.set(visited.get() + 1);
+        if index == 1 {
+            Err(hashed_blobs::Error::Refused(
+                "synthetic member unavailable".into(),
+            ))
+        } else {
+            preparation.plain(&b"uncommitted encoded member"[..], 3)
+        }
+    });
+    let error = writer
+        .append_group(items, |_| Ok(None))
+        .err()
+        .expect("fallible preparation fails the whole group");
+    assert!(error.to_string().contains("synthetic member unavailable"));
+    assert_eq!(visited.get(), 2);
+    // An earlier successful group may commit; the failed suffix never can.
+    writer.acknowledge(&previous).unwrap();
+    let end = writer.committed_end();
+    assert_eq!(end, previous.end);
+    assert!(writer
+        .append_group(
+            std::iter::once(preparation.plain(&b"cannot follow the failed gap"[..], 3)),
+            |_| Ok(None)
+        )
+        .is_err());
+    drop(writer);
+    let mut writer = SegmentWriter::open(dir.path(), "segment", end, &[], 0o600).unwrap();
+    assert_eq!(
+        std::fs::metadata(dir.path().join("segment")).unwrap().len(),
+        end
+    );
+    assert_eq!(
+        Reader::new(dir.path())
+            .read(&previous.extents, None)
+            .unwrap(),
+        b"previous synced group"
+    );
+    let group = writer
+        .append_group(
+            [b"same".as_slice(), b"same".as_slice(), b"other".as_slice()]
+                .into_iter()
+                .map(|bytes| preparation.plain(bytes, 3)),
+            |_| Ok(None),
+        )
+        .unwrap()
+        .wait()
+        .unwrap();
+    assert_eq!(group.metrics.materials, 3);
+    assert_eq!(group.metrics.appended_materials, 2);
+    assert_eq!(group.metrics.deduplicated_materials, 1);
+    assert_eq!(group.metrics.syncs, 1);
+    assert_eq!(group.extents[0], group.extents[1]);
+    writer.acknowledge(&group).unwrap();
+    assert!(Reader::new(dir.path())
+        .scan(&group.extents)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn lazy_preparations_keep_the_open_file_count_bounded_for_one_synced_group() {
+    fn fds() -> usize {
+        std::fs::read_dir("/proc/self/fd").unwrap().count()
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let preparation = Preparation::new(dir.path())
+        .unwrap()
+        .with_frame_size(32)
+        .unwrap();
+    let mut writer = SegmentWriter::open(dir.path(), "segment", 0, &[], 0o600).unwrap();
+    let baseline = fds();
+    let maximum = std::cell::Cell::new(baseline);
+    let items = (0u64..1000).map(|number| {
+        let prepared = preparation.plain(number.to_le_bytes().as_slice(), 3);
+        maximum.set(maximum.get().max(fds()));
+        prepared
+    });
+    let group = writer
+        .append_group(items, |_| Ok(None))
+        .unwrap()
+        .wait()
+        .unwrap();
+    assert!(
+        maximum.get() <= baseline + 2,
+        "prepared members do not retain one descriptor each"
+    );
+    assert_eq!(group.metrics.materials, 1000);
+    assert_eq!(group.metrics.syncs, 1);
+    writer.acknowledge(&group).unwrap();
 }

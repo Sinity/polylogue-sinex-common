@@ -171,7 +171,7 @@ impl SegmentWriter {
     /// existing descriptor. An append or sync failure requires ordinary reopen.
     pub fn append_group(
         &mut self,
-        prepared: Vec<Prepared>,
+        prepared: impl IntoIterator<Item = Result<Prepared>>,
         mut lookup: impl FnMut(&Hash) -> Result<Option<Extent>>,
     ) -> Result<PendingGroup> {
         if self.failed.load(Ordering::Acquire) {
@@ -187,17 +187,21 @@ impl SegmentWriter {
     }
     fn append(
         &mut self,
-        prepared: Vec<Prepared>,
+        prepared: impl IntoIterator<Item = Result<Prepared>>,
         lookup: &mut impl FnMut(&Hash) -> Result<Option<Extent>>,
     ) -> Result<PendingGroup> {
-        let mut extents = Vec::with_capacity(prepared.len());
+        let mut extents = Vec::new();
         let mut hashes = Vec::new();
         let mut metrics = GroupMetrics {
-            materials: prepared.len() as u64,
             syncs: 1,
             ..GroupMetrics::default()
         };
-        for mut item in prepared {
+        for item in prepared {
+            let mut item = item?;
+            metrics.materials = metrics
+                .materials
+                .checked_add(1)
+                .ok_or_else(|| Error::Refused("group material count overflows".into()))?;
             let known = if let Some(extent) = self.pending.get(&item.hash) {
                 Some(extent.clone())
             } else {

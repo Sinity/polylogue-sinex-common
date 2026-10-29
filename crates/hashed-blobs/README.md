@@ -135,12 +135,14 @@ holds an exclusive file lock until it and its sync thread close. Readers
 hold separate file descriptors and take no lock.
 
 ```rust,ignore
-let pending = writer.append_group(prepared, |hash| product_index.lookup(hash))?;
+let pending = writer.append_group(prepared.into_iter().map(Ok), |hash| product_index.lookup(hash))?;
 // Preparation of another group can proceed while the dedicated worker syncs.
 let group = pending.wait()?;
 product_database.commit(&group.extents, group.end)?;
 writer.acknowledge(&group)?;
 ```
+
+The preparation input is a fallible iterator. A product can pin and fully verify one closed encoded member at a time; the writer drops it after appending and still syncs exactly once for the complete group. A preparation failure partway through the iterator poisons further appends; no group is returned for that tail, and ordinary reopen truncates it to the product's last committed end. Earlier synced groups retain their normal ordered acknowledgment semantics.
 
 The returned extents have the same order and multiplicity as the inputs;
 deduplication returns an existing descriptor. The database commits the full

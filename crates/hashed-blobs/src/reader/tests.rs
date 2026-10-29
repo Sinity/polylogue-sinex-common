@@ -18,9 +18,11 @@ fn sealed_tamper_fails_even_when_unkeyed_frame_and_index_digests_are_replaced() 
         let mut writer = SegmentWriter::open(dir.path(), "segment.zst", 0, &[], 0o600).unwrap();
         let group = writer
             .append_group(
-                vec![preparation
+                (vec![preparation
                     .sealed(std::io::Cursor::new(&body), 3, &key)
-                    .unwrap()],
+                    .unwrap()])
+                .into_iter()
+                .map(Ok),
                 |_| Ok(None),
             )
             .unwrap()

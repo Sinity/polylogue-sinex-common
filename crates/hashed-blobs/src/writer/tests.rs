@@ -31,7 +31,9 @@ fn crash_worker() {
     let p = Preparation::new(root.join("scratch")).unwrap();
     let group = writer
         .append_group(
-            vec![p.plain(&b"second committed payload"[..], 3).unwrap()],
+            (vec![p.plain(&b"second committed payload"[..], 3).unwrap()])
+                .into_iter()
+                .map(Ok),
             |_| Ok(None),
         )
         .unwrap();
@@ -45,7 +47,9 @@ fn crash_worker() {
     writer.acknowledge(&group).unwrap();
     let tail = writer
         .append_group(
-            vec![p.plain(&b"third uncommitted payload"[..], 3).unwrap()],
+            (vec![p.plain(&b"third uncommitted payload"[..], 3).unwrap()])
+                .into_iter()
+                .map(Ok),
             |_| Ok(None),
         )
         .unwrap()
@@ -65,7 +69,9 @@ fn crash_leaves_only_a_tail_at_append_sync_commit_and_truncate() {
         let mut writer = SegmentWriter::open(dir.path(), "segment.zst", 0, &[], 0o600).unwrap();
         let first = writer
             .append_group(
-                vec![p.plain(&b"first committed payload"[..], 3).unwrap()],
+                (vec![p.plain(&b"first committed payload"[..], 3).unwrap()])
+                    .into_iter()
+                    .map(Ok),
                 |_| Ok(None),
             )
             .unwrap()

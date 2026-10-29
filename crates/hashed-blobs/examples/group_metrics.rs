@@ -31,7 +31,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         prepared.push(material);
         if Instant::now() >= next {
             let group = writer
-                .append_group(std::mem::take(&mut prepared), |_| Ok(None))?
+                .append_group((std::mem::take(&mut prepared)).into_iter().map(Ok), |_| {
+                    Ok(None)
+                })?
                 .wait()?;
             written += group.metrics.appended_bytes;
             writer.acknowledge(&group)?;
@@ -41,7 +43,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if !prepared.is_empty() {
         std::thread::sleep(next.saturating_duration_since(Instant::now()));
-        let group = writer.append_group(prepared, |_| Ok(None))?.wait()?;
+        let group = writer
+            .append_group((prepared).into_iter().map(Ok), |_| Ok(None))?
+            .wait()?;
         written += group.metrics.appended_bytes;
         writer.acknowledge(&group)?;
         groups += 1;
