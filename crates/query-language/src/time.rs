@@ -640,6 +640,28 @@ pub enum Precision {
     Year,
     Bounded,
 }
+impl Precision {
+    pub const ALL: [Self; 7] = [
+        Self::Instant,
+        Self::Second,
+        Self::Minute,
+        Self::Day,
+        Self::Month,
+        Self::Year,
+        Self::Bounded,
+    ];
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Instant => "instant",
+            Self::Second => "second",
+            Self::Minute => "minute",
+            Self::Day => "day",
+            Self::Month => "month",
+            Self::Year => "year",
+            Self::Bounded => "bounded",
+        }
+    }
+}
 /// Boundary provenance is mandatory for day and hour-derived values. Hour
 /// grains may use bounded precision and retain the same setting here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
