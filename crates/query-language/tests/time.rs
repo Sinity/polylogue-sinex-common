@@ -565,3 +565,22 @@ fn time_quality_is_one_shared_closed_set_separate_from_precision() {
     }
     assert!("estimated".parse::<TimeQuality>().is_err());
 }
+
+#[test]
+fn precision_catalog_vocabulary_matches_canonical_wire_values() {
+    use query_language::time::Precision;
+    let expected = [
+        "instant", "second", "minute", "day", "month", "year", "bounded",
+    ];
+    assert_eq!(Precision::ALL.map(Precision::as_str), expected);
+    for (value, name) in Precision::ALL.into_iter().zip(expected) {
+        let encoded = serde_json::Value::String(name.into());
+        assert_eq!(serde_json::to_value(value).unwrap(), encoded);
+        assert_eq!(serde_json::from_value::<Precision>(encoded).unwrap(), value);
+    }
+    for outside in ["millisecond", "estimated", "unknown"] {
+        assert!(
+            serde_json::from_value::<Precision>(serde_json::Value::String(outside.into())).is_err()
+        );
+    }
+}
