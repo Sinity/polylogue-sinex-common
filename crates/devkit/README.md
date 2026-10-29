@@ -39,15 +39,15 @@ passes explicit package selectors through to Cargo.
 
 `devkit::local_link::LocalLink` builds several Cargo workspaces against one
 checkout of a Git dependency. The product supplies the repository URL, patch
-and opt-out paths, and each workspace's existing lock and original-backup
-paths. Its CLI owns checkout discovery and user-facing messages.
+path, and each workspace's existing lock and original-backup paths. Its CLI
+owns checkout discovery and user-facing messages.
 
 `link(checkout)` discovers the shared crates, writes the Cargo patch, keeps
 the original locks and resolves every workspace. A crate still resolving to
 Git is an error, including Cargo falling back to Git when the checkout's
 version does not satisfy a workspace. Successful relinks keep the same
 original backups. `unlink()` restores those locks, removes the patch and
-backups, and writes the opt-out marker.
+backups. Linking happens only when the product CLI requests it.
 
 Both operations restore the preceding file contents on a returned error,
 including the preceding active link and any absent files. A rollback failure
@@ -256,9 +256,11 @@ targets; VM scenario names; development-stack services and readiness probes.
   lock and the original backups; a subsequent unlink restores the original
   Git-backed locks. A synthetic two-workspace dependency accepts a new version
   in its root but refuses it in its fuzz workspace.
-- **failed-first-link**: a failed first link preserves original locks, an
-  existing opt-out marker and the absence of patch and backup files. The same
-  two-workspace refusal exercises the returned-error path.
+- **failed-first-link**: a failed first link preserves original locks and the
+  absence of patch and backup files. The same two-workspace refusal exercises
+  the returned-error path.
+- **link-roundtrip**: linking and unlinking restore both workspace locks and
+  the entire Cargo configuration directory, including unrelated settings.
 - **history-never-gates**: a run whose history store cannot be opened reports
   that and finishes with the outcome of its steps.
 - **changed-selection-includes-reverse-dependencies**: a production change

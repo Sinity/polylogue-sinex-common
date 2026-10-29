@@ -81,7 +81,6 @@ impl Fixture {
     fn paths(&self) -> Vec<PathBuf> {
         [
             ".cargo/local.toml",
-            ".cargo/link.off",
             "Cargo.lock",
             ".cargo/root.lock",
             "fuzz/Cargo.lock",
@@ -106,13 +105,12 @@ impl Fixture {
     fn with_link<T>(&self, operation: impl FnOnce(LocalLink<'_>) -> T) -> T {
         let paths = self.paths();
         let locks = [
-            (paths[2].as_path(), paths[3].as_path()),
-            (paths[4].as_path(), paths[5].as_path()),
+            (paths[1].as_path(), paths[2].as_path()),
+            (paths[3].as_path(), paths[4].as_path()),
         ];
         operation(LocalLink {
             repository: &self.repository,
             patch: &paths[0],
-            disabled: &paths[1],
             locks: &locks,
         })
     }
@@ -125,10 +123,10 @@ fn failed_relink_preserves_the_active_checkout_and_original_locks() {
     let names = fixture.with_link(|link| link.link(&fixture.first)).unwrap();
     assert_eq!(names, ["shared"]);
     let linked = fixture.state();
-    assert_ne!(linked[2], original[2]);
-    assert_ne!(linked[4], original[4]);
-    assert_eq!(linked[3], original[2]);
-    assert_eq!(linked[5], original[4]);
+    assert_ne!(linked[1], original[1]);
+    assert_ne!(linked[3], original[3]);
+    assert_eq!(linked[2], original[1]);
+    assert_eq!(linked[4], original[3]);
     // The root accepts version 2, but the fuzz workspace requires version 1.
     let error = fixture
         .with_link(|link| link.link(&fixture.second))
@@ -145,22 +143,16 @@ fn failed_relink_preserves_the_active_checkout_and_original_locks() {
         ]
     );
     let unlinked = fixture.state();
-    assert_eq!(unlinked[2], original[2]);
-    assert_eq!(unlinked[4], original[4]);
+    assert_eq!(unlinked[1], original[1]);
+    assert_eq!(unlinked[3], original[3]);
     assert!(unlinked[0].is_none());
-    assert!(unlinked[3].is_none());
-    assert!(unlinked[5].is_none());
-    assert!(unlinked[1].is_some());
+    assert!(unlinked[2].is_none());
+    assert!(unlinked[4].is_none());
 }
 
 #[test]
-fn failed_first_link_restores_absence_and_the_existing_opt_out() {
+fn failed_first_link_preserves_original_locks_and_absent_overrides() {
     let fixture = Fixture::new();
-    fs::write(
-        fixture.root().join(".cargo/link.off"),
-        b"synthetic opt out\n",
-    )
-    .unwrap();
     let original = fixture.state();
     assert!(
         fixture
