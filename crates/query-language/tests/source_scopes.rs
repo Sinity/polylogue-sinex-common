@@ -360,3 +360,58 @@ fn nested_implicit_units_inherit_the_row_domain_and_explicit_units_keep_their_ow
         matches!(&inner.source, Source::Unit { unit, implicit: true, .. } if unit == "commands")
     );
 }
+
+#[test]
+fn explicit_units_keep_saved_and_result_predicates_distinct_from_sources() {
+    let catalog = catalog();
+    for (literal, saved) in [("query:by-action", true), ("result:synthetic", false)] {
+        let source = parse(literal, &catalog).unwrap();
+        assert!(if saved {
+            matches!(source.source, Source::Saved { .. })
+        } else {
+            matches!(source.source, Source::Result { .. })
+        });
+        let implicit = parse(&format!("({literal})"), &catalog).unwrap();
+        assert_eq!(
+            question_id(&source, &catalog, &BTreeMap::new()).unwrap(),
+            question_id(&implicit, &catalog, &BTreeMap::new()).unwrap()
+        );
+        for text in [
+            format!("sessions where {literal}"),
+            format!("sessions where ({literal})"),
+        ] {
+            let explicit = parse(&text, &catalog).unwrap();
+            let Source::Unit {
+                unit,
+                implicit: false,
+                condition: Some(condition),
+            } = &explicit.source
+            else {
+                panic!("explicit source was lost: {explicit:?}");
+            };
+            assert_eq!(unit, "sessions");
+            assert!(if saved {
+                matches!(condition.kind, ConditionKind::Saved { .. })
+            } else {
+                matches!(condition.kind, ConditionKind::Reference { .. })
+            });
+            assert_ne!(
+                question_id(&source, &catalog, &BTreeMap::new()).unwrap(),
+                question_id(&explicit, &catalog, &BTreeMap::new()).unwrap()
+            );
+            let rendered = format_query(&explicit, &catalog).unwrap();
+            let parsed = parse(&rendered, &catalog).unwrap();
+            assert!(matches!(
+                parsed.source,
+                Source::Unit {
+                    implicit: false,
+                    ..
+                }
+            ));
+            assert_eq!(
+                question_id(&explicit, &catalog, &BTreeMap::new()).unwrap(),
+                question_id(&parsed, &catalog, &BTreeMap::new()).unwrap()
+            );
+        }
+    }
+}

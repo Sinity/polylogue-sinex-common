@@ -475,6 +475,7 @@ impl Parser<'_> {
         }
         source = match source {
             Source::Unit {
+                implicit: true,
                 condition:
                     Some(Condition {
                         kind: ConditionKind::Saved { name, arguments },
@@ -488,6 +489,7 @@ impl Parser<'_> {
                 output: OutputBinding::Deferred,
             },
             Source::Unit {
+                implicit: true,
                 condition:
                     Some(Condition {
                         kind: ConditionKind::Reference { reference },
