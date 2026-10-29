@@ -69,8 +69,17 @@
           cargoArgs
           // {
             inherit cargoArtifacts;
-            # These groups start database services; the native xtask runs them.
-            cargoNextestExtraArgs = "-E 'not (package(devkit) and (test(/^pg::/) or test(/^nats::/)))'";
+            # Native checks also cover services and filesystem ACL/xattr syscalls,
+            # which the sealed builder cannot supply. Keep the PAX byte tests here.
+            cargoNextestExtraArgs = ''
+              -E 'not (
+                (package(devkit) and (test(/^pg::/) or test(/^nats::/))) or
+                (package(hashed-blobs) and binary(pax) and (
+                  test(=gnu_tar::gnu_tar_generated_pax_sparse_versions_match_extracted_files) or
+                  test(=gnu_tar::pax_members_match_gnu_tar_names_metadata_xattrs_acls_and_sparse_bytes)
+                ))
+              )'
+            '';
             nativeBuildInputs = cargoArgs.nativeBuildInputs ++ [
               pkgs.git
               pkgs.dbus

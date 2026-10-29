@@ -21,9 +21,11 @@ checks. Clippy and nextest reuse one Crane dependency artifact build with the
 same Rust toolchain and all workspace features. The source includes fixture
 JSON and browser assets as well as Rust files.
 
-The nextest check excludes only devkit's `pg::` and `nats::` test groups,
-which start database services. `cargo xtask check` runs those groups too and
-remains the full native check. Database service tools stay in the shell:
+The nextest check excludes devkit's `pg::` and `nats::` service test groups
+and the two GNUtar extraction oracles that call filesystem ACL/xattr syscalls.
+The sealed builder rejects those syscalls. All synthetic PAX parser, metadata
+and content tests remain in this check. `cargo xtask check` also runs the two
+filesystem oracles and service groups, retaining every native assertion. Database service tools stay in the shell:
 PostgreSQL 18 with TimescaleDB and pgvector, and NATS. DBus and the frontend
 tools support the existing notification and browser checks.
 
