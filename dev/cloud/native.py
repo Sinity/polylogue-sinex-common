@@ -52,7 +52,7 @@ def main():
     args = parser.parse_args()
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         parser.error("the pinned native toolchain currently targets x86_64 Linux")
-    for tool in ("cc", "make", "pkg-config"):
+    for tool in ("cc", "c++", "make", "pkg-config"):
         if not shutil.which(tool):
             parser.error(f"native setup requires {tool} from the cloud base image")
     pins_path = Path(__file__).with_name("pins.json")
@@ -72,10 +72,11 @@ def main():
     tools.mkdir(exist_ok=True)
     cargo = prefix / "cargo"
     rustup = prefix / "rustup"
+    bootstrap = prefix / "bootstrap"
     pg = prefix / "postgres"
     cmake = prefix / "cmake" / "cmake-3.31.8-linux-x86_64" / "bin"
     env = os.environ | {"CARGO_HOME": str(cargo), "RUSTUP_HOME": str(rustup), "RUSTUP_INIT_SKIP_PATH_CHECK": "yes"}
-    env["PATH"] = os.pathsep.join(map(str, (cargo / "bin", tools, pg / "bin", cmake))) + os.pathsep + os.environ["PATH"]
+    env["PATH"] = os.pathsep.join(map(str, (cargo / "bin", tools, pg / "bin", bootstrap / "bin", cmake))) + os.pathsep + os.environ["PATH"]
     stamp = prefix / "installed.json"
     identity = hashlib.sha256(pins_path.read_bytes()).hexdigest()
     installed = stamp.exists() and json.loads(stamp.read_text()).get("pins_sha256") == identity
@@ -91,11 +92,19 @@ def main():
                 raise RuntimeError(f"expected one {binary} in {name} archive")
             shutil.copy2(candidates[0], tools / binary)
         unpack(artifact("cmake.tar.gz", pins["cmake"], cache), prefix / "cmake")
+        jobs = str(int(os.environ.get("CLOUD_BUILD_JOBS", "2")))
+        # PostgreSQL 18 requires its parser generators even from release
+        # archives; these are part of the owned bootstrap, not system packages.
+        for name in ("m4", "bison", "flex"):
+            sources = unpack(artifact(name + ".tar", pins[name], cache), build / name)
+            sources = next(path for path in sources.iterdir() if path.is_dir())
+            run([sources / "configure", "--prefix=" + str(bootstrap), "--disable-nls"], cwd=sources, env=env)
+            run(["make", "-j" + jobs], cwd=sources, env=env)
+            run(["make", "install"], cwd=sources, env=env)
         pg_sources = unpack(artifact("postgres.tar.bz2", pins["postgres"], cache), build / "postgres") / ("postgresql-" + pins["postgres"]["version"])
         # The test clusters use Unix sockets. These optional client features
         # would otherwise require system development packages in a rootless VM.
         run([pg_sources / "configure", "--prefix=" + str(pg), "--without-readline", "--without-icu", "--without-zlib"], cwd=pg_sources, env=env)
-        jobs = str(int(os.environ.get("CLOUD_BUILD_JOBS", "2")))
         run(["make", "-j" + jobs], cwd=pg_sources, env=env)
         run(["make", "install"], cwd=pg_sources, env=env)
         run(["make", "-C", "contrib/pg_trgm", "install"], cwd=pg_sources, env=env)

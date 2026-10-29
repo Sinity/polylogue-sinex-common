@@ -25,5 +25,20 @@
   "nats": {
     "url": "https://github.com/nats-io/nats-server/releases/download/v2.15.2/nats-server-v2.15.2-linux-amd64.tar.gz",
     "sha256": "67cb8e10bc6f0c4b47f75a728529a20953dbae2a4f9a4a52ae8517d65ae303ff"
+  },
+  "m4": {
+    "version": "1.4.20",
+    "url": "https://ftp.gnu.org/gnu/m4/m4-1.4.20.tar.xz",
+    "sha256": "e236ea3a1ccf5f6c270b1c4bb60726f371fa49459a8eaaebc90b216b328daf2b"
+  },
+  "bison": {
+    "version": "3.8.2",
+    "url": "https://ftp.gnu.org/gnu/bison/bison-3.8.2.tar.xz",
+    "sha256": "9bba0214ccf7f1079c5d59210045227bcf619519840ebfa80cd3849cff5a5bf2"
+  },
+  "flex": {
+    "version": "2.6.4",
+    "url": "https://github.com/westes/flex/releases/download/v2.6.4/flex-2.6.4.tar.gz",
+    "sha256": "e87aae032bf07c26f85ac0ed3250998c37621d95f8bd748b31f15b33c45ee995"
   }
 }
