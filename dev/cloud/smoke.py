@@ -3,7 +3,7 @@
 import argparse
 import json
 import os
-import shlex
+import signal
 from pathlib import Path
 import socket
 import subprocess
@@ -27,6 +27,36 @@ def port():
         return listener.getsockname()[1]
 
 
+def stop(process, shutdown_signal=signal.SIGTERM):
+    if process is None:
+        return
+    if process.poll() is None:
+        process.send_signal(shutdown_signal)
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+def postgres_ready(process, sock):
+    deadline = time.monotonic() + 60
+    while True:
+        if process.poll() is not None:
+            raise RuntimeError("PostgreSQL exited before readiness")
+        ready = subprocess.run(
+            ["pg_isready", "-h", str(sock), "-d", "postgres"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+            timeout=2,
+        )
+        if ready.returncode == 0:
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError("PostgreSQL did not become ready")
+        time.sleep(0.1)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scratch", type=Path, required=True)
@@ -39,12 +69,17 @@ def main():
         sock = root / "sock"
         sock.mkdir()
         run(["initdb", "-D", data, "--no-locale", "--auth=trust", "--data-checksums"])
-        started = False
+        postgres = None
         nats = None
-        with (root / "nats.log").open("w") as nats_log:
+        with (root / "pg.log").open("w") as pg_log, (root / "nats.log").open("w") as nats_log:
             try:
-                run(["pg_ctl", "-D", data, "-l", root / "pg.log", "-o", f"-k {shlex.quote(str(sock))} -c listen_addresses='' -c shared_preload_libraries=timescaledb -c timescaledb.telemetry_level=off", "-w", "start"])
-                started = True
+                postgres = subprocess.Popen(
+                    ["postgres", "-D", str(data), "-k", str(sock),
+                     "-c", "listen_addresses=", "-c", "shared_preload_libraries=timescaledb",
+                     "-c", "timescaledb.telemetry_level=off"],
+                    stdout=pg_log, stderr=subprocess.STDOUT,
+                )
+                postgres_ready(postgres, sock)
                 answer = run(["psql", "-X", "-h", sock, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-Atc", "CREATE EXTENSION timescaledb; CREATE EXTENSION pg_trgm; CREATE TABLE synthetic(ts timestamptz NOT NULL, value int); SELECT create_hypertable('synthetic','ts'); INSERT INTO synthetic VALUES ('2020-01-01T00:00:00Z',7); SELECT sum(value) FROM synthetic;"])
                 if answer.splitlines()[-1] != "7":
                     raise RuntimeError("synthetic TimescaleDB query returned " + answer)
@@ -79,15 +114,17 @@ def main():
                         print(log.name + ":\n" + log.read_text())
                 raise
             finally:
-                if nats is not None:
-                    nats.terminate()
-                    try:
-                        nats.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        nats.kill()
-                        nats.wait()
-                if started or (data / "postmaster.pid").exists():
-                    run(["pg_ctl", "-D", data, "-m", "immediate", "-w", "stop"])
+                try:
+                    stop(nats)
+                finally:
+                    if postgres is not None:
+                        try:
+                            if postgres.poll() is None:
+                                run(["pg_ctl", "-D", data, "-m", "immediate", "-w", "stop"])
+                        finally:
+                            # Direct ownership lets this process reap the postmaster,
+                            # including startup failures before pg_ctl can stop it.
+                            stop(postgres, signal.SIGQUIT)
 
 
 if __name__ == "__main__":
