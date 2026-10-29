@@ -335,3 +335,24 @@ fn recall_last_binds_its_own_unit() {
     let q = parse("recall last where cwds ^ /src/demo", &c).unwrap();
     assert_eq!(q.namespaces().into_iter().collect::<Vec<_>>(), ["sx"]);
 }
+
+#[test]
+fn closed_sets_use_their_declared_spelling_in_the_bound_tree() {
+    let c = support::sinex();
+    let query = parse("runs where status:RUNNING", &c).unwrap();
+    let Source::Unit {
+        condition: Some(condition),
+        ..
+    } = query.source
+    else {
+        panic!("unit filter")
+    };
+    let ConditionKind::Match {
+        value: Value::Scalar { text, .. },
+        ..
+    } = condition.kind
+    else {
+        panic!("closed-set match")
+    };
+    assert_eq!(text, "running");
+}

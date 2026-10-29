@@ -95,14 +95,12 @@ fn normalize(value: &mut Value) {
                         values.dedup();
                     }
                 }
-                if matches!(kind.as_str(), "and" | "or") {
-                    if let Some(Value::Array(conditions)) = fields.get("conditions") {
-                        if conditions.len() == 1 {
-                            if let Some(inner) = conditions[0].get("kind") {
-                                *value = inner.clone();
-                            }
-                        }
-                    }
+                if matches!(kind.as_str(), "and" | "or")
+                    && let Some(Value::Array(conditions)) = fields.get("conditions")
+                    && conditions.len() == 1
+                    && let Some(inner) = conditions[0].get("kind")
+                {
+                    *value = inner.clone();
                 }
             }
         }

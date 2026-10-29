@@ -226,10 +226,10 @@ fn context(text: &str, catalog: &Catalog) -> (String, Vec<(String, String)>) {
                 ) {
                     start = at + 1;
                 }
-            } else if c == ')' {
-                if let Some((outer, _)) = stack.pop() {
-                    start = outer;
-                }
+            } else if c == ')'
+                && let Some((outer, _)) = stack.pop()
+            {
+                start = outer;
             }
         } else {
             word.push(c);

@@ -31,9 +31,18 @@ fn value(value: &mut Value, field: &Field) {
             }
         }
         Value::Scalar { text, quoted } => {
-            if !*quoted && matches!(&field.unknown,UnknownRule::Word(word) if word==text) {
+            if !*quoted
+                && matches!(&field.unknown,UnknownRule::Word(word) if word.eq_ignore_ascii_case(text))
+            {
                 *value = Value::Unknown;
                 return;
+            }
+            if let Some(canonical) = field
+                .values
+                .iter()
+                .find(|candidate| candidate.eq_ignore_ascii_case(text))
+            {
+                *text = canonical.clone();
             }
             let kind = match &field.kind {
                 FieldKind::List(kind) => kind.as_ref(),

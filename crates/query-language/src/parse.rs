@@ -257,112 +257,113 @@ impl Parser<'_> {
             condition: None,
         };
         let mut consumed_source = false;
-        if let Some(first) = self.peek().cloned() {
-            if !first.quoted && !self.field_syntax() {
-                let lower = first.text.to_ascii_lowercase();
-                if matches!(lower.as_str(), "trace" | "descendants" | "parents")
-                    && self.catalog.commands.iter().any(|w| w == &lower)
-                {
-                    self.at += 1;
-                    consumed_source = true;
-                    let reference = self.next()?.text;
-                    source = Source::Walk {
-                        direction: match lower.as_str() {
-                            "trace" => WalkDirection::Trace,
-                            "parents" => WalkDirection::Parents,
-                            _ => WalkDirection::Descendants,
-                        },
-                        reference,
-                    };
-                } else if lower == "recall" && self.catalog.commands.iter().any(|w| w == &lower) {
-                    self.at += 1;
-                    consumed_source = true;
-                    source = if self.take("last") {
-                        scope.unit = self
-                            .catalog
-                            .recall_last_unit
-                            .clone()
-                            .unwrap_or_else(|| scope.unit.clone());
-                        let condition = if self.take("where") {
-                            Some(self.condition(&scope)?)
-                        } else {
-                            None
-                        };
-                        Source::RecallLast {
-                            unit: scope.unit.clone(),
-                            condition,
-                        }
-                    } else if self.take("mark") {
-                        let number = if self.peek().is_some_and(|t| t.text.parse::<u64>().is_ok()) {
-                            self.number()?
-                        } else {
-                            1
-                        };
-                        if number == 0 {
-                            return Err(self.error("mark number must be positive"));
-                        }
-                        Source::RecallMark {
-                            number,
-                            window: self.recall_window()?,
-                        }
-                    } else {
-                        let time = if self.query_end() || self.stage_start() {
-                            None
-                        } else {
-                            Some(self.value()?)
-                        };
-                        Source::Recall {
-                            time,
-                            window: self.recall_window()?,
-                        }
-                    };
-                } else if let Some(unit) = self.catalog.unit(&first.text) {
-                    self.at += 1;
-                    consumed_source = true;
-                    scope.unit = unit.name.clone();
+        if let Some(first) = self.peek().cloned()
+            && !first.quoted
+            && !self.field_syntax()
+        {
+            let lower = first.text.to_ascii_lowercase();
+            if matches!(lower.as_str(), "trace" | "descendants" | "parents")
+                && self.catalog.commands.iter().any(|w| w == &lower)
+            {
+                self.at += 1;
+                consumed_source = true;
+                let reference = self.next()?.text;
+                source = Source::Walk {
+                    direction: match lower.as_str() {
+                        "trace" => WalkDirection::Trace,
+                        "parents" => WalkDirection::Parents,
+                        _ => WalkDirection::Descendants,
+                    },
+                    reference,
+                };
+            } else if lower == "recall" && self.catalog.commands.iter().any(|w| w == &lower) {
+                self.at += 1;
+                consumed_source = true;
+                source = if self.take("last") {
+                    scope.unit = self
+                        .catalog
+                        .recall_last_unit
+                        .clone()
+                        .unwrap_or_else(|| scope.unit.clone());
                     let condition = if self.take("where") {
                         Some(self.condition(&scope)?)
                     } else {
                         None
                     };
-                    source = Source::Unit {
+                    Source::RecallLast {
                         unit: scope.unit.clone(),
                         condition,
+                    }
+                } else if self.take("mark") {
+                    let number = if self.peek().is_some_and(|t| t.text.parse::<u64>().is_ok()) {
+                        self.number()?
+                    } else {
+                        1
                     };
-                } else if self
-                    .catalog
-                    .commands
-                    .iter()
-                    .any(|word| word.eq_ignore_ascii_case(&first.text))
-                {
-                    return Err(Error::new(
-                        ErrorKind::NotAQuery,
-                        format!(
-                            "`{}` is a command; quote it to search for the word",
-                            first.text
-                        ),
-                        first.span.start,
-                    )
-                    .hint(format!("run the `{}` command", first.text)));
-                } else if self.field_known(&scope, &first.text) {
-                    return Err(Error::new(
-                        ErrorKind::InvalidQuery,
-                        format!("`{}` is a field; give it an operator and value", first.text),
-                        first.span.start,
-                    ));
-                } else if let Some(word) = closest(&first.text, self.catalog.command_words()) {
-                    return Err(Error::new(
-                        ErrorKind::NotAQuery,
-                        format!(
-                            "`{}` looks like `{word}`; quote it to search for the word",
-                            first.text
-                        ),
-                        first.span.start,
-                    )
-                    .suggestion(self.replace(first.span, &word)));
-                } else if self.next_is(1, "where") {
-                    return Err(self.unknown_unit(&first));
-                }
+                    if number == 0 {
+                        return Err(self.error("mark number must be positive"));
+                    }
+                    Source::RecallMark {
+                        number,
+                        window: self.recall_window()?,
+                    }
+                } else {
+                    let time = if self.query_end() || self.stage_start() {
+                        None
+                    } else {
+                        Some(self.value()?)
+                    };
+                    Source::Recall {
+                        time,
+                        window: self.recall_window()?,
+                    }
+                };
+            } else if let Some(unit) = self.catalog.unit(&first.text) {
+                self.at += 1;
+                consumed_source = true;
+                scope.unit = unit.name.clone();
+                let condition = if self.take("where") {
+                    Some(self.condition(&scope)?)
+                } else {
+                    None
+                };
+                source = Source::Unit {
+                    unit: scope.unit.clone(),
+                    condition,
+                };
+            } else if self
+                .catalog
+                .commands
+                .iter()
+                .any(|word| word.eq_ignore_ascii_case(&first.text))
+            {
+                return Err(Error::new(
+                    ErrorKind::NotAQuery,
+                    format!(
+                        "`{}` is a command; quote it to search for the word",
+                        first.text
+                    ),
+                    first.span.start,
+                )
+                .hint(format!("run the `{}` command", first.text)));
+            } else if self.field_known(&scope, &first.text) {
+                return Err(Error::new(
+                    ErrorKind::InvalidQuery,
+                    format!("`{}` is a field; give it an operator and value", first.text),
+                    first.span.start,
+                ));
+            } else if let Some(word) = closest(&first.text, self.catalog.command_words()) {
+                return Err(Error::new(
+                    ErrorKind::NotAQuery,
+                    format!(
+                        "`{}` looks like `{word}`; quote it to search for the word",
+                        first.text
+                    ),
+                    first.span.start,
+                )
+                .suggestion(self.replace(first.span, &word)));
+            } else if self.next_is(1, "where") {
+                return Err(self.unknown_unit(&first));
             }
         }
         if consumed_source
@@ -391,12 +392,10 @@ impl Parser<'_> {
             && !self.is("|")
             && (!consumed_source || !self.stage_start())
             && !self.is("with")
+            && let Source::Unit { condition, .. } = &mut source
+            && condition.is_none()
         {
-            if let Source::Unit { condition, .. } = &mut source {
-                if condition.is_none() {
-                    *condition = Some(self.condition(&scope)?);
-                }
-            }
+            *condition = Some(self.condition(&scope)?);
         }
         source = match source {
             Source::Unit {
@@ -436,15 +435,14 @@ impl Parser<'_> {
         })
     }
     fn recall_window(&mut self) -> Result<Option<Value>, Error> {
-        if let Some(t) = self.peek().cloned() {
-            if let Some(w) = t
+        if let Some(t) = self.peek().cloned()
+            && let Some(w) = t
                 .text
                 .strip_prefix('±')
                 .or_else(|| t.text.strip_prefix("+-"))
-            {
-                self.at += 1;
-                return Ok(Some(Value::scalar(w)));
-            }
+        {
+            self.at += 1;
+            return Ok(Some(Value::scalar(w)));
         }
         Ok(None)
     }
@@ -744,7 +742,7 @@ impl Parser<'_> {
                 ));
             }
             self.check_field(scope, field, start)?;
-            self.normalize_unknown(scope, field, &mut value);
+            self.normalize_field_value(scope, field, &mut value);
             self.check_value(scope, field, &value, start + field.len() + 1)?;
             return Ok(self.cond(
                 start,
@@ -766,8 +764,8 @@ impl Parser<'_> {
                 let mut from = self.value()?;
                 self.expect("and")?;
                 let mut to = self.value()?;
-                self.normalize_operand_unknown(scope, &operand, &mut from);
-                self.normalize_operand_unknown(scope, &operand, &mut to);
+                self.normalize_operand_value(scope, &operand, &mut from);
+                self.normalize_operand_value(scope, &operand, &mut to);
                 self.check_operand_value(scope, &operand, &from, start)?;
                 self.check_operand_value(scope, &operand, &to, start)?;
                 return Ok(self.cond(start, ConditionKind::Between { operand, from, to }));
@@ -797,26 +795,25 @@ impl Parser<'_> {
             }
             let op = self.op()?;
             let mut value = self.value()?;
-            self.normalize_operand_unknown(scope, &operand, &mut value);
-            if let Operand::Field { name } = &operand {
-                if self
+            self.normalize_operand_value(scope, &operand, &mut value);
+            if let Operand::Field { name } = &operand
+                && self
                     .catalog
                     .field(&scope.unit, name)
                     .is_some_and(|f| f.kind == FieldKind::Time)
-                    && matches!(op, Op::Lt | Op::Le | Op::Gt | Op::Ge)
-                    && matches!(&value,Value::Scalar{text,quoted:false} if is_duration(text))
-                {
-                    let duration = value.text().unwrap();
-                    let end = self.end();
-                    return Err(Error::new(
-                        ErrorKind::BadValue,
-                        "a bare duration is not a time instant; use since or a relative range",
-                        start,
-                    )
-                    .suggestion(
-                        self.replace(Span { start, end }, &format!("{name} in last {duration}")),
-                    ));
-                }
+                && matches!(op, Op::Lt | Op::Le | Op::Gt | Op::Ge)
+                && matches!(&value,Value::Scalar{text,quoted:false} if is_duration(text))
+            {
+                let duration = value.text().unwrap();
+                let end = self.end();
+                return Err(Error::new(
+                    ErrorKind::BadValue,
+                    "a bare duration is not a time instant; use since or a relative range",
+                    start,
+                )
+                .suggestion(
+                    self.replace(Span { start, end }, &format!("{name} in last {duration}")),
+                ));
             }
             self.check_operand_value(scope, &operand, &value, start)?;
             return Ok(self.cond(start, ConditionKind::Compare { operand, op, value }));
@@ -956,18 +953,19 @@ impl Parser<'_> {
         if !t.quoted {
             let mut phrase = t.text.clone();
             if matches!(t.text.as_str(), "last" | "this") {
-                if let Some(next) = self.peek() {
-                    if !next.quoted && !is_symbol(&next.text) {
+                if let Some(next) = self.peek()
+                    && !next.quoted
+                    && !is_symbol(&next.text)
+                {
+                    phrase.push(' ');
+                    phrase.push_str(&self.next()?.text);
+                    if phrase
+                        .split_whitespace()
+                        .last()
+                        .is_some_and(|s| s.chars().all(|c| c.is_ascii_digit()))
+                    {
                         phrase.push(' ');
                         phrase.push_str(&self.next()?.text);
-                        if phrase
-                            .split_whitespace()
-                            .last()
-                            .is_some_and(|s| s.chars().all(|c| c.is_ascii_digit()))
-                        {
-                            phrase.push(' ');
-                            phrase.push_str(&self.next()?.text);
-                        }
                     }
                 }
             } else if t.text.chars().all(|c| c.is_ascii_digit())
@@ -1122,25 +1120,32 @@ impl Parser<'_> {
             e
         })
     }
-    fn normalize_operand_unknown(&self, scope: &Scope, operand: &Operand, value: &mut Value) {
+    fn normalize_operand_value(&self, scope: &Scope, operand: &Operand, value: &mut Value) {
         if let Operand::Field { name } = operand {
-            self.normalize_unknown(scope, name, value);
+            self.normalize_field_value(scope, name, value);
         }
     }
-    fn normalize_unknown(&self, scope: &Scope, field: &str, value: &mut Value) {
+    fn normalize_field_value(&self, scope: &Scope, field: &str, value: &mut Value) {
         if let Value::Set { values } = value {
             for value in values {
-                self.normalize_unknown(scope, field, value);
+                self.normalize_field_value(scope, field, value);
             }
             return;
         }
-        if let Some(spec) = self.catalog.field(&scope.unit, field) {
-            if let crate::catalog::UnknownRule::Word(word) = &spec.unknown {
-                if matches!(value,Value::Scalar{text,quoted:false} if text.eq_ignore_ascii_case(word))
-                {
-                    *value = Value::Unknown;
-                }
-            }
+        if let Some(spec) = self.catalog.field(&scope.unit, field)
+            && let crate::catalog::UnknownRule::Word(word) = &spec.unknown
+            && matches!(value,Value::Scalar{text,quoted:false} if text.eq_ignore_ascii_case(word))
+        {
+            *value = Value::Unknown;
+        }
+        if let Some(spec) = self.catalog.field(&scope.unit, field)
+            && let Value::Scalar { text, .. } = value
+            && let Some(canonical) = spec
+                .values
+                .iter()
+                .find(|candidate| candidate.eq_ignore_ascii_case(text))
+        {
+            *text = canonical.clone();
         }
     }
     fn check_value(
