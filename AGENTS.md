@@ -133,13 +133,12 @@ nothing names a particular host, path or person.
 
 ## Cloud sessions and changes the products need
 
-Cloud sessions (Claude Code on the web, Codex cloud) run on a fresh
-VM without AgentCTL or the operator's services; run `cargo xtask check` and
-`cargo xtask test` there directly. The environment's setup script runs
-`bash dev/cloud/setup.sh`, after which every shell is in the development
-shell. devkit's throwaway PostgreSQL runs as `nobody` when started by root,
-so the `pg` tests run there too. Push a branch and open a pull request; do
-not merge.
+Cloud sessions run `cargo xtask` directly without AgentCTL or operator
+services. Run `bash dev/cloud/setup.sh`; [the cloud setup guide](dev/cloud/README.md)
+owns backend selection, pinned tools, shell startup and readiness checks.
+The explicit native backend supports restricted rootless cloud runtimes;
+the default Nix backend uses the repository's development shell. Push a
+branch and open a pull request; do not merge.
 
 Polylogue and Sinex follow this repository's `master`, and their Cargo.lock
 pins the commit. To change a crate here together with its callers, check

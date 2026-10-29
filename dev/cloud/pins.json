@@ -1,0 +1,44 @@
+{
+  "rust": "1.98.1",
+  "rustup": {
+    "url": "https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init",
+    "sha256": "20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c"
+  },
+  "nextest": {
+    "url": "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.150/cargo-nextest-0.9.150-x86_64-unknown-linux-musl.tar.gz",
+    "sha256": "84f0f9ba75d0b6fa117bc418d49747ba78e20e4583057f6fa628f1b17c17234d"
+  },
+  "cmake": {
+    "url": "https://github.com/Kitware/CMake/releases/download/v3.31.8/cmake-3.31.8-linux-x86_64.tar.gz",
+    "sha256": "630615d8e98ac33eba7fbe472626dff5c899c85af3c024585ae109166a6909d0"
+  },
+  "postgres": {
+    "version": "18.6",
+    "url": "https://ftp.postgresql.org/pub/source/v18.6/postgresql-18.6.tar.bz2",
+    "sha256": "555610c24d53e4316da5b7d3fc25c279d96856d5e0e23ee308c328c5fa881d9f"
+  },
+  "timescale": {
+    "version": "2.31.0",
+    "url": "https://codeload.github.com/timescale/timescaledb/tar.gz/4fa2a7c6b579171a1a8966fd87a0d4189ebab43b",
+    "sha256": "a5710c0232e7faf393ce618957ed7ff9e7fe4dd0cb1875938751816a5c7ec9a9"
+  },
+  "nats": {
+    "url": "https://github.com/nats-io/nats-server/releases/download/v2.15.2/nats-server-v2.15.2-linux-amd64.tar.gz",
+    "sha256": "67cb8e10bc6f0c4b47f75a728529a20953dbae2a4f9a4a52ae8517d65ae303ff"
+  },
+  "m4": {
+    "version": "1.4.21",
+    "url": "https://ftp.gnu.org/gnu/m4/m4-1.4.21.tar.xz",
+    "sha256": "f25c6ab51548a73a75558742fb031e0625d6485fe5f9155949d6486a2408ab66"
+  },
+  "bison": {
+    "version": "3.8.2",
+    "url": "https://ftp.gnu.org/gnu/bison/bison-3.8.2.tar.xz",
+    "sha256": "9bba0214ccf7f1079c5d59210045227bcf619519840ebfa80cd3849cff5a5bf2"
+  },
+  "flex": {
+    "version": "2.6.4",
+    "url": "https://github.com/westes/flex/releases/download/v2.6.4/flex-2.6.4.tar.gz",
+    "sha256": "e87aae032bf07c26f85ac0ed3250998c37621d95f8bd748b31f15b33c45ee995"
+  }
+}
