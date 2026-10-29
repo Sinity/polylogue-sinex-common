@@ -329,3 +329,9 @@ a conflicting snapshot under the same delivery identity is refused. An unknown
 route remains terminal. Only an explicit D-Bus failure may use its one service
 appearance retry; command outcomes are never selected by that retry. Server
 identity scopes replacement IDs and desktop actions.
+
+The desktop guard returns typed `SendDecision` values for a batch of notices.
+A quiet hold retains its absolute owner-policy deadline and provenance per route
+in the same `NotificationState`. A held retry retains its original identity and
+retry flag; expiry permits a fresh policy check, not an automatic send. The I/O
+worker owns clock injection and the pre-effect unknown persistence boundary.

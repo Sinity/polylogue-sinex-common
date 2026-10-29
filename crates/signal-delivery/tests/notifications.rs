@@ -1,4 +1,6 @@
-use signal_delivery::{Deliverer, NotificationRequest, NotificationUpdate, run};
+use signal_delivery::{
+    Authorization, Deliverer, NotificationRequest, NotificationUpdate, Policy, PolicyRequest, run,
+};
 use signals::DeliveryOutcome;
 use signals::notifications::*;
 use std::collections::HashMap;
@@ -180,7 +182,7 @@ async fn send(deliverer: &mut Deliverer, notice: Notice) -> Vec<NotificationRece
     let id = notice.delivery_id.clone();
     let initial = deliverer.begin(notice);
     assert_eq!(initial[0].outcome, DeliveryOutcome::Unknown);
-    deliverer.send(&id, &|_| true).await
+    deliverer.send(&id, &permit).await
 }
 
 #[tokio::test]
@@ -215,13 +217,13 @@ async fn notification_replaced_in_place_and_current_clear_closes() {
         calls[0].actions,
         ["default", "Open", "acknowledge", "Acknowledge"]
     );
-    deliverer.cancel("b", &|_| true).await;
+    clear(&mut deliverer, "b", &permit).await;
     assert_eq!(
         *records.closed.lock().unwrap(),
         [a[0].notification_id.unwrap()]
     );
     assert!(deliverer.begin(notice("a", "source-a")).is_empty());
-    assert!(deliverer.send("a", &|_| true).await.is_empty());
+    assert!(deliverer.send("a", &permit).await.is_empty());
 }
 
 #[tokio::test]
@@ -288,15 +290,17 @@ async fn grouping_replaces_rule_summary_and_budget_summary() {
     assert!(calls[4].body.ends_with("example read notice:budget-2"));
     assert_eq!(calls[2].urgency, 2);
     assert_eq!(calls[2].expire, 0);
-    let shrink = deliverer.cancel("b", &|_| true).await;
+    let shrink = clear(&mut deliverer, "b", &permit).await;
     let calls = records.calls.lock().unwrap().clone();
     assert_eq!(calls.len(), 6);
     assert_eq!(calls[5].replaces, second[0].notification_id.unwrap());
     assert_eq!(calls[5].summary, "Source unreadable: 2 open occurrences");
     assert_eq!(calls[5].urgency, 2);
     assert!(calls[5].body.ends_with("example read notice:c"));
-    assert_eq!(shrink.len(), 1);
+    assert_eq!(shrink.len(), 2);
     assert_eq!(shrink[0].delivery_id, "c");
+    assert_eq!(shrink[0].outcome, DeliveryOutcome::Unknown);
+    assert_eq!(shrink[1].outcome, DeliveryOutcome::Delivered);
     assert_eq!(
         deliverer.state.attempts()["budget-2"].notification_id,
         budget2[0].notification_id
@@ -329,7 +333,7 @@ async fn grouping_replaces_rule_summary_and_budget_summary() {
             reference: "https://example.invalid/notices/budget-2".into()
         })
     );
-    deliverer.cancel("c", &|_| true).await;
+    clear(&mut deliverer, "c", &permit).await;
     assert!(
         records
             .closed
@@ -337,7 +341,7 @@ async fn grouping_replaces_rule_summary_and_budget_summary() {
             .unwrap()
             .contains(&second[0].notification_id.unwrap())
     );
-    deliverer.cancel("budget-2", &|_| true).await;
+    clear(&mut deliverer, "budget-2", &permit).await;
     assert!(deliverer.state.attempts()["a"].active);
     assert!(
         !records
@@ -373,14 +377,14 @@ async fn not_sent_retried_once_unknown_never_and_restart_keeps_identity() {
     let retry = deliverer.server_appeared();
     assert_eq!(retry[0].delivery_id, "a");
     assert_eq!(retry[0].outcome, DeliveryOutcome::Unknown);
-    let delivered = deliverer.send("a", &|_| true).await;
+    let delivered = deliverer.send("a", &permit).await;
     assert_eq!(delivered[0].outcome, DeliveryOutcome::Delivered);
     assert!(deliverer.server_appeared().is_empty());
     assert_eq!(records.calls.lock().unwrap().len(), 1);
     let state = serde_json::from_str(&serde_json::to_string(&deliverer.state).unwrap()).unwrap();
     let mut restored = Deliverer::new(bus.connect().await, config(), state);
     assert!(restored.begin(notice("a", "source-a")).is_empty());
-    assert!(restored.send("a", &|_| true).await.is_empty());
+    assert!(restored.send("a", &permit).await.is_empty());
     assert!(restored.server_appeared().is_empty());
 
     let slow_bus = PrivateBus::start();
@@ -401,11 +405,11 @@ async fn not_sent_retried_once_unknown_never_and_restart_keeps_identity() {
     );
     let unknown = send(&mut slow, notice("slow", "source-a")).await;
     assert_eq!(unknown[0].outcome, DeliveryOutcome::Unknown);
-    assert!(slow.send("slow", &|_| true).await.is_empty());
+    assert!(slow.send("slow", &permit).await.is_empty());
     assert!(slow.server_appeared().is_empty());
     let mut restored = Deliverer::new(slow_bus.connect().await, short, slow.state);
     assert!(restored.begin(notice("slow", "source-a")).is_empty());
-    assert!(restored.send("slow", &|_| true).await.is_empty());
+    assert!(restored.send("slow", &permit).await.is_empty());
     assert_eq!(slow_records.calls.lock().unwrap().len(), 1);
 }
 
@@ -426,7 +430,7 @@ async fn current_state_rechecks_before_retry_and_passive_never_notifies() {
         })
         .await;
     deliverer.server_appeared();
-    let cancelled = deliverer.send("a", &|_| false).await;
+    let cancelled = deliverer.send("a", &cancelled).await;
     assert_eq!(cancelled[0].outcome, DeliveryOutcome::Cancelled);
     assert!(records.calls.lock().unwrap().is_empty());
     assert!(deliverer.server_appeared().is_empty());
@@ -457,7 +461,7 @@ async fn configured_command_receives_json_and_both_routes_have_separate_receipts
     let notice = notice("a", "source-a");
     let initial = deliverer.begin(notice.clone());
     assert_eq!(initial.len(), 2);
-    let receipts = deliverer.send("a", &|_| true).await;
+    let receipts = deliverer.send("a", &permit).await;
     assert_eq!(receipts.len(), 2);
     assert_eq!(
         receipts[0].outcome,
@@ -477,7 +481,7 @@ async fn configured_command_receives_json_and_both_routes_have_separate_receipts
     let retry = deliverer.server_appeared();
     assert_eq!(retry.len(), 1);
     assert_eq!(retry[0].route, Route::Dbus);
-    let retried = deliverer.send("a", &|_| true).await;
+    let retried = deliverer.send("a", &permit).await;
     assert_eq!(retried.len(), 1);
     assert_eq!(retried[0].route, Route::Dbus);
     assert_eq!(retried[0].outcome, DeliveryOutcome::Delivered);
@@ -512,7 +516,13 @@ async fn worker_records_protocol_actions_as_desktop_operator_acts() {
     let deliverer = Deliverer::new(bus.connect().await, config(), NotificationState::default());
     let (requests, received) = mpsc::unbounded_channel();
     let (updates, mut updated) = mpsc::unbounded_channel();
-    let worker = tokio::spawn(run(deliverer, received, updates, Arc::new(|_| true)));
+    let worker = tokio::spawn(run(
+        deliverer,
+        received,
+        updates,
+        Arc::new(permit),
+        Arc::new(|| 1000),
+    ));
     requests
         .send(NotificationRequest::Deliver(Box::new(notice(
             "a", "source-a",
@@ -564,7 +574,13 @@ async fn service_appearance_retries_automatically() {
     let deliverer = Deliverer::new(bus.connect().await, config(), NotificationState::default());
     let (requests, received) = mpsc::unbounded_channel();
     let (updates, mut updated) = mpsc::unbounded_channel();
-    let worker = tokio::spawn(run(deliverer, received, updates, Arc::new(|_| true)));
+    let worker = tokio::spawn(run(
+        deliverer,
+        received,
+        updates,
+        Arc::new(permit),
+        Arc::new(|| 1000),
+    ));
     requests
         .send(NotificationRequest::Deliver(Box::new(notice(
             "a", "source-a",
@@ -635,7 +651,13 @@ async fn command_only_worker_needs_no_session_bus() {
     let deliverer = Deliverer::new(None, configured, NotificationState::default());
     let (requests, received) = mpsc::unbounded_channel();
     let (updates, mut updated) = mpsc::unbounded_channel();
-    let worker = tokio::spawn(run(deliverer, received, updates, Arc::new(|_| true)));
+    let worker = tokio::spawn(run(
+        deliverer,
+        received,
+        updates,
+        Arc::new(permit),
+        Arc::new(|| 1000),
+    ));
     requests
         .send(NotificationRequest::Deliver(Box::new(notice(
             "headless", "source-a",
@@ -668,7 +690,13 @@ async fn slow_server_never_holds_writer() {
     let deliverer = Deliverer::new(bus.connect().await, config(), NotificationState::default());
     let (requests, received) = mpsc::unbounded_channel();
     let (updates, mut updated) = mpsc::unbounded_channel();
-    let worker = tokio::spawn(run(deliverer, received, updates, Arc::new(|_| true)));
+    let worker = tokio::spawn(run(
+        deliverer,
+        received,
+        updates,
+        Arc::new(permit),
+        Arc::new(|| 1000),
+    ));
     requests
         .send(NotificationRequest::Deliver(Box::new(notice(
             "slow", "source-a",
@@ -714,7 +742,13 @@ async fn appearance_during_downtime_retries_and_same_server_restart_keeps_replac
     let restored = Deliverer::new(bus.connect().await, config(), initial.state);
     let (requests, received) = mpsc::unbounded_channel();
     let (updates, mut updated) = mpsc::unbounded_channel();
-    let worker = tokio::spawn(run(restored, received, updates, Arc::new(|_| true)));
+    let worker = tokio::spawn(run(
+        restored,
+        received,
+        updates,
+        Arc::new(permit),
+        Arc::new(|| 1000),
+    ));
     let retry = update(&mut updated).await;
     assert_eq!(retry.receipts[0].delivery_id, "a");
     assert_eq!(retry.receipts[0].outcome, DeliveryOutcome::Unknown);
@@ -728,7 +762,13 @@ async fn appearance_during_downtime_retries_and_same_server_restart_keeps_replac
     let restored = Deliverer::new(bus.connect().await, config(), checkpoint);
     let (requests, received) = mpsc::unbounded_channel();
     let (updates, mut updated) = mpsc::unbounded_channel();
-    let worker = tokio::spawn(run(restored, received, updates, Arc::new(|_| true)));
+    let worker = tokio::spawn(run(
+        restored,
+        received,
+        updates,
+        Arc::new(permit),
+        Arc::new(|| 1000),
+    ));
     requests
         .send(NotificationRequest::Deliver(Box::new(notice(
             "b", "source-a",
@@ -764,7 +804,7 @@ async fn clearing_first_occurrence_promotes_summary_and_keeps_actions_on_visible
     send(&mut deliverer, notice("a", "source-a")).await;
     let second = send(&mut deliverer, notice("b", "source-b")).await;
     send(&mut deliverer, notice("c", "source-c")).await;
-    deliverer.cancel("a", &|_| true).await;
+    clear(&mut deliverer, "a", &permit).await;
     let calls = records.calls.lock().unwrap().clone();
     assert_eq!(calls[3].replaces, second[0].notification_id.unwrap());
     assert_eq!(calls[3].summary, "Source unreadable");
@@ -829,7 +869,7 @@ async fn failed_replacement_keeps_prior_notification_actionable_until_condition_
             reference: "https://example.invalid/notices/a".into()
         })
     );
-    deliverer.cancel("b", &|_| true).await;
+    clear(&mut deliverer, "b", &permit).await;
     assert!(!deliverer.state.attempts()["a"].active);
     assert!(!deliverer.state.attempts()["b"].active);
     assert_eq!(
@@ -881,7 +921,13 @@ async fn explicit_dbus_error_retries_on_new_owner_but_not_same_server_restart() 
     let restored = Deliverer::new(bus.connect().await, configured, checkpoint);
     let (requests, received) = mpsc::unbounded_channel();
     let (updates, mut updated) = mpsc::unbounded_channel();
-    let worker = tokio::spawn(run(restored, received, updates, Arc::new(|_| true)));
+    let worker = tokio::spawn(run(
+        restored,
+        received,
+        updates,
+        Arc::new(permit),
+        Arc::new(|| 1000),
+    ));
     // This empty update is a FIFO barrier after worker startup. The same owner
     // must retain the explicit error until the service actually reappears.
     requests
@@ -952,7 +998,13 @@ async fn missing_bus_records_dbus_failure_and_still_runs_both_route_command() {
         let deliverer = Deliverer::new(None, configured, NotificationState::default());
         let (requests, received) = mpsc::unbounded_channel();
         let (updates, mut updated) = mpsc::unbounded_channel();
-        let worker = tokio::spawn(run(deliverer, received, updates, Arc::new(|_| true)));
+        let worker = tokio::spawn(run(
+            deliverer,
+            received,
+            updates,
+            Arc::new(permit),
+            Arc::new(|| 1000),
+        ));
         requests
             .send(NotificationRequest::Deliver(Box::new(notice(
                 "headless", "source-a",
@@ -1007,7 +1059,7 @@ async fn historical_occurrence_still_requires_current_policy() {
     let mut n = notice("historical", "once");
     n.current = false;
     d.begin(n);
-    let result = d.send("historical", &|_| false).await;
+    let result = d.send("historical", &cancelled).await;
     assert_eq!(result[0].outcome, DeliveryOutcome::Cancelled);
     assert!(records.calls.lock().unwrap().is_empty());
 }
@@ -1028,7 +1080,7 @@ async fn grouped_replacement_checks_policy_before_notify() {
         send(&mut d, notice(id, id)).await;
     }
     let before = records.calls.lock().unwrap().len();
-    d.cancel("a", &|_| false).await;
+    clear(&mut d, "a", &cancelled).await;
     assert_eq!(records.calls.lock().unwrap().len(), before);
     assert!(d.state.attempts().values().all(|a| !a.active));
 }
@@ -1071,7 +1123,7 @@ async fn unknown_command_is_not_retried_when_dbus_appears() {
         })
         .await;
     d.server_appeared();
-    let retry = d.send("a", &|_| true).await;
+    let retry = d.send("a", &permit).await;
     assert_eq!(retry.len(), 1);
     assert_eq!(retry[0].route, Route::Dbus);
     assert_eq!(retry[0].outcome, DeliveryOutcome::Delivered);
@@ -1099,7 +1151,13 @@ async fn live_import_retries_absent_server_once_after_persisting_unknown() {
     let receiver = Deliverer::new(bus.connect().await, config(), NotificationState::default());
     let (requests, received) = mpsc::unbounded_channel();
     let (updates, mut updated) = mpsc::unbounded_channel();
-    let worker = tokio::spawn(run(receiver, received, updates, Arc::new(|_| true)));
+    let worker = tokio::spawn(run(
+        receiver,
+        received,
+        updates,
+        Arc::new(permit),
+        Arc::new(|| 1000),
+    ));
     // Consume startup owner checkpoint before inserting the transferred attempt.
     let startup = raw_update(&mut updated).await;
     startup.persisted.send(()).unwrap();
@@ -1152,7 +1210,13 @@ async fn release_persists_original_handoff_and_inactive_checkpoint_before_ack() 
     let receiver = Deliverer::new(None, config(), NotificationState::default());
     let (requests, received) = mpsc::unbounded_channel();
     let (updates, mut updated) = mpsc::unbounded_channel();
-    let worker = tokio::spawn(run(receiver, received, updates, Arc::new(|_| true)));
+    let worker = tokio::spawn(run(
+        receiver,
+        received,
+        updates,
+        Arc::new(permit),
+        Arc::new(|| 1000),
+    ));
     requests
         .send(NotificationRequest::Deliver(Box::new(notice("a", "a"))))
         .unwrap();
@@ -1239,6 +1303,405 @@ async fn importing_grouped_attempts_in_reverse_order_keeps_the_visible_action_ow
         Some(DesktopEvent::Seen)
     );
     let before = records.calls.lock().unwrap().len();
-    assert!(receiver.send("c", &|_| true).await.is_empty());
+    assert!(receiver.send("c", &permit).await.is_empty());
     assert_eq!(records.calls.lock().unwrap().len(), before);
+}
+
+fn authorize(notices: &[Notice], decision: SendDecision) -> Authorization {
+    Authorization {
+        decisions: notices
+            .iter()
+            .map(|n| (n.delivery_id.clone(), decision.clone()))
+            .collect(),
+        lease: None,
+    }
+}
+fn permit(request: &PolicyRequest) -> Authorization {
+    authorize(&request.notices, SendDecision::Permit)
+}
+fn cancelled(request: &PolicyRequest) -> Authorization {
+    authorize(&request.notices, SendDecision::Cancel)
+}
+async fn clear(deliverer: &mut Deliverer, id: &str, check: &Policy) -> Vec<NotificationReceipt> {
+    let mut receipts = deliverer.cancel(id, check).await;
+    while let Some(id) = deliverer.ready_ids().into_iter().next() {
+        receipts.extend(deliverer.send(&id, check).await);
+    }
+    receipts
+}
+
+#[tokio::test]
+async fn imported_retry_rechecks_changed_quiet_policy_after_restart_without_another_retry() {
+    use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+    let bus = PrivateBus::start();
+    let mut source = Deliverer::new(bus.connect().await, config(), NotificationState::default());
+    send(&mut source, notice("held", "one")).await;
+    let original = source.state.attempt("held").unwrap().clone();
+    let records = Records::default();
+    let _server = bus
+        .server(FakeServer {
+            records: records.clone(),
+            actions: true,
+            stall: false,
+        })
+        .await;
+    let now = Arc::new(AtomicI64::new(1_000));
+    let quiet_until = Arc::new(AtomicI64::new(2_000));
+    let revision = Arc::new(AtomicU64::new(1));
+    let check: signal_delivery::PolicyCheck = {
+        let now = Arc::clone(&now);
+        let quiet = Arc::clone(&quiet_until);
+        let revision = Arc::clone(&revision);
+        Arc::new(move |request| {
+            let decision = if now.load(Ordering::SeqCst) < quiet.load(Ordering::SeqCst) {
+                SendDecision::HoldUntil {
+                    at: quiet.load(Ordering::SeqCst),
+                    policy: format!("owner-policy:{}", revision.load(Ordering::SeqCst)),
+                }
+            } else {
+                SendDecision::Permit
+            };
+            authorize(&request.notices, decision)
+        })
+    };
+    let clock: signal_delivery::DeliveryClock = {
+        let now = Arc::clone(&now);
+        Arc::new(move || now.load(Ordering::SeqCst))
+    };
+    let (requests, received) = mpsc::unbounded_channel();
+    let (updates, mut updated) = mpsc::unbounded_channel();
+    let worker = tokio::spawn(run(
+        Deliverer::new(bus.connect().await, config(), NotificationState::default()),
+        received,
+        updates,
+        Arc::clone(&check),
+        Arc::clone(&clock),
+    ));
+    raw_update(&mut updated).await.persisted.send(()).unwrap();
+    let (ack, wait) = tokio::sync::oneshot::channel();
+    requests
+        .send(NotificationRequest::Import {
+            attempt: Box::new(original.clone()),
+            imported: ack,
+        })
+        .unwrap();
+    raw_update(&mut updated).await.persisted.send(()).unwrap();
+    assert_eq!(wait.await.unwrap(), Ok(()));
+    let prepared = raw_update(&mut updated).await;
+    assert!(prepared.state.attempt("held").unwrap().retried);
+    prepared.persisted.send(()).unwrap();
+    let held = raw_update(&mut updated).await;
+    assert_eq!(
+        held.state.held_until("held", Route::Dbus),
+        Some(&HeldRoute {
+            at: 2_000,
+            policy: "owner-policy:1".into()
+        })
+    );
+    assert_eq!(
+        held.state.attempt("held").unwrap().dbus,
+        Some(DeliveryOutcome::Unknown)
+    );
+    assert!(records.calls.lock().unwrap().is_empty());
+    let checkpoint: NotificationState =
+        serde_json::from_slice(&serde_json::to_vec(&held.state).unwrap()).unwrap();
+    held.persisted.send(()).unwrap();
+    let (ack, wait) = tokio::sync::oneshot::channel();
+    requests
+        .send(NotificationRequest::Import {
+            attempt: Box::new(original),
+            imported: ack,
+        })
+        .unwrap();
+    assert_eq!(wait.await.unwrap(), Ok(()));
+    requests
+        .send(NotificationRequest::Clear("barrier".into()))
+        .unwrap();
+    let barrier = raw_update(&mut updated).await;
+    assert_eq!(
+        barrier.state.held_until("held", Route::Dbus),
+        checkpoint.held_until("held", Route::Dbus)
+    );
+    barrier.persisted.send(()).unwrap();
+    drop(requests);
+    worker.await.unwrap().unwrap();
+    now.store(2_000, Ordering::SeqCst);
+    quiet_until.store(3_000, Ordering::SeqCst);
+    revision.store(2, Ordering::SeqCst);
+    let (requests, received) = mpsc::unbounded_channel();
+    let (updates, mut updated) = mpsc::unbounded_channel();
+    let worker = tokio::spawn(run(
+        Deliverer::new(bus.connect().await, config(), checkpoint),
+        received,
+        updates,
+        check,
+        clock,
+    ));
+    let prepared = raw_update(&mut updated).await;
+    assert!(prepared.state.held_until("held", Route::Dbus).is_none());
+    assert!(prepared.state.attempt("held").unwrap().retried);
+    prepared.persisted.send(()).unwrap();
+    let held = raw_update(&mut updated).await;
+    assert_eq!(
+        held.state.held_until("held", Route::Dbus),
+        Some(&HeldRoute {
+            at: 3_000,
+            policy: "owner-policy:2".into()
+        })
+    );
+    assert!(records.calls.lock().unwrap().is_empty());
+    held.persisted.send(()).unwrap();
+    now.store(3_000, Ordering::SeqCst);
+    requests.send(NotificationRequest::Recheck).unwrap();
+    let prepared = raw_update(&mut updated).await;
+    assert_eq!(prepared.receipts[0].outcome, DeliveryOutcome::Unknown);
+    assert!(records.calls.lock().unwrap().is_empty());
+    prepared.persisted.send(()).unwrap();
+    let delivered = raw_update(&mut updated).await;
+    assert_eq!(delivered.receipts[0].outcome, DeliveryOutcome::Delivered);
+    assert!(delivered.state.attempt("held").unwrap().retried);
+    assert!(delivered.state.held_until("held", Route::Dbus).is_none());
+    delivered.persisted.send(()).unwrap();
+    assert_eq!(records.calls.lock().unwrap().len(), 1);
+    drop(requests);
+    worker.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn policy_batch_uses_one_short_fence_for_all_members_without_retaining_it_for_receipts() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    struct Lease(Arc<AtomicBool>);
+    impl Drop for Lease {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+    let active = Arc::new(AtomicBool::new(false));
+    let batches = Arc::new(AtomicUsize::new(0));
+    let members = Arc::new(AtomicUsize::new(0));
+    let check: signal_delivery::PolicyCheck = {
+        let active = Arc::clone(&active);
+        let batches = Arc::clone(&batches);
+        let members = Arc::clone(&members);
+        Arc::new(move |request| {
+            assert!(
+                !active.swap(true, Ordering::SeqCst),
+                "previous admission fence was not released"
+            );
+            batches.fetch_add(1, Ordering::SeqCst);
+            members.store(request.notices.len(), Ordering::SeqCst);
+            let mut authorization = authorize(
+                &request.notices,
+                SendDecision::HoldUntil {
+                    at: 10_000,
+                    policy: "policy:current".into(),
+                },
+            );
+            authorization.lease = Some(Box::new(Lease(Arc::clone(&active))));
+            authorization
+        })
+    };
+    let mut state = NotificationState::default();
+    for n in 0..32 {
+        state.begin(
+            notice(&format!("member-{n}"), &format!("occurrence-{n}")),
+            Route::Command,
+        );
+    }
+    let mut configured = config();
+    configured.route = Route::Command;
+    let (requests, received) = mpsc::unbounded_channel();
+    let (updates, mut updated) = mpsc::unbounded_channel();
+    let worker = tokio::spawn(run(
+        Deliverer::new(None, configured, state),
+        received,
+        updates,
+        check,
+        Arc::new(|| 1_000),
+    ));
+    requests
+        .send(NotificationRequest::Deliver(Box::new(notice("new", "new"))))
+        .unwrap();
+    raw_update(&mut updated).await.persisted.send(()).unwrap();
+    let held = raw_update(&mut updated).await;
+    assert!(held.receipts.is_empty());
+    assert_eq!(batches.load(Ordering::SeqCst), 1);
+    assert_eq!(members.load(Ordering::SeqCst), 33);
+    assert!(
+        !active.load(Ordering::SeqCst),
+        "the policy fence ended before any receipt write"
+    );
+    held.persisted.send(()).unwrap();
+    drop(requests);
+    worker.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn crash_after_due_hold_unknown_checkpoint_never_resends_on_restart() {
+    let bus = PrivateBus::start();
+    let mut source = Deliverer::new(bus.connect().await, config(), NotificationState::default());
+    send(&mut source, notice("held", "one")).await;
+    source.server_appeared();
+    source
+        .state
+        .hold("held", [Route::Dbus], 1_000, "policy:one");
+    let records = Records::default();
+    let _server = bus
+        .server(FakeServer {
+            records: records.clone(),
+            actions: true,
+            stall: false,
+        })
+        .await;
+    let (requests, received) = mpsc::unbounded_channel();
+    let (updates, mut updated) = mpsc::unbounded_channel();
+    let worker = tokio::spawn(run(
+        Deliverer::new(bus.connect().await, config(), source.state),
+        received,
+        updates,
+        Arc::new(permit),
+        Arc::new(|| 1_000),
+    ));
+    let prepared = raw_update(&mut updated).await;
+    assert!(prepared.state.attempt("held").unwrap().retried);
+    assert!(prepared.state.held_until("held", Route::Dbus).is_none());
+    let checkpoint = prepared.state.clone();
+    assert!(records.calls.lock().unwrap().is_empty());
+    // The committed unknown body survives, but the worker never got its ack.
+    drop(prepared);
+    worker.await.unwrap().unwrap();
+    drop(requests);
+    let (requests, received) = mpsc::unbounded_channel();
+    let (updates, mut updated) = mpsc::unbounded_channel();
+    let worker = tokio::spawn(run(
+        Deliverer::new(bus.connect().await, config(), checkpoint),
+        received,
+        updates,
+        Arc::new(permit),
+        Arc::new(|| 1_000),
+    ));
+    raw_update(&mut updated).await.persisted.send(()).unwrap();
+    requests
+        .send(NotificationRequest::Clear("barrier".into()))
+        .unwrap();
+    let barrier = raw_update(&mut updated).await;
+    assert_eq!(
+        barrier.state.attempt("held").unwrap().dbus,
+        Some(DeliveryOutcome::Unknown)
+    );
+    barrier.persisted.send(()).unwrap();
+    assert!(records.calls.lock().unwrap().is_empty());
+    drop(requests);
+    worker.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn stalled_server_does_not_hold_policy_lock_and_the_next_route_rechecks_policy() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let policy = Arc::new(tokio::sync::RwLock::new(true));
+    let active = Arc::new(AtomicBool::new(false));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let bus = PrivateBus::start();
+    let records = Records::default();
+    records.stall.store(true, Ordering::SeqCst);
+    let _server = bus
+        .server(FakeServer {
+            records: records.clone(),
+            actions: true,
+            stall: false,
+        })
+        .await;
+    struct Lease {
+        active: Arc<AtomicBool>,
+        _guard: tokio::sync::OwnedRwLockReadGuard<bool>,
+    }
+    impl Drop for Lease {
+        fn drop(&mut self) {
+            self.active.store(false, Ordering::SeqCst);
+        }
+    }
+    let check: signal_delivery::PolicyCheck = {
+        let active = Arc::clone(&active);
+        let calls = Arc::clone(&calls);
+        let policy = Arc::clone(&policy);
+        Arc::new(move |request| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let guard = Arc::clone(&policy).try_read_owned().unwrap();
+            let decision = if *guard {
+                SendDecision::Permit
+            } else {
+                SendDecision::Cancel
+            };
+            assert!(!active.swap(true, Ordering::SeqCst));
+            let mut authorization = authorize(&request.notices, decision);
+            authorization.lease = Some(Box::new(Lease {
+                active: Arc::clone(&active),
+                _guard: guard,
+            }));
+            authorization
+        })
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let command_output = directory.path().join("command-output");
+    let mut configured = config();
+    configured.route = Route::Both;
+    configured.command = Some(RouteCommand {
+        program: "sh".into(),
+        arguments: vec![
+            "-c".into(),
+            "cat > \"$1\"".into(),
+            "route".into(),
+            command_output.to_string_lossy().into_owned(),
+        ],
+    });
+    let (requests, received) = mpsc::unbounded_channel();
+    let (updates, mut updated) = mpsc::unbounded_channel();
+    let worker = tokio::spawn(run(
+        Deliverer::new(
+            bus.connect().await,
+            configured,
+            NotificationState::default(),
+        ),
+        received,
+        updates,
+        check,
+        Arc::new(|| 1_000),
+    ));
+    requests
+        .send(NotificationRequest::Deliver(Box::new(notice(
+            "first", "one",
+        ))))
+        .unwrap();
+    let initial = update(&mut updated).await;
+    initial.persisted.send(()).unwrap();
+    records.entered.notified().await;
+    assert!(
+        !active.load(Ordering::SeqCst),
+        "no policy fence is retained during Notify"
+    );
+    *policy
+        .try_write()
+        .expect("policy changes proceed while Notify is stalled") = false;
+    let unknown = update(&mut updated).await;
+    assert_eq!(unknown.receipts[0].outcome, DeliveryOutcome::Unknown);
+    assert!(
+        !command_output.exists(),
+        "the independently admitted command obeys the changed policy"
+    );
+    unknown.persisted.send(()).unwrap();
+    records.stall.store(false, Ordering::SeqCst);
+    requests
+        .send(NotificationRequest::Deliver(Box::new(notice(
+            "next", "two",
+        ))))
+        .unwrap();
+    let initial = update(&mut updated).await;
+    initial.persisted.send(()).unwrap();
+    let cancelled = update(&mut updated).await;
+    assert_eq!(cancelled.receipts[0].outcome, DeliveryOutcome::Cancelled);
+    cancelled.persisted.send(()).unwrap();
+    assert!(calls.load(Ordering::SeqCst) >= 2);
+    assert_eq!(records.calls.lock().unwrap().len(), 1);
+    drop(requests);
+    worker.await.unwrap().unwrap();
 }

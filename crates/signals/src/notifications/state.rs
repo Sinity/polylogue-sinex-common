@@ -91,6 +91,66 @@ impl NotificationState {
             .map(|a| a.notice.clone())
             .collect()
     }
+    pub fn hold(
+        &mut self,
+        id: &str,
+        routes: impl IntoIterator<Item = Route>,
+        until: i64,
+        policy: &str,
+    ) {
+        if let Some(a) = self.attempts.get_mut(id)
+            && a.active
+        {
+            for route in routes {
+                a.held.insert(
+                    route,
+                    HeldRoute {
+                        at: until,
+                        policy: policy.to_string(),
+                    },
+                );
+            }
+        }
+    }
+    pub fn held_until(&self, id: &str, route: Route) -> Option<&HeldRoute> {
+        self.attempts.get(id)?.held.get(&route)
+    }
+    pub fn next_hold(&self) -> Option<crate::Instant> {
+        self.attempts
+            .values()
+            .filter(|a| a.active)
+            .flat_map(|a| a.held.values())
+            .map(|held| held.at)
+            .min()
+    }
+    /// A due hold is converted to a terminal-on-crash unknown checkpoint before
+    /// the worker may send. Its next policy check may hold it again.
+    pub fn resume_holds(&mut self, now: crate::Instant) -> Vec<NotificationReceipt> {
+        let mut receipts = Vec::new();
+        for a in self.attempts.values_mut().filter(|a| a.active) {
+            let due: Vec<_> = a
+                .held
+                .iter()
+                .filter(|(_, held)| held.at <= now)
+                .map(|(route, _)| *route)
+                .collect();
+            for route in due {
+                a.held.remove(&route);
+                receipts.push(receipt(a, route));
+            }
+        }
+        receipts
+    }
+    /// An already-shown group update is a new replace operation, whose unknown
+    /// checkpoint must also be committed before touching the platform.
+    pub fn prepare_refresh(&mut self, id: &str) -> Option<NotificationReceipt> {
+        let a = self.attempts.get_mut(id)?;
+        if !a.active || a.dbus != Some(DeliveryOutcome::Delivered) {
+            return None;
+        }
+        a.dbus = Some(DeliveryOutcome::Unknown);
+        Some(receipt(a, Route::Dbus))
+    }
     pub fn presentation(&mut self, notice: &Notice, actions: bool) -> Presentation {
         let slot = self.slot(notice);
         let data_loss = notice.data_loss
@@ -154,6 +214,7 @@ impl NotificationState {
             }
         }
         let attempt = self.attempts.get_mut(id).expect("existing attempt");
+        attempt.held.remove(&route);
         if route == Route::Dbus {
             attempt.dbus = Some(outcome.clone());
             attempt.notification_id = notification_id;
@@ -177,6 +238,7 @@ impl NotificationState {
             .filter(|a| same_occurrence(&a.notice, &notice))
         {
             a.active = false;
+            a.held.clear();
             result.deactivated.push(a.notice.delivery_id.clone());
             if let Some(id) = a.notification_id {
                 ids.insert(id);
@@ -282,6 +344,7 @@ impl NotificationState {
             active: true,
             server_owner: None,
             handoff: None,
+            held: BTreeMap::new(),
         };
         let mut receipts = Vec::new();
         if matches!(route, Route::Dbus | Route::Both) {
@@ -469,3 +532,14 @@ pub struct Completion {
     pub server_owner: Option<String>,
     pub slot: Option<String>,
 }
+
+impl std::fmt::Display for ImportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Conflict => {
+                f.write_str("notification attempt identity reused with a different body")
+            }
+        }
+    }
+}
+impl std::error::Error for ImportError {}
