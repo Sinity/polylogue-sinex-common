@@ -61,6 +61,11 @@ only pgvector rebuilds that extension while rechecking the existing core tools.
 
 `CLOUD_PREFIX` selects the absolute writable prefix; its default is `.cloud`
 beside the checkout. Downloads and build trees stay there for repeat setup.
+The prefix must be on a filesystem supporting POSIX ACLs for the full test
+suite. Setup creates private `tmp` under that prefix and exports it as
+`TMPDIR` during installation and later commands. This keeps filesystem
+oracles on the prepared workspace filesystem; a runtime's default tmpfs may
+support user xattrs while rejecting POSIX ACLs.
 `CLOUD_BUILD_JOBS` controls native compilation concurrency (default 2).
 The frontend tools use the upstream npm tarballs directly, without npm install
 scripts or changing workspace manifests. Their versions match the shared

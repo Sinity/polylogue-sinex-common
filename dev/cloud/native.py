@@ -106,6 +106,9 @@ def main():
             parser.error("repository Rust toolchain differs from the shared cloud pin")
     prefix = args.prefix.resolve()
     prefix.mkdir(parents=True, exist_ok=True)
+    scratch = prefix / "tmp"
+    scratch.mkdir(mode=0o700, exist_ok=True)
+    scratch.chmod(0o700)
     cache = prefix / "downloads"
     cache.mkdir(exist_ok=True)
     build = prefix / "build"
@@ -118,7 +121,7 @@ def main():
     bootstrap_bin = bootstrap / ("usr/bin" if bootstrap_kind == "debian13" else "bin")
     pg = prefix / "postgres"
     cmake = prefix / "cmake" / "cmake-3.31.8-linux-x86_64" / "bin"
-    env = os.environ | {"CARGO_HOME": str(cargo), "RUSTUP_HOME": str(rustup), "RUSTUP_INIT_SKIP_PATH_CHECK": "yes"}
+    env = os.environ | {"CARGO_HOME": str(cargo), "RUSTUP_HOME": str(rustup), "RUSTUP_INIT_SKIP_PATH_CHECK": "yes", "TMPDIR": str(scratch)}
     paths = list(map(str, (cargo / "bin", tools, pg / "bin", bootstrap_bin, cmake))) + os.environ["PATH"].split(os.pathsep)
     env["PATH"] = os.pathsep.join(dict.fromkeys(paths))
     if bootstrap_kind == "debian13":
@@ -186,7 +189,7 @@ def main():
     if not (pkglib / "vector.so").is_file() or not (sharedir / "extension/vector.control").is_file():
         raise RuntimeError("pgvector library or extension control file is missing")
     run([sys.executable, Path(__file__).with_name("smoke.py"), "--scratch", prefix], env=env)
-    entries = {"CARGO_HOME": str(cargo), "RUSTUP_HOME": str(rustup), "PATH": env["PATH"], "LINKING_COMMON": "1"}
+    entries = {"CARGO_HOME": str(cargo), "RUSTUP_HOME": str(rustup), "PATH": env["PATH"], "LINKING_COMMON": "1", "TMPDIR": str(scratch)}
     if bootstrap_kind == "debian13":
         entries |= {key: env[key] for key in ("M4", "BISON_PKGDATADIR")}
     environment = prefix / "env.sh"
