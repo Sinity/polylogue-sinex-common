@@ -85,6 +85,7 @@ mechanic and nothing else in the shared crates.
 | delivery | the record of one firing: rule, revision, rows, channel, outcome |
 | delivery receipt | the returned outcome of one route attempt, recorded against its delivery identity |
 | attempt | one execution of a delivery route, initially unknown until a returned receipt |
+| attempt context | the process-local absolute work deadline and owner cancellation shared by a dispatched delivery and all its phases |
 | notice, value, action | the three kinds of delivery: a message, a number written to a target, a command run |
 | interrupting, passive | a notice shown as a desktop notification, or one that waits in status and briefs |
 | interrupt budget | how many interrupting notices per hour rules not authored by the operator may cause |

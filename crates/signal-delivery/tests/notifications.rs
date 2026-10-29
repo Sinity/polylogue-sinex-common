@@ -1,5 +1,6 @@
 use signal_delivery::{
-    Authorization, Deliverer, NotificationRequest, NotificationUpdate, Policy, PolicyRequest, run,
+    AttemptContext, Authorization, CancellationToken, Deliverer, NotificationRequest,
+    NotificationUpdate, Policy, PolicyRequest, run,
 };
 use signals::DeliveryOutcome;
 use signals::notifications::*;
@@ -9,6 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use zbus::zvariant::OwnedValue;
+#[path = "notifications/attempt_deadlines.rs"]
+mod attempt_deadlines;
 
 struct PrivateBus {
     process: std::process::Child,
@@ -98,6 +101,9 @@ struct Records {
     calls: Arc<Mutex<Vec<Call>>>,
     closed: Arc<Mutex<Vec<u32>>>,
     entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    capabilities_entered: Arc<tokio::sync::Notify>,
+    stall_capabilities: Arc<std::sync::atomic::AtomicBool>,
     stall: Arc<std::sync::atomic::AtomicBool>,
     reject: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -108,7 +114,15 @@ struct FakeServer {
 }
 #[zbus::interface(name = "org.freedesktop.Notifications")]
 impl FakeServer {
-    fn get_capabilities(&self) -> Vec<String> {
+    async fn get_capabilities(&self) -> Vec<String> {
+        self.records.capabilities_entered.notify_one();
+        if self
+            .records
+            .stall_capabilities
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            std::future::pending::<()>().await;
+        }
         if self.actions {
             vec!["actions".into()]
         } else {
@@ -159,7 +173,7 @@ impl FakeServer {
             ));
         }
         if self.stall || self.records.stall.load(std::sync::atomic::Ordering::SeqCst) {
-            std::future::pending::<()>().await;
+            self.records.release.notified().await;
         }
         Ok(id)
     }
@@ -178,6 +192,9 @@ impl FakeServer {
         id: u32,
         reason: u32,
     ) -> zbus::Result<()>;
+}
+fn attempt() -> AttemptContext {
+    AttemptContext::new(config().deadline, None, CancellationToken::new())
 }
 fn config() -> NotificationConfig {
     NotificationConfig {
@@ -204,10 +221,11 @@ fn notice(id: &str, occurrence: &str) -> Notice {
     }
 }
 async fn send(deliverer: &mut Deliverer, notice: Notice) -> Vec<NotificationReceipt> {
+    let context = attempt();
     let id = notice.delivery_id.clone();
     let initial = deliverer.begin(notice);
     assert_eq!(initial[0].outcome, DeliveryOutcome::Unknown);
-    deliverer.send(&id, &permit).await
+    deliverer.send(&id, &permit, &context).await
 }
 
 #[tokio::test]
@@ -248,7 +266,7 @@ async fn notification_replaced_in_place_and_current_clear_closes() {
         [a[0].notification_id.unwrap()]
     );
     assert!(deliverer.begin(notice("a", "source-a")).is_empty());
-    assert!(deliverer.send("a", &permit).await.is_empty());
+    assert!(deliverer.send("a", &permit, &attempt()).await.is_empty());
 }
 
 #[tokio::test]
@@ -402,14 +420,14 @@ async fn not_sent_retried_once_unknown_never_and_restart_keeps_identity() {
     let retry = deliverer.server_appeared();
     assert_eq!(retry[0].delivery_id, "a");
     assert_eq!(retry[0].outcome, DeliveryOutcome::Unknown);
-    let delivered = deliverer.send("a", &permit).await;
+    let delivered = deliverer.send("a", &permit, &attempt()).await;
     assert_eq!(delivered[0].outcome, DeliveryOutcome::Delivered);
     assert!(deliverer.server_appeared().is_empty());
     assert_eq!(records.calls.lock().unwrap().len(), 1);
     let state = serde_json::from_str(&serde_json::to_string(&deliverer.state).unwrap()).unwrap();
     let mut restored = Deliverer::new(bus.connect().await, config(), state);
     assert!(restored.begin(notice("a", "source-a")).is_empty());
-    assert!(restored.send("a", &permit).await.is_empty());
+    assert!(restored.send("a", &permit, &attempt()).await.is_empty());
     assert!(restored.server_appeared().is_empty());
 
     let slow_bus = PrivateBus::start();
@@ -430,11 +448,11 @@ async fn not_sent_retried_once_unknown_never_and_restart_keeps_identity() {
     );
     let unknown = send(&mut slow, notice("slow", "source-a")).await;
     assert_eq!(unknown[0].outcome, DeliveryOutcome::Unknown);
-    assert!(slow.send("slow", &permit).await.is_empty());
+    assert!(slow.send("slow", &permit, &attempt()).await.is_empty());
     assert!(slow.server_appeared().is_empty());
     let mut restored = Deliverer::new(slow_bus.connect().await, short, slow.state);
     assert!(restored.begin(notice("slow", "source-a")).is_empty());
-    assert!(restored.send("slow", &permit).await.is_empty());
+    assert!(restored.send("slow", &permit, &attempt()).await.is_empty());
     assert_eq!(slow_records.calls.lock().unwrap().len(), 1);
 }
 
@@ -455,7 +473,7 @@ async fn current_state_rechecks_before_retry_and_passive_never_notifies() {
         })
         .await;
     deliverer.server_appeared();
-    let cancelled = deliverer.send("a", &cancelled).await;
+    let cancelled = deliverer.send("a", &cancelled, &attempt()).await;
     assert_eq!(cancelled[0].outcome, DeliveryOutcome::Cancelled);
     assert!(records.calls.lock().unwrap().is_empty());
     assert!(deliverer.server_appeared().is_empty());
@@ -486,7 +504,7 @@ async fn configured_command_receives_json_and_both_routes_have_separate_receipts
     let notice = notice("a", "source-a");
     let initial = deliverer.begin(notice.clone());
     assert_eq!(initial.len(), 2);
-    let receipts = deliverer.send("a", &permit).await;
+    let receipts = deliverer.send("a", &permit, &attempt()).await;
     assert_eq!(receipts.len(), 2);
     assert_eq!(
         receipts[0].outcome,
@@ -506,7 +524,7 @@ async fn configured_command_receives_json_and_both_routes_have_separate_receipts
     let retry = deliverer.server_appeared();
     assert_eq!(retry.len(), 1);
     assert_eq!(retry[0].route, Route::Dbus);
-    let retried = deliverer.send("a", &permit).await;
+    let retried = deliverer.send("a", &permit, &attempt()).await;
     assert_eq!(retried.len(), 1);
     assert_eq!(retried[0].route, Route::Dbus);
     assert_eq!(retried[0].outcome, DeliveryOutcome::Delivered);
@@ -547,6 +565,8 @@ async fn worker_records_protocol_actions_as_desktop_operator_acts() {
         updates,
         Arc::new(permit),
         Arc::new(|| 1000),
+        CancellationToken::new(),
+        None,
     ));
     requests
         .send(NotificationRequest::Deliver(Box::new(notice(
@@ -605,6 +625,8 @@ async fn service_appearance_retries_automatically() {
         updates,
         Arc::new(permit),
         Arc::new(|| 1000),
+        CancellationToken::new(),
+        None,
     ));
     requests
         .send(NotificationRequest::Deliver(Box::new(notice(
@@ -682,6 +704,8 @@ async fn command_only_worker_needs_no_session_bus() {
         updates,
         Arc::new(permit),
         Arc::new(|| 1000),
+        CancellationToken::new(),
+        None,
     ));
     requests
         .send(NotificationRequest::Deliver(Box::new(notice(
@@ -721,6 +745,8 @@ async fn slow_server_never_holds_writer() {
         updates,
         Arc::new(permit),
         Arc::new(|| 1000),
+        CancellationToken::new(),
+        None,
     ));
     requests
         .send(NotificationRequest::Deliver(Box::new(notice(
@@ -773,6 +799,8 @@ async fn appearance_during_downtime_retries_and_same_server_restart_keeps_replac
         updates,
         Arc::new(permit),
         Arc::new(|| 1000),
+        CancellationToken::new(),
+        None,
     ));
     let retry = update(&mut updated).await;
     assert_eq!(retry.receipts[0].delivery_id, "a");
@@ -793,6 +821,8 @@ async fn appearance_during_downtime_retries_and_same_server_restart_keeps_replac
         updates,
         Arc::new(permit),
         Arc::new(|| 1000),
+        CancellationToken::new(),
+        None,
     ));
     requests
         .send(NotificationRequest::Deliver(Box::new(notice(
@@ -952,6 +982,8 @@ async fn explicit_dbus_error_retries_on_new_owner_but_not_same_server_restart() 
         updates,
         Arc::new(permit),
         Arc::new(|| 1000),
+        CancellationToken::new(),
+        None,
     ));
     // This empty update is a FIFO barrier after worker startup. The same owner
     // must retain the explicit error until the service actually reappears.
@@ -1029,6 +1061,8 @@ async fn missing_bus_records_dbus_failure_and_still_runs_both_route_command() {
             updates,
             Arc::new(permit),
             Arc::new(|| 1000),
+            CancellationToken::new(),
+            None,
         ));
         requests
             .send(NotificationRequest::Deliver(Box::new(notice(
@@ -1084,7 +1118,7 @@ async fn historical_occurrence_still_requires_current_policy() {
     let mut n = notice("historical", "once");
     n.current = false;
     d.begin(n);
-    let result = d.send("historical", &cancelled).await;
+    let result = d.send("historical", &cancelled, &attempt()).await;
     assert_eq!(result[0].outcome, DeliveryOutcome::Cancelled);
     assert!(records.calls.lock().unwrap().is_empty());
 }
@@ -1132,7 +1166,9 @@ async fn unknown_command_is_not_retried_when_dbus_appears() {
         configured,
         NotificationState::default(),
     );
-    let first = send(&mut d, notice("a", "a")).await;
+    d.begin(notice("a", "a"));
+    let context = AttemptContext::new(Duration::from_millis(100), None, CancellationToken::new());
+    let first = d.send("a", &permit, &context).await;
     assert_eq!(
         first[0].outcome,
         DeliveryOutcome::NotSent("no_notification_server".into())
@@ -1148,7 +1184,7 @@ async fn unknown_command_is_not_retried_when_dbus_appears() {
         })
         .await;
     d.server_appeared();
-    let retry = d.send("a", &permit).await;
+    let retry = d.send("a", &permit, &attempt()).await;
     assert_eq!(retry.len(), 1);
     assert_eq!(retry[0].route, Route::Dbus);
     assert_eq!(retry[0].outcome, DeliveryOutcome::Delivered);
@@ -1182,6 +1218,8 @@ async fn live_import_retries_absent_server_once_after_persisting_unknown() {
         updates,
         Arc::new(permit),
         Arc::new(|| 1000),
+        CancellationToken::new(),
+        None,
     ));
     // Consume startup owner checkpoint before inserting the transferred attempt.
     let startup = raw_update(&mut updated).await;
@@ -1241,6 +1279,8 @@ async fn release_persists_original_handoff_and_inactive_checkpoint_before_ack() 
         updates,
         Arc::new(permit),
         Arc::new(|| 1000),
+        CancellationToken::new(),
+        None,
     ));
     requests
         .send(NotificationRequest::Deliver(Box::new(notice("a", "a"))))
@@ -1328,17 +1368,20 @@ async fn importing_grouped_attempts_in_reverse_order_keeps_the_visible_action_ow
         Some(DesktopEvent::Seen)
     );
     let before = records.calls.lock().unwrap().len();
-    assert!(receiver.send("c", &permit).await.is_empty());
+    assert!(receiver.send("c", &permit, &attempt()).await.is_empty());
     assert_eq!(records.calls.lock().unwrap().len(), before);
 }
 
-fn authorize(notices: &[Notice], decision: SendDecision) -> Authorization {
-    Authorization {
+fn authorize(
+    notices: &[Notice],
+    decision: SendDecision,
+) -> Result<Authorization, signal_delivery::PolicyFailure> {
+    Ok(Authorization {
         decisions: notices
             .iter()
             .map(|n| (n.delivery_id.clone(), decision.clone()))
             .collect(),
-    }
+    })
 }
 fn permit(request: PolicyRequest) -> signal_delivery::PolicyFuture {
     Box::pin(async move { authorize(&request.notices, SendDecision::Permit) })
@@ -1347,9 +1390,10 @@ fn cancelled(request: PolicyRequest) -> signal_delivery::PolicyFuture {
     Box::pin(async move { authorize(&request.notices, SendDecision::Cancel) })
 }
 async fn clear(deliverer: &mut Deliverer, id: &str, check: &Policy) -> Vec<NotificationReceipt> {
-    let mut receipts = deliverer.cancel(id, check).await;
+    let context = attempt();
+    let mut receipts = deliverer.cancel(id, check, &context).await.unwrap();
     while let Some(id) = deliverer.ready_ids().into_iter().next() {
-        receipts.extend(deliverer.send(&id, check).await);
+        receipts.extend(deliverer.send(&id, check, &context).await);
     }
     receipts
 }
@@ -1405,6 +1449,8 @@ async fn imported_retry_rechecks_changed_quiet_policy_after_restart_without_anot
         updates,
         Arc::clone(&check),
         Arc::clone(&clock),
+        CancellationToken::new(),
+        None,
     ));
     raw_update(&mut updated).await.persisted.send(()).unwrap();
     let (ack, wait) = tokio::sync::oneshot::channel();
@@ -1465,6 +1511,8 @@ async fn imported_retry_rechecks_changed_quiet_policy_after_restart_without_anot
         updates,
         check,
         clock,
+        CancellationToken::new(),
+        None,
     ));
     let prepared = raw_update(&mut updated).await;
     assert!(prepared.state.held_until("held", Route::Dbus).is_none());
@@ -1553,6 +1601,8 @@ async fn policy_batch_uses_one_short_fence_for_all_members_without_retaining_it_
         updates,
         check,
         Arc::new(|| 1_000),
+        CancellationToken::new(),
+        None,
     ));
     requests
         .send(NotificationRequest::Deliver(Box::new(notice("new", "new"))))
@@ -1596,6 +1646,8 @@ async fn crash_after_due_hold_unknown_checkpoint_never_resends_on_restart() {
         updates,
         Arc::new(permit),
         Arc::new(|| 1_000),
+        CancellationToken::new(),
+        None,
     ));
     let prepared = raw_update(&mut updated).await;
     assert!(prepared.state.attempt("held").unwrap().retried);
@@ -1614,6 +1666,8 @@ async fn crash_after_due_hold_unknown_checkpoint_never_resends_on_restart() {
         updates,
         Arc::new(permit),
         Arc::new(|| 1_000),
+        CancellationToken::new(),
+        None,
     ));
     raw_update(&mut updated).await.persisted.send(()).unwrap();
     requests
@@ -1707,6 +1761,8 @@ async fn stalled_server_does_not_hold_policy_lock_and_the_next_route_rechecks_po
         updates,
         check,
         Arc::new(|| 1_000),
+        CancellationToken::new(),
+        None,
     ));
     requests
         .send(NotificationRequest::Deliver(Box::new(notice(
@@ -1723,13 +1779,15 @@ async fn stalled_server_does_not_hold_policy_lock_and_the_next_route_rechecks_po
     *policy
         .try_write()
         .expect("policy changes proceed while Notify is stalled") = false;
-    let unknown = update(&mut updated).await;
-    assert_eq!(unknown.receipts[0].outcome, DeliveryOutcome::Unknown);
+    records.release.notify_one();
+    let completed = update(&mut updated).await;
+    assert_eq!(completed.receipts[0].outcome, DeliveryOutcome::Delivered);
+    assert_eq!(completed.receipts[1].outcome, DeliveryOutcome::Cancelled);
     assert!(
         !command_output.exists(),
         "the independently admitted command obeys the changed policy"
     );
-    unknown.persisted.send(()).unwrap();
+    completed.persisted.send(()).unwrap();
     records.stall.store(false, Ordering::SeqCst);
     requests
         .send(NotificationRequest::Deliver(Box::new(notice(
@@ -1781,6 +1839,8 @@ async fn platform_effect_waits_for_asynchronous_owner_admission_completion() {
         updates,
         check,
         Arc::new(|| 1_000),
+        CancellationToken::new(),
+        None,
     ));
     requests
         .send(NotificationRequest::Deliver(Box::new(notice(
