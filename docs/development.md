@@ -16,6 +16,21 @@ cargo xtask test -p devkit --all-features
 and compiler wrappers. Cargo's default output directory is `target/`; a
 caller may set `CARGO_TARGET_DIR` explicitly.
 
+`nix flake check` builds sealed formatting, Clippy, nextest and browser-shell
+checks. Clippy and nextest reuse one Crane dependency artifact build with the
+same Rust toolchain and all workspace features. The source includes fixture
+JSON and browser assets as well as Rust files.
+
+The nextest check excludes only devkit's `pg::` and `nats::` test groups,
+which start database services. `cargo xtask check` runs those groups too and
+remains the full native check. Database service tools stay in the shell:
+PostgreSQL 18 with TimescaleDB and pgvector, and NATS. DBus and the frontend
+tools support the existing notification and browser checks.
+
+`nix fmt` uses nixfmt. The shell also provides cargo-llvm-cov, cargo-fuzz,
+cargo-deny, mold, sqlite and jq. Coverage uses the LLVM tools from the declared
+Rust toolchain.
+
 A host may queue these commands through its own job runner.
 
 For a change spanning common and a product, use the explicit
