@@ -1,5 +1,5 @@
 //! The single append owner and its dedicated durability thread.
-use crate::{Error, Extent, Hash, Prepared, Result, codec};
+use crate::{codec, Error, Extent, Hash, Prepared, Result};
 use std::{
     collections::{HashMap, VecDeque},
     fs::{File, OpenOptions},
@@ -7,9 +7,8 @@ use std::{
     os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::Path,
     sync::{
-        Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc,
+        mpsc, Arc,
     },
     thread,
 };

@@ -1,5 +1,5 @@
 //! A prepared encoding can cross a custody boundary without acquiring a segment location.
-use crate::{BlobReader, DataKey, Error, Extent, Hash, Kind, ReadLimits, Result, codec};
+use crate::{codec, BlobReader, DataKey, Error, Extent, Hash, Kind, ReadLimits, Result};
 use std::{fs::File, os::unix::fs::FileExt};
 
 /// Description of exactly one encoded blob. The codec version, frame index,

@@ -1,11 +1,11 @@
 //! Bounded frame preparation, independent of segment ownership and durability.
 use crate::{
-    DEFAULT_FRAME, DataKey, EncodedBlob, Error, Hash, Kind, ReadLimits, Result,
     codec::{self, Frame, Index},
+    DataKey, EncodedBlob, Error, Hash, Kind, ReadLimits, Result, DEFAULT_FRAME,
 };
 use chacha20poly1305::{
+    aead::{rand_core::RngCore, Aead, OsRng, Payload},
     ChaCha20Poly1305, KeyInit, Nonce,
-    aead::{Aead, OsRng, Payload, rand_core::RngCore},
 };
 use std::{
     fs::File,

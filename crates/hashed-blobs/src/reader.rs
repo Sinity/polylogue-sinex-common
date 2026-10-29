@@ -1,11 +1,11 @@
 //! Lock-free readers addressed by immutable extent descriptors.
 use crate::{
-    DataKey, EncodedBlob, Error, Extent, Hash, Kind, Result,
     codec::{self, Index},
+    DataKey, EncodedBlob, Error, Extent, Hash, Kind, Result,
 };
 use chacha20poly1305::{
-    ChaCha20Poly1305, KeyInit, Nonce,
     aead::{Aead, Payload},
+    ChaCha20Poly1305, KeyInit, Nonce,
 };
 use std::{
     fs::File,

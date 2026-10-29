@@ -136,15 +136,13 @@ fn owner_sealing_reads_encoded_custody_without_writing_decoded_bytes() {
     let descriptor = sealed.descriptor();
     assert_eq!(sealed.into_file().metadata().unwrap().ino(), inode);
     assert_eq!(descriptor.hash, Preparation::sealed_name(&key, &input));
-    assert!(
-        Prepared::from_encoded(
-            target.reopen().unwrap(),
-            descriptor.clone(),
-            None,
-            ReadLimits::default()
-        )
-        .is_err()
-    );
+    assert!(Prepared::from_encoded(
+        target.reopen().unwrap(),
+        descriptor.clone(),
+        None,
+        ReadLimits::default()
+    )
+    .is_err());
     let adopted = Prepared::from_encoded(
         target.reopen().unwrap(),
         descriptor,
