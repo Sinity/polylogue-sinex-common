@@ -77,6 +77,10 @@ Sinex in [its query page](https://github.com/Sinity/sinex/blob/master/docs/query
 
 ## Errors
 
+At the end of an otherwise complete parenthesized condition, a missing closing
+parenthesis offers the complete balanced query. Quoted parentheses remain data;
+incomplete operands or random seeds never receive invented values.
+
 Every error carries `kind`, `message`, `position` (a byte offset, printed with
 a caret line), `suggestion` (a corrected query that runs as given, whenever
 one can be formed), `hint` and `retryable`. The language's kinds are
@@ -162,6 +166,8 @@ the resolved question. It is sealed: opaque to the caller and checked on use.
 `Source::Saved` and `Source::Result` carry `OutputBinding::Deferred` until the product supplies their output in the immutable catalog's `source_outputs`. A `SourceOutput` identifies the saved name and arguments, or kept reference and `ResultPart`, and provides an `OutputSchema` of typed fields, optional main time and optional actual row unit. Products derive these schemas from expanded saved definitions or stored result columns. The parser performs no reads and never borrows the default unit's fields for either source.
 
 A deferred tree is syntax only. Before execution, the product calls `bind::bind` with the derived snapshot; the resulting `BoundQuery` contains a tree whose saved and kept scopes are all known, including nested sources. Binding reuses the shared parser's field, type and closed-set checks and refuses missing schemas, unknown suffix fields and invalid values. Products use that same snapshot for canonical identity. The binding marker is validation state and does not enter question identity; the `since`, `until`, source identity and kept result part do.
+
+A saved reference used as a boolean operand (`query:name OR …`) belongs to the enclosing row domain, just as when that expression is parenthesized. Its other operands use that domain's fields. An ordinary saved source and its inline or piped suffix retain the saved output schema.
 
 Inline conditions on saved and kept sources are stored in their source's `condition`, separately from a piped `StageKind::Where`. This preserves the product's distinction between conditions applied to an expanded base relation and filters applied after that relation's output has been selected.
 

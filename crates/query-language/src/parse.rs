@@ -329,7 +329,25 @@ impl Parser<'_> {
         if self.take(word) {
             Ok(())
         } else {
-            Err(self.error(format!("expected `{word}`")))
+            let error = self.error(format!("expected `{word}`"));
+            if word == ")" && self.peek().is_none() {
+                let mut depth = 0usize;
+                for token in &self.tokens {
+                    if token.quoted {
+                        continue;
+                    }
+                    match token.text.as_str() {
+                        "(" => depth += 1,
+                        ")" if depth > 0 => depth -= 1,
+                        ")" => return Err(error),
+                        _ => {}
+                    }
+                }
+                if depth > 0 {
+                    return Err(error.suggestion(format!("{}{}", self.text, ")".repeat(depth))));
+                }
+            }
+            Err(error)
         }
     }
     fn name(&mut self) -> Result<Token, Error> {
@@ -394,6 +412,7 @@ impl Parser<'_> {
             condition: None,
         };
         let mut consumed_source = false;
+        let source_start = self.at;
         if let Some(first) = self.peek().cloned()
             && !first.quoted
             && let Some((prefix, raw)) = first.text.split_once(':')
@@ -443,8 +462,19 @@ impl Parser<'_> {
                     output: OutputBinding::Deferred,
                 }
             };
-            self.output_scope(&mut source, &mut scope);
-            consumed_source = true;
+            if matches!(source, Source::Saved { .. }) && self.bool_is("OR") {
+                // Here the saved relation is the first boolean operand, not
+                // the source whose output owns the following suffix fields.
+                self.at = source_start;
+                source = Source::Unit {
+                    unit: scope.unit.clone(),
+                    implicit: true,
+                    condition: None,
+                };
+            } else {
+                self.output_scope(&mut source, &mut scope);
+                consumed_source = true;
+            }
         }
         if !consumed_source
             && let Some(first) = self.peek().cloned()
