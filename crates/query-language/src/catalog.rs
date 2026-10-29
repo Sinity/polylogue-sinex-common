@@ -2,7 +2,7 @@
 use crate::ast::{Argument, ResultPart, Source, Value};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Catalog {
     pub default_unit: String,
     pub recall_last_unit: Option<String>,
@@ -16,7 +16,7 @@ pub struct Catalog {
     /// Both products accept pipes; products may additionally expose clauses without pipes.
     pub unpiped_stages: bool,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OutputSource {
     Saved {
@@ -28,14 +28,14 @@ pub enum OutputSource {
         part: ResultPart,
     },
 }
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OutputSchema {
     /// Actual row domain supplied by the product, used for nested implicit sources.
     pub unit: Option<String>,
     pub fields: Vec<Field>,
     pub main_time: Option<String>,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SourceOutput {
     pub source: OutputSource,
     pub schema: OutputSchema,
@@ -66,7 +66,7 @@ impl Catalog {
         })
     }
 }
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Unit {
     pub name: String,
     /// The row domain of sequence steps; None means this unit itself.
@@ -79,7 +79,7 @@ pub struct Unit {
     pub main_time: Option<String>,
     pub help: String,
 }
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Field {
     pub name: String,
     pub kind: FieldKind,
@@ -89,7 +89,7 @@ pub struct Field {
     pub read_as: String,
     pub unit: Option<String>,
 }
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FieldKind {
     #[default]
@@ -108,7 +108,7 @@ pub enum FieldKind {
     Json,
     List(Box<FieldKind>),
 }
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum UnknownRule {
     #[default]
@@ -116,26 +116,26 @@ pub enum UnknownRule {
     Never,
     Word(String),
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DefaultFilter {
     pub field: String,
     pub value: Value,
 }
 /// An extension declares its syntax as typed slots; no product parses an opaque remainder.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Extension {
     pub name: String,
     pub position: ExtensionPosition,
     pub arguments: Vec<ExtensionSlot>,
     pub help: String,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtensionPosition {
     Atom,
     Stage,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtensionSlot {
     Keyword(String),
@@ -186,7 +186,7 @@ impl Catalog {
 
 /// A product reference is one literal node. A required marker disambiguates
 /// reference forms from a field with the same prefix (for example tool:Bash).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ReferenceSyntax {
     pub prefix: String,
     pub marker: Option<String>,

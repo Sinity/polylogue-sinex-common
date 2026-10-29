@@ -32,8 +32,26 @@ pub fn question_id(
     catalog: &Catalog,
     parameters: &BTreeMap<String, String>,
 ) -> Result<QuestionId, Error> {
-    let canonical =
-        serde_json::to_vec(&(normal_form(query, catalog)?, parameters)).map_err(serialization)?;
+    question_id_from_normal_form(&normal_form(query, catalog)?, parameters)
+}
+
+/// Validate and hash a stored canonical form without reconstructing product catalogs.
+/// The form must come from [`normal_form`], after resolving product identities.
+/// Object insertion order is immaterial; parameter declarations remain part of identity.
+pub fn question_id_from_normal_form(
+    normal_form: &Value,
+    parameters: &BTreeMap<String, String>,
+) -> Result<QuestionId, Error> {
+    let mut canonical_form = normal_form.clone();
+    normalize(&mut canonical_form);
+    if canonical_form != *normal_form || !canonical_form.is_object() {
+        return Err(Error::new(
+            ErrorKind::InvalidQuery,
+            "stored question is not in canonical normal form",
+            0,
+        ));
+    }
+    let canonical = serde_json::to_vec(&(canonical_form, parameters)).map_err(serialization)?;
     Ok(QuestionId(*blake3::hash(&canonical).as_bytes()))
 }
 
@@ -69,6 +87,9 @@ fn normalize(value: &mut Value) {
             for value in fields.values_mut() {
                 normalize(value);
             }
+            // serde_json's preserve_order feature is additive across dependents.
+            // Identity must have the same bytes in every product's feature union.
+            fields.sort_keys();
             let unordered = matches!(
                 fields.get("kind").and_then(Value::as_str),
                 Some("and" | "or" | "set")
