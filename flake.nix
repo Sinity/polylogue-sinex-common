@@ -51,7 +51,7 @@
       ]);
     in
     {
-      formatter.${system} = pkgs.nixfmt;
+      formatter.${system} = pkgs.nixfmt-tree;
       checks.${system} = {
         fmt = craneLib.cargoFmt {
           inherit (cargoArgs) src pname version;
