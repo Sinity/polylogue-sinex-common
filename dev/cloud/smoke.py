@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the prepared PostgreSQL/TimescaleDB and NATS with synthetic data."""
+"""Exercise the prepared PostgreSQL extensions and NATS with synthetic data."""
 import argparse
 import json
 import os
@@ -48,6 +48,13 @@ def main():
                 answer = run(["psql", "-X", "-h", sock, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-Atc", "CREATE EXTENSION timescaledb; CREATE EXTENSION pg_trgm; CREATE TABLE synthetic(ts timestamptz NOT NULL, value int); SELECT create_hypertable('synthetic','ts'); INSERT INTO synthetic VALUES ('2020-01-01T00:00:00Z',7); SELECT sum(value) FROM synthetic;"])
                 if answer.splitlines()[-1] != "7":
                     raise RuntimeError("synthetic TimescaleDB query returned " + answer)
+                vector_connection = ["psql", "-X", "-h", sock, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-Atc"]
+                vector_answer = run(vector_connection + ["CREATE EXTENSION vector; CREATE TABLE synthetic_vectors(id int PRIMARY KEY, embedding vector(3)); INSERT INTO synthetic_vectors VALUES (1,'[1,0,0]'),(2,'[0,1,0]'),(3,'[-1,0,0]'); CREATE INDEX synthetic_vectors_hnsw ON synthetic_vectors USING hnsw(embedding vector_cosine_ops); SET enable_seqscan=off; SELECT vector_dims('[1,0,0]'::vector); SELECT abs(1-('[1,0,0]'::vector <=> '[0,1,0]'::vector))<1e-12; SELECT string_agg(id::text,',' ORDER BY distance,id) FROM (SELECT id,embedding <=> '[1,0,0]'::vector AS distance FROM synthetic_vectors ORDER BY embedding <=> '[1,0,0]'::vector LIMIT 3) ranked;"])
+                if vector_answer.splitlines()[-3:] != ["3", "t", "1,2,3"]:
+                    raise RuntimeError("synthetic pgvector distance/order query returned " + vector_answer)
+                plan = run(vector_connection + ["SET enable_seqscan=off; EXPLAIN (COSTS OFF) SELECT id FROM synthetic_vectors ORDER BY embedding <=> '[1,0,0]'::vector LIMIT 3;"])
+                if "Index Scan using synthetic_vectors_hnsw" not in plan:
+                    raise RuntimeError("synthetic pgvector HNSW index was not selected: " + plan)
                 monitoring = port()
                 nats = subprocess.Popen(["nats-server", "-js", "-sd", str(root / "nats"), "-a", "127.0.0.1", "-p", str(port()), "-m", str(monitoring)], stdout=nats_log, stderr=subprocess.STDOUT)
                 deadline = time.monotonic() + 10
@@ -65,7 +72,7 @@ def main():
                         if time.monotonic() >= deadline:
                             raise
                         time.sleep(0.1)
-                print(json.dumps({"postgres": run(["postgres", "--version"]), "timescaledb": "synthetic hypertable insert/query passed", "nats": "JetStream healthz passed"}))
+                print(json.dumps({"postgres": run(["postgres", "--version"]), "timescaledb": "synthetic hypertable insert/query passed", "pgvector": "synthetic dimensions, cosine distance and HNSW ordering passed", "nats": "JetStream healthz passed"}))
             except BaseException:
                 for log in (root / "pg.log", root / "nats.log"):
                     if log.exists():
