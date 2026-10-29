@@ -543,7 +543,7 @@ compiler_law!(page_is_not_the_answer, "page-is-not-the-answer");
 fn parsed_grouped_implicit_count_can_filter_and_sort_in_both_catalogs() {
     for (catalog, unit, field) in [
         (support::polylogue(), "sessions", "origin"),
-        (support::sinex(), "events", "kind"),
+        (support::sinex(), "events", "event_type"),
     ] {
         let data = BTreeMap::from([(
             unit.into(),

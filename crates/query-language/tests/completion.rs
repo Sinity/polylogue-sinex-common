@@ -250,14 +250,21 @@ fn declared_values_complete_inside_open_quotes_with_escaped_replacements() {
 
 #[test]
 fn grouped_completion_includes_implicit_count_before_explicit_aggregation() {
-    assert!(
-        values(
+    for (catalog, text) in [
+        (
+            support::polylogue(),
             "sessions | group by origin | where co",
-            &support::polylogue()
-        )
-        .contains(&"count".into())
-    );
-    assert!(
-        values("events | group by kind | sort by co", &support::sinex()).contains(&"count".into())
-    );
+        ),
+        (
+            support::sinex(),
+            "events | group by event_type | sort by co",
+        ),
+    ] {
+        assert!(
+            complete(text, text.len(), &catalog)
+                .iter()
+                .any(|candidate| candidate.value == "count"
+                    && candidate.kind == query_language::complete::CompletionKind::Field)
+        );
+    }
 }
