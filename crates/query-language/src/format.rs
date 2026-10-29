@@ -470,7 +470,7 @@ impl Renderer<'_> {
             .collect()
     }
 }
-fn quote(text: &str) -> String {
+pub(crate) fn quote(text: &str) -> String {
     let mut out = String::from("\"");
     for c in text.chars() {
         match c {

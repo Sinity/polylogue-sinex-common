@@ -54,22 +54,32 @@ pub fn complete(text: &str, position: usize, catalog: &Catalog) -> Vec<Completio
     if let Some(field) = set_field(before) {
         if let Some(spec) = catalog.field(&unit, field) {
             for value in &spec.values {
-                add(value, CompletionKind::Value, &spec.help, span, fragment);
+                if value.starts_with(fragment) {
+                    add(
+                        &literal_spelling(value),
+                        CompletionKind::Value,
+                        &spec.help,
+                        span,
+                        "",
+                    );
+                }
             }
         }
     } else if let Some((field, partial)) = fragment.split_once(':') {
         if let Some(spec) = catalog.field(&unit, field) {
             for value in &spec.values {
-                add(
-                    value,
-                    CompletionKind::Value,
-                    &spec.help,
-                    Span {
-                        start: start + field.len() + 1,
-                        end,
-                    },
-                    partial,
-                );
+                if value.starts_with(partial) {
+                    add(
+                        &literal_spelling(value),
+                        CompletionKind::Value,
+                        &spec.help,
+                        Span {
+                            start: start + field.len() + 1,
+                            end,
+                        },
+                        "",
+                    );
+                }
             }
             for value in ["unknown", "*"] {
                 add(
@@ -92,7 +102,15 @@ pub fn complete(text: &str, position: usize, catalog: &Catalog) -> Vec<Completio
             let field = field_before.unwrap_or("");
             if let Some(spec) = catalog.field(&unit, field) {
                 for value in &spec.values {
-                    add(value, CompletionKind::Value, &spec.help, span, fragment);
+                    if value.starts_with(fragment) {
+                        add(
+                            &literal_spelling(value),
+                            CompletionKind::Value,
+                            &spec.help,
+                            span,
+                            "",
+                        );
+                    }
                 }
                 for value in ["unknown", "*"] {
                     add(value, CompletionKind::Value, "", span, fragment);
@@ -315,4 +333,18 @@ fn set_field(before: &str) -> Option<&str> {
     }
     let head = before[..open].split_whitespace().last()?;
     head.strip_suffix(':')
+}
+
+fn literal_spelling(value: &str) -> String {
+    if matches!(value, "unknown" | "*")
+        || value.starts_with('$')
+        || value.is_empty()
+        || value
+            .chars()
+            .any(|c| c.is_whitespace() || "()[]|,\"=<>!~^".contains(c))
+    {
+        crate::format::quote(value)
+    } else {
+        value.to_string()
+    }
 }

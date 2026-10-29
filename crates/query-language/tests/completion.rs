@@ -63,3 +63,59 @@ fn completion_shares_every_declared_stage() {
     }
     assert!(values("sessions | group by origin | fi", &c).contains(&"first".into()));
 }
+
+#[test]
+fn closed_set_literal_completion_preserves_reserved_words_and_query_punctuation() {
+    use query_language::{
+        ast::{ConditionKind, Source, Value},
+        parse::parse,
+    };
+    let mut catalog = support::sinex();
+    catalog
+        .units
+        .iter_mut()
+        .find(|u| u.name == "runs")
+        .unwrap()
+        .fields
+        .iter_mut()
+        .find(|f| f.name == "status")
+        .unwrap()
+        .values = vec![
+        "unknown".into(),
+        "a|b".into(),
+        "two words".into(),
+        "$parameter".into(),
+    ];
+    for (prefix, literal) in [
+        ("runs where status:unk", "unknown"),
+        ("runs where status:a", "a|b"),
+        ("runs where status:t", "two words"),
+        ("runs where status:$", "$parameter"),
+    ] {
+        let completion = complete(prefix, prefix.len(), &catalog)
+            .into_iter()
+            .find(|c| c.value.starts_with('"'))
+            .unwrap();
+        let text = format!(
+            "{}{}{}",
+            &prefix[..completion.replace.start],
+            completion.value,
+            &prefix[completion.replace.end..]
+        );
+        let Source::Unit {
+            condition: Some(condition),
+            ..
+        } = parse(&text, &catalog).unwrap().source
+        else {
+            panic!("unit filter")
+        };
+        let ConditionKind::Match {
+            value: Value::Scalar { text, .. },
+            ..
+        } = condition.kind
+        else {
+            panic!("closed-set literal must remain a scalar")
+        };
+        assert_eq!(text, literal);
+    }
+}
