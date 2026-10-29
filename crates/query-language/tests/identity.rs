@@ -226,3 +226,62 @@ fn duration_gap_spellings_and_catalog_unknown_words_share_identity() {
     }]);
     assert_eq!(normal_form(&a, &c).unwrap(), normal_form(&b, &c).unwrap());
 }
+
+#[test]
+fn stored_normal_form_has_feature_independent_canonical_bytes() {
+    let q = query(vec![condition("source", "alpha", 42)]);
+    let form = normal_form(&q, &catalog()).unwrap();
+    let expected = r#"{"attach":[],"source":{"condition":{"kind":{"field":"source","kind":"match","value":{"kind":"scalar","text":"alpha"}}},"kind":"unit","unit":"events"},"stages":[]}"#;
+    assert_eq!(serde_json::to_string(&form).unwrap(), expected);
+    // This exact independent byte oracle is also exercised with preserve_order
+    // enabled, as it is in product feature unions.
+    let bytes = format!("[{expected},{{}}]");
+    let expected_id = QuestionId(*blake3::hash(bytes.as_bytes()).as_bytes());
+    assert_eq!(
+        question_id(&q, &catalog(), &BTreeMap::new()).unwrap(),
+        expected_id
+    );
+    let mut reversed = form.clone();
+    fn reverse(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                for value in fields.values_mut() {
+                    reverse(value);
+                }
+                let entries: Vec<_> = std::mem::take(fields).into_iter().rev().collect();
+                fields.extend(entries);
+            }
+            serde_json::Value::Array(values) => values.iter_mut().for_each(reverse),
+            _ => {}
+        }
+    }
+    reverse(&mut reversed);
+    assert_ne!(reversed.to_string(), expected);
+    assert_eq!(
+        question_id_from_normal_form(&reversed, &BTreeMap::new()).unwrap(),
+        expected_id
+    );
+}
+
+#[test]
+fn stored_identity_validates_normalization_and_parameter_types() {
+    let form = normal_form(&query(vec![condition("source", "alpha", 0)]), &catalog()).unwrap();
+    let declarations = BTreeMap::from([("input".into(), "text".into())]);
+    assert_eq!(
+        question_id_from_normal_form(&form, &declarations).unwrap(),
+        question_id(
+            &query(vec![condition("source", "alpha", 99)]),
+            &catalog(),
+            &declarations
+        )
+        .unwrap()
+    );
+    assert_ne!(
+        question_id_from_normal_form(&form, &declarations).unwrap(),
+        question_id_from_normal_form(&form, &BTreeMap::new()).unwrap()
+    );
+    let mut noncanonical = form.clone();
+    noncanonical["span"] = serde_json::json!({"start":0,"end":1});
+    assert!(question_id_from_normal_form(&noncanonical, &declarations).is_err());
+    assert!(question_id_from_normal_form(&serde_json::json!(null), &declarations).is_err());
+}
