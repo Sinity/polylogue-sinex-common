@@ -329,3 +329,11 @@ fn page_and_palette_cli_derive_from_registered_request() {
     assert!(markup.contains("page-command"));
     assert!(action.cli.contains("--deadline none"));
 }
+
+#[test]
+fn resume_reload_matches_browser_fixture() {
+    let resume = command_surface::Resume::<serde_json::Value>::Reload {
+        reason: "position no longer retained".into(),
+    };
+    assert_eq!(resume.encode().unwrap(), include_str!("reload.sse"));
+}

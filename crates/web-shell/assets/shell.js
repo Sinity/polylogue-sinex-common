@@ -94,6 +94,7 @@ function windowTrim(rows2, maximum, preferred) {
 
 // typescript/types.ts
 var SHARED_KEYS = [{ "key": "/", "prefix": null, "ctrl": false, "action": "focus_query", "picker": null, "label": "Focus query" }, { "key": ":", "prefix": null, "ctrl": false, "action": "palette", "picker": null, "label": "Actions palette" }, { "key": "k", "prefix": null, "ctrl": true, "action": "palette", "picker": null, "label": "Actions palette" }, { "key": "?", "prefix": null, "ctrl": false, "action": "help", "picker": null, "label": "Key help" }, { "key": "g", "prefix": null, "ctrl": false, "action": "go_prefix", "picker": null, "label": "Go to section (then a letter)" }, { "key": "j", "prefix": null, "ctrl": false, "action": "next", "picker": "Ctrl-j", "label": "Next item" }, { "key": "ArrowDown", "prefix": null, "ctrl": false, "action": "next", "picker": "ArrowDown", "label": "Next item" }, { "key": "k", "prefix": null, "ctrl": false, "action": "previous", "picker": "Ctrl-k", "label": "Previous item" }, { "key": "ArrowUp", "prefix": null, "ctrl": false, "action": "previous", "picker": "ArrowUp", "label": "Previous item" }, { "key": "g", "prefix": "g", "ctrl": false, "action": "first", "picker": null, "label": "First item" }, { "key": "G", "prefix": null, "ctrl": false, "action": "last", "picker": "Ctrl-Shift-g", "label": "Last item" }, { "key": "Enter", "prefix": null, "ctrl": false, "action": "open", "picker": "Enter", "label": "Open focused item" }, { "key": "x", "prefix": null, "ctrl": false, "action": "toggle_selection", "picker": "Ctrl-x", "label": "Toggle selection" }, { "key": "*", "prefix": null, "ctrl": false, "action": "select_visible", "picker": null, "label": "Select visible items" }, { "key": "y", "prefix": null, "ctrl": false, "action": "copy_menu", "picker": "Ctrl-y", "label": "Copy menu" }, { "key": "Y", "prefix": null, "ctrl": false, "action": "copy_default", "picker": "Ctrl-Shift-y", "label": "Copy default form" }, { "key": "c", "prefix": "y", "ctrl": false, "action": "copy_command", "picker": null, "label": "Copy CLI command" }, { "key": "n", "prefix": null, "ctrl": false, "action": "next_match", "picker": "Ctrl-n", "label": "Next find match" }, { "key": "N", "prefix": null, "ctrl": false, "action": "previous_match", "picker": "Ctrl-Shift-n", "label": "Previous find match" }, { "key": "Escape", "prefix": null, "ctrl": false, "action": "close", "picker": "Escape", "label": "Close and clear selection" }];
+var RELOAD_EVENT = "reload";
 
 // typescript/shell.ts
 var requests = new LatestRequest();
@@ -157,7 +158,7 @@ function selectedText() {
 }
 function protectedTarget(element) {
   const active = document.activeElement;
-  return Boolean(heldRow && (element === heldRow || element.contains(heldRow))) || active !== document.body && active !== element && Boolean(active && element.contains(active)) || active === element || Boolean(one('[aria-selected="true"]', element)) || Boolean(selectedText() && document.getSelection()?.containsNode(element, true));
+  return Boolean(heldRow && (element === heldRow || element.contains(heldRow))) || active !== document.body && active !== element && Boolean(active && element.contains(active)) || active === element || element.getAttribute("aria-selected") === "true" || Boolean(one('[aria-selected="true"]', element)) || Boolean(selectedText() && document.getSelection()?.containsNode(element, true));
 }
 function rows(root = document) {
   return all("[data-row]", root).filter((row) => !row.hidden);
@@ -184,18 +185,46 @@ var FragmentController = class {
     this.doc = doc;
   }
   pending = /* @__PURE__ */ new Map();
+  revisions = /* @__PURE__ */ new Map();
+  resolving = /* @__PURE__ */ new Map();
   receive(update) {
     const element = this.doc.getElementById(update.target);
-    if (!(element instanceof HTMLElement)) return;
-    if (update.kind === "ref") {
-      void requests.run(`fragment:${update.target}`, async (signal) => {
-        const response = await fetch(url(update.url), { signal, credentials: "same-origin", headers: { Accept: "text/html" } });
-        if (!response.ok) throw new Error(`Fragment unavailable (${response.status})`);
-        return await response.text();
-      }, (html) => this.receive({ kind: "replace", target: update.target, html })).catch(report);
-      return;
+    if (!(element instanceof HTMLElement)) return Promise.resolve();
+    let revision = this.revisions.get(update.target) ?? 0;
+    if (update.kind !== "append") {
+      this.revisions.set(update.target, ++revision);
+      requests.cancel(`fragment:${update.target}`);
+      this.resolving.delete(update.target);
     }
-    requests.cancel(`fragment:${update.target}`);
+    const preceding = this.resolving.get(update.target);
+    if (update.kind === "ref" || preceding) {
+      const currentRevision = revision;
+      const current = () => (this.revisions.get(update.target) ?? 0) === currentRevision;
+      const work = (preceding ?? Promise.resolve()).then(async () => {
+        if (!current()) return;
+        if (update.kind === "ref") {
+          const applied = await requests.run(`fragment:${update.target}`, async (signal) => {
+            const response = await fetch(url(update.url), { signal, credentials: "same-origin", headers: { Accept: "text/html" } });
+            if (!response.ok) throw new Error(`Fragment unavailable (${response.status})`);
+            return response.text();
+          }, (html) => {
+            if (current()) this.rendered(element, { kind: "replace", target: update.target, html });
+          });
+          if (!applied && current()) throw new Error("Fragment request interrupted. Reload the view.");
+        } else this.rendered(element, update);
+      }).catch((error) => {
+        if (current()) throw error;
+      });
+      const finished = work.finally(() => {
+        if (this.resolving.get(update.target) === finished) this.resolving.delete(update.target);
+      });
+      this.resolving.set(update.target, finished);
+      return finished;
+    }
+    this.rendered(element, update);
+    return Promise.resolve();
+  }
+  rendered(element, update) {
     const reader = element.closest("[data-follow]") ?? element;
     const state = { following: reader.dataset.follow === "true", atEnd: nearEnd(reader.scrollTop, reader.clientHeight, reader.scrollHeight), protected: protectedTarget(element) };
     if (this.pending.has(update.target) || shouldHold(update.kind, state)) {
@@ -258,28 +287,42 @@ function readUpdate(value) {
   return item;
 }
 var stream;
+var closeStream = () => {
+};
+var feedRequiresReload = () => false;
 var hadStream = false;
 var visibilityGeneration = 0;
 async function visibility() {
   const generation = ++visibilityGeneration;
-  stream?.close();
+  closeStream();
   stream = void 0;
   if (document.hidden) {
     requests.abortAll();
     return;
   }
+  if (feedRequiresReload()) return;
   const feed = document.body.dataset.feed;
   const refresh = document.body.dataset.refresh;
   if (hadStream && refresh) {
-    await requests.run("refresh", async (signal) => {
+    let refreshed;
+    const applied = await requests.run("refresh", async (signal) => {
       const response = await fetch(url(refresh), { signal, credentials: "same-origin", headers: { Accept: "application/json" } });
       if (!response.ok) throw new Error(`Refresh unavailable (${response.status})`);
       return await response.json();
     }, (snapshot) => {
       if (!Array.isArray(snapshot.fragments) || typeof snapshot.position !== "string") throw new Error("Refresh must contain fragments and their read position");
-      for (const value of snapshot.fragments) fragments?.receive(readUpdate(value));
-      document.body.dataset.position = snapshot.position;
+      refreshed = snapshot;
     });
+    if (!applied || !refreshed || generation !== visibilityGeneration || document.hidden) return;
+    const presented = await presentSnapshot(
+      refreshed,
+      (update) => fragments?.receive(update) ?? Promise.resolve(),
+      () => generation === visibilityGeneration && !document.hidden,
+      (position2) => {
+        document.body.dataset.position = position2;
+      }
+    );
+    if (!presented) return;
   }
   if (!feed || generation !== visibilityGeneration || document.hidden) return;
   const address = url(feed);
@@ -287,20 +330,65 @@ async function visibility() {
   if (position) address.searchParams.set("since", position);
   stream = new EventSource(address, { withCredentials: true });
   hadStream = true;
-  stream.addEventListener("fragment", (event) => {
+  const bound = bindFeed(stream, (update) => fragments?.receive(update) ?? Promise.resolve(), (position2) => {
+    document.body.dataset.position = position2;
+  });
+  closeStream = bound.close;
+  feedRequiresReload = bound.requiresReload;
+}
+async function presentSnapshot(snapshot, receive, current, recordPosition) {
+  if (!current()) return false;
+  await Promise.all(snapshot.fragments.map((value) => receive(readUpdate(value))));
+  if (!current()) return false;
+  recordPosition(snapshot.position);
+  return true;
+}
+function bindFeed(source, receive, recordPosition, showStatus = status) {
+  let stopped = false;
+  let reloadRequired = false;
+  let ordered = Promise.resolve();
+  const stop = (message) => {
+    reloadRequired = true;
+    stopped = true;
+    source.close();
+    showStatus(message);
+  };
+  source.addEventListener("fragment", (event) => {
+    if (stopped) return;
     try {
-      fragments?.receive(readUpdate(JSON.parse(event.data)));
-      if (event.lastEventId) document.body.dataset.position = event.lastEventId;
+      const received = receive(readUpdate(JSON.parse(event.data)));
+      const accounted = received.then(() => ({ ok: true }), (error) => ({ ok: false, error }));
+      ordered = ordered.then(async () => {
+        const result = await accounted;
+        if (stopped) return;
+        if (!result.ok) throw result.error;
+        if (event.lastEventId) recordPosition(event.lastEventId);
+      }).catch((error) => {
+        if (!stopped) stop(`${error instanceof Error ? error.message : String(error)} Reload the view.`);
+      });
     } catch (error) {
-      report(error);
+      stop(`${error instanceof Error ? error.message : String(error)} Reload the view.`);
     }
   });
-  stream.addEventListener("gap", (event) => {
-    stream?.close();
-    status(`Subscription gap: ${event.data}. Reload the view.`);
+  source.addEventListener(RELOAD_EVENT, (event) => {
+    let reason = event.data;
+    try {
+      const value = JSON.parse(event.data);
+      reason = value.reason ?? reason;
+    } catch {
+    }
+    stop(`Subscription requires reload: ${reason}. Reload the view.`);
   });
-  stream.onopen = () => status("");
-  stream.onerror = () => status("Disconnected \xB7 retrying");
+  source.onopen = () => {
+    if (!stopped) showStatus("");
+  };
+  source.onerror = () => {
+    if (!stopped) showStatus("Disconnected \xB7 retrying");
+  };
+  return { settled: () => ordered, close: () => {
+    stopped = true;
+    source.close();
+  }, requiresReload: () => reloadRequired };
 }
 var copySource = null;
 async function copyTarget(source, formIndex) {
@@ -381,7 +469,7 @@ async function runAction(action) {
     status(`${action.label} completed`);
     if (html.trimStart().startsWith("<")) {
       const selected = heldRow ?? focusedRow();
-      if (selected?.id) fragments?.receive({ kind: "replace", target: selected.id, html });
+      if (selected?.id) void fragments?.receive({ kind: "replace", target: selected.id, html }).catch(report);
     }
     dialog("palette")?.close();
   });
@@ -480,7 +568,7 @@ function keydown(event) {
       focusRow(candidates.length - 1, candidates);
       break;
     case "open":
-      if (focusedRow()) {
+      if (element === focusedRow()) {
         event.preventDefault();
         openRow();
       }
@@ -607,7 +695,11 @@ function pointers(element) {
   if (pointerTargets.has(element)) return;
   pointerTargets.add(element);
   const positions = /* @__PURE__ */ new Map();
-  let start = 0, end = 1, previousX = 0, previousDistance;
+  let start = 0, end = 1;
+  const distance = () => {
+    const [first, second] = [...positions.values()];
+    return first && second ? Math.hypot(first.x - second.x, first.y - second.y) : void 0;
+  };
   const range = () => {
     start = Number(element.dataset.start ?? 0);
     end = Number(element.dataset.end ?? 1);
@@ -618,38 +710,35 @@ function pointers(element) {
       const address = url(element.dataset.pointerRoute);
       address.searchParams.set("start", String(start));
       address.searchParams.set("end", String(end));
-      fragments?.receive({ kind: "ref", target: element.id, url: address.href });
+      void fragments?.receive({ kind: "ref", target: element.id, url: address.href }).catch(report);
     }
   };
   element.addEventListener("pointerdown", (event) => {
     if (event.target.closest("a,button,input,textarea,select,[contenteditable], [data-row]")) return;
     if (positions.size === 0) range();
     positions.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    previousX = event.clientX;
     element.setPointerCapture(event.pointerId);
   });
   element.addEventListener("pointermove", (event) => {
     const previous = positions.get(event.pointerId);
     if (!previous) return;
+    const previousDistance = distance();
     positions.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    const points = [...positions.values()];
-    const first = points[0], second = points[1];
-    const distance = first && second ? Math.hypot(first.x - second.x, first.y - second.y) : void 0;
-    const scale = distance && previousDistance ? distance / previousDistance : 1;
+    const nextDistance = distance();
+    const scale = nextDistance && previousDistance ? nextDistance / previousDistance : 1;
+    const deltaX = event.clientX - previous.x;
+    const deltaY = event.clientY - previous.y;
     const box = element.getBoundingClientRect();
-    [start, end] = pointerRange(start, end, box.width, event.clientX - previousX, scale, (event.clientX - box.left) / Math.max(1, box.width));
+    [start, end] = pointerRange(start, end, box.width, deltaX, scale, (event.clientX - box.left) / Math.max(1, box.width));
     if (element.dataset.pointer === "board") {
-      element.scrollLeft -= event.clientX - previousX;
-      element.scrollTop -= event.clientY - previous.y;
+      element.scrollLeft -= deltaX;
+      element.scrollTop -= deltaY;
     }
-    previousX = event.clientX;
-    previousDistance = distance;
-    publish("preview", event.clientY - previous.y);
+    publish("preview", deltaY);
   });
   const finish = (event) => {
     if (!positions.has(event.pointerId)) return;
     positions.delete(event.pointerId);
-    previousDistance = void 0;
     element.dataset.start = String(start);
     element.dataset.end = String(end);
     publish("commit");
@@ -741,7 +830,7 @@ function boot() {
     void visibility().catch(report);
   });
   window.addEventListener("pagehide", () => {
-    stream?.close();
+    closeStream();
     requests.abortAll();
   });
   window.addEventListener("pageshow", (event) => {
@@ -755,7 +844,12 @@ if (typeof document !== "undefined") {
 }
 export {
   FragmentController,
+  bindFeed,
   copyTarget,
+  keydown,
   pointers,
+  presentSnapshot,
+  protectedTarget,
+  pruneWindow,
   resolveKey
 };

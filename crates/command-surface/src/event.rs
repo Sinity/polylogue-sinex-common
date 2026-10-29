@@ -4,6 +4,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
+/// Reserved recovery event shared by stream producers and generated clients.
+pub const RELOAD_EVENT: &str = "reload";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EventPosition {
     pub generation: String,
@@ -266,7 +269,7 @@ impl<T: Serialize> Resume<'_, T> {
                 .collect(),
             Self::Reload { reason } => SseEvent {
                 id: None,
-                event: "reload".into(),
+                event: RELOAD_EVENT.into(),
                 data: serde_json::json!({"reason":reason}).to_string(),
                 retry: None,
             }

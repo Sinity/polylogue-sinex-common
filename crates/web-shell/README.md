@@ -251,7 +251,9 @@ JavaScript.
 
 Pointer events dispatch `shell:pointer` with `{kind, start, end, deltaY,
 phase}` (`preview` or `commit`). Products use the domain values for timeline
-selection or board zoom. The shell handles capture, touch pinch and wheel
+selection or board zoom. Each pointer uses its own movement delta; pinch
+scaling compares the active touches before and after each move. The shell
+handles capture, touch pinch and wheel
 coordinates; products render domain geometry. An optional pointer route is
 refetched only at commit, through the same superseding request controller.
 
@@ -260,9 +262,18 @@ refetched only at commit, through the same superseding request controller.
 The frame's `feed` is an existing filtered subscription route. It emits SSE
 `event: fragment` whose data is generated `FragmentUpdate` JSON, and whose ID
 is the product's committed position. `append` and `replace` contain rendered
-HTML; `ref` contains the same-origin URL of that rendered fragment. The shell
-never constructs a view from a JSON answer. A named `gap` event closes the
-subscription and leaves a visible instruction to reload. Native EventSource
+HTML; `ref` contains the same-origin URL of that rendered fragment. A `ref`
+URL identifies the read position of its event,
+so its HTML excludes later appends. The shell buffers appends behind an
+unresolved reference and advances its resume cursor only after preceding
+events have been applied or retained for explicit apply. A newer full
+replacement or reference supersedes an older snapshot and its preceding
+appends. Failed reference reads close the feed with a reload instruction and
+leave the failed position unacknowledged. The shell never constructs a view
+from a JSON answer. The shared `reload` event closes the
+subscription and leaves a visible instruction to reload. Visibility changes
+keep that feed closed until the page is reloaded. Its event name is
+generated from command-surface alongside the shell types. Native EventSource
 reconnect sends `Last-Event-ID`. A connection reopened after visibility
 changes sends its position in the `since` query parameter; the product maps
 both to the same shared resume mechanism.

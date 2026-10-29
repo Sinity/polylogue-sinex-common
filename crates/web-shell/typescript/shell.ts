@@ -1,5 +1,5 @@
 import { LatestRequest, shouldHold, nearEnd, matchScore, pointerRange, sameOrigin, copyText, windowTrim } from "./core";
-import { SHARED_KEYS } from "./types";
+import { SHARED_KEYS, RELOAD_EVENT } from "./types";
 import type { Action, Completion, CopyTarget, FragmentUpdate, Refresh, KeyAction } from "./types";
 
 const requests = new LatestRequest();
@@ -38,10 +38,10 @@ async function refreshActions(): Promise<void> {
   });
 }
 function selectedText(): boolean { return Boolean(document.getSelection()?.toString()); }
-function protectedTarget(element: HTMLElement): boolean {
+export function protectedTarget(element: HTMLElement): boolean {
   const active = document.activeElement;
   return Boolean(heldRow && (element === heldRow || element.contains(heldRow))) || (active !== document.body && active !== element && Boolean(active && element.contains(active))) || active === element ||
-    Boolean(one('[aria-selected="true"]', element)) ||
+    element.getAttribute("aria-selected") === "true" || Boolean(one('[aria-selected="true"]', element)) ||
     Boolean(selectedText() && document.getSelection()?.containsNode(element, true));
 }
 function rows(root: ParentNode = document): HTMLElement[] { return all<HTMLElement>("[data-row]", root).filter(row => !row.hidden); }
@@ -58,19 +58,45 @@ function openRow(): void { const row = focusedRow(); one<HTMLAnchorElement>("a[d
 /** A pending update belongs to a target and never replaces a focused/selected tree. */
 export class FragmentController {
   private pending = new Map<string, FragmentUpdate[]>();
+  private revisions = new Map<string, number>();
+  private resolving = new Map<string, Promise<void>>();
   constructor(private readonly doc: Document = document) {}
-  receive(update: FragmentUpdate): void {
+  receive(update: FragmentUpdate): Promise<void> {
     const element = this.doc.getElementById(update.target);
-    if (!(element instanceof HTMLElement)) return;
-    if (update.kind === "ref") {
-      void requests.run(`fragment:${update.target}`, async signal => {
-        const response = await fetch(url(update.url), { signal, credentials: "same-origin", headers: { Accept: "text/html" } });
-        if (!response.ok) throw new Error(`Fragment unavailable (${response.status})`);
-        return await response.text();
-      }, html => this.receive({ kind: "replace", target: update.target, html })).catch(report);
-      return;
+    if (!(element instanceof HTMLElement)) return Promise.resolve();
+    let revision = this.revisions.get(update.target) ?? 0;
+    if (update.kind !== "append") {
+      // A later full snapshot includes preceding events for this target. It can
+      // supersede an older snapshot, while appends after it must wait for it.
+      this.revisions.set(update.target, ++revision);
+      requests.cancel(`fragment:${update.target}`);
+      this.resolving.delete(update.target);
     }
-    requests.cancel(`fragment:${update.target}`);
+    const preceding = this.resolving.get(update.target);
+    if (update.kind === "ref" || preceding) {
+      const currentRevision = revision;
+      const current = () => (this.revisions.get(update.target) ?? 0) === currentRevision;
+      const work = (preceding ?? Promise.resolve()).then(async () => {
+        if (!current()) return;
+        if (update.kind === "ref") {
+          const applied = await requests.run(`fragment:${update.target}`, async signal => {
+            const response = await fetch(url(update.url), { signal, credentials: "same-origin", headers: { Accept: "text/html" } });
+            if (!response.ok) throw new Error(`Fragment unavailable (${response.status})`);
+            return response.text();
+          }, html => { if (current()) this.rendered(element, { kind: "replace", target: update.target, html }); });
+          if (!applied && current()) throw new Error("Fragment request interrupted. Reload the view.");
+        } else this.rendered(element, update);
+      }).catch(error => { if (current()) throw error; });
+      const finished = work.finally(() => {
+        if (this.resolving.get(update.target) === finished) this.resolving.delete(update.target);
+      });
+      this.resolving.set(update.target, finished);
+      return finished;
+    }
+    this.rendered(element, update);
+    return Promise.resolve();
+  }
+  private rendered(element: HTMLElement, update: Exclude<FragmentUpdate, { kind: "ref" }>): void {
     const reader = element.closest<HTMLElement>("[data-follow]") ?? element;
     const state = { following: reader.dataset.follow === "true", atEnd: nearEnd(reader.scrollTop, reader.clientHeight, reader.scrollHeight), protected: protectedTarget(element) };
     if (this.pending.has(update.target) || shouldHold(update.kind, state)) {
@@ -124,24 +150,33 @@ function readUpdate(value: unknown): FragmentUpdate {
   return item as unknown as FragmentUpdate;
 }
 let stream: EventSource | undefined;
+let closeStream = () => {};
+let feedRequiresReload = () => false;
 let hadStream = false;
 let visibilityGeneration = 0;
 async function visibility(): Promise<void> {
   const generation = ++visibilityGeneration;
-  stream?.close(); stream = undefined;
+  closeStream(); stream = undefined;
   if (document.hidden) { requests.abortAll(); return; }
+  if (feedRequiresReload()) return;
   const feed = document.body.dataset.feed;
   const refresh = document.body.dataset.refresh;
   if (hadStream && refresh) {
-    await requests.run("refresh", async signal => {
+    let refreshed: Refresh | undefined;
+    const applied = await requests.run("refresh", async signal => {
       const response = await fetch(url(refresh), { signal, credentials: "same-origin", headers: { Accept: "application/json" } });
       if (!response.ok) throw new Error(`Refresh unavailable (${response.status})`);
       return await response.json() as Refresh;
     }, snapshot => {
       if (!Array.isArray(snapshot.fragments) || typeof snapshot.position !== "string") throw new Error("Refresh must contain fragments and their read position");
-      for (const value of snapshot.fragments) fragments?.receive(readUpdate(value));
-      document.body.dataset.position = snapshot.position;
+      refreshed = snapshot;
     });
+    if (!applied || !refreshed || generation !== visibilityGeneration || document.hidden) return;
+    const presented = await presentSnapshot(refreshed,
+      update => fragments?.receive(update) ?? Promise.resolve(),
+      () => generation === visibilityGeneration && !document.hidden,
+      position => { document.body.dataset.position = position; });
+    if (!presented) return;
   }
   if (!feed || generation !== visibilityGeneration || document.hidden) return;
   const address = url(feed);
@@ -150,15 +185,48 @@ async function visibility(): Promise<void> {
   // close creates a new connection, so the snapshot position travels in `since`.
   if (position) address.searchParams.set("since", position);
   stream = new EventSource(address, { withCredentials: true }); hadStream = true;
-  stream.addEventListener("fragment", event => {
+  const bound = bindFeed(stream, update => fragments?.receive(update) ?? Promise.resolve(), position => { document.body.dataset.position = position; });
+  closeStream = bound.close; feedRequiresReload = bound.requiresReload;
+}
+
+/** Snapshot references may finish after another visibility generation starts. */
+export async function presentSnapshot(snapshot: Refresh, receive: (update: FragmentUpdate) => Promise<void>, current: () => boolean, recordPosition: (position: string) => void): Promise<boolean> {
+  if (!current()) return false;
+  await Promise.all(snapshot.fragments.map(value => receive(readUpdate(value))));
+  if (!current()) return false;
+  recordPosition(snapshot.position);
+  return true;
+}
+
+/** Receive immediately so newer full snapshots can supersede older requests,
+ * but advance the resume position only after preceding events are accounted for. */
+export function bindFeed(source: EventSource, receive: (update: FragmentUpdate) => Promise<void>, recordPosition: (position: string) => void, showStatus: (message: string) => void = status): { settled: () => Promise<void>; close: () => void; requiresReload: () => boolean } {
+  let stopped = false;
+  let reloadRequired = false;
+  let ordered = Promise.resolve();
+  const stop = (message: string) => { reloadRequired = true; stopped = true; source.close(); showStatus(message); };
+  source.addEventListener("fragment", event => {
+    if (stopped) return;
     try {
-      fragments?.receive(readUpdate(JSON.parse(event.data)));
-      if (event.lastEventId) document.body.dataset.position = event.lastEventId;
-    } catch (error) { report(error); }
+      const received = receive(readUpdate(JSON.parse(event.data)));
+      // Attach a rejection handler immediately even if an older event is pending.
+      const accounted = received.then(() => ({ ok: true as const }), error => ({ ok: false as const, error }));
+      ordered = ordered.then(async () => {
+        const result = await accounted;
+        if (stopped) return;
+        if (!result.ok) throw result.error;
+        if (event.lastEventId) recordPosition(event.lastEventId);
+      }).catch(error => { if (!stopped) stop(`${error instanceof Error ? error.message : String(error)} Reload the view.`); });
+    } catch (error) { stop(`${error instanceof Error ? error.message : String(error)} Reload the view.`); }
   });
-  stream.addEventListener("gap", event => { stream?.close(); status(`Subscription gap: ${event.data}. Reload the view.`); });
-  stream.onopen = () => status("");
-  stream.onerror = () => status("Disconnected · retrying");
+  source.addEventListener(RELOAD_EVENT, event => {
+    let reason = event.data;
+    try { const value = JSON.parse(event.data) as { reason?: string }; reason = value.reason ?? reason; } catch { /* Preserve an unstructured server reason. */ }
+    stop(`Subscription requires reload: ${reason}. Reload the view.`);
+  });
+  source.onopen = () => { if (!stopped) showStatus(""); };
+  source.onerror = () => { if (!stopped) showStatus("Disconnected · retrying"); };
+  return { settled: () => ordered, close: () => { stopped = true; source.close(); }, requiresReload: () => reloadRequired };
 }
 
 let copySource: HTMLElement | null = null;
@@ -218,7 +286,7 @@ async function runAction(action: Action): Promise<void> {
     // is never assembled into a browser view.
     if (html.trimStart().startsWith("<")) {
       const selected = heldRow ?? focusedRow();
-      if (selected?.id) fragments?.receive({ kind: "replace", target: selected.id, html });
+      if (selected?.id) void fragments?.receive({ kind: "replace", target: selected.id, html }).catch(report);
     }
     dialog("palette")?.close();
   });
@@ -229,7 +297,7 @@ let prefixExpires = 0;
 export function resolveKey(key: string, ctrl: boolean, prefix: string = ""): KeyAction | null {
   return SHARED_KEYS.find(binding => binding.key === key && binding.ctrl === ctrl && (binding.prefix ?? "") === prefix)?.action ?? null;
 }
-function keydown(event: KeyboardEvent): void {
+export function keydown(event: KeyboardEvent): void {
   const element = target(event);
   if (event.isComposing || event.altKey || event.metaKey) return;
   if (resolveKey(event.key, event.ctrlKey) === "close") {
@@ -268,7 +336,7 @@ function keydown(event: KeyboardEvent): void {
     case "first": event.preventDefault(); focusRow(0, candidates); break;
     case "copy_command": event.preventDefault(); copyCommand(); break;
     case "last": event.preventDefault(); focusRow(candidates.length - 1, candidates); break;
-    case "open": if (focusedRow()) { event.preventDefault(); openRow(); } break;
+    case "open": if (element === focusedRow()) { event.preventDefault(); openRow(); } break;
     case "toggle_selection": event.preventDefault(); toggleRow(focusedRow()); break;
     case "select_visible": event.preventDefault(); candidates.filter(row => { const rect = row.getBoundingClientRect(); return rect.bottom > 0 && rect.top < innerHeight; }).forEach(row => row.setAttribute("aria-selected", "true")); break;
     case "copy_menu": { event.preventDefault(); prefix = event.key; prefixExpires = Date.now() + 1000; const source = currentCopy(); if (source) copyMenu(source); break; }
@@ -332,7 +400,7 @@ async function windowPage(list: HTMLElement, direction: "before" | "after"): Pro
   } finally { paging.delete(list); }
 }
 
-function pruneWindow(list: HTMLElement, route: string, preferred: "before" | "after"): void {
+export function pruneWindow(list: HTMLElement, route: string, preferred: "before" | "after"): void {
   const box = list.getBoundingClientRect();
   const candidates = rows(list).map(row => {
     const rect = row.getBoundingClientRect();
@@ -358,35 +426,40 @@ export function pointers(element: HTMLElement): void {
   if (pointerTargets.has(element)) return;
   pointerTargets.add(element);
   const positions = new Map<number, { x: number; y: number }>();
-  let start = 0, end = 1, previousX = 0, previousDistance: number | undefined;
+  let start = 0, end = 1;
+  const distance = () => {
+    const [first, second] = [...positions.values()];
+    return first && second ? Math.hypot(first.x - second.x, first.y - second.y) : undefined;
+  };
   const range = () => { start = Number(element.dataset.start ?? 0); end = Number(element.dataset.end ?? 1); };
   const publish = (phase: "preview" | "commit", deltaY = 0) => {
     element.dispatchEvent(new CustomEvent("shell:pointer", { bubbles: true, detail: { kind: element.dataset.pointer, start, end, deltaY, phase } }));
     if (phase === "commit" && element.dataset.pointerRoute && element.id) {
       const address = url(element.dataset.pointerRoute); address.searchParams.set("start", String(start)); address.searchParams.set("end", String(end));
-      fragments?.receive({ kind: "ref", target: element.id, url: address.href });
+      void fragments?.receive({ kind: "ref", target: element.id, url: address.href }).catch(report);
     }
   };
   element.addEventListener("pointerdown", event => {
     if ((event.target as HTMLElement).closest("a,button,input,textarea,select,[contenteditable], [data-row]")) return;
-    if (positions.size === 0) range(); positions.set(event.pointerId, { x: event.clientX, y: event.clientY }); previousX = event.clientX;
+    if (positions.size === 0) range(); positions.set(event.pointerId, { x: event.clientX, y: event.clientY });
     element.setPointerCapture(event.pointerId);
   });
   element.addEventListener("pointermove", event => {
     const previous = positions.get(event.pointerId); if (!previous) return;
+    const previousDistance = distance();
     positions.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    const points = [...positions.values()];
-    const first = points[0], second = points[1];
-    const distance = first && second ? Math.hypot(first.x - second.x, first.y - second.y) : undefined;
-    const scale = distance && previousDistance ? distance / previousDistance : 1;
+    const nextDistance = distance();
+    const scale = nextDistance && previousDistance ? nextDistance / previousDistance : 1;
+    const deltaX = event.clientX - previous.x;
+    const deltaY = event.clientY - previous.y;
     const box = element.getBoundingClientRect();
-    [start, end] = pointerRange(start, end, box.width, event.clientX - previousX, scale, (event.clientX - box.left) / Math.max(1, box.width));
-    if (element.dataset.pointer === "board") { element.scrollLeft -= event.clientX - previousX; element.scrollTop -= event.clientY - previous.y; }
-    previousX = event.clientX; previousDistance = distance; publish("preview", event.clientY - previous.y);
+    [start, end] = pointerRange(start, end, box.width, deltaX, scale, (event.clientX - box.left) / Math.max(1, box.width));
+    if (element.dataset.pointer === "board") { element.scrollLeft -= deltaX; element.scrollTop -= deltaY; }
+    publish("preview", deltaY);
   });
   const finish = (event: PointerEvent) => {
     if (!positions.has(event.pointerId)) return;
-    positions.delete(event.pointerId); previousDistance = undefined;
+    positions.delete(event.pointerId);
     element.dataset.start = String(start); element.dataset.end = String(end); publish("commit");
   };
   element.addEventListener("pointerup", finish); element.addEventListener("pointercancel", finish);
@@ -439,7 +512,7 @@ function boot(): void {
   rails(); narrow.addEventListener("change", rails);
   enhanceWindows(); all<HTMLElement>("[data-pointer]").forEach(pointers);
   document.addEventListener("visibilitychange", () => { void visibility().catch(report); });
-  window.addEventListener("pagehide", () => { stream?.close(); requests.abortAll(); });
+  window.addEventListener("pagehide", () => { closeStream(); requests.abortAll(); });
   window.addEventListener("pageshow", event => { if (event.persisted) void visibility().catch(report); });
   void visibility().catch(report);
 }
