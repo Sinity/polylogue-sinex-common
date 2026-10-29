@@ -927,7 +927,14 @@ fn one_deliverer_per_host_forwarded_intents_use_one_quiet_policy_and_budget() {
         Some(quiet()),
     );
     host.submit(original.clone(), at(23));
-    host.submit(original.clone(), at(23));
+    let mut copied = original.clone();
+    copied.delivery.basis[0].observed = at(24);
+    host.submit(copied, at(24));
+    assert_eq!(
+        host.pending_intents()
+            .find(|intent| intent.delivery.id == original.delivery.id),
+        Some(&original)
+    );
     let mode = EvaluationMode::Local {
         host: &mut host,
         forwarded: &|_| Condition::Matching,
@@ -938,6 +945,12 @@ fn one_deliverer_per_host_forwarded_intents_use_one_quiet_policy_and_budget() {
     assert_eq!(host.pending_count(), 2);
     let mut restored: HostPolicy =
         serde_json::from_str(&serde_json::to_string(&host).unwrap()).unwrap();
+    assert_eq!(
+        restored
+            .pending_intents()
+            .find(|intent| intent.delivery.id == original.delivery.id),
+        Some(&original)
+    );
     let released = sx
         .advance_in_mode(
             at(32),

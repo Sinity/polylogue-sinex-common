@@ -23,7 +23,6 @@ struct PreparedDbus {
     proxy: zbus::Proxy<'static>,
     owner: String,
     actions: Vec<&'static str>,
-    deadline: tokio::time::Instant,
 }
 
 impl Deliverer {
@@ -149,16 +148,19 @@ impl Deliverer {
                 route,
                 notices: self.state.group_members(&notice),
             };
-            let Authorization { decisions } = check(&request);
-            let denied = request
+            let member_ids: Vec<_> = request
                 .notices
                 .iter()
-                .find(|n| decision(&decisions, &n.delivery_id) == SendDecision::Cancel)
-                .map(|n| n.delivery_id.clone());
-            let held = request
-                .notices
+                .map(|n| n.delivery_id.clone())
+                .collect();
+            let Authorization { decisions } = check(request).await;
+            let denied = member_ids
                 .iter()
-                .filter_map(|n| match decision(&decisions, &n.delivery_id) {
+                .find(|id| decision(&decisions, id) == SendDecision::Cancel)
+                .cloned();
+            let held = member_ids
+                .iter()
+                .filter_map(|id| match decision(&decisions, id) {
                     SendDecision::HoldUntil { at, policy } => Some((at, policy)),
                     _ => None,
                 })
@@ -209,7 +211,6 @@ impl Deliverer {
                 proxy,
                 owner,
                 actions,
-                deadline,
             })
         })
         .await;
@@ -235,7 +236,7 @@ impl Deliverer {
         let category = format!("{}.{}", notice.product, notice.rule);
         hints.insert("category", Value::from(category.as_str()));
         let result = tokio::time::timeout_at(
-            prepared.deadline,
+            tokio::time::Instant::now() + self.config.deadline,
             prepared.proxy.call::<_, _, u32>(
                 "Notify",
                 &(
@@ -330,11 +331,12 @@ impl Deliverer {
         let Some(notice) = self.state.attempt(id).map(|a| a.notice.clone()) else {
             return Vec::new();
         };
-        let Authorization { decisions } = check(&PolicyRequest {
+        let Authorization { decisions } = check(PolicyRequest {
             delivery_id: id.to_string(),
             route: Route::Dbus,
             notices: self.state.group_members(&notice),
-        });
+        })
+        .await;
         self.cancel_authorized(id, &decisions).await
     }
     async fn cancel_authorized(
@@ -494,7 +496,9 @@ pub struct PolicyRequest {
 pub struct Authorization {
     pub decisions: BTreeMap<String, SendDecision>,
 }
-pub type Policy = dyn Fn(&PolicyRequest) -> Authorization + Send + Sync;
+pub type PolicyFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Authorization> + Send + 'static>>;
+pub type Policy = dyn Fn(PolicyRequest) -> PolicyFuture + Send + Sync;
 pub type PolicyCheck = Arc<Policy>;
 pub type DeliveryClock = Arc<dyn Fn() -> i64 + Send + Sync>;
 fn decision(decisions: &BTreeMap<String, SendDecision>, id: &str) -> SendDecision {
