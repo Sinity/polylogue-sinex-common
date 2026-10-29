@@ -60,8 +60,14 @@ each product runs against its own catalog and occurrence keys.
   of a notice cannot fire a notice.
 - **Baseline.** Rows observed before a rule starts form its baseline and never
   fire. A new revision cancels the rule's pending work and takes the current
-  matches as a new baseline without replaying them. Withdrawing a rule cancels
-  its pending work.
+  matches as a new baseline without replaying them. `replace_rule` takes the
+  owner's captured observation instant explicitly. It must not precede the
+  evaluator checkpoint; a scheduled revision starts at that instant, even if
+  the checkpoint has not advanced during idle time. Adoption does not advance
+  or fire the old revision. Identical active-revision retries preserve the
+  original baseline and held occurrences; a changed body requires a newer
+  revision. Observations for a revision cannot precede its adoption. Withdrawing
+  a rule cancels its pending work.
 - **Causality.** Only observed rows count. A row's future effective time (an
   end, a `for` deadline) becomes a wakeup only once the row has been
   observed. A `for` duration starts no earlier than the row's observation, so

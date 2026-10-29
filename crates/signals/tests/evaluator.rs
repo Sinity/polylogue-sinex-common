@@ -355,7 +355,7 @@ fn rule_withdrawal_and_revision_cancel_old_work_revision_takes_new_baseline() {
         assert!(advance(&mut e, minute(23, 30)).is_empty());
         r.version.revision = 2;
         r.rule.enabled = enabled;
-        e.replace_rule(r, &CalendarUtc).unwrap();
+        e.replace_rule(r, minute(23, 30), &CalendarUtc).unwrap();
         assert!(advance(&mut e, at(33)).is_empty());
     }
     let r = rule();
@@ -754,7 +754,7 @@ fn revision_takes_new_baseline_from_revised_query() {
     assert!(advance(&mut e, at(10)).is_empty());
     r.version.revision = 2;
     r.rule.query = "other".into();
-    e.replace_rule(r.clone(), &CalendarUtc).unwrap();
+    e.replace_rule(r.clone(), at(10), &CalendarUtc).unwrap();
     e.observe(evaluation(
         &r,
         at(10),

@@ -347,6 +347,15 @@ impl Evaluator {
         if evaluation.at < self.now {
             return Err(EvaluationError("observation precedes checkpoint".into()));
         }
+        if self
+            .rules
+            .get(&rule_id(&evaluation.rule))
+            .is_some_and(|state| {
+                state.active.version == evaluation.rule && evaluation.at < state.started
+            })
+        {
+            return Err(EvaluationError("observation precedes rule adoption".into()));
+        }
         if evaluation.value.is_some_and(|v| !v.is_finite()) {
             return Err(EvaluationError("sample must be finite".into()));
         }
@@ -389,23 +398,39 @@ impl Evaluator {
             .sort_by(|a, b| (a.at, &a.rule).cmp(&(b.at, &b.rule)));
         Ok(())
     }
-    /// Rule versions are insert-only. The current observed matches become the
-    /// new baseline and pending work is cancelled, including quiet-held work.
+    /// Adopt a revision at the owner's captured observation time, without
+    /// advancing old rules first. Its first complete result is the new baseline.
+    /// Retrying an identical active revision preserves its original baseline and
+    /// held occurrences. A changed revision cancels the previous pending work.
     pub fn replace_rule(
         &mut self,
         active: ActiveRule,
+        observed_at: Instant,
         calendar: &impl Calendar,
     ) -> Result<(), EvaluationError> {
+        if observed_at < self.now {
+            return Err(EvaluationError("rule adoption precedes checkpoint".into()));
+        }
         let key = rule_id(&active.version);
+        if let Some(old) = self.rules.get(&key) {
+            if old.active == active {
+                return Ok(());
+            }
+            if active.version.revision <= old.active.version.revision {
+                return Err(EvaluationError("rule edits require a new revision".into()));
+            }
+        }
         if self
-            .rules
-            .get(&key)
-            .is_some_and(|old| active.version.revision <= old.active.version.revision)
+            .inputs
+            .iter()
+            .any(|input| input.rule == active.version && input.at < observed_at)
         {
-            return Err(EvaluationError("rule edits require a new revision".into()));
+            return Err(EvaluationError(
+                "queued observation precedes rule adoption".into(),
+            ));
         }
         self.products.insert(active.version.product.clone());
-        let mut state = Self::state(active, self.now, calendar);
+        let mut state = Self::state(active, observed_at, calendar);
         // A revised query can read a different relation. Its first complete
         // evaluation, rather than the previous query's rows, is its baseline.
         state.revision_baseline = true;
