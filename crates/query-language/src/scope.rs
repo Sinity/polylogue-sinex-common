@@ -52,6 +52,10 @@ pub enum Origin {
         source: OutputSource,
         field: String,
     },
+    /// The exact product-declared projection selected by shared binding.
+    Matches {
+        source: crate::catalog::MatchSource,
+    },
     Group {
         operand: NodePath,
         input: Box<FieldInfo>,

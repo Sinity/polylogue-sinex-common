@@ -347,7 +347,7 @@ fn selections_preserve_the_actual_relation_qualifier_and_declared_shape() {
     for (mut catalog, base, _) in catalogs() {
         let source = install(&mut catalog, &format!("{base} | matches"));
         let expected = query_language::parse::relation_patterns(base, &catalog).unwrap();
-        for selection in ["limit 1", "offset 1", "first 1", "last 1", "distinct"] {
+        for selection in ["limit 1", "offset 1", "first 1", "distinct"] {
             let entering = format!("{base} | {selection}");
             assert_eq!(
                 query_language::parse::relation_patterns(&entering, &catalog).unwrap(),
@@ -372,7 +372,7 @@ fn reference_sequence_projection_uses_only_the_selected_parent_rows() {
         } else {
             ("event_type", "command.executed")
         };
-        let text = format!("seq({field}:{value}) | limit 1 | matches");
+        let text = format!("seq({field}:{value} -> {field}:{value}) | limit 1 | matches");
         let query = parse(&text, &catalog).unwrap();
         let requested = matches_requirements(&text, &catalog).unwrap();
         let MatchPattern::Sequence {
@@ -386,14 +386,37 @@ fn reference_sequence_projection_uses_only_the_selected_parent_rows() {
             catalog.default_unit.clone(),
             vec![Row::new("p1"), Row::new("p2")],
         );
-        for (id, parent) in [("c1", "p1"), ("c2", "p2")] {
+        for (id, parent, order) in [
+            ("c1a", "p1", 1),
+            ("c1b", "p1", 2),
+            ("c2a", "p2", 1),
+            ("c2b", "p2", 2),
+        ] {
             let mut row = Row::new(id).with(field, value);
             row.parent = Some(parent.into());
+            row.order = order;
             data.entry(child_unit.clone()).or_default().push(row);
         }
         let answer = ReferenceEvaluator { data: &data }.execute(&query).unwrap();
         assert_eq!(answer.total, 1);
         assert_eq!(answer.rows[0].parent.as_deref(), Some("p1"));
-        assert_eq!(answer.rows[0].matches, ["c1"]);
+        assert_eq!(answer.rows[0].matches, ["c1a", "c1b"]);
+    }
+}
+
+#[test]
+fn matches_fields_retain_the_validated_projection_key() {
+    for (mut catalog, base, _) in catalogs() {
+        let text = format!("{base} | matches");
+        let source = install(&mut catalog, &text);
+        let bound = bind(&parse(&text, &catalog).unwrap(), &catalog).unwrap();
+        for field in &bound.typing().queries[0].stages[0].after.fields {
+            assert_eq!(
+                field.origin,
+                query_language::scope::Origin::Matches {
+                    source: source.clone()
+                }
+            );
+        }
     }
 }

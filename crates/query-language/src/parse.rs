@@ -1841,8 +1841,8 @@ impl Parser<'_> {
                     .as_ref()
                     .and_then(|request| self.catalog.match_output(request))
                     .cloned();
-                if let Some(request) = request {
-                    self.required_matches.insert(request);
+                if let Some(request) = &request {
+                    self.required_matches.insert(request.clone());
                 }
                 *scope = Scope::new(
                     output
@@ -1853,9 +1853,14 @@ impl Parser<'_> {
                 scope.deferred = output.is_none();
                 scope.match_patterns = output.as_ref().map(|_| Vec::new());
                 if let Some(output) = output {
+                    let source = request.expect("a declared Matches output has its validated key");
                     for field in &output.fields {
-                        Arc::make_mut(&mut scope.origins)
-                            .insert(field.name.clone(), crate::scope::Origin::Generated);
+                        Arc::make_mut(&mut scope.origins).insert(
+                            field.name.clone(),
+                            crate::scope::Origin::Matches {
+                                source: source.clone(),
+                            },
+                        );
                     }
                     scope.output = Some(Arc::new(output));
                 }
