@@ -23,8 +23,9 @@ JSON and browser assets as well as Rust files.
 
 The nextest check excludes devkit's `pg::` and `nats::` service test groups
 and the two GNUtar extraction oracles that call filesystem ACL/xattr syscalls.
-The sealed builder rejects those syscalls. All synthetic PAX parser, metadata
-and content tests remain in this check. `cargo xtask check` also runs the two
+The sealed builder rejects those syscalls. The PAX subset is five synthetic
+parser, metadata and content tests in the sealed check, plus two GNUtar
+filesystem oracles in the native check. `cargo xtask check` also runs the two
 filesystem oracles and service groups, retaining every native assertion. Database service tools stay in the shell:
 PostgreSQL 18 with TimescaleDB and pgvector, and NATS. DBus and the frontend
 tools support the existing notification and browser checks.
