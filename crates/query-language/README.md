@@ -90,8 +90,8 @@ one can be formed), `hint` and `retryable`. The language's kinds are
   `march`) resolve to one instant or range, shown in the query's explanation;
   an ambiguous phrase is an error listing the readings.
 - **Natural-language choices:** a bare weekday means its latest occurrence including today; `last WEEKDAY` is strictly earlier. A named month means that month in the current logical year. `last N days` includes the current logical day. Slash dates with two distinct valid readings are `ambiguous` and list their ISO readings.
-- **Bounds:** dates are half-open whole days; `between` two dates includes
-  both days; `since:` and `until:` select spans by overlap.
+- **Bounds:** dates are half-open whole days; `between` two dates includes both days. `since DATE` (or `since:DATE`) starts at that logical day's start; `until DATE` (or `until:DATE`) includes that entire day and stops at its exclusive end. `until INSTANT` stops exclusively at that instant. These operations select spans by overlap. Explicit comparisons keep their operator meaning: `when < DATE` stops at the day's start.
+- **Bound syntax:** `ConditionKind::Since` and `ConditionKind::Until` retain the catalog's main-time operand and the unresolved value. They remain distinct from `Compare` through serialization, formatting and canonical identity. Compilers use `Time::start()` for a lower bound or explicit comparison and `Time::until_bound()` for an exclusive `until` bound; they never infer an operation from source spans.
 - **Daylight saving:** a local time inside a skipped hour means the first
   instant after the gap; inside a repeated hour, the earlier instant, with a
   note.

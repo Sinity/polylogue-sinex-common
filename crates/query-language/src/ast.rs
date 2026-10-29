@@ -77,6 +77,17 @@ pub enum ConditionKind {
         op: Op,
         value: Value,
     },
+    /// Main-time lower bound; span-valued rows are selected by overlap.
+    Since {
+        operand: Operand,
+        value: Value,
+    },
+    /// Main-time exclusive upper bound. A date resolves to its logical-day
+    /// end, while an instant remains that instant.
+    Until {
+        operand: Operand,
+        value: Value,
+    },
     Between {
         operand: Operand,
         from: Value,
@@ -478,6 +489,8 @@ impl Condition {
                 }
             }
             ConditionKind::Extension { arguments, .. } => visit_arguments(arguments, visitor),
+            // Bounds contain values and an already-bound field, never units.
+            ConditionKind::Since { .. } | ConditionKind::Until { .. } => {}
             _ => {}
         }
     }

@@ -146,6 +146,8 @@ impl Renderer<'_> {
                 op,
                 value: literal,
             } => format!("{} {} {}", operand(field)?, op.symbol(), value(literal)?),
+            ConditionKind::Since { value: literal, .. } => format!("since {}", value(literal)?),
+            ConditionKind::Until { value: literal, .. } => format!("until {}", value(literal)?),
             ConditionKind::Between {
                 operand: field,
                 from,

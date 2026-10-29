@@ -96,7 +96,9 @@ fn condition(c: &mut Condition, scope: &Fields, catalog: &Catalog) {
         }
         ConditionKind::Compare {
             operand, value: v, ..
-        } => {
+        }
+        | ConditionKind::Since { operand, value: v }
+        | ConditionKind::Until { operand, value: v } => {
             if let Some(f) = field(scope, operand) {
                 value(v, &f);
             }

@@ -744,6 +744,10 @@ impl Parser<'_> {
                     },
                 ));
             }
+            if field.eq_ignore_ascii_case("since") || field.eq_ignore_ascii_case("until") {
+                let kind = self.time_bound(scope, field.eq_ignore_ascii_case("until"), value)?;
+                return Ok(self.cond(start, kind));
+            }
             self.check_field(scope, field, start)?;
             self.normalize_field_value(scope, field, &mut value);
             self.check_value(scope, field, &value, start + field.len() + 1)?;
@@ -823,24 +827,9 @@ impl Parser<'_> {
         }
         self.at += 1;
         if matches!(token.text.as_str(), "since" | "until") {
-            let field = self
-                .catalog
-                .unit(&scope.unit)
-                .and_then(|u| u.main_time.clone())
-                .ok_or_else(|| self.error("this unit has no main time"))?;
             let value = self.value()?;
-            return Ok(self.cond(
-                start,
-                ConditionKind::Compare {
-                    operand: Operand::field(field),
-                    op: if token.text == "since" {
-                        Op::Ge
-                    } else {
-                        Op::Lt
-                    },
-                    value,
-                },
-            ));
+            let kind = self.time_bound(scope, token.text == "until", value)?;
+            return Ok(self.cond(start, kind));
         }
         if token.text == "overlaps" {
             let from = self.value()?;
@@ -925,6 +914,19 @@ impl Parser<'_> {
                 "expected a nonnegative integer",
                 t.span.start,
             )
+        })
+    }
+    fn time_bound(&self, scope: &Scope, until: bool, value: Value) -> Result<ConditionKind, Error> {
+        let field = self
+            .catalog
+            .unit(&scope.unit)
+            .and_then(|unit| unit.main_time.clone())
+            .ok_or_else(|| self.error("this unit has no main time"))?;
+        let operand = Operand::field(field);
+        Ok(if until {
+            ConditionKind::Until { operand, value }
+        } else {
+            ConditionKind::Since { operand, value }
         })
     }
     fn value(&mut self) -> Result<Value, Error> {
