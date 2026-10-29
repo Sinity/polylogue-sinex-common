@@ -8,10 +8,19 @@ use std::collections::BTreeSet;
 #[derive(Debug, Clone, PartialEq)]
 pub struct BoundQuery {
     query: Query,
+    typing: crate::scope::Typing,
 }
 impl BoundQuery {
     pub fn query(&self) -> &Query {
         &self.query
+    }
+    /// Semantic scopes and structural operand addresses in `query()`.
+    pub fn typing(&self) -> &crate::scope::Typing {
+        &self.typing
+    }
+    /// Move the exact bound tree and its independently retainable type snapshot.
+    pub fn into_parts(self) -> (Query, crate::scope::Typing) {
+        (self.query, self.typing)
     }
     pub fn into_query(self) -> Query {
         self.query
@@ -61,9 +70,10 @@ pub fn bind(query: &Query, catalog: &Catalog) -> Result<BoundQuery, Error> {
         }
     }
     let text = crate::format::render_query(query, catalog)?;
-    let query = crate::parse::parse(&text, catalog)?;
+    let (query, typing) = crate::parse::parse_typed(&text, catalog)
+        .map_err(|error| crate::parse::parse(&text, catalog).err().unwrap_or(error))?;
     check_query(&query, catalog)?;
-    Ok(BoundQuery { query })
+    Ok(BoundQuery { query, typing })
 }
 fn check_query(query: &Query, catalog: &Catalog) -> Result<(), Error> {
     if let Source::Unit { unit, .. } = &query.source

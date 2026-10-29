@@ -9,6 +9,7 @@ pub mod identity;
 pub mod laws;
 mod number;
 pub mod parse;
+pub mod scope;
 pub mod semantics;
 pub mod time;
 

@@ -246,3 +246,28 @@ Completion inside an unfinished quoted field value offers only declared catalog 
 Declared neutral builtin key functions are case-insensitive at their function-call position and are stored under their registered spelling (`DAY(when)` becomes `day(when)`). Builtin declarations with colliding case-insensitive names are ambiguous. Field names, scalar data, saved identities and product extension names retain their declared case. Boolean operators remain `AND`, `OR` and `NOT`; an unknown colon field such as `TODO:` is a typed field error, while `"TODO:"` is text.
 
 Saved and kept reference prefixes accept optional whitespace around the colon (`QUERY : name`, `result: name`), including quoted names. Canonical formatting remains `query:name` and `result:name`. Parsing and completion share these tokens and preserve original UTF-8 byte spans.
+
+Binding also returns owned semantic typing through `BoundQuery::typing()` or
+`into_parts()`. `scope::Typing` identifies each query by a `NodePath` in the
+returned bound tree, records its actual underlying row unit and source fields,
+and captures the scope before and after every stage. `TypedOperand` addresses
+field uses and function operands in source conditions, related conditions,
+attachments, sequences, nested queries, projections and aggregate inputs.
+Paths contain AST field names and array indexes; they do not use byte spans.
+Changing the tree or the catalog requires binding again.
+
+Each `FieldInfo` retains the declared `catalog::Field`, including its closed
+values, and an `Origin`. Group origins name the exact key operand; aggregate
+origins name the aggregate and retain its inputs plus `TypeRule::Input` or
+`Fixed`; promoted temporal outputs name their nested query. Saved/result
+fields retain their caller-supplied `OutputSource`. Unchanged field snapshots
+share storage. The parser captures its existing scope transitions; consumers
+must not reconstruct grouping or alias types from names.
+
+These are semantic declarations, not a product's physical SQL or JSON schema.
+For example, a product can carry its path type through a grouped text field's
+validated source lineage, or refine a JSON input at the recorded operand and
+propagate it through an `Input` rule. A fixed result uses the declared output
+kind. `Json` remains `Json` until the product resolves its physical schema.
+Scalar spelling is retained in the bound tree: text and JSON literal `001`
+remain `001`; identity normalization applies only to declared scalar types.

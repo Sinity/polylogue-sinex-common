@@ -20,7 +20,11 @@ fn fields(catalog: &Catalog, unit: &str) -> Fields {
 fn field(scope: &Fields, operand: &Operand) -> Option<Field> {
     match operand {
         Operand::Field { name } => scope.get(name).cloned(),
-        _ => None,
+        Operand::Function { name, .. } => Some(Field {
+            name: operand.column(),
+            kind: crate::scope::function_kind(name),
+            ..Field::default()
+        }),
     }
 }
 fn value(value: &mut Value, field: &Field) {
@@ -248,17 +252,14 @@ pub(super) fn canonicalize(query: &mut Query, catalog: &Catalog) {
                     scope.clear();
                 }
                 for aggregate in aggregates {
-                    let kind = match aggregate.function {
-                        AggregateFunction::Count | AggregateFunction::CountDistinct => {
-                            FieldKind::Integer
-                        }
-                        _ => aggregate
+                    let (kind, _) = crate::scope::aggregate_kind(
+                        &aggregate.function,
+                        aggregate
                             .fields
                             .first()
-                            .and_then(|f| input.get(f))
-                            .map(|f| f.kind.clone())
-                            .unwrap_or(FieldKind::Number),
-                    };
+                            .and_then(|name| input.get(name))
+                            .map(|field| &field.kind),
+                    );
                     let name = aggregate.column();
                     scope.insert(
                         name.clone(),

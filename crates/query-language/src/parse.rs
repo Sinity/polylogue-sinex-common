@@ -2,7 +2,9 @@
 use crate::ast::*;
 use crate::catalog::{Catalog, ExtensionPosition, ExtensionSlot, Field, FieldKind, OutputSchema};
 use crate::{Error, ErrorKind};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+mod typing;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 struct Token {
@@ -213,27 +215,51 @@ pub fn parse(text: &str, catalog: &Catalog) -> Result<Query, Error> {
     }
 }
 fn parse_once(text: &str, catalog: &Catalog) -> Result<Query, Error> {
+    parse_internal(text, catalog, false).map(|(query, _)| query)
+}
+pub(crate) fn parse_typed(
+    text: &str,
+    catalog: &Catalog,
+) -> Result<(Query, crate::scope::Typing), Error> {
+    parse_internal(text, catalog, true)
+}
+fn parse_internal(
+    text: &str,
+    catalog: &Catalog,
+    capture_types: bool,
+) -> Result<(Query, crate::scope::Typing), Error> {
     let mut p = Parser {
         tokens: tokens(text, catalog)?,
         at: 0,
         text,
         catalog,
+        captures: Vec::new(),
+        query_stack: Vec::new(),
+        capture_types,
     };
     let query = p.query()?;
     if p.peek().is_some() {
         return Err(p.error("expected a stage or the end of the query"));
     }
-    Ok(query)
+    let typing = if capture_types {
+        typing::project(&p, &query)
+    } else {
+        crate::scope::Typing::default()
+    };
+    Ok((query, typing))
 }
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct Scope {
     unit: String,
     columns: Option<BTreeSet<String>>,
     extra: BTreeSet<String>,
     bucketed: bool,
-    output: Option<OutputSchema>,
+    output: Option<Arc<OutputSchema>>,
     deferred: bool,
-    typed_extra: Vec<Field>,
+    typed_extra: Arc<Vec<Field>>,
+    origins: Arc<BTreeMap<String, crate::scope::Origin>>,
+    group_input: Option<Arc<Scope>>,
+    output_source: Option<crate::catalog::OutputSource>,
 }
 impl Scope {
     fn new(unit: String) -> Self {
@@ -244,7 +270,10 @@ impl Scope {
             bucketed: false,
             output: None,
             deferred: false,
-            typed_extra: Vec::new(),
+            typed_extra: Arc::new(Vec::new()),
+            origins: Arc::new(BTreeMap::new()),
+            group_input: None,
+            output_source: None,
         }
     }
 }
@@ -253,6 +282,9 @@ struct Parser<'a> {
     at: usize,
     text: &'a str,
     catalog: &'a Catalog,
+    captures: Vec<Option<typing::Capture>>,
+    query_stack: Vec<(usize, usize)>,
+    capture_types: bool,
 }
 impl Parser<'_> {
     fn peek(&self) -> Option<&Token> {
@@ -342,6 +374,11 @@ impl Parser<'_> {
         self.query_in(None)
     }
     fn query_in(&mut self, inherited: Option<&Scope>) -> Result<Query, Error> {
+        let capture = self.captures.len();
+        if self.capture_types {
+            self.captures.push(None);
+        }
+        self.query_stack.push((capture, 0));
         let mut scope = if let Some(parent) = inherited {
             // An omitted nested source inherits the row domain, rather than
             // the enclosing grouping/projection's visible output columns.
@@ -602,14 +639,28 @@ impl Parser<'_> {
         if self.take("with") {
             attach = self.attachments()?;
         }
+        let source_scope = self.capture_types.then(|| scope.clone());
+        let mut stage_scopes = Vec::new();
         let mut stages = Vec::new();
         while !self.query_end() {
             if self.take("|") {
             } else if !self.catalog.unpiped_stages {
                 return Err(self.error("expected `|` before a stage"));
             }
+            self.query_stack.last_mut().unwrap().1 = stages.len();
+            let before = self.capture_types.then(|| scope.clone());
             stages.push(self.stage(&mut scope)?);
+            if let Some(before) = before {
+                stage_scopes.push((before, scope.clone()));
+            }
         }
+        if let Some(source) = source_scope {
+            self.captures[capture] = Some(typing::Capture {
+                source,
+                stages: stage_scopes,
+            });
+        }
+        self.query_stack.pop();
         Ok(Query {
             source,
             attach,
@@ -622,7 +673,22 @@ impl Parser<'_> {
             Source::Result { reference, .. } => reference.clone(),
             _ => return,
         };
-        scope.output = self.catalog.source_output(source).cloned();
+        scope.output_source = match source {
+            Source::Saved {
+                name, arguments, ..
+            } => Some(crate::catalog::OutputSource::Saved {
+                name: name.clone(),
+                arguments: arguments.clone(),
+            }),
+            Source::Result {
+                reference, part, ..
+            } => Some(crate::catalog::OutputSource::Result {
+                reference: reference.clone(),
+                part: *part,
+            }),
+            _ => None,
+        };
+        scope.output = self.catalog.source_output(source).cloned().map(Arc::new);
         if let Some(unit) = scope
             .output
             .as_ref()
@@ -1633,7 +1699,41 @@ impl Parser<'_> {
                         break;
                     }
                 }
-                scope.bucketed=keys.iter().any(|k|matches!(k,Operand::Function{name,..} if matches!(name.as_str(),"day"|"hour"|"week"|"month")));
+                let inputs: Vec<_> = keys
+                    .iter()
+                    .map(|key| self.operand_info(scope, key))
+                    .collect();
+                let rows = scope.clone();
+                Arc::make_mut(&mut scope.typed_extra).clear();
+                Arc::make_mut(&mut scope.origins).clear();
+                scope.extra.clear();
+                for (index, (key, mut info)) in keys.iter().zip(inputs).enumerate() {
+                    let input = info.clone();
+                    info.field.name = key.column();
+                    Arc::make_mut(&mut scope.origins).insert(
+                        info.field.name.clone(),
+                        crate::scope::Origin::Group {
+                            operand: self.stage_path().field("keys").index(index),
+                            input: Box::new(input),
+                        },
+                    );
+                    Arc::make_mut(&mut scope.typed_extra)
+                        .retain(|field| field.name != info.field.name);
+                    Arc::make_mut(&mut scope.typed_extra).push(info.field);
+                }
+                self.generated_field(
+                    scope,
+                    "count",
+                    FieldKind::Integer,
+                    crate::scope::Origin::Aggregate {
+                        at: self.stage_path(),
+                        function: AggregateFunction::Count,
+                        inputs: Vec::new(),
+                        rule: crate::scope::TypeRule::Fixed,
+                    },
+                );
+                scope.group_input = Some(Arc::new(rows));
+                scope.bucketed = keys.iter().any(|key| matches!(key, Operand::Function { name, .. } if matches!(name.as_str(), "day" | "hour" | "week" | "month")));
                 scope.columns = Some(
                     keys.iter()
                         .map(Operand::column)
@@ -1672,6 +1772,12 @@ impl Parser<'_> {
                     return Err(self.error("fill follows a time-bucketed group by"));
                 }
                 scope.columns.as_mut().unwrap().insert("coverage".into());
+                self.generated_field(
+                    scope,
+                    "coverage",
+                    FieldKind::Json,
+                    crate::scope::Origin::Generated,
+                );
                 StageKind::Fill
             }
             "fields" => {
@@ -1684,6 +1790,7 @@ impl Parser<'_> {
                         break;
                     }
                 }
+                scope.extra.retain(|name| fields.contains(name));
                 scope.columns = Some(fields.iter().cloned().collect());
                 StageKind::Fields { fields }
             }
@@ -1778,8 +1885,40 @@ impl Parser<'_> {
                     _ => "near",
                 };
                 scope.extra.insert(format!("{base}{suffix}"));
+                self.generated_field(
+                    scope,
+                    &format!("{base}{suffix}"),
+                    FieldKind::Reference,
+                    crate::scope::Origin::Temporal {
+                        output: crate::scope::TemporalOutput::Match,
+                        query: self.stage_path().field("query"),
+                        relation: match word.as_str() {
+                            "during" => TemporalRelation::During,
+                            "containing" => TemporalRelation::Containing,
+                            "before" => TemporalRelation::Before,
+                            "after" => TemporalRelation::After,
+                            _ => TemporalRelation::Near,
+                        },
+                        all,
+                    },
+                );
                 if base == "near" {
                     scope.extra.insert(format!("offset{suffix}"));
+                    self.generated_field(
+                        scope,
+                        &format!("offset{suffix}"),
+                        FieldKind::Duration,
+                        crate::scope::Origin::Temporal {
+                            output: crate::scope::TemporalOutput::Offset,
+                            query: self.stage_path().field("query"),
+                            relation: match word.as_str() {
+                                "before" => TemporalRelation::Before,
+                                "after" => TemporalRelation::After,
+                                _ => TemporalRelation::Near,
+                            },
+                            all,
+                        },
+                    );
                 }
                 StageKind::Temporal {
                     relation: match word.as_str() {
@@ -1836,6 +1975,9 @@ impl Parser<'_> {
                 }
             }
         };
+        if !matches!(kind, StageKind::Group { .. } | StageKind::Aggregate { .. }) {
+            scope.group_input = None;
+        }
         Ok(Stage {
             span: Span {
                 start,
@@ -1846,6 +1988,18 @@ impl Parser<'_> {
     }
     fn aggregates(&mut self, scope: &mut Scope) -> Result<Vec<Aggregate>, Error> {
         let mut aggregates = Vec::new();
+        let grouped = scope.group_input.is_some();
+        let rows = scope
+            .group_input
+            .take()
+            .map(|rows| (*rows).clone())
+            .unwrap_or_else(|| scope.clone());
+        if !grouped {
+            scope.columns = Some(BTreeSet::new());
+            scope.extra.clear();
+            Arc::make_mut(&mut scope.typed_extra).clear();
+            Arc::make_mut(&mut scope.origins).clear();
+        }
         loop {
             let t = self.name()?;
             let (name, field) = t
@@ -1903,27 +2057,27 @@ impl Parser<'_> {
             if parenthesis {
                 self.expect(")")?;
             }
-            // Aggregates read the pre-group row fields; grouped columns belong to subsequent stages.
+            // Aggregate operands read the actual entering group rows, including
+            // outputs of earlier groups, rather than reopening the unit catalog.
             for f in &fields {
-                let mut rows = scope.clone();
-                rows.columns = None;
                 self.check_field(&rows, f, t.span.start)?;
             }
             let aggregate = Aggregate { function, fields };
-            let kind = match aggregate.function {
-                AggregateFunction::Count | AggregateFunction::CountDistinct => FieldKind::Integer,
-                _ => aggregate
-                    .fields
-                    .first()
-                    .and_then(|field| self.scope_field(scope, field))
-                    .map(|field| field.kind.clone())
-                    .unwrap_or(FieldKind::Number),
-            };
-            scope.typed_extra.push(Field {
-                name: aggregate.column(),
-                kind,
-                ..Field::default()
-            });
+            let inputs = aggregate
+                .fields
+                .iter()
+                .map(|name| self.field_info(&rows, name))
+                .collect();
+            let info = self.aggregate_info(
+                &aggregate,
+                inputs,
+                self.stage_path()
+                    .field("aggregates")
+                    .index(aggregates.len()),
+            );
+            Arc::make_mut(&mut scope.origins).insert(info.field.name.clone(), info.origin);
+            Arc::make_mut(&mut scope.typed_extra).retain(|f| f.name != info.field.name);
+            Arc::make_mut(&mut scope.typed_extra).push(info.field);
             if let Some(columns) = &mut scope.columns {
                 columns.insert(aggregate.column());
             } else {
