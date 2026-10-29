@@ -60,6 +60,13 @@ def install_frontend(pins, cache, prefix):
         link.symlink_to(binary)
 
 
+def install_debian_bootstrap(pins, cache, bootstrap, env):
+    """Extract signed-index-pinned Debian packages without package scripts."""
+    for name in ("m4", "bison", "flex"):
+        package = artifact("debian13-" + name + ".deb", pins["debian13"][name], cache)
+        run(["dpkg-deb", "--extract", package, bootstrap], env=env)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prefix", required=True, type=Path)
@@ -69,6 +76,15 @@ def main():
         parser.error("the native backend expects an ordinary user; privileged environments can use Nix")
     if not (args.repo / "Cargo.toml").is_file():
         parser.error("the target checkout has no Cargo.toml")
+    bootstrap_kind = os.environ.get("CLOUD_NATIVE_BOOTSTRAP", "source")
+    if bootstrap_kind not in ("source", "debian13"):
+        parser.error("CLOUD_NATIVE_BOOTSTRAP must be source or debian13")
+    if bootstrap_kind == "debian13":
+        release = platform.freedesktop_os_release()
+        if release.get("ID") != "debian" or release.get("VERSION_ID") != "13":
+            parser.error("debian13 bootstrap requires a Debian 13 base image")
+        if not shutil.which("dpkg-deb"):
+            parser.error("debian13 bootstrap requires dpkg-deb")
     jobs = int(os.environ.get("CLOUD_BUILD_JOBS", "2"))
     if jobs < 1:
         parser.error("CLOUD_BUILD_JOBS must be positive")
@@ -98,15 +114,20 @@ def main():
     tools.mkdir(exist_ok=True)
     cargo = prefix / "cargo"
     rustup = prefix / "rustup"
-    bootstrap = prefix / "bootstrap"
+    bootstrap = prefix / ("bootstrap-debian13" if bootstrap_kind == "debian13" else "bootstrap")
+    bootstrap_bin = bootstrap / ("usr/bin" if bootstrap_kind == "debian13" else "bin")
     pg = prefix / "postgres"
     cmake = prefix / "cmake" / "cmake-3.31.8-linux-x86_64" / "bin"
     env = os.environ | {"CARGO_HOME": str(cargo), "RUSTUP_HOME": str(rustup), "RUSTUP_INIT_SKIP_PATH_CHECK": "yes"}
-    paths = list(map(str, (cargo / "bin", tools, pg / "bin", bootstrap / "bin", cmake))) + os.environ["PATH"].split(os.pathsep)
+    paths = list(map(str, (cargo / "bin", tools, pg / "bin", bootstrap_bin, cmake))) + os.environ["PATH"].split(os.pathsep)
     env["PATH"] = os.pathsep.join(dict.fromkeys(paths))
+    if bootstrap_kind == "debian13":
+        env |= {"M4": str(bootstrap_bin / "m4"), "BISON_PKGDATADIR": str(bootstrap / "usr/share/bison")}
     stamp = prefix / "installed.json"
     identity = hashlib.sha256(pins_path.read_bytes()).hexdigest()
-    installed = stamp.exists() and json.loads(stamp.read_text()).get("pins_sha256") == identity
+    postgres_pin = pins["postgres_github"] if bootstrap_kind == "debian13" else pins["postgres"]
+    saved = json.loads(stamp.read_text()) if stamp.exists() else {}
+    installed = saved.get("pins_sha256") == identity and saved.get("bootstrap") == bootstrap_kind
     if not installed:
         install_frontend(pins, cache, prefix)
         installer = artifact("rustup-init", pins["rustup"], cache)
@@ -122,17 +143,19 @@ def main():
         unpack(artifact("cmake.tar.gz", pins["cmake"], cache), prefix / "cmake")
         # PostgreSQL 18 requires its parser generators even from release
         # archives; these are part of the owned bootstrap, not system packages.
-        # Their bundled portability headers predate C23's type-generic libc
-        # macros. Use their supported C dialect even when cc defaults to C23.
-        bootstrap_env = env | {"CFLAGS": env.get("CFLAGS", "-O2") + " -std=gnu17"}
-        for name in ("m4", "bison", "flex"):
-            sources = unpack(artifact(name + ".tar", pins[name], cache), build / name, single_root=True)
-            if (sources / "Makefile").exists():
-                run(["make", "distclean"], cwd=sources, env=bootstrap_env)
-            run([sources / "configure", "--prefix=" + str(bootstrap), "--disable-nls"], cwd=sources, env=bootstrap_env)
-            run(["make", "-j" + jobs], cwd=sources, env=bootstrap_env)
-            run(["make", "install"], cwd=sources, env=bootstrap_env)
-        pg_sources = unpack(artifact("postgres.tar.bz2", pins["postgres"], cache), build / "postgres") / ("postgresql-" + pins["postgres"]["version"])
+        if bootstrap_kind == "debian13":
+            install_debian_bootstrap(pins, cache, bootstrap, env)
+        else:
+            # These release portability headers predate C23 libc macros.
+            bootstrap_env = env | {"CFLAGS": env.get("CFLAGS", "-O2") + " -std=gnu17"}
+            for name in ("m4", "bison", "flex"):
+                sources = unpack(artifact(name + ".tar", pins[name], cache), build / name, single_root=True)
+                if (sources / "Makefile").exists():
+                    run(["make", "distclean"], cwd=sources, env=bootstrap_env)
+                run([sources / "configure", "--prefix=" + str(bootstrap), "--disable-nls"], cwd=sources, env=bootstrap_env)
+                run(["make", "-j" + jobs], cwd=sources, env=bootstrap_env)
+                run(["make", "install"], cwd=sources, env=bootstrap_env)
+        pg_sources = unpack(artifact("postgres-" + bootstrap_kind + ".tar", postgres_pin, cache), build / ("postgres-" + bootstrap_kind), single_root=True)
         # The test clusters use Unix sockets. These optional client features
         # would otherwise require system development packages in a rootless VM.
         run([pg_sources / "configure", "--prefix=" + str(pg), "--without-readline", "--without-icu", "--without-zlib"], cwd=pg_sources, env=env)
@@ -146,18 +169,20 @@ def main():
         run(["cmake", "--install", ts_build], env=env)
     # Check the tools again when reusing a completed prefix; a deleted binary
     # must fail setup instead of being silently accepted by a saved stamp.
-    for command in (["node", "--version"], ["tsc", "--version"], ["esbuild", "--version"], ["dbus-daemon", "--version"], ["rustc", "--version"], ["cargo", "--version"], ["cargo", "nextest", "--version"], ["postgres", "--version"], ["nats-server", "--version"]):
+    for command in (["m4", "--version"], ["bison", "--version"], ["flex", "--version"], ["node", "--version"], ["tsc", "--version"], ["esbuild", "--version"], ["dbus-daemon", "--version"], ["rustc", "--version"], ["cargo", "--version"], ["cargo", "nextest", "--version"], ["postgres", "--version"], ["nats-server", "--version"]):
         run(command, env=env)
     pkglib = Path(subprocess.check_output([str(pg / "bin/pg_config"), "--pkglibdir"], text=True, env=env).strip())
     if not (pkglib / "timescaledb.so").is_file():
         raise RuntimeError("TimescaleDB loader is missing from the prepared PostgreSQL")
     run([sys.executable, Path(__file__).with_name("smoke.py"), "--scratch", prefix], env=env)
     entries = {"CARGO_HOME": str(cargo), "RUSTUP_HOME": str(rustup), "PATH": env["PATH"], "LINKING_COMMON": "1"}
+    if bootstrap_kind == "debian13":
+        entries |= {key: env[key] for key in ("M4", "BISON_PKGDATADIR")}
     environment = prefix / "env.sh"
     temporary = environment.with_suffix(".new")
     temporary.write_text("\n".join("export " + key + "=" + shlex.quote(value) for key, value in entries.items()) + "\n")
     temporary.replace(environment)
-    stamp.write_text(json.dumps({"pins_sha256": identity, "backend": "native"}, indent=2) + "\n")
+    stamp.write_text(json.dumps({"pins_sha256": identity, "backend": "native", "bootstrap": bootstrap_kind}, indent=2) + "\n")
     print("cloud setup: source " + shlex.quote(str(environment)), flush=True)
 
 

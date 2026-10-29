@@ -40,6 +40,22 @@ PostgreSQL 18 requires even when building its release archives. Rust matches the
 PostgreSQL and TimescaleDB build into the user's prefix. The toolchain does
 not need root, a writable `/nix`, user namespaces or PRoot.
 
+On Debian 13 amd64, `CLOUD_NATIVE_BOOTSTRAP=debian13` selects the official
+Debian generator packages pinned in `pins.json` and the official PostgreSQL
+GitHub release tag archive instead of the GNU/PostgreSQL FTP artifacts. This
+route needs `dpkg-deb` in the base image. For example:
+
+```sh
+CLOUD_BACKEND=native CLOUD_NATIVE_BOOTSTRAP=debian13 bash dev/cloud/setup.sh
+```
+
+It downloads exact package artifacts,
+checks their SHA256 from the signed Debian index, and extracts files into the
+owned prefix; it runs no package scripts or system installation. Bison's data
+directory and M4 path are exported for the relocated tools. The default
+`CLOUD_NATIVE_BOOTSTRAP=source` compiles the generator release archives.
+Both routes use the same PostgreSQL/Timescale/NATS smoke checks.
+
 `CLOUD_PREFIX` selects the absolute writable prefix; its default is `.cloud`
 beside the checkout. Downloads and build trees stay there for repeat setup.
 `CLOUD_BUILD_JOBS` controls native compilation concurrency (default 2).
