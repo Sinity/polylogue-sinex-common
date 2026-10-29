@@ -156,6 +156,12 @@ verifies the same requirements before returning it. A missing extension in
 that shell fails by name before schema bootstrap. Further server settings
 apply to newly started clusters.
 
+An owned cluster runs PostgreSQL as a direct child. Normal shutdown stops
+and waits for that child, so a container whose init does not reap orphans
+does not accumulate exited postmasters. If the owner is killed, the existing
+watchdog stops the cluster and removes its files; reaping processes orphaned
+by abrupt owner death remains the platform init's responsibility.
+
 - Each schema version, named by a hash of the schema sources, is built once
   into a template database and copied to the read-only **schema database**
   that `DATABASE_URL` points at. Every test clones the template

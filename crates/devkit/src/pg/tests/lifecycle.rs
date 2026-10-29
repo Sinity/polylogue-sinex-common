@@ -1,6 +1,31 @@
 use super::*;
 
 #[test]
+fn startup_failure_returns_the_postgres_log_and_removes_its_directory() {
+    let base = tempfile::tempdir_in(if Path::new("/dev/shm").is_dir() {
+        Path::new("/dev/shm")
+    } else {
+        Path::new("/tmp")
+    })
+    .unwrap();
+    if crate::owner::running_as_root() {
+        give_to_nobody(base.path()).unwrap();
+    }
+    let error = match Server::start_in(
+        &ClusterOptions {
+            settings: vec![("devkit_fixture_unknown_setting".into(), "on".into())],
+            ..Default::default()
+        },
+        base.path(),
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("an unknown server setting must fail startup"),
+    };
+    assert!(error.contains("devkit_fixture_unknown_setting"), "{error}");
+    assert_eq!(fs::read_dir(base.path()).unwrap().count(), 0);
+}
+
+#[test]
 fn normal_shutdown_reaps_the_postmaster_in_a_nonreaping_fixture() {
     let output = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "pg::tests::lifecycle::nonreaping_child"])

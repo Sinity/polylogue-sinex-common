@@ -1,8 +1,8 @@
 //! Throwaway servers that cannot outlive the process that started them.
 //!
-//! A test killed by a timeout or a signal never runs its `Drop`, and
-//! PostgreSQL is daemonized by `pg_ctl`, so neither server would stop with
-//! it. Each owned server's directory is named `<prefix>-<owner pid>-<id>`.
+//! A test killed by a timeout or a signal never runs its `Drop`, so its
+//! servers need independent cleanup. Each owned server's directory is named
+//! `<prefix>-<owner pid>-<id>`.
 //! A watchdog per server stops it once the owner is gone, and every start
 //! first sweeps directories whose owner is gone, in case a watchdog was
 //! killed too.
