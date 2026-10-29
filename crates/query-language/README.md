@@ -271,3 +271,5 @@ propagate it through an `Input` rule. A fixed result uses the declared output
 kind. `Json` remains `Json` until the product resolves its physical schema.
 Scalar spelling is retained in the bound tree: text and JSON literal `001`
 remain `001`; identity normalization applies only to declared scalar types.
+
+Declared `Integer` and `Number` fields use `number::is_integer` and `number::is_decimal`, the same lexical decimal rules used by canonical numeric handling. Integer validation tests the exact value, including integral decimal/scientific spellings, without an `i64` limit; number validation accepts finite decimal syntax without a float conversion or exponent cap. The bound scalar keeps its original text. Canonical identity and numeric key comparison use the same exact coefficient and symbolic exponent arithmetic, including exponents beyond machine integer ranges; they never expand zeros in proportion to an exponent. Product SQL lowerers pass that exact lexeme to their physical numeric binding and report actual database range errors; validation never rounds through a float.

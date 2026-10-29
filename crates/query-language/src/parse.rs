@@ -1503,8 +1503,8 @@ impl Parser<'_> {
             return Err(Error::new(ErrorKind::BadValue, message, position));
         }
         let valid = match spec.kind {
-            FieldKind::Integer => text.parse::<i64>().is_ok(),
-            FieldKind::Number => text.parse::<f64>().is_ok_and(f64::is_finite),
+            FieldKind::Integer => crate::number::is_integer(text),
+            FieldKind::Number => crate::number::is_decimal(text),
             FieldKind::Bool => matches!(text.as_str(), "true" | "false"),
             _ => true,
         };
