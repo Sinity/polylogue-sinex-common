@@ -28,6 +28,13 @@ Nested Cargo commands use `devkit::cargo_command()`, which drops the parent's
 `CARGO_MANIFEST_DIR`, `CARGO_MANIFEST_PATH` and `CARGO_PKG_*` so they do not
 invalidate build-script fingerprints.
 
+`Run::nextest` passes Cargo's package selection unchanged to both the build
+and execution commands. Use `-p <package>` to compile that package's test
+targets and its dependencies. A nextest `-E 'package(...)'` filter selects
+execution within the Cargo build scope; it does not replace `-p`. A product
+keeps its full-workspace defaults for `check` and unscoped `test` runs, and
+passes explicit package selectors through to Cargo.
+
 ## Local dependency links
 
 `devkit::local_link::LocalLink` builds several Cargo workspaces against one

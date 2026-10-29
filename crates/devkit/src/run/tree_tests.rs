@@ -67,7 +67,9 @@ fn distinct_commits_with_equal_git_trees_keep_identity_separate_from_dirty_conte
 
 #[test]
 fn failed_git_or_untracked_observation_is_unknown_instead_of_clean() {
-    if crate::owner::running_as_root() {
+    // This test also runs without the optional server features and their owner module.
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    if unsafe { libc::geteuid() == 0 } {
         use std::os::unix::process::CommandExt;
         // Root can read mode-000 files. Exercise the same observation failures
         // as an unprivileged caller so the read-denial assertion still applies.
