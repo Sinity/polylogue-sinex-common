@@ -209,6 +209,7 @@ integration run.
   frame-table entry fails authentication on read.
 - **sealed-check-without-key**: the scan detects damage to a sealed blob
   without its key.
-- **pax-members-match-gnu-tar**: every member read through the crate equals
-  GNU tar's extraction of the same stream, including byte names, extended
-  attributes, ACLs and sparse maps.
+- **pax-members-match-gnu-tar**: members in GNU-produced streams and current directory captures equal GNU
+  tar's extraction, including byte names, extended attributes, ACLs and sparse
+  maps. Independent byte-range oracles establish the logical bytes of
+  arbitrary sparse extent maps.
