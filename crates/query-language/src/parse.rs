@@ -918,32 +918,32 @@ impl Parser<'_> {
             ));
         }
         if let Some((field, raw)) = token.text.split_once(':') {
-            if field.eq_ignore_ascii_case("result") && raw.is_empty() {
-                let value = self.next()?;
-                if !value.quoted && is_symbol(&value.text) {
-                    return Err(self.error("a kept result needs a literal identity"));
-                }
-                return Ok(self.cond(
-                    start,
-                    ConditionKind::Reference {
-                        reference: format!("result:{}", value.text),
-                    },
-                ));
-            }
-            if is_reference(&token.text) || self.catalog.is_reference(&token.text) {
-                return Ok(self.cond(
-                    start,
-                    ConditionKind::Reference {
-                        reference: token.text,
-                    },
-                ));
-            }
             if field.eq_ignore_ascii_case("query") {
                 let name = self.saved_name(raw, start)?;
                 let arguments = self.arguments()?;
                 return Ok(self.cond(start, ConditionKind::Saved { name, arguments }));
             }
             if field.eq_ignore_ascii_case("result") {
+                let id = if raw.is_empty() {
+                    let value = self.next()?;
+                    if !value.quoted && is_symbol(&value.text) {
+                        return Err(self.error("a kept result needs a literal identity"));
+                    }
+                    value.text
+                } else {
+                    raw.into()
+                };
+                if id.is_empty() {
+                    return Err(self.error("a kept result needs a literal identity"));
+                }
+                return Ok(self.cond(
+                    start,
+                    ConditionKind::Reference {
+                        reference: format!("result:{id}"),
+                    },
+                ));
+            }
+            if is_reference(&token.text) || self.catalog.is_reference(&token.text) {
                 return Ok(self.cond(
                     start,
                     ConditionKind::Reference {

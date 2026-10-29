@@ -206,3 +206,34 @@ fn spaced_reference_completion_uses_original_utf8_spans_and_decoded_prefixes() {
         );
     }
 }
+
+#[test]
+fn conditional_saved_and_kept_names_use_the_same_spacing_and_quoting() {
+    let catalog = catalog();
+    for namespace in ["query", "result"] {
+        for name in ["Case", "two words", "$literal"] {
+            let a = parse(
+                &format!(
+                    "events where {namespace}:{}",
+                    serde_json::to_string(name).unwrap()
+                ),
+                &catalog,
+            )
+            .unwrap();
+            let b = parse(
+                &format!(
+                    "events where {} : {}",
+                    namespace.to_uppercase(),
+                    serde_json::to_string(name).unwrap()
+                ),
+                &catalog,
+            )
+            .unwrap();
+            assert_eq!(
+                question_id(&a, &catalog, &BTreeMap::new()).unwrap(),
+                question_id(&b, &catalog, &BTreeMap::new()).unwrap()
+            );
+            format_query(&b, &catalog).unwrap();
+        }
+    }
+}
