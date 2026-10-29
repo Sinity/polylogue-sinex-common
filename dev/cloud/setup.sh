@@ -55,4 +55,4 @@ fi
 if [ "${CLOUD_PREBUILD:-0}" = 1 ]; then
     env -C "$repo" cargo xtask test --no-run
 fi
-printf 'cloud setup: configure BASH_ENV=%s for later shells\n' "$environment"
+printf 'cloud setup: initialize each later shell with . %q\n' "$environment"
