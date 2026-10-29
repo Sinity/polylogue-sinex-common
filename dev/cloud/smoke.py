@@ -12,7 +12,12 @@ import urllib.request
 
 
 def run(args):
-    return subprocess.run(list(map(str, args)), check=True, capture_output=True, text=True).stdout.strip()
+    result = subprocess.run(list(map(str, args)), capture_output=True, text=True)
+    if result.returncode:
+        print(result.stdout, end="")
+        print(result.stderr, end="")
+        result.check_returncode()
+    return result.stdout.strip()
 
 
 def port():
@@ -73,7 +78,7 @@ def main():
                     except subprocess.TimeoutExpired:
                         nats.kill()
                         nats.wait()
-                if started:
+                if started or (data / "postmaster.pid").exists():
                     run(["pg_ctl", "-D", data, "-m", "immediate", "-w", "stop"])
 
 

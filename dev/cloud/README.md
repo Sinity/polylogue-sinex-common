@@ -23,7 +23,7 @@ CLOUD_BACKEND=native bash dev/cloud/setup.sh
 ```
 
 The base image must provide Bash, Python 3.12 or newer, C and C++ compilers, Make,
-and pkg-config. The native backend downloads the SHA256-pinned artifacts in
+pkg-config and Perl with its standard generator modules. The native backend downloads the SHA256-pinned artifacts in
 `pins.json`: Rust with rustfmt and Clippy, nextest, CMake, PostgreSQL 18,
 TimescaleDB and NATS. The bootstrap also pins M4, Bison and Flex, which
 PostgreSQL 18 requires even when building its release archives. Rust matches the product's `rust-toolchain.toml`.

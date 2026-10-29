@@ -63,9 +63,10 @@ def main():
     jobs = str(jobs)
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         parser.error("the pinned native toolchain currently targets x86_64 Linux")
-    for tool in ("cc", "c++", "make", "pkg-config"):
+    for tool in ("cc", "c++", "make", "pkg-config", "perl"):
         if not shutil.which(tool):
             parser.error(f"native setup requires {tool} from the cloud base image")
+    run(["perl", "-MGetopt::Long", "-MFindBin", "-MFile::Compare", "-e", "exit 0"])
     pins_path = Path(__file__).with_name("pins.json")
     pins = json.loads(pins_path.read_text())
     toolchain = args.repo / "rust-toolchain.toml"
