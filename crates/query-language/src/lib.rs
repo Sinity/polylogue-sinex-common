@@ -1,5 +1,6 @@
 //! Pure query mechanics shared by product-owned catalogs and compilers.
 pub mod ast;
+pub mod bind;
 pub mod catalog;
 pub mod complete;
 pub mod cursor;

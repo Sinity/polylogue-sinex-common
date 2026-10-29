@@ -23,9 +23,12 @@ pub enum Source {
     Saved {
         name: String,
         arguments: Vec<Argument>,
+        output: OutputBinding,
     },
     Result {
         reference: String,
+        part: ResultPart,
+        output: OutputBinding,
     },
     Walk {
         direction: WalkDirection,
@@ -43,6 +46,19 @@ pub enum Source {
         number: u64,
         window: Option<Value>,
     },
+}
+/// Deferred output scopes are syntax only and must pass shared binding before execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputBinding {
+    Deferred,
+    Known,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultPart {
+    Rows,
+    Matches,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

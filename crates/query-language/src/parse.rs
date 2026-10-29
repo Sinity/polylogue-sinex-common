@@ -1,6 +1,6 @@
 //! Catalog-driven parsing for piped and clause-oriented surfaces.
 use crate::ast::*;
-use crate::catalog::{Catalog, ExtensionPosition, ExtensionSlot, FieldKind};
+use crate::catalog::{Catalog, ExtensionPosition, ExtensionSlot, Field, FieldKind, OutputSchema};
 use crate::{Error, ErrorKind};
 use std::collections::BTreeSet;
 
@@ -62,9 +62,10 @@ fn tokens(text: &str, catalog: &Catalog) -> Result<Vec<Token>, Error> {
         let literal_end = text[i..]
             .find(|c: char| c.is_whitespace() || matches!(c, '|' | ')' | ']' | ','))
             .map_or(text.len(), |offset| i + offset);
-        if catalog.is_reference(&text[i..literal_end])
-            || text[i..].starts_with("http://")
-            || text[i..].starts_with("https://")
+        if !text[i..literal_end].contains('"')
+            && (catalog.is_reference(&text[i..literal_end])
+                || text[i..].starts_with("http://")
+                || text[i..].starts_with("https://"))
         {
             i = literal_end;
             out.push(Token {
@@ -149,6 +150,9 @@ struct Scope {
     columns: Option<BTreeSet<String>>,
     extra: BTreeSet<String>,
     bucketed: bool,
+    output: Option<OutputSchema>,
+    deferred: bool,
+    typed_extra: Vec<Field>,
 }
 impl Scope {
     fn new(unit: String) -> Self {
@@ -157,6 +161,9 @@ impl Scope {
             columns: None,
             extra: BTreeSet::new(),
             bucketed: false,
+            output: None,
+            deferred: false,
+            typed_extra: Vec::new(),
         }
     }
 }
@@ -258,6 +265,60 @@ impl Parser<'_> {
         };
         let mut consumed_source = false;
         if let Some(first) = self.peek().cloned()
+            && !first.quoted
+            && let Some((prefix, raw)) = first.text.split_once(':')
+            && matches!(prefix, "query" | "result")
+        {
+            self.at += 1;
+            source = if prefix == "query" {
+                if raw.is_empty() || raw.starts_with('$') {
+                    return Err(self.error("a saved query needs a literal name"));
+                }
+                Source::Saved {
+                    name: raw.to_string(),
+                    arguments: self.arguments()?,
+                    output: OutputBinding::Deferred,
+                }
+            } else {
+                let (mut id, quoted, end) = if raw.is_empty() {
+                    let token = self.next()?;
+                    if !token.quoted && is_symbol(&token.text) {
+                        return Err(self.error("a kept result needs a literal identity"));
+                    }
+                    (token.text, token.quoted, token.span.end)
+                } else {
+                    (raw.to_string(), false, first.span.end)
+                };
+                let mut part = ResultPart::Rows;
+                if !quoted {
+                    if let Some(base) = id.strip_suffix(".matches") {
+                        id = base.to_string();
+                        part = ResultPart::Matches;
+                    } else if let Some(base) = id.strip_suffix(".rows") {
+                        id = base.to_string();
+                    }
+                } else if let Some(selector) = self.peek()
+                    && selector.span.start == end
+                    && matches!(selector.text.as_str(), ".rows" | ".matches")
+                {
+                    if self.next()?.text == ".matches" {
+                        part = ResultPart::Matches;
+                    }
+                }
+                if id.is_empty() {
+                    return Err(self.error("a kept result needs a literal identity"));
+                }
+                Source::Result {
+                    reference: format!("result:{id}"),
+                    part,
+                    output: OutputBinding::Deferred,
+                }
+            };
+            self.output_scope(&mut source, &mut scope);
+            consumed_source = true;
+        }
+        if !consumed_source
+            && let Some(first) = self.peek().cloned()
             && !first.quoted
             && !self.field_syntax()
         {
@@ -405,7 +466,11 @@ impl Parser<'_> {
                         ..
                     }),
                 ..
-            } => Source::Saved { name, arguments },
+            } => Source::Saved {
+                name,
+                arguments,
+                output: OutputBinding::Deferred,
+            },
             Source::Unit {
                 condition:
                     Some(Condition {
@@ -413,14 +478,37 @@ impl Parser<'_> {
                         ..
                     }),
                 ..
-            } if reference.starts_with("result:") => Source::Result { reference },
+            } if reference.starts_with("result:") => Source::Result {
+                reference,
+                part: ResultPart::Rows,
+                output: OutputBinding::Deferred,
+            },
             other => other,
         };
+        if matches!(source, Source::Saved { .. } | Source::Result { .. }) {
+            self.output_scope(&mut source, &mut scope);
+        }
+        let mut source_suffix = None;
+        if matches!(source, Source::Saved { .. } | Source::Result { .. })
+            && !self.query_end()
+            && !self.is("|")
+            && !self.is("with")
+            && !self.stage_start()
+        {
+            self.take("where");
+            source_suffix = Some(self.condition(&scope)?);
+        }
         let mut attach = Vec::new();
         if self.take("with") {
             attach = self.attachments()?;
         }
         let mut stages = Vec::new();
+        if let Some(condition) = source_suffix {
+            stages.push(Stage {
+                span: condition.span,
+                kind: StageKind::Where { condition },
+            });
+        }
         while !self.query_end() {
             if self.take("|") {
             } else if !self.catalog.unpiped_stages {
@@ -433,6 +521,52 @@ impl Parser<'_> {
             attach,
             stages,
         })
+    }
+    fn output_scope(&self, source: &mut Source, scope: &mut Scope) {
+        scope.unit = match source {
+            Source::Saved { name, .. } => format!("query:{name}"),
+            Source::Result { reference, .. } => reference.clone(),
+            _ => return,
+        };
+        scope.output = self.catalog.source_output(source).cloned();
+        scope.deferred = scope.output.is_none();
+        scope.columns = scope
+            .output
+            .as_ref()
+            .map(|output| output.fields.iter().map(|f| f.name.clone()).collect());
+        if let Source::Saved { output, .. } | Source::Result { output, .. } = source {
+            *output = if scope.deferred {
+                OutputBinding::Deferred
+            } else {
+                OutputBinding::Known
+            };
+        }
+    }
+    fn scope_field<'a>(&'a self, scope: &'a Scope, name: &str) -> Option<&'a Field> {
+        scope
+            .typed_extra
+            .iter()
+            .find(|field| field.name == name)
+            .or_else(|| {
+                if let Some(output) = &scope.output {
+                    output.fields.iter().find(|field| field.name == name)
+                } else if scope.deferred {
+                    None
+                } else {
+                    self.catalog.field(&scope.unit, name)
+                }
+            })
+    }
+    fn main_time(&self, scope: &Scope) -> Option<String> {
+        if let Some(output) = &scope.output {
+            output.main_time.clone()
+        } else if scope.deferred {
+            Some("$deferred_main_time".into())
+        } else {
+            self.catalog
+                .unit(&scope.unit)
+                .and_then(|unit| unit.main_time.clone())
+        }
     }
     fn recall_window(&mut self) -> Result<Option<Value>, Error> {
         if let Some(t) = self.peek().cloned()
@@ -805,8 +939,7 @@ impl Parser<'_> {
             self.normalize_operand_value(scope, &operand, &mut value);
             if let Operand::Field { name } = &operand
                 && self
-                    .catalog
-                    .field(&scope.unit, name)
+                    .scope_field(scope, name)
                     .is_some_and(|f| f.kind == FieldKind::Time)
                 && matches!(op, Op::Lt | Op::Le | Op::Gt | Op::Ge)
                 && matches!(&value,Value::Scalar{text,quoted:false} if is_duration(text))
@@ -918,9 +1051,7 @@ impl Parser<'_> {
     }
     fn time_bound(&self, scope: &Scope, until: bool, value: Value) -> Result<ConditionKind, Error> {
         let field = self
-            .catalog
-            .unit(&scope.unit)
-            .and_then(|unit| unit.main_time.clone())
+            .main_time(scope)
             .ok_or_else(|| self.error("this unit has no main time"))?;
         let operand = Operand::field(field);
         Ok(if until {
@@ -1084,8 +1215,11 @@ impl Parser<'_> {
         ))
     }
     fn field_known(&self, scope: &Scope, field: &str) -> bool {
+        if (scope.deferred && scope.columns.is_none()) || scope.extra.contains(field) {
+            return true;
+        }
         scope.columns.as_ref().map_or_else(
-            || self.catalog.field(&scope.unit, field).is_some() || scope.extra.contains(field),
+            || self.scope_field(scope, field).is_some() || scope.extra.contains(field),
             |c| c.contains(field),
         )
     }
@@ -1137,13 +1271,13 @@ impl Parser<'_> {
             }
             return;
         }
-        if let Some(spec) = self.catalog.field(&scope.unit, field)
+        if let Some(spec) = self.scope_field(scope, field)
             && let crate::catalog::UnknownRule::Word(word) = &spec.unknown
             && matches!(value,Value::Scalar{text,quoted:false} if text.eq_ignore_ascii_case(word))
         {
             *value = Value::Unknown;
         }
-        if let Some(spec) = self.catalog.field(&scope.unit, field)
+        if let Some(spec) = self.scope_field(scope, field)
             && let Value::Scalar { text, .. } = value
             && let Some(canonical) = spec
                 .values
@@ -1169,7 +1303,7 @@ impl Parser<'_> {
         let Value::Scalar { text, .. } = value else {
             return Ok(());
         };
-        let Some(spec) = self.catalog.field(&scope.unit, field) else {
+        let Some(spec) = self.scope_field(scope, field) else {
             return Ok(());
         };
         if !spec.values.is_empty() && !spec.values.iter().any(|v| v.eq_ignore_ascii_case(text)) {
@@ -1414,6 +1548,7 @@ impl Parser<'_> {
                         break;
                     }
                 }
+                scope.columns = Some(fields.iter().cloned().collect());
                 StageKind::Fields { fields }
             }
             "measure" => {
@@ -1427,13 +1562,9 @@ impl Parser<'_> {
                                 && !self.field_known(scope, &t.text)
                         }) {
                             let bucket = self.next()?;
-                            let time = self
-                                .catalog
-                                .unit(&scope.unit)
-                                .and_then(|unit| unit.main_time.clone())
-                                .ok_or_else(|| {
-                                    self.error("period measure keys need the unit's main time")
-                                })?;
+                            let time = self.main_time(scope).ok_or_else(|| {
+                                self.error("period measure keys need the unit's main time")
+                            })?;
                             by.push(Operand::Function {
                                 name: bucket.text,
                                 arguments: vec![Operand::field(time)],
@@ -1556,9 +1687,7 @@ impl Parser<'_> {
                     let Some(unit) = self.catalog.unit(&t.text) else {
                         return Err(self.unknown_unit(&t));
                     };
-                    scope.unit = unit.name.clone();
-                    scope.columns = None;
-                    scope.extra.clear();
+                    *scope = Scope::new(unit.name.clone());
                     let condition = if self.take("where") {
                         Some(self.condition(scope)?)
                     } else {
@@ -1640,10 +1769,25 @@ impl Parser<'_> {
             }
             // Aggregates read the pre-group row fields; grouped columns belong to subsequent stages.
             for f in &fields {
-                let rows = Scope::new(scope.unit.clone());
+                let mut rows = scope.clone();
+                rows.columns = None;
                 self.check_field(&rows, f, t.span.start)?;
             }
             let aggregate = Aggregate { function, fields };
+            let kind = match aggregate.function {
+                AggregateFunction::Count | AggregateFunction::CountDistinct => FieldKind::Integer,
+                _ => aggregate
+                    .fields
+                    .first()
+                    .and_then(|field| self.scope_field(scope, field))
+                    .map(|field| field.kind.clone())
+                    .unwrap_or(FieldKind::Number),
+            };
+            scope.typed_extra.push(Field {
+                name: aggregate.column(),
+                kind,
+                ..Field::default()
+            });
             if let Some(columns) = &mut scope.columns {
                 columns.insert(aggregate.column());
             } else {

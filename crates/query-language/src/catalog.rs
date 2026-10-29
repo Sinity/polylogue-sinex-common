@@ -1,5 +1,5 @@
 //! Product-owned vocabulary and structural extension declarations.
-use crate::ast::Value;
+use crate::ast::{Argument, ResultPart, Source, Value};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -10,8 +10,59 @@ pub struct Catalog {
     pub commands: Vec<String>,
     pub extensions: Vec<Extension>,
     pub references: Vec<ReferenceSyntax>,
+    /// Immutable product-derived outputs of expanded saved questions and kept results.
+    #[serde(default)]
+    pub source_outputs: Vec<SourceOutput>,
     /// Both products accept pipes; products may additionally expose clauses without pipes.
     pub unpiped_stages: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OutputSource {
+    Saved {
+        name: String,
+        arguments: Vec<Argument>,
+    },
+    Result {
+        reference: String,
+        part: ResultPart,
+    },
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputSchema {
+    pub fields: Vec<Field>,
+    pub main_time: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceOutput {
+    pub source: OutputSource,
+    pub schema: OutputSchema,
+}
+impl Catalog {
+    pub fn source_output(&self, source: &Source) -> Option<&OutputSchema> {
+        self.source_outputs.iter().find_map(|output| {
+            let matches = match (&output.source, source) {
+                (
+                    OutputSource::Saved { name, arguments },
+                    Source::Saved {
+                        name: other,
+                        arguments: actual,
+                        ..
+                    },
+                ) => name == other && arguments == actual,
+                (
+                    OutputSource::Result { reference, part },
+                    Source::Result {
+                        reference: other,
+                        part: actual,
+                        ..
+                    },
+                ) => reference == other && part == actual,
+                _ => false,
+            };
+            matches.then_some(&output.schema)
+        })
+    }
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Unit {

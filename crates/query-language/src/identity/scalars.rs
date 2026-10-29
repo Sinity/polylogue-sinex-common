@@ -159,6 +159,17 @@ fn argument(a: &mut ExtensionArgument, scope: &Fields, catalog: &Catalog) {
 pub(super) fn canonicalize(query: &mut Query, catalog: &Catalog) {
     let mut scope = match &query.source {
         Source::Unit { unit, .. } | Source::RecallLast { unit, .. } => fields(catalog, unit),
+        Source::Saved { .. } | Source::Result { .. } => catalog
+            .source_output(&query.source)
+            .map(|output| {
+                output
+                    .fields
+                    .iter()
+                    .cloned()
+                    .map(|f| (f.name.clone(), f))
+                    .collect()
+            })
+            .unwrap_or_default(),
         _ => fields(catalog, &catalog.default_unit),
     };
     match &mut query.source {

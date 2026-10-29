@@ -1,0 +1,218 @@
+use query_language::{
+    ErrorKind, ast::*, bind::bind, catalog::*, format::format_query, identity::question_id,
+    parse::parse,
+};
+use std::collections::BTreeMap;
+fn field(name: &str, kind: FieldKind) -> Field {
+    Field {
+        name: name.into(),
+        kind,
+        ..Field::default()
+    }
+}
+fn catalog() -> Catalog {
+    let mut catalog = Catalog::new("sessions");
+    catalog.units.push(Unit {
+        name: "sessions".into(),
+        fields: vec![
+            field("default_only", FieldKind::Text),
+            field("id", FieldKind::Reference),
+        ],
+        ..Unit::default()
+    });
+    catalog
+}
+fn saved(name: &str, fields: Vec<Field>) -> SourceOutput {
+    SourceOutput {
+        source: OutputSource::Saved {
+            name: name.into(),
+            arguments: vec![],
+        },
+        schema: OutputSchema {
+            fields,
+            main_time: None,
+        },
+    }
+}
+fn result(reference: &str, part: ResultPart, fields: Vec<Field>) -> SourceOutput {
+    SourceOutput {
+        source: OutputSource::Result {
+            reference: reference.into(),
+            part,
+        },
+        schema: OutputSchema {
+            fields,
+            main_time: None,
+        },
+    }
+}
+#[test]
+fn saved_suffix_is_deferred_then_bound_to_actual_typed_output() {
+    let mut catalog = catalog();
+    let parsed = parse(
+        "query:failing session.repo:morrow | sort by count desc",
+        &catalog,
+    )
+    .unwrap();
+    assert!(matches!(
+        parsed.source,
+        Source::Saved {
+            output: OutputBinding::Deferred,
+            ..
+        }
+    ));
+    assert_eq!(
+        bind(&parsed, &catalog).unwrap_err().kind,
+        ErrorKind::BadValue
+    );
+    catalog.source_outputs.push(saved(
+        "failing",
+        vec![
+            field("session.repo", FieldKind::Text),
+            field("count", FieldKind::Integer),
+        ],
+    ));
+    let bound = bind(&parsed, &catalog).unwrap();
+    assert!(matches!(
+        bound.query().source,
+        Source::Saved {
+            output: OutputBinding::Known,
+            ..
+        }
+    ));
+    assert!(parse("query:failing default_only:no", &catalog).is_err());
+    assert_eq!(
+        parse("query:failing | where count > nope", &catalog)
+            .unwrap_err()
+            .kind,
+        ErrorKind::BadValue
+    );
+    assert_eq!(
+        parse("query:failing | sort by default_only", &catalog)
+            .unwrap_err()
+            .kind,
+        ErrorKind::UnknownField
+    );
+}
+#[test]
+fn grouped_promoted_aliases_types_and_closed_sets_come_from_output_snapshot() {
+    let mut catalog = catalog();
+    let mut state = field("state", FieldKind::Match);
+    state.values = vec!["Open".into(), "Closed".into()];
+    catalog.source_outputs.push(saved(
+        "grouped",
+        vec![
+            field("count", FieldKind::Integer),
+            field("promoted_alias", FieldKind::Money),
+            state,
+        ],
+    ));
+    let a = parse(
+        "query:grouped | where promoted_alias = 02.900usd AND state:open | sort by count",
+        &catalog,
+    )
+    .unwrap();
+    let b = parse(
+        "query:grouped | where state:Open AND promoted_alias = 2.9usd | sort by count",
+        &catalog,
+    )
+    .unwrap();
+    assert_eq!(
+        question_id(&a, &catalog, &BTreeMap::new()).unwrap(),
+        question_id(&b, &catalog, &BTreeMap::new()).unwrap()
+    );
+    assert!(bind(&a, &catalog).is_ok());
+    assert_eq!(
+        parse("query:grouped | where state:absent", &catalog)
+            .unwrap_err()
+            .kind,
+        ErrorKind::BadValue
+    );
+    assert!(
+        parse(
+            "query:grouped | fields count | sort by promoted_alias",
+            &catalog
+        )
+        .is_err()
+    );
+    let regrouped = parse(
+        "query:grouped | group by state | agg count | where count > 1",
+        &catalog,
+    )
+    .unwrap();
+    assert!(bind(&regrouped, &catalog).is_ok());
+    assert_eq!(
+        parse(
+            "query:grouped | group by state | agg count | where count > nope",
+            &catalog
+        )
+        .unwrap_err()
+        .kind,
+        ErrorKind::BadValue
+    );
+}
+#[test]
+fn kept_columns_and_quoted_literal_ids_keep_rows_and_matches_distinct() {
+    let mut catalog = catalog();
+    let reference = "result:source:λ | \"reader\".matches";
+    catalog.source_outputs.push(result(
+        reference,
+        ResultPart::Rows,
+        vec![field("id", FieldKind::Reference)],
+    ));
+    let query = parse(
+        r#"result:"source:λ | \"reader\".matches" | sort by id"#,
+        &catalog,
+    )
+    .unwrap();
+    assert!(
+        matches!(&query.source, Source::Result { reference: value, part: ResultPart::Rows, output: OutputBinding::Known } if value == reference)
+    );
+    let text = format_query(&query, &catalog).unwrap();
+    assert_eq!(
+        query_language::identity::normal_form(&parse(&text, &catalog).unwrap(), &catalog).unwrap(),
+        query_language::identity::normal_form(&query, &catalog).unwrap()
+    );
+    assert!(bind(&query, &catalog).is_ok());
+    let matches = parse("result:synthetic.matches | sort by count", &catalog).unwrap();
+    assert!(matches!(
+        matches.source,
+        Source::Result {
+            part: ResultPart::Matches,
+            output: OutputBinding::Deferred,
+            ..
+        }
+    ));
+    assert!(bind(&matches, &catalog).is_err());
+    catalog.source_outputs.push(result(
+        "result:synthetic",
+        ResultPart::Matches,
+        vec![field("count", FieldKind::Integer)],
+    ));
+    assert!(bind(&matches, &catalog).is_ok());
+    let rows = parse("result:synthetic.rows | sort by count", &catalog).unwrap();
+    assert!(bind(&rows, &catalog).is_err());
+}
+#[test]
+fn binding_checks_nested_sources_and_never_trusts_serialized_known_marker() {
+    let mut catalog = catalog();
+    catalog
+        .source_outputs
+        .push(saved("outer", vec![field("id", FieldKind::Reference)]));
+    let query = parse(
+        "query:outer | where id in (query:inner | fields id)",
+        &catalog,
+    )
+    .unwrap();
+    assert!(bind(&query, &catalog).is_err());
+    catalog
+        .source_outputs
+        .push(saved("inner", vec![field("id", FieldKind::Reference)]));
+    assert!(bind(&query, &catalog).is_ok());
+    let mut forged = parse("result:missing", &catalog).unwrap();
+    if let Source::Result { output, .. } = &mut forged.source {
+        *output = OutputBinding::Known;
+    }
+    let forged: Query = serde_json::from_value(serde_json::to_value(forged).unwrap()).unwrap();
+    assert!(bind(&forged, &catalog).is_err());
+}

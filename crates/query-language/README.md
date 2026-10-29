@@ -151,6 +151,14 @@ the resolved question. It is sealed: opaque to the caller and checked on use.
 - A page may be empty and still carry a cursor; only a page without a next
   cursor is the end.
 
+## Saved and kept output binding
+
+`Source::Saved` and `Source::Result` carry `OutputBinding::Deferred` until the product supplies their output in the immutable catalog's `source_outputs`. A `SourceOutput` identifies the saved name and arguments, or kept reference and `ResultPart`, and provides an `OutputSchema` of typed fields and optional main time. Products derive these schemas from expanded saved definitions or stored result columns. The parser performs no reads and never borrows the default unit's fields for either source.
+
+A deferred tree is syntax only. Before execution, the product calls `bind::bind` with the derived snapshot; the resulting `BoundQuery` contains a tree whose saved and kept scopes are all known, including nested sources. Binding reuses the shared parser's field, type and closed-set checks and refuses missing schemas, unknown suffix fields and invalid values. Products use that same snapshot for canonical identity. The binding marker is validation state and does not enter question identity; the `since`, `until`, source identity and kept result part do.
+
+A kept reference's `.rows` or `.matches` selector is a typed `ResultPart`. A quoted identity retains those characters as literal data: `result:"example.matches"` reads rows from that identity, while `result:"example".matches` selects matches from `example`.
+
 ## Completion
 
 The completer proposes what may come next at a grammar position (units,

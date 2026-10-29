@@ -47,6 +47,8 @@ mechanic and nothing else in the shared crates.
 | time quality | where an event time came from: intrinsic, captured, file modification time, the operator, or unknown |
 | precision | how exact a time is: `instant` to `year`, or `bounded` with an end |
 | coarse time | a time whose precision is a period rather than an instant |
+| output schema | the typed fields and optional main time of an expanded saved question or kept result |
+| bound query | a query whose source output scopes and suffix fields have passed shared binding |
 | time bound | a `since` lower bound or `until` exclusive upper bound, preserved as its own query operation |
 
 ## Operations and transport

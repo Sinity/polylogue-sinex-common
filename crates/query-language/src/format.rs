@@ -7,7 +7,7 @@ use crate::{Error, ErrorKind};
 /// A round trip through this catalog must preserve the canonical question. This
 /// also refuses manually constructed trees the language cannot express.
 pub fn format_query(query: &Query, catalog: &Catalog) -> Result<String, Error> {
-    let text = Renderer { catalog }.query(query)?;
+    let text = render_query(query, catalog)?;
     let parsed = crate::parse::parse(&text, catalog)
         .map_err(|error| invalid(format!("syntax tree cannot be rendered: {}", error.message)))?;
     if crate::identity::normal_form(query, catalog)?
@@ -18,6 +18,9 @@ pub fn format_query(query: &Query, catalog: &Catalog) -> Result<String, Error> {
         ));
     }
     Ok(text)
+}
+pub(crate) fn render_query(query: &Query, catalog: &Catalog) -> Result<String, Error> {
+    Renderer { catalog }.query(query)
 }
 fn invalid(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::InvalidQuery, message, 0)
@@ -36,8 +39,25 @@ impl Renderer<'_> {
                 }
                 text
             }
-            Source::Saved { name, arguments } => self.saved(name, arguments)?,
-            Source::Result { reference } => reference.clone(),
+            Source::Saved {
+                name, arguments, ..
+            } => self.saved(name, arguments)?,
+            Source::Result {
+                reference, part, ..
+            } => {
+                let id = reference
+                    .strip_prefix("result:")
+                    .ok_or_else(|| invalid("a result source needs the result: prefix"))?;
+                format!(
+                    "result:{}{}",
+                    quote(id),
+                    if *part == ResultPart::Matches {
+                        ".matches"
+                    } else {
+                        ""
+                    }
+                )
+            }
             Source::Walk {
                 direction,
                 reference,
