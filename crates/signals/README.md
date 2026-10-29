@@ -312,3 +312,5 @@ evaluator or notification implementation.
   unanswered attempt stays `unknown` and is not resent.
 - **slow-server-never-holds-writer**: a notification server that never answers
   does not delay any commit.
+
+`Evaluator`, `HostPolicy` and `NotificationState` expose the complete serialized checkpoint through `JsonSchema`, including private nested state. Products embed these types and the typed notification receipts directly in their atomic signal commit DTOs. Authenticated host rechecks use `Condition` with the closed wire values `matching`, `ended` and `incomplete`.

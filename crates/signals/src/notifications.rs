@@ -4,6 +4,7 @@
 
 use crate::DeliveryOutcome;
 use futures_util::StreamExt;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -17,7 +18,7 @@ const DESTINATION: &str = "org.freedesktop.Notifications";
 const PATH: &str = "/org/freedesktop/Notifications";
 
 /// The evaluator has already applied quiet hours and the shared host budget.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct Notice {
     pub delivery_id: String,
     pub product: String,
@@ -38,7 +39,7 @@ pub struct Notice {
     pub budget_passive_count: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Route {
     #[default]
@@ -60,7 +61,7 @@ pub struct NotificationConfig {
     pub deadline: Duration,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum DesktopEvent {
     /// The product opens this reference through its ordinary read operation.
@@ -74,7 +75,7 @@ pub enum DesktopEvent {
     Closed,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct NotificationReceipt {
     pub delivery_id: String,
     pub route: Route,
@@ -85,7 +86,7 @@ pub struct NotificationReceipt {
     pub via: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct Attempt {
     pub notice: Notice,
     pub dbus: Option<DeliveryOutcome>,
@@ -97,7 +98,7 @@ pub struct Attempt {
 
 /// Persist this beside the product's delivery records. An unknown attempt is
 /// deliberately terminal: after a crash there is no safe automatic resend.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct NotificationState {
     pub attempts: BTreeMap<String, Attempt>,
     slots: BTreeMap<String, u32>,

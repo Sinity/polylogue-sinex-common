@@ -14,13 +14,14 @@ pub struct FiredIntent {
     pub rate_limit: Option<RateLimit>,
     pub current: bool,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum Condition {
     Matching,
     Ended,
     Incomplete,
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 struct Held {
     intent: FiredIntent,
     due: Instant,
@@ -28,7 +29,7 @@ struct Held {
 
 /// One value belongs to the host deliverer, including all local and forwarded
 /// product intents. Persist it atomically with emitted delivery records.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct HostPolicy {
     pub quiet_hours: Option<QuietHours>,
     pub budget: InterruptBudget,

@@ -172,7 +172,7 @@ impl InterruptBudget {
         true
     }
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 struct Pending {
     trigger: Trigger,
     due: Instant,
@@ -181,13 +181,13 @@ struct Pending {
     change: Option<Change>,
     value: Option<f64>,
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 struct Snapshot {
     at: Instant,
     order: Vec<Occurrence>,
     rows: Vec<Row>,
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 struct RuleState {
     active: ActiveRule,
     started: Instant,
@@ -237,7 +237,7 @@ fn change_basis(before: &Snapshot, after: &Snapshot) -> Vec<Row> {
         .into_values()
         .collect()
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Evaluator {
     now: Instant,
     policy: Policy,
