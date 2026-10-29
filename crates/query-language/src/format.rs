@@ -220,7 +220,13 @@ impl Renderer<'_> {
                 TextMode::Prefix => format!("{}*", word(text)?),
                 TextMode::Approximate => format!("{}~", word(text)?),
             },
-            ConditionKind::Reference { reference } => literal(reference)?,
+            ConditionKind::Reference { reference } => {
+                if let Some(id) = reference.strip_prefix("result:") {
+                    format!("result:{}", quote(id))
+                } else {
+                    literal(reference)?
+                }
+            }
             ConditionKind::Similar { value: literal } => format!("similar:{}", value(literal)?),
             ConditionKind::Exists { unit, condition } => format!(
                 "exists {}({})",
