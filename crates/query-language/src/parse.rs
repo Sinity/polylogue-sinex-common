@@ -1,6 +1,9 @@
 //! Catalog-driven parsing for piped and clause-oriented surfaces.
 use crate::ast::*;
-use crate::catalog::{Catalog, ExtensionPosition, ExtensionSlot, Field, FieldKind, OutputSchema};
+use crate::catalog::{
+    Catalog, ExtensionPosition, ExtensionSlot, Field, FieldKind, MatchPattern, MatchSource,
+    OutputSchema,
+};
 use crate::{Error, ErrorKind};
 use std::collections::{BTreeMap, BTreeSet};
 mod typing;
@@ -215,19 +218,31 @@ pub fn parse(text: &str, catalog: &Catalog) -> Result<Query, Error> {
     }
 }
 fn parse_once(text: &str, catalog: &Catalog) -> Result<Query, Error> {
-    parse_internal(text, catalog, false).map(|(query, _)| query)
+    parse_internal(text, catalog, false).map(|parsed| parsed.query)
 }
-pub(crate) fn parse_typed(
-    text: &str,
-    catalog: &Catalog,
-) -> Result<(Query, crate::scope::Typing), Error> {
+pub(crate) fn parse_typed(text: &str, catalog: &Catalog) -> Result<Parsed, Error> {
     parse_internal(text, catalog, true)
 }
-fn parse_internal(
+/// Product metadata needed by Matches stages, collected by the same parser
+/// that checks their suffixes. Load saved/result schemas first when deferred.
+pub fn matches_requirements(text: &str, catalog: &Catalog) -> Result<Vec<MatchSource>, Error> {
+    parse_internal(text, catalog, false).map(|parsed| parsed.required_matches)
+}
+/// Qualifiers of the final relation, after this parser has applied every stage.
+/// None denotes unresolved source/projection metadata, not an empty relation.
+pub fn relation_patterns(
     text: &str,
     catalog: &Catalog,
-    capture_types: bool,
-) -> Result<(Query, crate::scope::Typing), Error> {
+) -> Result<Option<Vec<MatchPattern>>, Error> {
+    parse_internal(text, catalog, false).map(|parsed| parsed.relation_patterns)
+}
+pub(crate) struct Parsed {
+    pub query: Query,
+    pub typing: crate::scope::Typing,
+    pub required_matches: Vec<MatchSource>,
+    relation_patterns: Option<Vec<MatchPattern>>,
+}
+fn parse_internal(text: &str, catalog: &Catalog, capture_types: bool) -> Result<Parsed, Error> {
     let mut p = Parser {
         tokens: tokens(text, catalog)?,
         at: 0,
@@ -236,6 +251,8 @@ fn parse_internal(
         captures: Vec::new(),
         query_stack: Vec::new(),
         capture_types,
+        required_matches: BTreeSet::new(),
+        relation_patterns: None,
     };
     let query = p.query()?;
     if p.peek().is_some() {
@@ -246,7 +263,12 @@ fn parse_internal(
     } else {
         crate::scope::Typing::default()
     };
-    Ok((query, typing))
+    Ok(Parsed {
+        query,
+        typing,
+        required_matches: p.required_matches.into_iter().collect(),
+        relation_patterns: p.relation_patterns,
+    })
 }
 #[derive(Clone, PartialEq, Eq)]
 struct Scope {
@@ -260,6 +282,7 @@ struct Scope {
     origins: Arc<BTreeMap<String, crate::scope::Origin>>,
     group_input: Option<Arc<Scope>>,
     output_source: Option<crate::catalog::OutputSource>,
+    match_patterns: Option<Vec<MatchPattern>>,
 }
 impl Scope {
     fn new(unit: String) -> Self {
@@ -274,6 +297,7 @@ impl Scope {
             origins: Arc::new(BTreeMap::new()),
             group_input: None,
             output_source: None,
+            match_patterns: Some(Vec::new()),
         }
     }
 }
@@ -285,6 +309,8 @@ struct Parser<'a> {
     captures: Vec<Option<typing::Capture>>,
     query_stack: Vec<(usize, usize)>,
     capture_types: bool,
+    required_matches: BTreeSet<MatchSource>,
+    relation_patterns: Option<Vec<MatchPattern>>,
 }
 impl Parser<'_> {
     fn peek(&self) -> Option<&Token> {
@@ -673,6 +699,7 @@ impl Parser<'_> {
         if self.take("with") {
             attach = self.attachments()?;
         }
+        scope.match_patterns = crate::matches::source_context(&source, self.catalog).1;
         let source_scope = self.capture_types.then(|| scope.clone());
         let mut stage_scopes = Vec::new();
         let mut stages = Vec::new();
@@ -693,6 +720,9 @@ impl Parser<'_> {
                 source,
                 stages: stage_scopes,
             });
+        }
+        if self.query_stack.len() == 1 {
+            self.relation_patterns = scope.match_patterns.clone();
         }
         self.query_stack.pop();
         Ok(Query {
@@ -1800,7 +1830,37 @@ impl Parser<'_> {
                 count: self.number()?,
             },
             "distinct" => StageKind::Distinct,
-            "matches" => StageKind::Matches,
+            "matches" => {
+                let unit = self
+                    .catalog
+                    .unit(&scope.unit)
+                    .map(|unit| unit.name.as_str());
+                let request =
+                    crate::matches::request(unit, scope.match_patterns.as_deref(), start)?;
+                let output = request
+                    .as_ref()
+                    .and_then(|request| self.catalog.match_output(request))
+                    .cloned();
+                if let Some(request) = request {
+                    self.required_matches.insert(request);
+                }
+                *scope = Scope::new(
+                    output
+                        .as_ref()
+                        .and_then(|output| output.unit.clone())
+                        .unwrap_or_else(|| "$matches".into()),
+                );
+                scope.deferred = output.is_none();
+                scope.match_patterns = output.as_ref().map(|_| Vec::new());
+                if let Some(output) = output {
+                    for field in &output.fields {
+                        Arc::make_mut(&mut scope.origins)
+                            .insert(field.name.clone(), crate::scope::Origin::Generated);
+                    }
+                    scope.output = Some(Arc::new(output));
+                }
+                StageKind::Matches
+            }
             "fill" => {
                 if !scope.bucketed {
                     return Err(self.error("fill follows a time-bucketed group by"));
@@ -2017,6 +2077,7 @@ impl Parser<'_> {
                     } else {
                         None
                     };
+                    scope.match_patterns = Some(crate::matches::patterns(condition.as_ref()));
                     StageKind::Scope {
                         unit: scope.unit.clone(),
                         condition,
@@ -2024,6 +2085,9 @@ impl Parser<'_> {
                 }
             }
         };
+        if crate::matches::invalidates(&kind) {
+            scope.match_patterns = Some(Vec::new());
+        }
         if !matches!(kind, StageKind::Group { .. } | StageKind::Aggregate { .. }) {
             scope.group_input = None;
         }

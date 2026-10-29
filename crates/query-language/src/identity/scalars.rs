@@ -161,6 +161,8 @@ fn argument(a: &mut ExtensionArgument, scope: &Fields, catalog: &Catalog) {
     }
 }
 pub(super) fn canonicalize(query: &mut Query, catalog: &Catalog) {
+    let (mut match_unit, mut match_patterns) =
+        crate::matches::source_context(&query.source, catalog);
     let mut scope = match &query.source {
         Source::Unit { unit, .. } | Source::RecallLast { unit, .. } => fields(catalog, unit),
         Source::Saved { .. } | Source::Result { .. } => catalog
@@ -218,17 +220,50 @@ pub(super) fn canonicalize(query: &mut Query, catalog: &Catalog) {
     }
     let mut group_input = None;
     for stage in &mut query.stages {
+        if crate::matches::invalidates(&stage.kind) {
+            match_patterns = Some(Vec::new());
+        }
         match &mut stage.kind {
             StageKind::Where { condition: c } => {
                 condition(c, &scope, catalog);
                 group_input = None;
             }
             StageKind::Scope { unit, condition: c } => {
+                match_unit = catalog.unit(unit).map(|unit| unit.name.clone());
+                match_patterns = Some(crate::matches::patterns(c.as_ref()));
                 group_input = None;
                 scope = fields(catalog, unit);
                 if let Some(c) = c {
                     condition(c, &scope, catalog);
                 }
+            }
+            StageKind::Matches => {
+                let source = crate::matches::request(
+                    match_unit.as_deref(),
+                    match_patterns.as_deref(),
+                    stage.span.start,
+                )
+                .ok()
+                .flatten();
+                let output = source
+                    .as_ref()
+                    .and_then(|source| catalog.match_output(source));
+                scope = output
+                    .map(|output| {
+                        output
+                            .fields
+                            .iter()
+                            .cloned()
+                            .map(|field| (field.name.clone(), field))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                match_unit = output
+                    .and_then(|output| output.unit.as_deref())
+                    .and_then(|unit| catalog.unit(unit))
+                    .map(|unit| unit.name.clone());
+                match_patterns = output.map(|_| Vec::new());
+                group_input = None;
             }
             StageKind::Group { keys } => {
                 group_input = Some(scope.clone());

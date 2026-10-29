@@ -32,6 +32,7 @@ fn saved(name: &str, fields: Vec<Field>) -> SourceOutput {
             unit: Some("sessions".into()),
             fields,
             main_time: None,
+            match_patterns: Vec::new(),
         },
     }
 }
@@ -45,6 +46,7 @@ fn result(reference: &str, part: ResultPart, fields: Vec<Field>) -> SourceOutput
             unit: Some("sessions".into()),
             fields,
             main_time: None,
+            match_patterns: Vec::new(),
         },
     }
 }
@@ -282,6 +284,7 @@ fn saved_argument_snapshot_matching_ignores_quoted_spelling_and_parameter_order(
             unit: Some("sessions".into()),
             fields: vec![field("count", FieldKind::Integer)],
             main_time: None,
+            match_patterns: Vec::new(),
         },
     });
     assert!(bind(&parsed, &catalog).is_ok());
@@ -347,6 +350,7 @@ fn nested_implicit_units_inherit_the_row_domain_and_explicit_units_keep_their_ow
             unit: Some("commands".into()),
             fields: vec![field("id", FieldKind::Reference)],
             main_time: None,
+            match_patterns: Vec::new(),
         },
     });
     let bound = bind(&deferred, &catalog).unwrap();

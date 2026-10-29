@@ -68,6 +68,7 @@ fn saved_sources_keep_their_own_suffix_schema_outside_boolean_membership() {
                     ..Field::default()
                 }],
                 main_time: None,
+                match_patterns: Vec::new(),
             },
         });
         for text in [
@@ -125,5 +126,37 @@ fn missing_parentheses_offer_only_a_complete_executable_closure() {
             );
         }
         parse("\"(\"", &catalog).unwrap();
+    }
+}
+
+#[test]
+fn incomplete_saved_boolean_completion_uses_the_enclosing_native_domain() {
+    for (mut catalog, native) in catalogs() {
+        catalog.source_outputs.push(SourceOutput {
+            source: OutputSource::Saved {
+                name: "ExactCase".into(),
+                arguments: Vec::new(),
+            },
+            schema: OutputSchema {
+                unit: Some(catalog.default_unit.clone()),
+                fields: vec![Field {
+                    name: "promoted".into(),
+                    ..Field::default()
+                }],
+                ..OutputSchema::default()
+            },
+        });
+        let text = "query:ExactCase OR ";
+        let candidates = query_language::complete::complete(text, text.len(), &catalog);
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.value.starts_with(native))
+        );
+        assert!(
+            !candidates
+                .iter()
+                .any(|candidate| candidate.value.starts_with("promoted"))
+        );
     }
 }

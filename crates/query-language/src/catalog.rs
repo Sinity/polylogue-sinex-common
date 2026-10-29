@@ -13,6 +13,10 @@ pub struct Catalog {
     /// Immutable product-derived outputs of expanded saved questions and kept results.
     #[serde(default)]
     pub source_outputs: Vec<SourceOutput>,
+    /// Product-declared columns emitted by an actual Matches projection.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub match_outputs: Vec<MatchOutput>,
     /// Both products accept pipes; products may additionally expose clauses without pipes.
     pub unpiped_stages: bool,
 }
@@ -34,6 +38,31 @@ pub struct OutputSchema {
     pub unit: Option<String>,
     pub fields: Vec<Field>,
     pub main_time: Option<String>,
+    /// Runtime qualifiers of the actual entering relation, rebuilt from frozen
+    /// syntax. They are outside serialized canonical bodies and their schemas.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub match_patterns: Vec<MatchPattern>,
+}
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MatchPattern {
+    Exists { unit: String },
+    Sequence { unit: String, steps: usize },
+}
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
+)]
+pub struct MatchSource {
+    pub parent_unit: String,
+    pub pattern: MatchPattern,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct MatchOutput {
+    pub source: MatchSource,
+    pub schema: OutputSchema,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SourceOutput {
@@ -41,6 +70,12 @@ pub struct SourceOutput {
     pub schema: OutputSchema,
 }
 impl Catalog {
+    pub fn match_output(&self, source: &MatchSource) -> Option<&OutputSchema> {
+        self.match_outputs
+            .iter()
+            .find(|output| &output.source == source)
+            .map(|output| &output.schema)
+    }
     pub fn source_output(&self, source: &Source) -> Option<&OutputSchema> {
         self.source_outputs.iter().find_map(|output| {
             let matches = match (&output.source, source) {

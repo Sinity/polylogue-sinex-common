@@ -323,6 +323,7 @@ fn saved_output_completion_uses_typed_snapshot_fields_and_every_value_path() {
                         ..Field::default()
                     },
                 ],
+                match_patterns: Vec::new(),
             },
         });
         let fields: Vec<_> = complete("query:failing | where ", 22, &catalog)
@@ -423,6 +424,7 @@ fn result_rows_and_matches_have_separate_field_and_value_completion_scopes() {
                         help: value.into(),
                         ..Field::default()
                     }],
+                    match_patterns: Vec::new(),
                 },
             });
         }
@@ -474,6 +476,7 @@ fn nested_implicit_completion_uses_saved_actual_row_domain_and_defers_unknown_do
                     ..Field::default()
                 }],
                 main_time: None,
+                match_patterns: Vec::new(),
             },
         });
         let prefix = "query:grouped | where id in (";
@@ -520,6 +523,7 @@ fn requirements_load_active_source_schema_before_its_value_section() {
                     values: vec!["prefix value".into()],
                     ..Field::default()
                 }],
+                match_patterns: Vec::new(),
             },
         });
         let loaded = requirements(text, text.len(), &catalog);
@@ -556,6 +560,7 @@ fn requirements_decode_quotes_and_stop_at_the_byte_cursor_in_every_value_positio
                 name: "session.repo".into(),
                 ..Field::default()
             }],
+            match_patterns: Vec::new(),
         },
     });
     for (text, cursor, expected) in [
@@ -630,6 +635,7 @@ fn requirements_keep_result_parts_and_nested_source_dependencies_typed() {
                     name: field.into(),
                     ..Field::default()
                 }],
+                match_patterns: Vec::new(),
             },
         });
     }
@@ -742,6 +748,7 @@ fn requirements_keep_group_aliases_and_exclude_stage_reference_requests() {
                 values: vec!["prefix".into()],
                 ..Field::default()
             }],
+            match_patterns: Vec::new(),
         },
     });
     for (text, field, prefix) in [

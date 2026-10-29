@@ -175,6 +175,20 @@ Inline conditions on saved and kept sources are stored in their source's `condit
 
 A kept reference's `.rows` or `.matches` selector is a typed `ResultPart`. A quoted identity retains those characters as literal data: `result:"example.matches"` reads rows from that identity, while `result:"example".matches` selects matches from `example`.
 
+## Matches projection scopes
+
+`StageKind::Matches` keeps its existing AST shape. A product supplies the actual emitted columns in `Catalog.match_outputs`, as `MatchOutput { source: MatchSource { parent_unit, pattern }, schema: OutputSchema }`. `MatchPattern` is `Exists { unit }` or `Sequence { unit, steps }`. These are canonical row-domain names. The sequence AST has one step domain for the whole sequence; `all`, `next` and `within` change selected occurrences, not the output-column shape. Different step counts require different declarations.
+
+`matches::patterns(condition)` is the one collector of top-level AND qualifiers. OR, NOT and nested child conditions do not nominate a projection of their enclosing relation. `parse::relation_patterns(text, catalog)` exposes that same parser's final relation state after all stages; products use it on the retained expanded saved AST, rather than guessing qualifiers from current saved names. `OutputSchema.match_patterns` carries that runtime state when a saved relation hides its original condition. `None` from the final-state helper means unresolved metadata; a known empty vector means no qualifying projection.
+
+A Matches stage needs exactly one qualifier in its actual entering relation. Zero qualifiers refuse; multiple qualifiers are ambiguous. Matches consumes the qualifier. Projection, grouping and aggregates invalidate it; limit, offset, first/last and distinct preserve the actual row domain and its per-row qualifiers; a scoped unit starts with its own condition. `parse::matches_requirements(text, catalog)` reports the needed `MatchSource` keys through the same parser. Load deferred saved/result schemas first, then load the actual product projection declarations and bind. Missing Matches output remains deferred syntax and exposes no default-unit fields; `bind::bind` refuses to execute it. The supplied output is authoritative for parsing, shared typing, scalar canonicalization and completion, including closed sets and numeric-looking text.
+
+`complete::requirements(...).match_outputs` reports the active projection declarations, including an inherited nested row scope. Products load those declarations before the active value section, then call `complete` with the same snapshot. No provider callback or I/O runs inside parsing, binding or deserialization.
+
+`match_patterns` and `match_outputs` are recomputable runtime metadata, skipped by both Serde and JsonSchema. They never add fields to stored QueryObject/FrozenQueryDefinition bodies, native source facts, their schema declarations or the semantic question hash. Rebuild them from frozen definitions and the owned column declarations before binding or replay; deserialization establishes no executable projection. A product's canonical-object factory keeps only the serialized schema fields in its immutable body and rebuilds runtime metadata when validating that body.
+
+The reference evaluator retains its synthetic sequence-identity tuples. It explicitly refuses Exists projections and suffixes that require product Matches columns. It does not invent `stepN_message`, gap values or aliases from column names. Product execution laws must prove those values against the actual producer. A product without a Matches adapter, including Sinex's current compiler, keeps its explicit unsupported refusal.
+
 ## Completion
 
 Completion uses the same typed output-schema snapshot as parsing and binding. Saved and kept sources offer their actual fields, help and closed-set values, including promoted or grouped aliases; rows and matches use separate schemas. Missing output schemas offer no default-unit fields. Every value position, including an open quote, reads the active schema's field declaration. Nested omitted sources use the enclosing actual row unit rather than its shaped output columns.
@@ -219,6 +233,7 @@ Sinex's adoption replaces parsing and time mechanics in `sinex-model::query` whi
 The crate's law suite runs against both catalogs; each compiler runs it plus
 its own laws.
 
+- **matches-output-scope**: both catalogs validate suffix fields, types, closed values, completion and scalar spelling against the supplied projection only; absent metadata cannot bind, and consumed or changed relations cannot reuse qualifiers. Projection values are proved by the product producer laws.
 - **format-roundtrip**: parsing formatted syntax preserves the canonical question,
   including implicit time bounds, explicit random seeds and complete measure selectors;
   formatting the result again produces the same text. The law runs against both catalogs.

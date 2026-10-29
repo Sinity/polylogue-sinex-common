@@ -225,6 +225,7 @@ fn saved_and_result_scopes_retain_snapshot_fields_and_closed_values() {
             ..Field::default()
         }],
         main_time: None,
+        match_patterns: Vec::new(),
     };
     catalog.source_outputs = vec![
         SourceOutput {

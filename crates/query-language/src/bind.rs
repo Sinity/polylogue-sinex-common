@@ -41,40 +41,107 @@ pub fn bind(query: &Query, catalog: &Catalog) -> Result<BoundQuery, Error> {
                 0,
             ));
         }
-        if let Some(unit) = &output.schema.unit
-            && catalog.unit(unit).is_none()
-        {
-            return Err(unbound(format!("output row domain {unit:?}")));
-        }
-        let mut names = BTreeSet::new();
-        for field in &output.schema.fields {
-            if field.name.is_empty() || !names.insert(field.name.as_str()) {
-                return Err(Error::new(
-                    ErrorKind::BadValue,
-                    "output fields need distinct nonempty names",
-                    0,
-                ));
-            }
-        }
-        if output
-            .schema
-            .main_time
-            .as_ref()
-            .is_some_and(|name| !names.contains(name.as_str()))
+        check_schema(&output.schema, catalog)?;
+    }
+    for (index, output) in catalog.match_outputs.iter().enumerate() {
+        if catalog.match_outputs[..index]
+            .iter()
+            .any(|other| other.source == output.source)
         {
             return Err(Error::new(
+                ErrorKind::Ambiguous,
+                "duplicate Matches output schema",
+                0,
+            ));
+        }
+        check_match_unit(&output.source.parent_unit, catalog)?;
+        check_pattern(&output.source.pattern, catalog)?;
+        check_schema(&output.schema, catalog)?;
+        if !output.schema.match_patterns.is_empty() {
+            return Err(Error::new(
                 ErrorKind::BadValue,
-                "output main time is not an output field",
+                "Matches output cannot retain consumed qualifiers",
                 0,
             ));
         }
     }
     let text = crate::format::render_query(query, catalog)?;
-    let (query, typing) = crate::parse::parse_typed(&text, catalog)
+    let parsed = crate::parse::parse_typed(&text, catalog)
         .map_err(|error| crate::parse::parse(&text, catalog).err().unwrap_or(error))?;
-    check_query(&query, catalog)?;
-    Ok(BoundQuery { query, typing })
+    check_query(&parsed.query, catalog)?;
+    for source in parsed.required_matches {
+        if catalog.match_output(&source).is_none() {
+            return Err(unbound(format!("Matches projection {source:?}")));
+        }
+    }
+    Ok(BoundQuery {
+        query: parsed.query,
+        typing: parsed.typing,
+    })
 }
+fn check_match_unit(name: &str, catalog: &Catalog) -> Result<(), Error> {
+    let unit = catalog
+        .unit(name)
+        .ok_or_else(|| unbound(format!("Matches row domain {name:?}")))?;
+    if unit.name != name {
+        return Err(Error::new(
+            ErrorKind::BadValue,
+            "Matches metadata needs canonical row-domain names",
+            0,
+        ));
+    }
+    Ok(())
+}
+fn check_pattern(pattern: &crate::catalog::MatchPattern, catalog: &Catalog) -> Result<(), Error> {
+    use crate::catalog::MatchPattern;
+    let unit = match pattern {
+        MatchPattern::Exists { unit } => unit,
+        MatchPattern::Sequence { unit, steps } => {
+            if *steps == 0 {
+                return Err(Error::new(
+                    ErrorKind::BadValue,
+                    "a sequence projection needs at least one step",
+                    0,
+                ));
+            }
+            unit
+        }
+    };
+    check_match_unit(unit, catalog)
+}
+fn check_schema(output: &crate::catalog::OutputSchema, catalog: &Catalog) -> Result<(), Error> {
+    if let Some(unit) = &output.unit
+        && catalog.unit(unit).is_none()
+    {
+        return Err(unbound(format!("output row domain {unit:?}")));
+    }
+    let mut names = BTreeSet::new();
+    for field in &output.fields {
+        if field.name.is_empty() || !names.insert(field.name.as_str()) {
+            return Err(Error::new(
+                ErrorKind::BadValue,
+                "output fields need distinct nonempty names",
+                0,
+            ));
+        }
+    }
+    if output
+        .main_time
+        .as_ref()
+        .is_some_and(|name| !names.contains(name.as_str()))
+    {
+        return Err(Error::new(
+            ErrorKind::BadValue,
+            "output main time is not an output field",
+            0,
+        ));
+    }
+    for pattern in &output.match_patterns {
+        check_pattern(pattern, catalog)?;
+    }
+    Ok(())
+}
+
 fn check_query(query: &Query, catalog: &Catalog) -> Result<(), Error> {
     if let Source::Unit { unit, .. } = &query.source
         && catalog.unit(unit).is_none()
@@ -139,7 +206,7 @@ fn unbound(source: String) -> Error {
         format!("{source} has no bound output schema"),
         0,
     )
-    .hint("Supply its expanded or kept typed output before execution")
+    .hint("Supply its actual typed output snapshot before execution")
 }
 fn check_condition(condition: &Condition, catalog: &Catalog) -> Result<(), Error> {
     match &condition.kind {

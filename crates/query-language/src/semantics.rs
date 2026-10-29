@@ -1055,7 +1055,42 @@ fn validate_query(query: &Query) -> Result<(), Error> {
         }
         _ => return Err(unsupported("non-unit source", 0)),
     }
+    let (unit, condition) = match &query.source {
+        Source::Unit {
+            unit, condition, ..
+        } => (unit.as_str(), condition.as_ref()),
+        _ => unreachable!(),
+    };
+    let mut available = crate::matches::patterns(condition);
+    let mut matched = false;
     for stage in &query.stages {
+        if matched
+            && (matches!(
+                stage.kind,
+                StageKind::Where { .. }
+                    | StageKind::Group { .. }
+                    | StageKind::Sort { .. }
+                    | StageKind::Fields { .. }
+                    | StageKind::Temporal { .. }
+            ) || matches!(&stage.kind, StageKind::Aggregate { aggregates } if aggregates.iter().any(|aggregate| !aggregate.fields.is_empty())))
+        {
+            return Err(unsupported(
+                "product Matches columns (the oracle exposes sequence identity tuples only)",
+                stage.span.start,
+            ));
+        }
+        if matches!(stage.kind, StageKind::Matches) {
+            let request = crate::matches::request(Some(unit), Some(&available), stage.span.start)?
+                .expect("known qualifier validation returns its request");
+            if matches!(request.pattern, crate::catalog::MatchPattern::Exists { .. }) {
+                return Err(unsupported("Exists Matches projection", stage.span.start));
+            }
+            available.clear();
+            matched = true;
+        }
+        if crate::matches::invalidates(&stage.kind) {
+            available.clear();
+        }
         match &stage.kind {
             StageKind::Where { condition } => validate_condition(condition)?,
             StageKind::Group { keys } => {

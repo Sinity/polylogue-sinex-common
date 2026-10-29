@@ -7,6 +7,7 @@ pub mod cursor;
 pub mod format;
 pub mod identity;
 pub mod laws;
+pub mod matches;
 pub mod number;
 pub mod parse;
 pub mod scope;
