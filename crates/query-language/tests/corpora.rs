@@ -176,7 +176,6 @@ fn sinex_predecessor_positive_corpus() {
         ("recall mark", "recall mark"),
         ("recall yesterday", "recall yesterday"),
         ("tide", "tide"),
-        ("tide offset", "tide offset"),
     ] {
         if original != shared {
             let refusal = parse(original, &c).expect_err(original);
@@ -192,6 +191,11 @@ fn sinex_predecessor_positive_corpus() {
 #[test]
 fn predecessor_refusals_and_documented_changes() {
     for (catalog, text, reason) in [
+        (
+            support::sinex(),
+            "tide offset",
+            "a declared field/stage name needs a value or an explicit quoted search",
+        ),
         (
             support::polylogue(),
             "count words",
@@ -341,4 +345,13 @@ fn sinex_associated_predecessor_positive_shapes() {
 fn associated_predecessor_mark_number_refusal() {
     let error = parse("recall mark 0", &support::sinex()).unwrap_err();
     assert!(error.message.contains("positive"));
+}
+
+#[test]
+fn predecessor_offset_text_refuses_with_quoted_correction() {
+    let c = support::sinex();
+    let error = parse("tide offset", &c).unwrap_err();
+    assert!(error.message.contains("field"));
+    assert_eq!(error.suggestion.as_deref(), Some("tide \"offset\""));
+    parse(error.suggestion.as_deref().unwrap(), &c).unwrap();
 }

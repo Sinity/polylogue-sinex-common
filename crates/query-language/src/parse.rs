@@ -712,7 +712,10 @@ impl Parser<'_> {
                 ));
             }
             let mut value = if raw.is_empty() {
-                if self.peek().is_some_and(|t| Op::parse(&t.text).is_some()) {
+                if self
+                    .peek()
+                    .is_some_and(|t| !t.quoted && Op::parse(&t.text).is_some())
+                {
                     let op = self.next()?;
                     let value = self.value()?;
                     let end = self.end();
@@ -906,7 +909,7 @@ impl Parser<'_> {
     }
     fn op(&mut self) -> Result<Op, Error> {
         let t = self.next()?;
-        Op::parse(&t.text).ok_or_else(|| {
+        Op::parse(&t.text).filter(|_| !t.quoted).ok_or_else(|| {
             Error::new(
                 ErrorKind::InvalidQuery,
                 "expected a comparison operator",
@@ -1024,8 +1027,8 @@ impl Parser<'_> {
     fn sequence(&mut self, scope: &Scope) -> Result<Condition, Error> {
         let unit = self
             .catalog
-            .sequence_unit
-            .clone()
+            .unit(&scope.unit)
+            .and_then(|unit| unit.sequence_unit.clone())
             .unwrap_or_else(|| scope.unit.clone());
         let scope = &Scope::new(unit.clone());
         let start = self.pos();
@@ -1379,9 +1382,14 @@ impl Parser<'_> {
             "limit" => StageKind::Limit {
                 count: self.number()?,
             },
-            "offset" => StageKind::Offset {
-                count: self.number()?,
-            },
+            "offset" => {
+                if self.query_end() && self.field_known(scope, &t.text) {
+                    return Err(Error::new(ErrorKind::InvalidQuery,"`offset` is a field and a stage; supply a stage count or quote it to search",t.span.start).suggestion(self.replace(t.span,"\"offset\"")));
+                }
+                StageKind::Offset {
+                    count: self.number()?,
+                }
+            }
             "first" => StageKind::First {
                 count: self.number()?,
             },

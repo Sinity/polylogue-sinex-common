@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Catalog {
     pub default_unit: String,
-    pub sequence_unit: Option<String>,
     pub recall_last_unit: Option<String>,
     pub units: Vec<Unit>,
     pub commands: Vec<String>,
@@ -17,6 +16,8 @@ pub struct Catalog {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Unit {
     pub name: String,
+    /// The row domain of sequence steps; None means this unit itself.
+    pub sequence_unit: Option<String>,
     pub aliases: Vec<String>,
     pub fields: Vec<Field>,
     pub defaults: Vec<DefaultFilter>,

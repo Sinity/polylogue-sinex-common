@@ -356,3 +356,32 @@ fn closed_sets_use_their_declared_spelling_in_the_bound_tree() {
     };
     assert_eq!(text, "running");
 }
+
+#[test]
+fn mixed_sequences_bind_each_scopes_own_relation_domain() {
+    let catalog = support::mixed();
+    let query=parse("pl.sessions where seq(tool:Bash -> outcome:error) AND exists sx.events(seq(source:demo -> source:other))",&catalog).unwrap();
+    let Source::Unit {
+        condition:
+            Some(Condition {
+                kind: ConditionKind::And { conditions },
+                ..
+            }),
+        ..
+    } = &query.source
+    else {
+        panic!()
+    };
+    assert!(conditions.iter().any(|condition|matches!(&condition.kind,ConditionKind::Sequence{unit,..} if unit=="pl.tool_calls")));
+    assert!(conditions.iter().any(|condition|matches!(&condition.kind,ConditionKind::Exists{unit,condition:Some(inner)} if unit=="sx.events"&&matches!(&inner.kind,ConditionKind::Sequence{unit,..} if unit=="sx.events"))));
+    assert_eq!(
+        query.namespaces().into_iter().collect::<Vec<_>>(),
+        ["pl", "sx"]
+    );
+    let rendered = query_language::format::format_query(&query, &catalog).unwrap();
+    let parsed = parse(&rendered, &catalog).unwrap();
+    assert_eq!(
+        query_language::identity::normal_form(&query, &catalog).unwrap(),
+        query_language::identity::normal_form(&parsed, &catalog).unwrap()
+    );
+}

@@ -5,7 +5,6 @@ use query_language::catalog::{Catalog, Field, FieldKind, Unit};
 
 pub fn polylogue() -> Catalog {
     let mut catalog = Catalog::new("sessions");
-    catalog.sequence_unit = Some("tool_calls".into());
     catalog.references = [
         ("session:", Some(":")),
         ("message:", None),
@@ -92,11 +91,13 @@ pub fn polylogue() -> Catalog {
         }
     }
 
+    for unit in &mut catalog.units {
+        unit.sequence_unit = Some("tool_calls".into());
+    }
     catalog
 }
 pub fn sinex() -> Catalog {
     let mut catalog = Catalog::new("events");
-    catalog.sequence_unit = Some("events".into());
     catalog.recall_last_unit = Some("shell-sessions".into());
     catalog.unpiped_stages = true;
     catalog.commands = [
@@ -186,15 +187,20 @@ pub fn mixed() -> Catalog {
     let mut s = sinex();
     for u in &mut c.units {
         u.name = format!("pl.{}", u.name);
+        if let Some(domain) = &mut u.sequence_unit {
+            *domain = format!("pl.{domain}");
+        }
         u.aliases.clear();
     }
     for u in &mut s.units {
         u.name = format!("sx.{}", u.name);
+        if let Some(domain) = &mut u.sequence_unit {
+            *domain = format!("sx.{domain}");
+        }
         u.aliases.clear();
     }
     c.units.extend(s.units);
     c.default_unit = "pl.sessions".into();
-    c.sequence_unit = Some("pl.tool_calls".into());
     c.recall_last_unit = Some("sx.shell-sessions".into());
     c.unpiped_stages = true;
     c
