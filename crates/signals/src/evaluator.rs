@@ -860,29 +860,27 @@ impl Evaluator {
                         }
                     }
                 }
-                Fires::At { minute } => {
-                    if state.next_at.is_some_and(|due| due <= at) {
-                        state.next_at = Some(calendar.next_at(at, minute));
-                        if !private && active.rule.enabled {
-                            let trigger = Trigger {
-                                rule: active.version.clone(),
-                                occurrence: Occurrence {
-                                    id: "logical_day".into(),
-                                    episode: calendar.logical_day(at),
-                                },
-                            };
-                            if !self.consumed.contains(&trigger) {
-                                self.pending
-                                    .entry(trigger.delivery_id())
-                                    .or_insert_with(|| Pending {
-                                        trigger,
-                                        due: at,
-                                        matched: at,
-                                        basis: state.rows.values().cloned().collect(),
-                                        change: None,
-                                        value: state.last_value,
-                                    });
-                            }
+                Fires::At { minute } if state.next_at.is_some_and(|due| due <= at) => {
+                    state.next_at = Some(calendar.next_at(at, minute));
+                    if !private && active.rule.enabled {
+                        let trigger = Trigger {
+                            rule: active.version.clone(),
+                            occurrence: Occurrence {
+                                id: "logical_day".into(),
+                                episode: calendar.logical_day(at),
+                            },
+                        };
+                        if !self.consumed.contains(&trigger) {
+                            self.pending
+                                .entry(trigger.delivery_id())
+                                .or_insert_with(|| Pending {
+                                    trigger,
+                                    due: at,
+                                    matched: at,
+                                    basis: state.rows.values().cloned().collect(),
+                                    change: None,
+                                    value: state.last_value,
+                                });
                         }
                     }
                 }
