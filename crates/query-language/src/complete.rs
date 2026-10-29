@@ -2,14 +2,14 @@
 use crate::ast::Span;
 use crate::catalog::{Catalog, Field, FieldKind};
 use serde::{Deserialize, Serialize};
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Completion {
     pub value: String,
     pub replace: Span,
     pub kind: CompletionKind,
     pub help: String,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CompletionKind {
     Unit,
