@@ -460,7 +460,15 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
     use crate::ast::{Source, StageKind};
     // Pick the innermost query/exists scope from delimiter tokens, while quoted data
     // contributes no grammar. Function and set parentheses retain the outer scope.
-    let mut stack: Vec<(usize, String, bool, Vec<OutputSource>, Vec<MatchSource>)> = Vec::new();
+    #[derive(Default)]
+    struct CompletionFrame {
+        start: usize,
+        unit: String,
+        inherited: bool,
+        sources: Vec<OutputSource>,
+        matches: Vec<MatchSource>,
+    }
+    let mut stack: Vec<CompletionFrame> = Vec::new();
     let mut quote = false;
     let mut escape = false;
     let mut words: Vec<String> = Vec::new();
@@ -494,9 +502,12 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
             if c == '(' {
                 let preceding = words.last().cloned().unwrap_or_default();
                 let relation = words.iter().rev().nth(1).is_some_and(|s| s == "exists");
-                stack.push((start, String::new(), false, Vec::new(), Vec::new()));
+                stack.push(CompletionFrame {
+                    start,
+                    ..CompletionFrame::default()
+                });
                 if relation && catalog.unit(&preceding).is_some() {
-                    stack.last_mut().unwrap().1 = preceding;
+                    stack.last_mut().unwrap().unit = preceding;
                     start = at + 1;
                 } else if matches!(
                     preceding.as_str(),
@@ -514,37 +525,34 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
                     let (unit, sources, matches) = row_scope(&text[start..at], catalog);
                     let unit = unit.unwrap_or_else(|| "$deferred_completion".into());
                     let entry = stack.last_mut().unwrap();
-                    entry.1 = unit;
-                    entry.2 = true;
-                    entry.3 = sources;
-                    entry.4 = matches;
+                    entry.unit = unit;
+                    entry.inherited = true;
+                    entry.sources = sources;
+                    entry.matches = matches;
                     start = at + 1;
                 }
             } else if c == ')'
-                && let Some((outer, _, _, _, _)) = stack.pop()
+                && let Some(outer) = stack.pop()
             {
-                start = outer;
+                start = outer.start;
             }
         } else {
             word.push(c);
         }
     }
     let inner = &text[start..];
-    let explicit = stack
-        .iter()
-        .rev()
-        .find(|(_, unit, _, _, _)| !unit.is_empty());
+    let explicit = stack.iter().rev().find(|frame| !frame.unit.is_empty());
     let inner_first = inner.split_whitespace().next().unwrap_or("");
     let inner_source =
         catalog.unit(inner_first).is_some() || crate::parse::starts_with_source(inner, catalog);
-    let inherited_deferred = explicit.is_some_and(|(_, unit, inherited, _, _)| {
-        *inherited && unit == "$deferred_completion" && !inner_source
+    let inherited_deferred = explicit.is_some_and(|frame| {
+        frame.inherited && frame.unit == "$deferred_completion" && !inner_source
     });
-    let current = if let Some((_, unit, inherited, _, _)) = explicit {
-        if *inherited && inner_source {
+    let current = if let Some(frame) = explicit {
+        if frame.inherited && inner_source {
             inner.to_string()
         } else {
-            format!("{unit} where {inner}")
+            format!("{} where {inner}", frame.unit)
         }
     } else {
         inner.to_string()
@@ -708,16 +716,16 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
             }
         }
     }
-    if let Some((_, _, inherited, sources, matches)) = explicit
-        && *inherited
+    if let Some(frame) = explicit
+        && frame.inherited
         && !inner_source
     {
-        for source in sources {
+        for source in &frame.sources {
             if !scope.sources.contains(source) {
                 scope.sources.push(source.clone());
             }
         }
-        for source in matches {
+        for source in &frame.matches {
             if !scope.match_outputs.contains(source) {
                 scope.match_outputs.push(source.clone());
             }
