@@ -387,9 +387,7 @@ fn a_mid_group_preparation_failure_cannot_make_partial_custody_committable() {
     assert_eq!(group.metrics.syncs, 1);
     assert_eq!(group.extents[0], group.extents[1]);
     writer.acknowledge(&group).unwrap();
-    assert!(Reader::new(dir.path())
-        .scan(&group.extents)
-        .is_empty());
+    assert!(Reader::new(dir.path()).scan(&group.extents).is_empty());
 }
 
 #[test]
