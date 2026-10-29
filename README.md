@@ -7,7 +7,7 @@ Rust crates and development tooling shared by
 | Crate | Holds |
 |---|---|
 | [`hashed-blobs`](crates/hashed-blobs/README.md) | content-addressed blobs in an append-only segment container, checked reads, PAX member access, the on-demand scan |
-| [`query-language`](docs/query-language.md) | the shared grammar and spelling, the syntax tree's meaning, time expressions, the logical day, cursors, the completer and the shared law suite |
+| [`query-language`](crates/query-language/README.md) | the shared grammar and spelling, the syntax tree's meaning, time expressions, the logical day, cursors, the completer and the shared law suite |
 | [`command-surface`](docs/command-surface.md) | the `Operation` trait, failures with their exit and HTTP table, request and answer envelopes, latency classes and deadlines, server-sent-event framing, the status figure format |
 | [`web-shell`](docs/web-shell.md) | the rendering model, visual tokens, the shared key table, palette, copy, page frame, live fragments and windowed lists |
 | [`signals`](docs/signals.md) | the signal rule schema, the evaluator and its laws, the interrupt budget and desktop notifications |

@@ -30,6 +30,10 @@ mechanic and nothing else in the shared crates.
 |---|---|
 | catalog | a product's units or tables, their fields, closed-set values and defaults |
 | compiler | a product's translation of a parsed query into execution |
+| normal form | the canonical parsed question, with source spans removed and commutative operands ordered |
+| question identity | the BLAKE3 hash of the normal form and declared parameter types |
+| read position | a product-owned retained view that a continuation reads |
+| version binding | a schema, definition, grant or ranking version fixed for a continuation |
 | unit | what a query reads rows of (a product's sessions, events, tables …) |
 | condition | one test of a row; conditions side by side are joined by `AND` |
 | stage | one `\|` step of a query |
@@ -40,6 +44,7 @@ mechanic and nothing else in the shared crates.
 | cursor | the sealed key that continues one question from its last row |
 | logical day | the day a person reads: from the start hour in the configured zone to the same hour the next day |
 | day setting | the zone and start hour that define the logical day (`DaySetting`) |
+| time quality | where an event time came from: intrinsic, captured, file modification time, the operator, or unknown |
 | precision | how exact a time is: `instant` to `year`, or `bounded` with an end |
 | coarse time | a time whose precision is a period rather than an instant |
 
