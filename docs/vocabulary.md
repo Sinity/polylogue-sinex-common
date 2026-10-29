@@ -44,6 +44,7 @@ mechanic and nothing else in the shared crates.
 | cursor | the sealed key that continues one question from its last row |
 | logical day | the day a person reads: from the start hour in the configured zone to the same hour the next day |
 | day setting | the zone and start hour that define the logical day (`DaySetting`) |
+| time quality | where an event time came from: intrinsic, captured, file modification time, the operator, or unknown |
 | precision | how exact a time is: `instant` to `year`, or `bounded` with an end |
 | coarse time | a time whose precision is a period rather than an instant |
 

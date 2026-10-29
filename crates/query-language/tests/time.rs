@@ -546,3 +546,22 @@ fn wire_deserialization_never_resolves_a_zone_and_callers_must_supply_its_identi
     assert!(wire.clone().resolve(Some(TimeZone::UTC)).is_err());
     assert_eq!(wire.resolve(Some(day.zone().clone())).unwrap(), value);
 }
+
+#[test]
+fn time_quality_is_one_shared_closed_set_separate_from_precision() {
+    use query_language::time::TimeQuality;
+    let expected = ["intrinsic", "captured", "file_mtime", "operator", "unknown"];
+    assert_eq!(TimeQuality::ALL.map(TimeQuality::as_str), expected);
+    for (value, name) in TimeQuality::ALL.into_iter().zip(expected) {
+        assert_eq!(
+            serde_json::to_value(value).unwrap(),
+            serde_json::Value::String(name.into())
+        );
+        assert_eq!(name.parse::<TimeQuality>().unwrap(), value);
+        assert_eq!(
+            serde_json::from_value::<TimeQuality>(serde_json::Value::String(name.into())).unwrap(),
+            value
+        );
+    }
+    assert!("estimated".parse::<TimeQuality>().is_err());
+}

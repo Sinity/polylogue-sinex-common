@@ -128,7 +128,7 @@ system so that this works reliably, there are no unexpected exceptions"
 
 ## Coarse times
 
-A time carries its precision: `instant`, `second`, `minute`, `day`, `month`,
+`time::TimeQuality` is the shared closed set `intrinsic`, `captured`, `file_mtime`, `operator`, `unknown`; each product classifies its own producer evidence. Quality and precision are separate. A time carries its precision: `instant`, `second`, `minute`, `day`, `month`,
 `year`, or `bounded` with an end. A coarse or bounded time satisfies a time
 condition only when its whole period does, fails when none of its period
 does, and is otherwise unknown. In a temporal join, a coarse time takes part
