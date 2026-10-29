@@ -114,8 +114,9 @@ pub struct Deliverer {
 }
 
 impl Deliverer {
-    /// The caller supplies a session-bus connection, or None for a headless
-    /// command-only route. Tests supply a private bus.
+    /// The caller supplies a session-bus connection, or None when unavailable.
+    /// Missing-bus attempts are recorded while command routes still run. Tests
+    /// supply a private bus.
     pub fn new(
         connection: impl Into<Option<zbus::Connection>>,
         config: NotificationConfig,
@@ -692,7 +693,7 @@ pub async fn run(
     updates: mpsc::UnboundedSender<NotificationUpdate>,
     still_matches: ConditionCheck,
 ) -> zbus::Result<()> {
-    if deliverer.config.route == Route::Command {
+    if deliverer.config.route == Route::Command || deliverer.connection.is_none() {
         while let Some(request) = requests.recv().await {
             if !handle_request(&mut deliverer, request, &updates, still_matches.as_ref()).await {
                 break;
