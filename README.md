@@ -10,7 +10,8 @@ Rust crates and development tooling shared by
 | [`query-language`](crates/query-language/README.md) | the shared grammar and spelling, the syntax tree's meaning, time expressions, the logical day, cursors, the completer and the shared law suite |
 | [`command-surface`](crates/command-surface/README.md) | the `Operation` trait, failures with their exit and HTTP table, request and answer envelopes, latency classes and deadlines, server-sent-event framing, the status figure format |
 | [`web-shell`](crates/web-shell/README.md) | the rendering model, visual tokens, the shared key table, palette, copy, page frame, live fragments and windowed lists |
-| [`signals`](crates/signals/README.md) | the signal rule schema, the evaluator and its laws, the interrupt budget and desktop notifications |
+| [`signals`](crates/signals/README.md) | the pure signal rule schema, evaluator, host policy and delivery checkpoint types |
+| [`signal-delivery`](crates/signal-delivery/README.md) | the desktop and command worker over the pure signal checkpoint |
 | [`devkit`](crates/devkit/README.md), [`devkit-macros`](crates/devkit-macros) | the core of each product's `xtask`: runs and their history, changed-package selection, test databases and NATS, fixtures, bench, coverage, fuzz and VM runners |
 
 Each crate's `README.md` is its documentation. A crate that is not yet in the

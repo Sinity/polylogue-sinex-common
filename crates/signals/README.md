@@ -247,15 +247,15 @@ and command, outside their writer. The action reference is the last command
 argument. No signal command is an agent launch.
 
 A durable effect starts with an unknown `DeliveryReceipt`. The desktop
-`notifications::Deliverer` additionally persists `NotificationState` and
+[`signal_delivery::Deliverer`](../signal-delivery/README.md) additionally persists `NotificationState` and
 per-route `NotificationReceipt`s. Call `begin`, commit the unknown receipts
 and state, then call `send`. Restored unknown attempts cannot become eligible
-for a send. The asynchronous `notifications::run` worker enforces this order
+for a send. The asynchronous `signal_delivery::run` worker enforces this order
 with a persistence acknowledgement and handles service appearance and desktop
 protocol signals. It receives committed notices through a channel, never
 through a writer lock. Products apply returned desktop actions through their
 operation table as operator acts with `via: desktop`. The worker receives a
-current-condition callback and rechecks it before sending or retrying.
+fresh policy callback for every effect, including historical occurrences and grouped replacements. The adapter applies current authorization and visibility even when historical occurrence matching remains valid.
 
 When adopting, Polylogue removes its old signal evaluator and `notify-send`
 command path, maps logical sessions/notes to occurrences, and saves checkpoints
@@ -314,3 +314,18 @@ evaluator or notification implementation.
   does not delay any commit.
 
 `Evaluator`, `HostPolicy` and `NotificationState` expose the complete serialized checkpoint through `JsonSchema`, including private nested state. Products embed these types and the typed notification receipts directly in their atomic signal commit DTOs. Authenticated host rechecks use `Condition` with the closed wire values `matching`, `ended` and `incomplete`.
+
+## Pure checkpoint and platform worker
+
+This crate has no desktop or asynchronous runtime dependency. `notifications`
+owns the serialized notice, attempt, receipt and checkpoint, with pure methods
+for each transition. Its checkpoint exposes read-only attempt access. Platform
+connections, process execution and persistence acknowledgements belong to
+[`signal-delivery`](../signal-delivery/README.md).
+
+Attempt handoff imports the original immutable snapshot without `begin`.
+Repeating that snapshot preserves receiver progress, including after restart;
+a conflicting snapshot under the same delivery identity is refused. An unknown
+route remains terminal. Only an explicit D-Bus failure may use its one service
+appearance retry; command outcomes are never selected by that retry. Server
+identity scopes replacement IDs and desktop actions.
