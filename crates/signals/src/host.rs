@@ -1,11 +1,12 @@
 //! The final host handoff, shared by local and forwarded fired intents.
 use crate::*;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A firing is an intent until the host's quiet hours and attention budget have
 /// been applied. Authorship comes from the authenticated product write path.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct FiredIntent {
     pub delivery: Delivery,
     pub author: Author,

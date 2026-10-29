@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -8,6 +9,14 @@ pub const HOUR: i64 = 3_600_000;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct Duration(pub i64);
+impl JsonSchema for Duration {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Duration".into()
+    }
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({"oneOf":[{"type":"integer","minimum":0},{"type":"string","pattern":"^[0-9]+(ms|s|m|h|d)$"}]})
+    }
+}
 impl<'de> Deserialize<'de> for Duration {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
@@ -45,7 +54,7 @@ impl<'de> Deserialize<'de> for Duration {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeKind {
     #[default]
@@ -53,7 +62,7 @@ pub enum ChangeKind {
     Ranking,
     TopK,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum Compare {
     #[serde(rename = "<")]
     Less,
@@ -68,7 +77,7 @@ impl Compare {
         }
     }
 }
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Fires {
     #[default]
@@ -87,7 +96,7 @@ pub enum Fires {
         minute: u16,
     },
 }
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Deliver {
     #[default]
@@ -95,7 +104,7 @@ pub enum Deliver {
     Value,
     Action,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct QuietHours {
     pub from: u16,
     pub to: u16,
@@ -109,7 +118,7 @@ impl QuietHours {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RateLimit {
     pub count: usize,
     pub window: Duration,
@@ -123,7 +132,7 @@ fn minimum() -> usize {
 
 /// Authored fields only. Identity and authorship are supplied by the product's
 /// write path; `deny_unknown_fields` prevents a client forging daemon metadata.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
     pub name: String,
@@ -146,7 +155,7 @@ pub struct Rule {
     #[serde(default = "enabled")]
     pub enabled: bool,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Configuration {
     pub value_targets: BTreeSet<String>,
     pub action_commands: BTreeSet<String>,
@@ -228,13 +237,15 @@ impl Rule {
         Ok(())
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 pub struct RuleVersion {
     pub product: String,
     pub id: String,
     pub revision: u64,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Author {
     Operator,
@@ -246,7 +257,7 @@ impl Author {
         !matches!(self, Self::Agent(_))
     }
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ActiveRule {
     pub version: RuleVersion,
     pub rule: Rule,

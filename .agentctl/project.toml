@@ -77,3 +77,13 @@ pool = "codex"
 result = "exit"
 timeout_seconds = 28800
 cache = "none"
+
+[operations.lint]
+description = "Selected package Clippy checks in the normal development queue"
+exec = ["cargo", "clippy", "--locked"]
+arguments = "required"
+pool = "normal"
+result = "exit"
+timeout_seconds = 1800
+scratch = "nvme"
+cache = "none"

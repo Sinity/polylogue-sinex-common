@@ -1,4 +1,5 @@
 use crate::*;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -20,12 +21,14 @@ pub trait Calendar {
             .then(|| self.quiet_end(at, hours))
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 pub struct Occurrence {
     pub id: String,
     pub episode: String,
 }
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Origin {
     #[default]
@@ -33,7 +36,7 @@ pub enum Origin {
     SignalDelivery,
     InjectedContext,
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Row {
     pub occurrence: Occurrence,
     pub reference: String,
@@ -51,7 +54,7 @@ impl Row {
         self.start <= at && self.end.is_none_or(|end| at < end)
     }
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Evaluation {
     pub rule: RuleVersion,
     pub at: Instant,
@@ -59,16 +62,16 @@ pub struct Evaluation {
     pub rows: Vec<Row>,
     pub value: Option<f64>,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Interval {
     pub start: Instant,
     pub end: Instant,
 }
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Policy {
     pub private: Vec<Interval>,
 }
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
 pub struct Trigger {
     pub rule: RuleVersion,
     pub occurrence: Occurrence,
@@ -83,7 +86,7 @@ impl Trigger {
         identity(self)
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Channel {
     Notice,
@@ -92,13 +95,13 @@ pub enum Channel {
     Value,
     Action,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Downgrade {
     RateLimit,
     InterruptBudgetSpent,
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Change {
     pub what: ChangeKind,
     pub joined: Vec<Occurrence>,
@@ -111,7 +114,7 @@ impl Change {
         self.joined.len() + self.left.len()
     }
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Delivery {
     pub id: String,
     pub trigger: Trigger,
@@ -126,7 +129,7 @@ pub struct Delivery {
 }
 /// A durable attempt begins unknown before effects run. Persist this record in
 /// the same owner as deliveries; only a returned receipt changes its outcome.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "outcome", content = "reason", rename_all = "snake_case")]
 pub enum DeliveryOutcome {
     Unknown,
@@ -134,14 +137,14 @@ pub enum DeliveryOutcome {
     NotSent(String),
     Cancelled,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DeliveryReceipt {
     pub delivery_id: String,
     pub at: Instant,
     pub route: String,
     pub outcome: DeliveryOutcome,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct InterruptBudget {
     pub per_hour: usize,
     pub handoffs: Vec<Instant>,
