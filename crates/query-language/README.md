@@ -165,6 +165,8 @@ A kept reference's `.rows` or `.matches` selector is a typed `ResultPart`. A quo
 
 ## Completion
 
+Completion uses the same typed output-schema snapshot as parsing and binding. Saved and kept sources offer their actual fields, help and closed-set values, including promoted or grouped aliases; rows and matches use separate schemas. Missing output schemas offer no default-unit fields. Every value position, including an open quote, reads the active schema's field declaration. Nested omitted sources use the enclosing actual row unit rather than its shaped output columns.
+
 The completer proposes what may come next at a grammar position (units,
 fields, closed-set values, stages, operators) from the catalog it is given.
 It does no I/O, so a product can run it inside its CLI process from a catalog

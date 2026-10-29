@@ -1,6 +1,6 @@
 //! Pure grammar-position completion against a product catalog.
 use crate::ast::Span;
-use crate::catalog::Catalog;
+use crate::catalog::{Catalog, Field, FieldKind};
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Completion {
@@ -38,7 +38,12 @@ pub fn complete(text: &str, position: usize, catalog: &Catalog) -> Vec<Completio
     if let Some(open) = open_quote(prefix) {
         return quoted_values(text, end, open, catalog);
     }
-    let (unit, fields) = context(before, catalog);
+    let scope = context(before, catalog);
+    let fields: Vec<_> = scope
+        .fields
+        .iter()
+        .map(|field| (field.name.as_str(), field.help.as_str()))
+        .collect();
     let mut out = Vec::new();
     let mut add = |value: &str, kind, help: &str, replace: Span, fragment: &str| {
         if value.starts_with(fragment) {
@@ -52,7 +57,7 @@ pub fn complete(text: &str, position: usize, catalog: &Catalog) -> Vec<Completio
     };
     let span = Span { start, end };
     if let Some(field) = set_field(before) {
-        if let Some(spec) = catalog.field(&unit, field) {
+        if let Some(spec) = scope.field(field) {
             for value in &spec.values {
                 if value.starts_with(fragment) {
                     add(
@@ -66,7 +71,7 @@ pub fn complete(text: &str, position: usize, catalog: &Catalog) -> Vec<Completio
             }
         }
     } else if let Some((field, partial)) = fragment.split_once(':') {
-        if let Some(spec) = catalog.field(&unit, field) {
+        if let Some(spec) = scope.field(field) {
             for value in &spec.values {
                 if value.starts_with(partial) {
                     add(
@@ -100,7 +105,7 @@ pub fn complete(text: &str, position: usize, catalog: &Catalog) -> Vec<Completio
         let field_before = words.iter().rev().nth(1).copied();
         if ["=", "!=", ">", ">=", "<", "<=", "~", "^", "between"].contains(&last) {
             let field = field_before.unwrap_or("");
-            if let Some(spec) = catalog.field(&unit, field) {
+            if let Some(spec) = scope.field(field) {
                 for value in &spec.values {
                     if value.starts_with(fragment) {
                         add(
@@ -116,7 +121,7 @@ pub fn complete(text: &str, position: usize, catalog: &Catalog) -> Vec<Completio
                     add(value, CompletionKind::Value, "", span, fragment);
                 }
             }
-        } else if fields.iter().any(|(name, _)| name == last) {
+        } else if scope.field(last).is_some() {
             for op in [
                 ":", "=", "!=", ">", ">=", "<", "<=", "~", "^", "between", "in", "exists",
             ] {
@@ -205,8 +210,8 @@ fn quoted_values(text: &str, cursor: usize, open: usize, catalog: &Catalog) -> V
                 .then(|| words.iter().rev().nth(1).copied())
                 .flatten()
         });
-    let (unit, _) = context(before, catalog);
-    let Some(spec) = field.and_then(|field| catalog.field(&unit, field)) else {
+    let scope = context(before, catalog);
+    let Some(spec) = field.and_then(|field| scope.field(field)) else {
         return Vec::new();
     };
     let mut partial = String::new();
@@ -256,11 +261,28 @@ fn quoted_values(text: &str, cursor: usize, open: usize, catalog: &Catalog) -> V
     values.dedup_by(|a, b| a.value == b.value);
     values
 }
-fn context(text: &str, catalog: &Catalog) -> (String, Vec<(String, String)>) {
+#[derive(Default)]
+struct CompletionScope {
+    fields: Vec<Field>,
+}
+impl CompletionScope {
+    fn field(&self, name: &str) -> Option<&Field> {
+        self.fields.iter().find(|field| field.name == name)
+    }
+    fn unit(name: &str, catalog: &Catalog) -> Self {
+        Self {
+            fields: catalog
+                .unit(name)
+                .map(|unit| unit.fields.clone())
+                .unwrap_or_default(),
+        }
+    }
+}
+fn context(text: &str, catalog: &Catalog) -> CompletionScope {
     use crate::ast::{Source, StageKind};
     // Pick the innermost query/exists scope from delimiter tokens, while quoted data
     // contributes no grammar. Function and set parentheses retain the outer scope.
-    let mut stack: Vec<(usize, String)> = Vec::new();
+    let mut stack: Vec<(usize, String, bool)> = Vec::new();
     let mut quote = false;
     let mut escape = false;
     let mut words: Vec<String> = Vec::new();
@@ -289,7 +311,7 @@ fn context(text: &str, catalog: &Catalog) -> (String, Vec<(String, String)>) {
             if c == '(' {
                 let preceding = words.last().cloned().unwrap_or_default();
                 let relation = words.iter().rev().nth(1).is_some_and(|s| s == "exists");
-                stack.push((start, String::new()));
+                stack.push((start, String::new(), false));
                 if relation && catalog.unit(&preceding).is_some() {
                     stack.last_mut().unwrap().1 = preceding;
                     start = at + 1;
@@ -306,10 +328,15 @@ fn context(text: &str, catalog: &Catalog) -> (String, Vec<(String, String)>) {
                         | "fuse"
                         | "in"
                 ) {
+                    let unit = row_unit(&text[start..at], catalog)
+                        .unwrap_or_else(|| "$deferred_completion".into());
+                    let entry = stack.last_mut().unwrap();
+                    entry.1 = unit;
+                    entry.2 = true;
                     start = at + 1;
                 }
             } else if c == ')'
-                && let Some((outer, _)) = stack.pop()
+                && let Some((outer, _, _)) = stack.pop()
             {
                 start = outer;
             }
@@ -318,12 +345,18 @@ fn context(text: &str, catalog: &Catalog) -> (String, Vec<(String, String)>) {
         }
     }
     let inner = &text[start..];
-    let explicit = stack
-        .last()
-        .map(|(_, u)| u.as_str())
-        .filter(|u| !u.is_empty());
-    let current = if let Some(unit) = explicit {
-        format!("{unit} where {inner}")
+    let explicit = stack.iter().rev().find(|(_, unit, _)| !unit.is_empty());
+    let inner_first = inner.split_whitespace().next().unwrap_or("");
+    let inner_source = catalog.unit(inner_first).is_some() || source_prefix(inner_first);
+    let inherited_deferred = explicit.is_some_and(|(_, unit, inherited)| {
+        *inherited && unit == "$deferred_completion" && !inner_source
+    });
+    let current = if let Some((_, unit, inherited)) = explicit {
+        if *inherited && inner_source {
+            inner.to_string()
+        } else {
+            format!("{unit} where {inner}")
+        }
     } else {
         inner.to_string()
     };
@@ -331,68 +364,132 @@ fn context(text: &str, catalog: &Catalog) -> (String, Vec<(String, String)>) {
     let mut unit = catalog
         .unit(first)
         .map_or_else(|| catalog.default_unit.clone(), |u| u.name.clone());
-    let mut candidate = current.trim_end();
-    let mut parsed = None;
-    loop {
-        if let Ok(q) = crate::parse::parse(candidate, catalog) {
-            parsed = Some(q);
-            break;
-        }
-        let Some((at, _)) = candidate
-            .char_indices()
-            .rev()
-            .find(|(_, c)| c.is_whitespace() || *c == '|')
-        else {
-            break;
-        };
-        candidate = candidate[..at].trim_end();
-    }
-    let mut columns: Option<Vec<String>> = None;
+    let parsed = parse_prefix(&current, catalog);
+    // A source-like prefix cannot acquire the default unit's fields merely
+    // because an unfinished suffix forced the parser to shorten its input.
+    let source_like = source_prefix(first) || inherited_deferred;
+    let mut scope = if source_like {
+        CompletionScope::default()
+    } else {
+        CompletionScope::unit(&unit, catalog)
+    };
+    let mut group_input = None;
     if let Some(q) = parsed {
-        if let Source::Unit { unit: source, .. } = q.source {
-            unit = source;
+        match &q.source {
+            Source::Unit { unit: source, .. } if !source_like => {
+                unit = source.clone();
+                scope = CompletionScope::unit(&unit, catalog);
+            }
+            Source::Saved { .. } | Source::Result { .. } => {
+                scope.fields = catalog
+                    .source_output(&q.source)
+                    .map(|output| output.fields.clone())
+                    .unwrap_or_default();
+            }
+            _ => {}
         }
         for stage in q.stages {
             match stage.kind {
                 StageKind::Scope { unit: source, .. } => {
                     unit = source;
-                    columns = None;
+                    scope = CompletionScope::unit(&unit, catalog);
+                    group_input = None;
                 }
                 StageKind::Group { keys } => {
-                    columns = Some(
-                        keys.iter()
-                            .map(|key| key.column())
-                            .chain(std::iter::once("count".into()))
-                            .collect(),
-                    )
+                    let fields = keys
+                        .iter()
+                        .map(|key| {
+                            let mut field = match key {
+                                crate::ast::Operand::Field { name } => {
+                                    scope.field(name).cloned().unwrap_or_default()
+                                }
+                                _ => Field::default(),
+                            };
+                            field.name = key.column();
+                            field
+                        })
+                        .chain(std::iter::once(Field {
+                            name: "count".into(),
+                            kind: FieldKind::Integer,
+                            ..Field::default()
+                        }))
+                        .collect();
+                    group_input = Some(std::mem::replace(&mut scope.fields, fields));
                 }
                 StageKind::Aggregate { aggregates } => {
-                    let c = columns.get_or_insert_with(Vec::new);
-                    c.extend(aggregates.iter().map(|a| a.column()));
-                }
-                StageKind::Fill => {
-                    if let Some(c) = &mut columns {
-                        c.push("coverage".into());
+                    let grouped = group_input.is_some();
+                    let input = group_input.take().unwrap_or_else(|| scope.fields.clone());
+                    if !grouped {
+                        scope.fields.clear();
                     }
+                    for aggregate in aggregates {
+                        let kind = match aggregate.function {
+                            crate::ast::AggregateFunction::Count
+                            | crate::ast::AggregateFunction::CountDistinct => FieldKind::Integer,
+                            _ => aggregate
+                                .fields
+                                .first()
+                                .and_then(|name| input.iter().find(|field| &field.name == name))
+                                .map(|field| field.kind.clone())
+                                .unwrap_or(FieldKind::Number),
+                        };
+                        let name = aggregate.column();
+                        scope.fields.retain(|field| field.name != name);
+                        scope.fields.push(Field {
+                            name,
+                            kind,
+                            ..Field::default()
+                        });
+                    }
+                }
+                StageKind::Fill => scope.fields.push(Field {
+                    name: "coverage".into(),
+                    ..Field::default()
+                }),
+                StageKind::Fields { fields } => {
+                    scope.fields.retain(|field| fields.contains(&field.name))
                 }
                 _ => {}
             }
         }
     }
-    let fields = if let Some(columns) = columns {
-        columns
-            .into_iter()
-            .map(|name| (name, String::new()))
-            .collect()
-    } else {
-        catalog.unit(&unit).map_or_else(Vec::new, |u| {
-            u.fields
-                .iter()
-                .map(|f| (f.name.clone(), f.help.clone()))
-                .collect()
-        })
+    scope
+}
+
+fn source_prefix(first: &str) -> bool {
+    first.split_once(':').is_some_and(|(prefix, _)| {
+        prefix.eq_ignore_ascii_case("query") || prefix.eq_ignore_ascii_case("result")
+    })
+}
+fn parse_prefix(text: &str, catalog: &Catalog) -> Option<crate::ast::Query> {
+    let mut candidate = text.trim_end();
+    loop {
+        if let Ok(query) = crate::parse::parse(candidate, catalog) {
+            return Some(query);
+        }
+        let (at, _) = candidate
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_whitespace() || *c == '|')?;
+        candidate = candidate[..at].trim_end();
+    }
+}
+fn row_unit(text: &str, catalog: &Catalog) -> Option<String> {
+    use crate::ast::{Source, StageKind};
+    let query = parse_prefix(text, catalog)?;
+    let mut unit = match &query.source {
+        Source::Unit { unit, .. } => Some(unit.clone()),
+        Source::Saved { .. } | Source::Result { .. } => catalog
+            .source_output(&query.source)
+            .and_then(|output| output.unit.clone()),
+        _ => None,
     };
-    (unit, fields)
+    for stage in query.stages {
+        if let StageKind::Scope { unit: next, .. } = stage.kind {
+            unit = Some(next);
+        }
+    }
+    unit
 }
 
 fn set_field(before: &str) -> Option<&str> {
