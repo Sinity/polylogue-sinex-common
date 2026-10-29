@@ -410,7 +410,8 @@ fn matches_fields_retain_the_validated_projection_key() {
         let text = format!("{base} | matches");
         let source = install(&mut catalog, &text);
         let bound = bind(&parse(&text, &catalog).unwrap(), &catalog).unwrap();
-        for field in &bound.typing().queries[0].stages[0].after.fields {
+        let fields = &bound.typing().queries[0].stages[0].after.fields;
+        for field in fields.iter() {
             assert_eq!(
                 field.origin,
                 query_language::scope::Origin::Matches {
