@@ -1,11 +1,11 @@
 //! Lock-free readers addressed by immutable extent descriptors.
 use crate::{
+    DataKey, EncodedBlob, Error, Extent, Hash, Kind, Result,
     codec::{self, Index},
-    DataKey, Error, Extent, Hash, Kind, Result,
 };
 use chacha20poly1305::{
-    aead::{Aead, Payload},
     ChaCha20Poly1305, KeyInit, Nonce,
+    aead::{Aead, Payload},
 };
 use std::{
     fs::File,
@@ -264,11 +264,48 @@ impl Reader {
         Ok(mismatches)
     }
 }
+pub(crate) fn open_encoded(
+    file: File,
+    descriptor: &EncodedBlob,
+    key: Option<&DataKey>,
+    limits: ReadLimits,
+) -> Result<BlobReader> {
+    if file.metadata()?.len() != descriptor.stored_len {
+        return Err(Error::Refused(
+            "encoded file length differs from its descriptor".into(),
+        ));
+    }
+    let extent = descriptor.extent();
+    if let Kind::Sealed { key_ref } = &descriptor.kind {
+        let key = key.ok_or(Error::Locked(descriptor.hash))?;
+        if &key.key_ref != key_ref {
+            return Err(Error::Unwrap("sealed key reference differs".into()));
+        }
+    }
+    let (value, metadata) = OpenExtent::from_file(file, &extent, limits)?;
+    Ok(BlobReader {
+        extents: vec![value],
+        starts: vec![0],
+        len: descriptor.decoded_len,
+        position: 0,
+        key: key.cloned(),
+        check: Box::new(|| Ok(())),
+        cache: None,
+        stats: VerificationStats {
+            metadata_bytes: metadata,
+            ..Default::default()
+        },
+        failed: false,
+    })
+}
 impl OpenExtent {
     fn open(root: &Path, extent: &Extent, limits: ReadLimits) -> Result<(Self, u64)> {
         codec::segment_name(&extent.segment)?;
         let file = File::open(root.join(&extent.segment))
             .map_err(|e| Error::corrupt(extent, format!("cannot open segment: {e}")))?;
+        Self::from_file(file, extent, limits)
+    }
+    fn from_file(file: File, extent: &Extent, limits: ReadLimits) -> Result<(Self, u64)> {
         if extent
             .offset
             .checked_add(extent.len)

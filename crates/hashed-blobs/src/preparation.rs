@@ -1,11 +1,11 @@
 //! Bounded frame preparation, independent of segment ownership and durability.
 use crate::{
+    DEFAULT_FRAME, DataKey, EncodedBlob, Error, Hash, Kind, ReadLimits, Result,
     codec::{self, Frame, Index},
-    DataKey, Error, Hash, Kind, Result, DEFAULT_FRAME,
 };
 use chacha20poly1305::{
-    aead::{rand_core::RngCore, Aead, OsRng, Payload},
     ChaCha20Poly1305, KeyInit, Nonce,
+    aead::{Aead, OsRng, Payload, rand_core::RngCore},
 };
 use std::{
     fs::File,
@@ -40,6 +40,78 @@ impl Prepared {
     pub fn kind(&self) -> &Kind {
         &self.kind
     }
+    pub fn descriptor(&self) -> EncodedBlob {
+        EncodedBlob {
+            hash: self.hash,
+            decoded_len: self.decoded_len,
+            stored_len: self.stored_len,
+            kind: self.kind.clone(),
+            index_hash: self.index_hash,
+            encoded_hash: self.encoded_hash,
+        }
+    }
+    /// Return ownership of the encoded inode. Products own its persistence and custody.
+    pub fn into_file(self) -> File {
+        self.file
+    }
+    pub fn reader(&self, key: Option<&DataKey>, limits: ReadLimits) -> Result<crate::BlobReader> {
+        self.descriptor().open(self.file.try_clone()?, key, limits)
+    }
+    /// Open one locally owned encoded file, deriving and verifying its descriptor.
+    /// Remote input must additionally match its independently declared hash and length.
+    pub fn inspect(file: File, key: Option<&DataKey>, limits: ReadLimits) -> Result<Self> {
+        let descriptor = EncodedBlob::inspect(&file, limits)?;
+        Self::from_encoded(file, descriptor, key, limits)
+    }
+    /// Adopt an immutable owned encoding only after complete byte and decoded identity checks.
+    /// No decoded bytes are written. The file is not copied or recompressed.
+    pub fn from_encoded(
+        mut file: File,
+        descriptor: EncodedBlob,
+        key: Option<&DataKey>,
+        limits: ReadLimits,
+    ) -> Result<Self> {
+        if file.metadata()?.len() != descriptor.stored_len {
+            return Err(Error::Refused(
+                "encoded file length differs from its descriptor".into(),
+            ));
+        }
+        file.rewind()?;
+        let mut hash = blake3::Hasher::new();
+        let encoded_len = std::io::copy(&mut file, &mut hash)?;
+        if encoded_len != descriptor.stored_len
+            || Hash(*hash.finalize().as_bytes()) != descriptor.encoded_hash
+        {
+            return Err(Error::Refused(
+                "encoded bytes differ from their descriptor".into(),
+            ));
+        }
+        let mut reader = descriptor.open(file.try_clone()?, key, limits)?;
+        let mut hash = match &descriptor.kind {
+            Kind::Plain => blake3::Hasher::new(),
+            Kind::Sealed { .. } => blake3::Hasher::new_keyed(&codec::name_key(
+                key.ok_or(Error::Locked(descriptor.hash))?,
+            )),
+        };
+        let decoded_len = std::io::copy(&mut reader, &mut hash)?;
+        if decoded_len != descriptor.decoded_len
+            || Hash(*hash.finalize().as_bytes()) != descriptor.hash
+        {
+            return Err(Error::Refused(
+                "decoded bytes differ from their descriptor".into(),
+            ));
+        }
+        file.rewind()?;
+        Ok(Self {
+            file,
+            hash: descriptor.hash,
+            decoded_len: descriptor.decoded_len,
+            stored_len: descriptor.stored_len,
+            kind: descriptor.kind,
+            index_hash: descriptor.index_hash,
+            encoded_hash: descriptor.encoded_hash,
+        })
+    }
 }
 impl Preparation {
     pub fn new(scratch: impl AsRef<Path>) -> Result<Self> {
@@ -63,55 +135,95 @@ impl Preparation {
     }
     pub fn plain_checked<E: From<Error>>(
         &self,
+        reader: impl Read,
+        level: i32,
+        check: impl FnMut() -> std::result::Result<(), E>,
+    ) -> std::result::Result<Prepared, E> {
+        let file = tempfile::tempfile_in(&self.scratch).map_err(Error::Io)?;
+        self.plain_into_checked(file, reader, level, check)
+    }
+    /// Write the existing encoding to a caller-owned inode, without syncing it.
+    pub fn plain_into(&self, file: File, reader: impl Read, level: i32) -> Result<Prepared> {
+        self.plain_into_checked(file, reader, level, || Ok(()))
+    }
+    /// Stream a serializer directly into the existing encoded frames.
+    /// Finish returns the appendable descriptor; the product owns durability.
+    pub fn plain_writer(&self, mut file: File, level: i32) -> Result<PlainWriter> {
+        file.set_len(0)?;
+        file.rewind()?;
+        Ok(PlainWriter {
+            file,
+            compressor: compressor(level)?,
+            frame: self.frame,
+            buffer: Vec::with_capacity(self.frame),
+            index: Index {
+                hash: Hash([0; 32]),
+                binding: Hash([0; 32]),
+                kind: Kind::Plain,
+                salt: [0; 32],
+                frames: Vec::new(),
+            },
+            hash: blake3::Hasher::new(),
+            decoded_len: 0,
+            failed: false,
+        })
+    }
+    pub fn plain_into_checked<E: From<Error>>(
+        &self,
+        file: File,
         mut reader: impl Read,
         level: i32,
         mut check: impl FnMut() -> std::result::Result<(), E>,
     ) -> std::result::Result<Prepared, E> {
-        let mut file = tempfile::tempfile_in(&self.scratch).map_err(Error::Io)?;
-        let mut compressor = compressor(level).map_err(Error::Io)?;
-        let mut index = Index {
-            hash: Hash([0; 32]),
-            binding: Hash([0; 32]),
-            kind: Kind::Plain,
-            salt: [0; 32],
-            frames: Vec::new(),
-        };
-        let mut hasher = blake3::Hasher::new();
-        let mut total = 0;
-        let mut buffer = vec![0; self.frame];
+        let mut writer = self.plain_writer(file, level)?;
+        let mut buffer = [0; 65536];
         loop {
             check()?;
-            let n = read_frame(&mut reader, &mut buffer).map_err(Error::Io)?;
-            check()?;
-            if n == 0 && !index.frames.is_empty() {
+            let n = match reader.read(&mut buffer) {
+                Ok(n) => n,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(Error::Io(error).into()),
+            };
+            if n == 0 {
                 break;
             }
-            hasher.update(&buffer[..n]);
-            total += n as u64;
-            let encoded = compressor.compress(&buffer[..n]).map_err(Error::Io)?;
-            file.write_all(&encoded).map_err(Error::Io)?;
-            index.frames.push(Frame {
-                stored: encoded.len() as u64,
-                decoded: n as u64,
-                digest: Hash::of(&encoded),
-            });
-            if n < self.frame {
-                break;
-            }
+            writer.write_all(&buffer[..n]).map_err(Error::Io)?;
         }
         check()?;
-        finish(file, Hash(*hasher.finalize().as_bytes()), total, index).map_err(E::from)
+        writer.finish().map_err(E::from)
     }
     pub fn sealed(&self, reader: impl Read + Seek, level: i32, key: &DataKey) -> Result<Prepared> {
         self.sealed_checked(reader, level, key, || Ok(()))
     }
     pub fn sealed_checked<E: From<Error>>(
         &self,
+        reader: impl Read + Seek,
+        level: i32,
+        key: &DataKey,
+        check: impl FnMut() -> std::result::Result<(), E>,
+    ) -> std::result::Result<Prepared, E> {
+        let file = tempfile::tempfile_in(&self.scratch).map_err(Error::Io)?;
+        self.sealed_into_checked(file, reader, level, key, check)
+    }
+    pub fn sealed_into(
+        &self,
+        file: File,
+        reader: impl Read + Seek,
+        level: i32,
+        key: &DataKey,
+    ) -> Result<Prepared> {
+        self.sealed_into_checked(file, reader, level, key, || Ok(()))
+    }
+    pub fn sealed_into_checked<E: From<Error>>(
+        &self,
+        mut file: File,
         mut reader: impl Read + Seek,
         level: i32,
         key: &DataKey,
         mut check: impl FnMut() -> std::result::Result<(), E>,
     ) -> std::result::Result<Prepared, E> {
+        file.set_len(0).map_err(Error::Io)?;
+        file.rewind().map_err(Error::Io)?;
         let start = reader.stream_position().map_err(Error::Io)?;
         let mut compressor = compressor(level).map_err(Error::Io)?;
         let mut buffer = vec![0; self.frame];
@@ -153,7 +265,6 @@ impl Preparation {
         index.bind(hash);
         reader.seek(SeekFrom::Start(start)).map_err(Error::Io)?;
         let cipher = ChaCha20Poly1305::new((&codec::frame_key(key, hash, &index.salt)).into());
-        let mut file = tempfile::tempfile_in(&self.scratch).map_err(Error::Io)?;
         let mut second = blake3::Hasher::new_keyed(&naming_key);
         for number in 0..index.frames.len() {
             check()?;
@@ -191,6 +302,86 @@ impl Preparation {
         Hash(*blake3::keyed_hash(&codec::name_key(key), bytes).as_bytes())
     }
 }
+/// A bounded plain frame encoder implementing `Write` for streaming serializers.
+/// Dropping it abandons the incomplete encoding. Call `finish` before persistence.
+pub struct PlainWriter {
+    file: File,
+    compressor: zstd::bulk::Compressor<'static>,
+    frame: usize,
+    buffer: Vec<u8>,
+    index: Index,
+    hash: blake3::Hasher,
+    decoded_len: u64,
+    failed: bool,
+}
+impl PlainWriter {
+    fn emit(&mut self) -> std::io::Result<()> {
+        if self.buffer.is_empty() && !self.index.frames.is_empty() {
+            return Ok(());
+        }
+        let encoded = self.compressor.compress(&self.buffer)?;
+        self.file.write_all(&encoded)?;
+        self.index.frames.push(Frame {
+            stored: encoded.len() as u64,
+            decoded: self.buffer.len() as u64,
+            digest: Hash::of(&encoded),
+        });
+        self.buffer.clear();
+        Ok(())
+    }
+    fn write_inner(&mut self, mut bytes: &[u8]) -> std::io::Result<usize> {
+        let length = bytes.len();
+        while !bytes.is_empty() {
+            let n = bytes.len().min(self.frame - self.buffer.len());
+            self.decoded_len = self
+                .decoded_len
+                .checked_add(n as u64)
+                .ok_or_else(|| std::io::Error::other("decoded length overflows"))?;
+            self.hash.update(&bytes[..n]);
+            self.buffer.extend_from_slice(&bytes[..n]);
+            bytes = &bytes[n..];
+            if self.buffer.len() == self.frame {
+                self.emit()?;
+            }
+        }
+        Ok(length)
+    }
+    pub fn finish(mut self) -> Result<Prepared> {
+        if self.failed {
+            return Err(Error::Refused("plain encoder failed before finish".into()));
+        }
+        self.emit()?;
+        finish(
+            self.file,
+            Hash(*self.hash.finalize().as_bytes()),
+            self.decoded_len,
+            self.index,
+        )
+    }
+}
+impl Write for PlainWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.failed {
+            return Err(std::io::Error::other("plain encoder failed"));
+        }
+        let result = self.write_inner(bytes);
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.failed {
+            return Err(std::io::Error::other("plain encoder failed"));
+        }
+        let result = self.emit();
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
+}
+
 fn compressor(level: i32) -> std::io::Result<zstd::bulk::Compressor<'static>> {
     let mut c = zstd::bulk::Compressor::new(level)?;
     c.set_parameter(zstd::zstd_safe::CParameter::ChecksumFlag(true))?;

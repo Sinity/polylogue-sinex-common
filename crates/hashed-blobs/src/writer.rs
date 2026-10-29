@@ -1,14 +1,15 @@
 //! The single append owner and its dedicated durability thread.
-use crate::{codec, Error, Extent, Hash, Prepared, Result};
+use crate::{Error, Extent, Hash, Prepared, Result, codec};
 use std::{
     collections::{HashMap, VecDeque},
     fs::{File, OpenOptions},
-    io::{Seek, SeekFrom, Write},
+    io::{Read, Seek, SeekFrom, Write},
     os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::Path,
     sync::{
+        Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc,
+        mpsc,
     },
     thread,
 };
@@ -222,8 +223,26 @@ impl SegmentWriter {
                 .ok_or_else(|| Error::Refused("segment length overflows".into()))?;
             self.file.seek(SeekFrom::Start(offset))?;
             item.file.rewind()?;
-            let n = std::io::copy(&mut item.file, &mut self.file)?;
-            if n != item.stored_len {
+            let mut n = 0u64;
+            let mut hasher = blake3::Hasher::new();
+            let mut buffer = [0; 65536];
+            loop {
+                let got = item.file.read(&mut buffer)?;
+                if got == 0 {
+                    break;
+                }
+                n = n
+                    .checked_add(got as u64)
+                    .ok_or_else(|| Error::Refused("prepared length overflows".into()))?;
+                if n > item.stored_len {
+                    return Err(Error::Refused(
+                        "prepared encoding changed before append".into(),
+                    ));
+                }
+                hasher.update(&buffer[..got]);
+                self.file.write_all(&buffer[..got])?;
+            }
+            if n != item.stored_len || Hash(*hasher.finalize().as_bytes()) != item.encoded_hash {
                 return Err(Error::Refused(
                     "prepared encoding changed before append".into(),
                 ));
