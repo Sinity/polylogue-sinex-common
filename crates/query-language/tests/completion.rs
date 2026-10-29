@@ -508,7 +508,7 @@ fn requirements_load_active_source_schema_before_its_value_section() {
             arguments: vec![],
         };
         let missing = requirements(text, text.len(), &catalog);
-        assert_eq!(missing.sources, [source.clone()]);
+        assert_eq!(missing.sources.as_slice(), std::slice::from_ref(&source));
         assert!(missing.value.is_none());
         catalog.source_outputs.push(SourceOutput {
             source: source.clone(),
