@@ -84,6 +84,13 @@ impl Caller {
         &self.scope
     }
 }
+/// The answer and the trusted context that actually produced it. Owner context
+/// is process-private; transport serialization applies only to `answer`.
+pub struct DispatchResult {
+    pub answer: Answer<Value>,
+    pub owner: Caller,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Origin {
     Cli,
@@ -238,12 +245,17 @@ type FlightRegistry = Mutex<HashMap<RequestKey, Arc<InFlight>>>;
 
 struct InFlight {
     identity: Value,
+    owner: Caller,
     result: watch::Sender<Option<Arc<Answer<Value>>>>,
 }
 impl InFlight {
-    fn new(identity: Value) -> Self {
+    fn new(identity: Value, owner: Caller) -> Self {
         let (result, _) = watch::channel(None);
-        Self { identity, result }
+        Self {
+            identity,
+            owner,
+            result,
+        }
     }
     async fn wait(&self) -> Answer<Value> {
         let mut result = self.result.subscribe();
@@ -411,6 +423,7 @@ impl OperationTable {
     ) -> Answer<Value> {
         self.call_as(request, origin, Caller::default(), cancellation)
             .await
+            .answer
     }
     pub async fn call_as(
         &self,
@@ -418,19 +431,23 @@ impl OperationTable {
         origin: Origin,
         caller: Caller,
         cancellation: CancellationToken,
-    ) -> Answer<Value> {
+    ) -> DispatchResult {
+        let local = |answer| DispatchResult {
+            answer,
+            owner: caller.clone(),
+        };
         let Some(operation) = self
             .operations
             .iter()
             .find(|op| op.description().spec.name == request.operation)
         else {
-            return Answer::error(Failure::new(
+            return local(Answer::error(Failure::new(
                 FailureKind::NotFound,
                 format!("unknown operation {}", request.operation),
-            ));
+            )));
         };
         if request.request_id.is_empty() {
-            return Answer::error(bad_request("request_id must not be empty"));
+            return local(Answer::error(bad_request("request_id must not be empty")));
         }
         let description = operation.description();
         // Even a Request implementation that omits deny_unknown_fields cannot
@@ -445,7 +462,9 @@ impl OperationTable {
                 .is_none())
             && let Some(key) = object.keys().find(|key| !properties.contains_key(*key))
         {
-            return Answer::error(bad_request(format!("unknown argument {key}")));
+            return local(Answer::error(bad_request(format!(
+                "unknown argument {key}"
+            ))));
         }
         let progress = Arc::new(Mutex::new(Progress::default()));
         let token = cancellation.child_token();
@@ -465,14 +484,14 @@ impl OperationTable {
             let mut registry = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(flight) = registry.get(&key) {
                 if flight.identity != identity {
-                    return Answer::error(Failure::new(
+                    return local(Answer::error(Failure::new(
                         FailureKind::Conflict,
                         "request_id is in flight with different arguments",
-                    ));
+                    )));
                 }
                 Some(flight.clone())
             } else {
-                let flight = Arc::new(InFlight::new(identity));
+                let flight = Arc::new(InFlight::new(identity, caller.clone()));
                 registry.insert(key.clone(), flight.clone());
                 owner = Some(FlightOwner {
                     registry: &self.in_flight,
@@ -502,9 +521,9 @@ impl OperationTable {
                 None => std::future::pending::<()>().await,
             }
         };
-        let answer = tokio::select! {
+        let (answer, shared_result) = tokio::select! {
             biased;
-            _ = cancellation.cancelled() => Answer::error(Failure::new(FailureKind::Cancelled,"request cancelled")),
+            _ = cancellation.cancelled() => (Answer::error(Failure::new(FailureKind::Cancelled,"request cancelled")), false),
             _ = wait_deadline => {
                 let progress = progress.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 let scanned = progress.rows_scanned.map_or_else(|| "with rows scanned unknown".into(), |rows| format!("after {rows} rows scanned"));
@@ -513,16 +532,29 @@ impl OperationTable {
                 let mut answer = Answer::error(failure);
                 if let Some(narrower) = progress.narrower {answer.next_mut().push(Next{label:"narrower request".into(),request:narrower});}
                 let mut lifted=request.clone();lifted.deadline=Deadline::None;
-                answer.next_mut().push(Next{label:"complete without a deadline".into(),request:lifted});answer
+                answer.next_mut().push(Next{label:"complete without a deadline".into(),request:lifted});(answer, false)
             },
-            answer = execution => answer,
+            answer = execution => (answer, true),
         };
         drop(guard);
         let answer = self.checked_answer(answer, &description.spec);
-        if let Some(owner) = owner {
+        let publication_owner = if shared_result {
+            flight
+                .as_ref()
+                .map(|flight| flight.owner.clone())
+                .unwrap_or_else(|| caller.clone())
+        } else {
+            // A waiter's own timeout or cancellation carries no owner's data.
+            caller.clone()
+        };
+        let answer = if let Some(owner) = owner {
             owner.finish(answer)
         } else {
             answer
+        };
+        DispatchResult {
+            answer,
+            owner: publication_owner,
         }
     }
     fn checked_answer(&self, answer: Answer<Value>, spec: &OperationSpec) -> Answer<Value> {

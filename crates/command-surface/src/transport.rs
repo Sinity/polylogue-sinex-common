@@ -170,7 +170,8 @@ impl OperationTable {
                 (
                     operation,
                     self.call_as(request, Origin::Cli, caller, cancellation)
-                        .await,
+                        .await
+                        .answer,
                 )
             }
             Err(error) => (String::new(), Answer::error(error)),
@@ -288,7 +289,7 @@ impl OperationTable {
                             close_after_reply=true;
                             Answer::error(bad_request("wait for the reply before sending another request"))
                         },
-                        answer=call=>answer,
+                        dispatched=call=>dispatched.answer,
                     }
                 }
             };
@@ -383,6 +384,7 @@ impl OperationTable {
                     if matches {
                         self.call_as(envelope, Origin::Http, caller, cancellation)
                             .await
+                            .answer
                     } else {
                         Answer::error(Failure::new(
                             FailureKind::NotFound,
@@ -454,6 +456,7 @@ impl OperationTable {
                                 cancellation,
                             )
                             .await
+                            .answer
                         }
                         Err(error) => Answer::error(bad_request(error.to_string())),
                     };

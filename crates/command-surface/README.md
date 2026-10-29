@@ -175,7 +175,7 @@ for retry identity across CLI, HTTP and MCP.
 The table coalesces only in-flight writes with one caller scope and request ID.
 Changed arguments conflict while that identity is in flight. On completion,
 error, timeout, cancellation or owner-future drop, the entry leaves the registry;
-already-admitted waiters retain its final normalized answer until they finish.
+already-admitted waiters retain its final normalized answer until they finish. `call_as` returns a nonserialized `DispatchResult` containing that answer and the trusted caller context which actually produced it. A shared result retains its owner's context even after registry retirement. A waiter's own timeout or cancellation instead retains that waiter's context. Products validate both the owner's retained publication authority and the current waiter's authority at their output boundary; a new caller scope observation cannot relabel an old result. Neither the retained context nor its extensions enter JSON, schemas or Debug output. Anonymous `call` projects only the answer. Convenience transport adapters render only the answer. A product with a native publication fence uses `call_as` at that boundary and retains the returned owner context until its final bounded output activation.
 Dropping or cancelling a waiter does not cancel the owner. Dropping the owner
 cancels its work and releases its waiters with a cancelled outcome.
 

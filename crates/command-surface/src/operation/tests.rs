@@ -581,7 +581,8 @@ async fn authenticated_scopes_namespace_the_atomic_product_request_log() {
                 Caller::authenticated(scope, ()),
                 CancellationToken::new(),
             )
-            .await;
+            .await
+            .answer;
         ids.push(answer.value().unwrap()["row"].as_i64().unwrap());
         assert_eq!(entries(&table), 0);
     }
@@ -809,4 +810,96 @@ async fn waking_waiters_can_reenter_without_locking_or_removing_the_replacement_
     assert_eq!(retry.value().unwrap()["replayed"], true);
     assert_eq!(entries(&table), 0);
     assert_eq!(store.count(), 1);
+}
+
+#[tokio::test]
+async fn coalesced_results_keep_the_actual_owner_and_local_cancellation_keeps_its_waiter() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("product.sqlite"));
+    let gate = Gate::before();
+    let table = make_table(&store, Some(gate.clone()));
+    let caller =
+        |identity: &'static str| Caller::authenticated("same-authenticated-scope", identity);
+    let mut owner = Box::pin(table.call_as(
+        request("owner-context", "one"),
+        Origin::Http,
+        caller("private owner context"),
+        CancellationToken::new(),
+    ));
+    pending(owner.as_mut()).await;
+    let mut waiter = Box::pin(table.call_as(
+        request("owner-context", "one"),
+        Origin::Mcp,
+        caller("waiter context"),
+        CancellationToken::new(),
+    ));
+    pending(waiter.as_mut()).await;
+    let token = CancellationToken::new();
+    let mut cancelled = Box::pin(table.call_as(
+        request("owner-context", "one"),
+        Origin::Cli,
+        caller("cancelled waiter context"),
+        token.clone(),
+    ));
+    pending(cancelled.as_mut()).await;
+    token.cancel();
+    let cancelled = cancelled.await;
+    assert_eq!(kind(&cancelled.answer), FailureKind::Cancelled);
+    assert_eq!(
+        cancelled.owner.identity::<&str>(),
+        Some(&"cancelled waiter context")
+    );
+    gate.open();
+    let owner = owner.await;
+    let waiter = waiter.await;
+    assert_eq!(
+        owner.owner.identity::<&str>(),
+        Some(&"private owner context")
+    );
+    assert_eq!(
+        waiter.owner.identity::<&str>(),
+        Some(&"private owner context")
+    );
+    assert_eq!(owner.answer, waiter.answer);
+    assert!(
+        !serde_json::to_string(&waiter.answer)
+            .unwrap()
+            .contains("private owner context")
+    );
+    assert_eq!(store.attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(entries(&table), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_waiter_timeout_retains_its_context_without_replacing_the_shared_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("product.sqlite"));
+    let gate = Gate::before();
+    let table = make_table(&store, Some(gate.clone()));
+    let mut owner = Box::pin(table.call_as(
+        request("local-timeout", "one"),
+        Origin::Http,
+        Caller::authenticated("same-scope", 1u64),
+        CancellationToken::new(),
+    ));
+    pending(owner.as_mut()).await;
+    let mut input = request("local-timeout", "one");
+    input.deadline = Deadline::Milliseconds(1);
+    let mut waiter = Box::pin(table.call_as(
+        input,
+        Origin::Mcp,
+        Caller::authenticated("same-scope", 2u64),
+        CancellationToken::new(),
+    ));
+    pending(waiter.as_mut()).await;
+    tokio::time::advance(Duration::from_millis(2)).await;
+    let waiter = waiter.await;
+    assert_eq!(kind(&waiter.answer), FailureKind::Timeout);
+    assert_eq!(waiter.owner.identity::<u64>(), Some(&2));
+    assert_eq!(entries(&table), 1);
+    gate.open();
+    let owner = owner.await;
+    assert_eq!(owner.owner.identity::<u64>(), Some(&1));
+    assert!(owner.answer.value().is_some());
+    assert_eq!(store.attempts.load(Ordering::SeqCst), 1);
 }

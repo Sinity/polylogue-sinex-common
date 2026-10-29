@@ -429,7 +429,8 @@ async fn trusted_identity_is_typed() {
             Caller::authenticated("person-a", "trusted author".to_string()),
             CancellationToken::new(),
         )
-        .await;
+        .await
+        .answer;
     assert_eq!(answer.value().unwrap()["rows"], json!(["trusted author"]));
 }
 
