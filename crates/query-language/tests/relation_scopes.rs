@@ -1,7 +1,6 @@
 mod support;
 use query_language::{
     ErrorKind,
-    ast::*,
     bind::bind,
     catalog::*,
     complete::{CompletionKind, complete, requirements},
