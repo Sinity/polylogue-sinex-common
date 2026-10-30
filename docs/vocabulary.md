@@ -30,6 +30,10 @@ mechanic and nothing else in the shared crates.
 |---|---|
 | catalog | a product's units or tables, their fields, closed-set values and defaults |
 | compiler | a product's translation of a parsed query into execution |
+| normal form | the canonical parsed question, with source spans removed and commutative operands ordered |
+| question identity | the BLAKE3 hash of the normal form and declared parameter types |
+| read position | a product-owned retained view that a continuation reads |
+| version binding | a schema, definition, grant or ranking version fixed for a continuation |
 | unit | what a query reads rows of (a product's sessions, events, tables …) |
 | condition | one test of a row; conditions side by side are joined by `AND` |
 | stage | one `\|` step of a query |
@@ -40,8 +44,13 @@ mechanic and nothing else in the shared crates.
 | cursor | the sealed key that continues one question from its last row |
 | logical day | the day a person reads: from the start hour in the configured zone to the same hour the next day |
 | day setting | the zone and start hour that define the logical day (`DaySetting`) |
+| time quality | where an event time came from: intrinsic, captured, file modification time, the operator, or unknown |
 | precision | how exact a time is: `instant` to `year`, or `bounded` with an end |
 | coarse time | a time whose precision is a period rather than an instant |
+| output schema | the typed fields and optional main time of an expanded saved question or kept result |
+| implicit source | a source whose omitted unit inherits the enclosing actual row domain |
+| bound query | a query whose source output scopes and suffix fields have passed shared binding |
+| time bound | a `since` lower bound or `until` exclusive upper bound, preserved as its own query operation |
 
 ## Operations and transport
 
@@ -52,6 +61,9 @@ mechanic and nothing else in the shared crates.
 | request, answer | what a caller sends, and the typed value it gets back |
 | outcome | what kind of answer came back (rows, empty, incomplete …), or a failure |
 | failure, failure kind | a typed error, and its stable name on the wire |
+| failure code | a product's precise failure name, registered once against a shared failure kind |
+| caller scope | the server's authenticated identity namespace for request retries; never supplied in request JSON |
+| in-flight coalescing | concurrent matching requests share one active execution and its final answer; sequential retries reach the product request log |
 | exit code | the CLI's process status for an answer, one per failure kind |
 | latency class | the group an operation belongs to for its default deadline: local, status, completion, read, search, aggregate |
 | deadline | how long a request may run; a default any caller can lift |
@@ -71,6 +83,9 @@ mechanic and nothing else in the shared crates.
 | baseline | the matches a rule starts from, which never fire |
 | handoff | the moment a delivery leaves the evaluator |
 | delivery | the record of one firing: rule, revision, rows, channel, outcome |
+| delivery receipt | the returned outcome of one route attempt, recorded against its delivery identity |
+| attempt | one execution of a delivery route, initially unknown until a returned receipt |
+| attempt context | the process-local absolute work deadline and owner cancellation shared by a dispatched delivery and all its phases |
 | notice, value, action | the three kinds of delivery: a message, a number written to a target, a command run |
 | interrupting, passive | a notice shown as a desktop notification, or one that waits in status and briefs |
 | interrupt budget | how many interrupting notices per hour rules not authored by the operator may cause |

@@ -28,19 +28,26 @@ Nested Cargo commands use `devkit::cargo_command()`, which drops the parent's
 `CARGO_MANIFEST_DIR`, `CARGO_MANIFEST_PATH` and `CARGO_PKG_*` so they do not
 invalidate build-script fingerprints.
 
+`Run::nextest` passes Cargo's package selection unchanged to both the build
+and execution commands. Use `-p <package>` to compile that package's test
+targets and its dependencies. A nextest `-E 'package(...)'` filter selects
+execution within the Cargo build scope; it does not replace `-p`. A product
+keeps its full-workspace defaults for `check` and unscoped `test` runs, and
+passes explicit package selectors through to Cargo.
+
 ## Local dependency links
 
 `devkit::local_link::LocalLink` builds several Cargo workspaces against one
 checkout of a Git dependency. The product supplies the repository URL, patch
-and opt-out paths, and each workspace's existing lock and original-backup
-paths. Its CLI owns checkout discovery and user-facing messages.
+path, and each workspace's existing lock and original-backup paths. Its CLI
+owns checkout discovery and user-facing messages.
 
 `link(checkout)` discovers the shared crates, writes the Cargo patch, keeps
 the original locks and resolves every workspace. A crate still resolving to
 Git is an error, including Cargo falling back to Git when the checkout's
 version does not satisfy a workspace. Successful relinks keep the same
 original backups. `unlink()` restores those locks, removes the patch and
-backups, and writes the opt-out marker.
+backups. Linking happens only when the product CLI requests it.
 
 Both operations restore the preceding file contents on a returned error,
 including the preceding active link and any absent files. A rollback failure
@@ -140,6 +147,21 @@ compile-time-checked SQL, over a socket: a per-user service when one is
 running (its socket in `$XDG_RUNTIME_DIR/devkit/pg`), otherwise an owned
 throwaway cluster on tmpfs. The product's `xtask` chooses which.
 
+`ClusterOptions.required_extensions` names the extensions schema bootstrap
+needs. `Server::service_or_start` checks the running service's actual
+`pg_available_extensions`, PostgreSQL major version and required preloaded
+libraries before reusing it. An incompatible service stays running; devkit
+starts an isolated cluster from the current development shell instead and
+verifies the same requirements before returning it. A missing extension in
+that shell fails by name before schema bootstrap. Further server settings
+apply to newly started clusters.
+
+An owned cluster runs PostgreSQL as a direct child. Normal shutdown stops
+and waits for that child, so a container whose init does not reap orphans
+does not accumulate exited postmasters. If the owner is killed, the existing
+watchdog stops the cluster and removes its files; reaping processes orphaned
+by abrupt owner death remains the platform init's responsibility.
+
 - Each schema version, named by a hash of the schema sources, is built once
   into a template database and copied to the read-only **schema database**
   that `DATABASE_URL` points at. Every test clones the template
@@ -234,9 +256,11 @@ targets; VM scenario names; development-stack services and readiness probes.
   lock and the original backups; a subsequent unlink restores the original
   Git-backed locks. A synthetic two-workspace dependency accepts a new version
   in its root but refuses it in its fuzz workspace.
-- **failed-first-link**: a failed first link preserves original locks, an
-  existing opt-out marker and the absence of patch and backup files. The same
-  two-workspace refusal exercises the returned-error path.
+- **failed-first-link**: a failed first link preserves original locks and the
+  absence of patch and backup files. The same two-workspace refusal exercises
+  the returned-error path.
+- **link-roundtrip**: linking and unlinking restore both workspace locks and
+  the entire Cargo configuration directory, including unrelated settings.
 - **history-never-gates**: a run whose history store cannot be opened reports
   that and finishes with the outcome of its steps.
 - **changed-selection-includes-reverse-dependencies**: a production change

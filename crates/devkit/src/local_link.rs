@@ -1,9 +1,9 @@
 //! Local checkout overrides for a Git dependency shared by Cargo workspaces.
 //!
-//! The caller chooses the repository, patch, opt-out marker and original-lock
-//! backup paths. Linking resolves every workspace against the checkout and
-//! preserves the original locks until unlinking. Returned errors restore the
-//! files as they were before the operation, including an earlier active link.
+//! The caller chooses the repository, patch and original-lock backup paths.
+//! Linking resolves every workspace against the checkout and preserves the
+//! original locks until unlinking. Returned errors restore the files as they
+//! were before the operation, including an earlier active link.
 //! A killed process can leave the operation unfinished; original backups remain
 //! available for the caller's next unlink.
 use serde_json::Value;
@@ -22,7 +22,6 @@ type Result<T> = std::result::Result<T, String>;
 pub struct LocalLink<'a> {
     pub repository: &'a str,
     pub patch: &'a Path,
-    pub disabled: &'a Path,
     pub locks: &'a [(&'a Path, &'a Path)],
 }
 
@@ -51,7 +50,6 @@ impl LocalLink<'_> {
                 }
             }
             write(self.patch, patch.as_bytes())?;
-            remove(self.disabled)?;
             for (lock, _) in self.locks {
                 let resolved = metadata(workspace(lock)?, false)?;
                 if let Some(package) = resolved["packages"]
@@ -71,7 +69,7 @@ impl LocalLink<'_> {
         })
     }
 
-    /// Restores original locks, removes the patch and disables automatic linking.
+    /// Restores original locks and removes the patch and original-lock backups.
     pub fn unlink(&self) -> Result<Vec<PathBuf>> {
         self.change(|| {
             remove(self.patch)?;
@@ -83,10 +81,6 @@ impl LocalLink<'_> {
                     restored.push(lock.to_path_buf());
                 }
             }
-            write(
-                self.disabled,
-                b"Automatic local dependency linking is disabled.\n",
-            )?;
             Ok(restored)
         })
     }
@@ -96,7 +90,6 @@ impl LocalLink<'_> {
             return Err("a local dependency link needs a workspace lock".into());
         }
         let paths: BTreeSet<&Path> = std::iter::once(self.patch)
-            .chain(std::iter::once(self.disabled))
             .chain(
                 self.locks
                     .iter()

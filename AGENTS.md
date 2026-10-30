@@ -26,15 +26,17 @@ in both products before changing a shared interface.
   segments; one sync per group; extents committed with the rows that cite
   them; a segment opens at its last committed extent, so a crash never needs a
   repair step.
-- [`query-language`](docs/query-language.md): one surface language, two
+- [`query-language`](crates/query-language/README.md): one surface language, two
   catalogs and two compilers; the language owns the laws that are properties
   of the language and runs them against both catalogs.
-- [`command-surface`](docs/command-surface.md): one operation table per
+- [`command-surface`](crates/command-surface/README.md): one operation table per
   product, from which every transport is generated; one failure table.
-- [`web-shell`](docs/web-shell.md): server-rendered HTML from typed answers,
+- [`web-shell`](crates/web-shell/README.md): server-rendered HTML from typed answers,
   one TypeScript shell, one visual language.
-- [`signals`](docs/signals.md): one rule schema and evaluator, one interrupt
-  budget, freedesktop notifications.
+- [`signals`](crates/signals/README.md): one rule schema and evaluator, one interrupt
+  budget and pure delivery checkpoint types.
+- [`signal-delivery`](crates/signal-delivery/README.md): desktop and command I/O
+  over the shared signal checkpoint.
 - [`devkit`](crates/devkit/README.md): the core of each product's `xtask`. It
   starts what a run needs and stops it on drop, and names its interfaces
   neutrally (`DEVKIT_JOB_ID`, `DEVKIT_SCRATCH`) so that any job runner can
@@ -43,8 +45,9 @@ in both products before changing a shared interface.
 ## Building and testing
 
 Enter the development shell with `direnv allow` (the `.envrc` loads the
-flake) or `nix develop`. It carries the Rust toolchain, nextest, PostgreSQL
-and `nats-server`.
+flake) or `nix develop`. The flake reads `rust-toolchain.toml`, the same pin
+rustup uses; it also carries nextest, PostgreSQL and `nats-server`.
+[Development](docs/development.md) owns local overrides and plain commands.
 
 | Command | Does |
 |---|---|
@@ -133,12 +136,18 @@ nothing names a particular host, path or person.
 
 ## Cloud sessions and changes the products need
 
-Cloud sessions run `cargo xtask` directly without AgentCTL or operator
-services. Run `bash dev/cloud/setup.sh`; [the cloud setup guide](dev/cloud/README.md)
-owns backend selection, pinned tools, shell startup and readiness checks.
-The explicit native backend supports restricted rootless cloud runtimes;
-the default Nix backend uses the repository's development shell. Push a
-branch and open a pull request; do not merge.
+In cloud sessions, check for `${CLOUD_PREFIX:-../.cloud}/env.sh` from the
+checkout root before Cargo or other development commands. When present,
+source it in every command shell:
+
+```sh
+. "${CLOUD_PREFIX:-../.cloud}/env.sh"
+```
+
+If absent, read [the cloud setup guide](dev/cloud/README.md) before choosing
+a backend or installing tools. Preserve a resumed task's branch, commits and
+uncommitted work; sourcing initializes tools. Run `cargo xtask` directly;
+each run owns its services. Push a branch and open a pull request; do not merge.
 
 Polylogue and Sinex follow this repository's `master`, and their Cargo.lock
 pins the commit. To change a crate here together with its callers, check

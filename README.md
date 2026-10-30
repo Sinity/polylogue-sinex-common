@@ -7,10 +7,11 @@ Rust crates and development tooling shared by
 | Crate | Holds |
 |---|---|
 | [`hashed-blobs`](crates/hashed-blobs/README.md) | content-addressed blobs in an append-only segment container, checked reads, PAX member access, the on-demand scan |
-| [`query-language`](docs/query-language.md) | the shared grammar and spelling, the syntax tree's meaning, time expressions, the logical day, cursors, the completer and the shared law suite |
-| [`command-surface`](docs/command-surface.md) | the `Operation` trait, failures with their exit and HTTP table, request and answer envelopes, latency classes and deadlines, server-sent-event framing, the status figure format |
-| [`web-shell`](docs/web-shell.md) | the rendering model, visual tokens, the shared key table, palette, copy, page frame, live fragments and windowed lists |
-| [`signals`](docs/signals.md) | the signal rule schema, the evaluator and its laws, the interrupt budget and desktop notifications |
+| [`query-language`](crates/query-language/README.md) | the shared grammar and spelling, the syntax tree's meaning, time expressions, the logical day, cursors, the completer and the shared law suite |
+| [`command-surface`](crates/command-surface/README.md) | the `Operation` trait, failures with their exit and HTTP table, request and answer envelopes, latency classes and deadlines, server-sent-event framing, the status figure format |
+| [`web-shell`](crates/web-shell/README.md) | the rendering model, visual tokens, the shared key table, palette, copy, page frame, live fragments and windowed lists |
+| [`signals`](crates/signals/README.md) | the pure signal rule schema, evaluator, host policy and delivery checkpoint types |
+| [`signal-delivery`](crates/signal-delivery/README.md) | the desktop and command worker over the pure signal checkpoint |
 | [`devkit`](crates/devkit/README.md), [`devkit-macros`](crates/devkit-macros) | the core of each product's `xtask`: runs and their history, changed-package selection, test databases and NATS, fixtures, bench, coverage, fuzz and VM runners |
 
 Each crate's `README.md` is its documentation. A crate that is not yet in the
@@ -38,6 +39,9 @@ can take a new commit of this repository on its own schedule.
 
 ## Conventions
 
+[Development](docs/development.md) describes the declared Rust toolchain,
+development shell and local overrides.
+
 - Every crate page ends with `## Laws`: one bullet per law, a stable key in
   bold, then the property and its oracle. A test that checks a law carries the
   key in its name (`cursor_refusals` for `cursor-refusals`), and
@@ -59,8 +63,8 @@ When `master` moves, a workflow here opens a pull request in each product that
 updates all its workspace locks to the new commit. The product's own checks
 decide when to take it. The workflow needs the repository secret `COMMON_BUMP_TOKEN`,
 with Contents and Pull requests read/write access to both products. Without
-it, update their locks with `cargo update -p devkit -p hashed-blobs
--p credential-masking` and open those pull requests manually. Convert affected
+it, update their locks with `cargo update` selecting the shared crates
+that product adopts and open those pull requests manually. Convert affected
 callers and run the product's checks before merging its lock update.
 Sinex also has `fuzz/Cargo.lock`: update it with
 `cargo update --manifest-path fuzz/Cargo.toml -p devkit -p hashed-blobs`.

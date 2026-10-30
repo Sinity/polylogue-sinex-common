@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Formatting is a short local check; the native check owns Clippy and tests.
+set -euo pipefail
+build_inputs=(Cargo.toml Cargo.lock flake.nix flake.lock rust-toolchain
+    rust-toolchain.toml rustfmt.toml .rustfmt.toml .cargo build.rs crates xtask)
+check_build=false
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+    [[ "$local_sha" =~ ^0+$ ]] && continue
+    base="$remote_sha"
+    if [[ "$base" =~ ^0+$ ]]; then
+        base=$(git merge-base "$local_sha" refs/remotes/origin/master) || base=""
+    fi
+    if [[ -z "$base" || "$local_sha" != "$(git rev-parse HEAD)" ]] ||
+        ! git diff --quiet "$base" "$local_sha" -- "${build_inputs[@]}"; then
+        check_build=true
+    fi
+done
+if $check_build; then
+    if [[ -n "${IN_NIX_SHELL:-}" ]] && command -v cargo >/dev/null; then
+        cargo fmt --all -- --check
+    else
+        nix develop --command cargo fmt --all -- --check
+    fi
+fi
+git diff --check

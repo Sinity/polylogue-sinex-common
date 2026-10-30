@@ -10,6 +10,16 @@ fn cand(stratum: &str, rel: &str, size: u64) -> Candidate {
     }
 }
 
+#[test]
+fn a_single_file_stratum_is_selected_once_when_the_budget_exceeds_it() {
+    let all = vec![cand("synthetic", "one.jsonl", 20)];
+    for target in [1, 20, 100] {
+        let selected = select(&all, target, 1);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].rel, PathBuf::from("one.jsonl"));
+    }
+}
+
 fn corpus() -> Vec<Candidate> {
     let mut all = Vec::new();
     for i in 0..1000u64 {

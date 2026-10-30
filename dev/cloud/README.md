@@ -9,6 +9,13 @@ Run setup from the checkout you want to prepare:
 bash dev/cloud/setup.sh
 ```
 
+Command sandbox permissions and environment capabilities are separate.
+Dependency downloads may require the command tool's normal reviewed approval
+path, while retaining the inherited proxy and configured host allowlist.
+Diagnose network and namespace errors in that command's effective sandbox
+context. A proxy host-policy denial still requires the environment's normal
+review/save path for the required hosts before retrying.
+
 The default `CLOUD_BACKEND=nix` uses the repository's development shell. If
 Nix is absent, installation requires a privileged Debian/Ubuntu setup phase.
 An existing Nix installation can be used by an ordinary user. Local
@@ -23,18 +30,49 @@ CLOUD_BACKEND=native bash dev/cloud/setup.sh
 ```
 
 The base image must provide Bash, Python 3.12 or newer, C and C++ compilers, Make,
-pkg-config and Perl with its standard generator modules. The native backend downloads the SHA256-pinned artifacts in
-`pins.json`: Rust with rustfmt and Clippy, nextest, CMake, PostgreSQL 18,
-TimescaleDB and NATS. The bootstrap also pins M4, Bison and Flex, which
+pkg-config, Perl with its standard generator modules, Node.js 24 or newer and
+`dbus-daemon`. Signals tests create their own private D-Bus session; they do
+not need D-Bus development headers or an operator session bus.
+The native backend downloads the SHA256-pinned artifacts in
+`pins.json`: Rust with rustfmt and Clippy, nextest, CMake, TypeScript 7.0.2,
+esbuild 0.27.2, PostgreSQL 18, TimescaleDB, pgvector 0.8.7 and NATS. The bootstrap also pins M4, Bison and Flex, which
 PostgreSQL 18 requires even when building its release archives. Rust matches the product's `rust-toolchain.toml`.
 PostgreSQL and TimescaleDB build into the user's prefix. The toolchain does
 not need root, a writable `/nix`, user namespaces or PRoot.
 
+On Debian 13 amd64, `CLOUD_NATIVE_BOOTSTRAP=debian13` selects the official
+Debian generator packages pinned in `pins.json` and the official PostgreSQL
+GitHub release tag archive instead of the GNU/PostgreSQL FTP artifacts. This
+route needs `dpkg-deb` in the base image. For example:
+
+```sh
+CLOUD_BACKEND=native CLOUD_NATIVE_BOOTSTRAP=debian13 bash dev/cloud/setup.sh
+```
+
+It downloads exact package artifacts,
+checks their SHA256 from the signed Debian index, and extracts files into the
+owned prefix; it runs no package scripts or system installation. Bison's data
+directory and M4 path are exported for the relocated tools. The default
+`CLOUD_NATIVE_BOOTSTRAP=source` compiles the generator release archives.
+Both routes build pgvector against the owned PostgreSQL headers with portable
+compiler flags and use the same PostgreSQL/Timescale/pgvector/NATS smoke checks.
+The extension pin is tracked separately from core toolchain pins, so changing
+only pgvector rebuilds that extension while rechecking the existing core tools.
+
 `CLOUD_PREFIX` selects the absolute writable prefix; its default is `.cloud`
 beside the checkout. Downloads and build trees stay there for repeat setup.
+The prefix must be on a filesystem supporting POSIX ACLs for the full test
+suite. Setup creates private `tmp` under that prefix and exports it as
+`TMPDIR` during installation and later commands. This keeps filesystem
+oracles on the prepared workspace filesystem; a runtime's default tmpfs may
+support user xattrs while rejecting POSIX ACLs.
 `CLOUD_BUILD_JOBS` controls native compilation concurrency (default 2).
+The frontend tools use the upstream npm tarballs directly, without npm install
+scripts or changing workspace manifests. Their versions match the shared
+development shell so the committed web-shell bundle remains reproducible.
 Every native setup checks the installed tools, starts a throwaway PostgreSQL
-cluster, creates and queries a TimescaleDB hypertable, and checks a throwaway
+cluster, creates and queries a TimescaleDB hypertable, checks synthetic vector
+dimensions/cosine distance/HNSW index ordering, and checks a throwaway
 NATS JetStream server. Both services stop before setup returns. The native
 PostgreSQL is for local test sockets and omits ICU, Readline, zlib and TLS;
 it is not a production database installation.
@@ -44,10 +82,18 @@ committed dependency graph, without auto-linking a sibling common checkout.
 Use `cargo xtask link-common` explicitly when changing shared crates; that
 operation owns its patch and lock changes.
 
-Configure `BASH_ENV` to the printed absolute `env.sh` path so later Bash
-commands load the prepared tools, and have the environment's start
-instructions source it explicitly. The privileged Nix backend also keeps
-`/etc/devenv.sh` for existing profiles. `CLOUD_PREBUILD=1` builds all test
+The repository's `AGENTS.md` owns startup discovery. From the checkout root,
+source the existing `${CLOUD_PREFIX:-../.cloud}/env.sh` in every cloud command
+shell before development commands. An existing prepared prefix is reused;
+new and resumed tasks do not rerun installation just to initialize a shell.
+If the prefix is absent, choose the appropriate backend from this guide.
+
+Explicit sourcing is the supported initialization route in current Codex
+Cloud. `BASH_ENV` may point to the printed absolute `env.sh` path only where
+the provider supports that variable; it is optional. Provider startup fields
+can point to the repository instructions, which remain available in the
+checkout. The privileged Nix backend also keeps `/etc/devenv.sh` for existing
+profiles. `CLOUD_PREBUILD=1` builds all test
 binaries after fetching; the default leaves builds to the requested task.
 Run `cargo xtask` commands directly in cloud sessions. Each test run owns its
 throwaway services; no operator host services are required.

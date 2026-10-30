@@ -1,9 +1,10 @@
 //! PostgreSQL for development: one server, one database per schema version,
 //! and a fresh clone of it for every test.
 //!
-//! - **Server.** The per-user service, when it runs, listens on the socket in
-//!   `$XDG_RUNTIME_DIR/devkit/pg`. Without it (CI, Nix builds, a host that
-//!   does not run the service) [`Server::start`] runs a throwaway cluster on
+//! - **Server.** The per-user service, when it runs and has the required
+//!   capabilities, listens on the socket in `$XDG_RUNTIME_DIR/devkit/pg`.
+//!   Without it (CI, Nix builds, a host that does not run the service)
+//!   [`Server::start`] runs a throwaway cluster on
 //!   tmpfs, owned by the calling process and removed when dropped. Neither
 //!   listens on TCP, so nothing collides across checkouts. PostgreSQL refuses
 //!   to run as root, so a cluster started by root (cloud VMs, containers)
@@ -22,28 +23,33 @@
 //!   be cloned while anything is connected to it, and compilers and editors
 //!   hold connections.
 //!
-//! The PostgreSQL client tools (`initdb`, `pg_ctl`, `psql`) must be on PATH.
+//! PostgreSQL's tools (`postgres`, `initdb`, `pg_ctl`, `psql`) must be on PATH.
 //! Everything here is disposable: losing it costs a rebuild of the schema
 //! databases.
 use std::{
     env, fs,
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 pub type Result<T = ()> = std::result::Result<T, String>;
 
 const RECENT_USE_SECONDS: u64 = 3600;
 const DAY_SECONDS: u64 = 86_400;
+// The same default startup allowance as pg_ctl -w.
+const START_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Settings for a throwaway cluster.
+/// Required server capabilities and settings for an owned cluster.
 #[derive(Debug, Clone, Default)]
 pub struct ClusterOptions {
-    /// `shared_preload_libraries`, such as `timescaledb`.
+    /// Extensions that the server must offer for schema bootstrap.
+    pub required_extensions: Vec<String>,
+    /// Required `shared_preload_libraries`, such as `timescaledb`.
     pub preload: Vec<String>,
-    /// Further `-c name=value` server settings.
+    /// Further `-c name=value` settings for a newly started server.
     pub settings: Vec<(String, String)>,
 }
 
@@ -55,6 +61,7 @@ pub struct Server {
 
 struct Owned {
     data: PathBuf,
+    child: Option<Child>,
 }
 
 impl Server {
@@ -73,12 +80,20 @@ impl Server {
         server.ready().then_some(server)
     }
 
-    /// The per-user service if it is running, otherwise a throwaway cluster.
+    /// Reuses the per-user service when its PostgreSQL major matches the
+    /// current tools and it offers the required extensions and preloads.
+    /// Otherwise starts an owned cluster, leaving the service untouched.
     pub fn service_or_start(options: &ClusterOptions) -> Result<Self> {
-        match Self::service() {
-            Some(server) => Ok(server),
-            None => Self::start(options),
+        if let Some(server) = Self::service() {
+            match server.verify(options) {
+                Ok(()) => return Ok(server),
+                Err(error) => eprintln!(
+                    "PostgreSQL service {}: {error}; starting an isolated cluster",
+                    server.socket.display()
+                ),
+            }
         }
+        Self::start(options)
     }
 
     /// Starts a throwaway cluster on tmpfs, without fsync, stopped and
@@ -107,8 +122,11 @@ impl Server {
         let root = base.join(format!("devkit-pg-{}-{}", std::process::id(), unique()));
         let data = root.join("data");
         fs::create_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
-        let owned = Owned { data: data.clone() };
-        let server = Self {
+        let owned = Owned {
+            data: data.clone(),
+            child: None,
+        };
+        let mut server = Self {
             socket: root.clone(),
             owned: Some(owned),
         };
@@ -141,20 +159,24 @@ impl Server {
             ));
         }
         settings.extend(options.settings.iter().cloned());
-        let mut server_options = format!("-k {}", root.display());
+        let log = fs::File::create(root.join("postgres.log")).map_err(|e| e.to_string())?;
+        let mut command = Command::new("postgres");
+        crate::owner::as_owner_of(&mut command, &root)
+            .arg("-D")
+            .arg(&data)
+            .arg("-k")
+            .arg(&root)
+            .stdin(Stdio::null())
+            .stdout(log.try_clone().map_err(|e| e.to_string())?)
+            .stderr(log)
+            .process_group(0);
         for (name, value) in &settings {
-            server_options += &format!(" -c {name}={value}");
+            command.arg("-c").arg(format!("{name}={value}"));
         }
-        run(
-            crate::owner::as_owner_of(&mut Command::new("pg_ctl"), &root)
-                .arg("-D")
-                .arg(&data)
-                .arg("-l")
-                .arg(root.join("postgres.log"))
-                .args(["-o", &server_options, "-w", "start"]),
-        )?;
-        // pg_ctl daemonizes the server, so it would survive a killed test;
-        // the watchdog stops it once this process is gone.
+        server.owned.as_mut().expect("owned server").child =
+            Some(command.spawn().map_err(|e| format!("postgres: {e}"))?);
+        // The direct child is waited on normal shutdown. If its owner is
+        // killed, the watchdog still stops the server and removes its files.
         let quoted_data = crate::owner::shell_quote(&data.display().to_string());
         let quoted_root = crate::owner::shell_quote(&root.display().to_string());
         crate::owner::watch(
@@ -162,7 +184,33 @@ impl Server {
             &root,
             &format!("pg_ctl -D {quoted_data} -m immediate -w stop; rm -rf {quoted_root}"),
         );
+        server.wait_ready()?;
+        server.verify(options)?;
         Ok(server)
+    }
+
+    fn wait_ready(&mut self) -> Result {
+        let deadline = Instant::now() + START_TIMEOUT;
+        loop {
+            let status = self
+                .owned
+                .as_mut()
+                .and_then(|owned| owned.child.as_mut())
+                .expect("only an owned server is started")
+                .try_wait()
+                .map_err(|e| format!("postgres status: {e}"))?;
+            if status.is_some() || Instant::now() >= deadline {
+                let log = fs::read_to_string(self.socket.join("postgres.log")).unwrap_or_default();
+                return Err(format!(
+                    "postgres did not become ready (status {status:?}):\n{}",
+                    log.trim()
+                ));
+            }
+            if self.ready() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// Whether the server accepts connections.
@@ -591,12 +639,20 @@ impl Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        if let Some(owned) = &self.owned {
-            let _ = crate::owner::as_owner_of(&mut Command::new("pg_ctl"), &self.socket)
-                .arg("-D")
-                .arg(&owned.data)
-                .args(["-m", "immediate", "-w", "stop"])
-                .output();
+        if let Some(owned) = &mut self.owned {
+            if let Some(child) = &mut owned.child {
+                if matches!(child.try_wait(), Ok(None)) {
+                    let _ = crate::owner::as_owner_of(&mut Command::new("pg_ctl"), &self.socket)
+                        .arg("-D")
+                        .arg(&owned.data)
+                        .args(["-m", "immediate", "-w", "stop"])
+                        .output();
+                    // The exact child remains reserved until wait, including
+                    // when pg_ctl fails or the postmaster already exited.
+                    let _ = child.kill();
+                }
+                let _ = child.wait();
+            }
             let _ = fs::remove_dir_all(&self.socket);
         }
     }
@@ -868,3 +924,5 @@ fn unique() -> u64 {
 
 #[cfg(test)]
 mod tests;
+
+mod capabilities;
