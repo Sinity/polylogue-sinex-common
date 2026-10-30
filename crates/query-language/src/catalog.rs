@@ -92,8 +92,9 @@ impl Catalog {
             .map(|output| output.relation_scope.as_ref().unwrap_or(&output.schema))
     }
     fn source_snapshot(&self, source: &Source) -> Option<&SourceOutput> {
-        self.source_outputs.iter().find_map(|output| {
-            let matches = match (&output.source, source) {
+        self.source_outputs
+            .iter()
+            .find(|output| match (&output.source, source) {
                 (
                     OutputSource::Saved { name, arguments },
                     Source::Saved {
@@ -111,9 +112,7 @@ impl Catalog {
                     },
                 ) => reference == other && part == actual,
                 _ => false,
-            };
-            matches.then_some(output)
-        })
+            })
     }
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
