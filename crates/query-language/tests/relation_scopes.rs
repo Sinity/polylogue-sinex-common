@@ -23,7 +23,7 @@ fn cases() -> [Case; 2] {
         Case {
             catalog: support::polylogue(),
             unit: "tool_calls",
-            column: "message",
+            column: "command",
             native: "session.repo",
             qualifier: "exists tool_call(outcome:error)",
         },
