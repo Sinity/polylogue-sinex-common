@@ -67,7 +67,7 @@ pub struct MatchOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SourceOutput {
     pub source: OutputSource,
-    /// Columns actually emitted by the product's projection.
+    // Columns actually emitted by the product's projection.
     pub schema: OutputSchema,
     /// Recomputed queryable relation fields from the retained bound definition.
     /// This pure runtime snapshot is never part of canonical source bodies.
