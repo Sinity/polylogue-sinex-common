@@ -24,6 +24,7 @@ fn catalog() -> Catalog {
 }
 fn saved(name: &str, fields: Vec<Field>) -> SourceOutput {
     SourceOutput {
+        relation_scope: None,
         source: OutputSource::Saved {
             name: name.into(),
             arguments: vec![],
@@ -38,6 +39,7 @@ fn saved(name: &str, fields: Vec<Field>) -> SourceOutput {
 }
 fn result(reference: &str, part: ResultPart, fields: Vec<Field>) -> SourceOutput {
     SourceOutput {
+        relation_scope: None,
         source: OutputSource::Result {
             reference: reference.into(),
             part,
@@ -267,6 +269,7 @@ fn saved_argument_snapshot_matching_ignores_quoted_spelling_and_parameter_order(
     )
     .unwrap();
     catalog.source_outputs.push(SourceOutput {
+        relation_scope: None,
         source: OutputSource::Saved {
             name: "named".into(),
             arguments: vec![
@@ -342,6 +345,7 @@ fn nested_implicit_units_inherit_the_row_domain_and_explicit_units_keep_their_ow
     let deferred = parse("result:kept | where id in (outcome:error)", &catalog).unwrap();
     assert!(bind(&deferred, &catalog).is_err());
     catalog.source_outputs.push(SourceOutput {
+        relation_scope: None,
         source: OutputSource::Result {
             reference: "result:kept".into(),
             part: ResultPart::Rows,

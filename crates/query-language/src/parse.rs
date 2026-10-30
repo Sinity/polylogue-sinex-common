@@ -752,7 +752,7 @@ impl Parser<'_> {
             }),
             _ => None,
         };
-        scope.output = self.catalog.source_output(source).cloned().map(Arc::new);
+        scope.output = self.catalog.source_scope(source).cloned().map(Arc::new);
         if let Some(unit) = scope
             .output
             .as_ref()

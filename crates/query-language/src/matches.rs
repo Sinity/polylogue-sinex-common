@@ -36,7 +36,7 @@ pub(crate) fn source_context(
             (Some(unit.clone()), Some(Vec::new()), condition.as_ref())
         }
         Source::Saved { condition, .. } | Source::Result { condition, .. } => {
-            let output = catalog.source_output(source);
+            let output = catalog.source_scope(source);
             (
                 output.and_then(|output| output.unit.clone()),
                 output.map(|output| output.match_patterns.clone()),

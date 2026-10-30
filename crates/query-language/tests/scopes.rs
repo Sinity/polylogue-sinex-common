@@ -229,6 +229,7 @@ fn saved_and_result_scopes_retain_snapshot_fields_and_closed_values() {
     };
     catalog.source_outputs = vec![
         SourceOutput {
+            relation_scope: None,
             source: OutputSource::Saved {
                 name: "named".into(),
                 arguments: vec![],
@@ -236,6 +237,7 @@ fn saved_and_result_scopes_retain_snapshot_fields_and_closed_values() {
             schema: schema.clone(),
         },
         SourceOutput {
+            relation_scope: None,
             source: OutputSource::Result {
                 reference: "result:r".into(),
                 part: ResultPart::Rows,
@@ -243,6 +245,7 @@ fn saved_and_result_scopes_retain_snapshot_fields_and_closed_values() {
             schema: schema.clone(),
         },
         SourceOutput {
+            relation_scope: None,
             source: OutputSource::Result {
                 reference: "result:r".into(),
                 part: ResultPart::Matches,

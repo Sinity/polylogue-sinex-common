@@ -42,6 +42,16 @@ pub fn bind(query: &Query, catalog: &Catalog) -> Result<BoundQuery, Error> {
             ));
         }
         check_schema(&output.schema, catalog)?;
+        if let Some(scope) = &output.relation_scope {
+            check_schema(scope, catalog)?;
+            if scope.unit != output.schema.unit {
+                return Err(Error::new(
+                    ErrorKind::BadValue,
+                    "source relation scope and produced schema have different row domains",
+                    0,
+                ));
+            }
+        }
     }
     for (index, output) in catalog.match_outputs.iter().enumerate() {
         if catalog.match_outputs[..index]

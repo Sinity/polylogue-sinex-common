@@ -180,6 +180,7 @@ fn saved_relations_retain_only_their_actual_expanded_qualifiers() {
             ..OutputSchema::default()
         };
         catalog.source_outputs.push(SourceOutput {
+            relation_scope: None,
             source: OutputSource::Saved {
                 name: "observed".into(),
                 arguments: Vec::new(),

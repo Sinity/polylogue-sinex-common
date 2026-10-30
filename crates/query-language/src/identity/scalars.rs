@@ -166,7 +166,7 @@ pub(super) fn canonicalize(query: &mut Query, catalog: &Catalog) {
     let mut scope = match &query.source {
         Source::Unit { unit, .. } | Source::RecallLast { unit, .. } => fields(catalog, unit),
         Source::Saved { .. } | Source::Result { .. } => catalog
-            .source_output(&query.source)
+            .source_scope(&query.source)
             .map(|output| {
                 output
                     .fields

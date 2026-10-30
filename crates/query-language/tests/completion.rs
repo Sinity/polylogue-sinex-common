@@ -292,6 +292,7 @@ fn saved_output_completion_uses_typed_snapshot_fields_and_every_value_path() {
             ..Field::default()
         });
         catalog.source_outputs.push(SourceOutput {
+            relation_scope: None,
             source: OutputSource::Saved {
                 name: "failing".into(),
                 arguments: vec![],
@@ -411,6 +412,7 @@ fn result_rows_and_matches_have_separate_field_and_value_completion_scopes() {
             (ResultPart::Matches, "match_alias", "match_value"),
         ] {
             catalog.source_outputs.push(SourceOutput {
+                relation_scope: None,
                 source: OutputSource::Result {
                     reference: "result:kept".into(),
                     part,
@@ -465,6 +467,7 @@ fn nested_implicit_completion_uses_saved_actual_row_domain_and_defers_unknown_do
         (support::sinex(), "commands", "exit_code"),
     ] {
         catalog.source_outputs.push(SourceOutput {
+            relation_scope: None,
             source: OutputSource::Saved {
                 name: "grouped".into(),
                 arguments: vec![],
@@ -514,6 +517,7 @@ fn requirements_load_active_source_schema_before_its_value_section() {
         assert_eq!(missing.sources.as_slice(), std::slice::from_ref(&source));
         assert!(missing.value.is_none());
         catalog.source_outputs.push(SourceOutput {
+            relation_scope: None,
             source: source.clone(),
             schema: OutputSchema {
                 unit: Some(unit.into()),
@@ -549,6 +553,7 @@ fn requirements_decode_quotes_and_stop_at_the_byte_cursor_in_every_value_positio
     };
     let mut catalog = support::polylogue();
     catalog.source_outputs.push(SourceOutput {
+        relation_scope: None,
         source: OutputSource::Saved {
             name: "failing".into(),
             arguments: vec![],
@@ -624,6 +629,7 @@ fn requirements_keep_result_parts_and_nested_source_dependencies_typed() {
         (ResultPart::Matches, "match_alias"),
     ] {
         catalog.source_outputs.push(SourceOutput {
+            relation_scope: None,
             source: OutputSource::Result {
                 reference: "result:kept".into(),
                 part,
@@ -736,6 +742,7 @@ fn requirements_keep_group_aliases_and_exclude_stage_reference_requests() {
     };
     let mut catalog = support::sinex();
     catalog.source_outputs.push(SourceOutput {
+        relation_scope: None,
         source: OutputSource::Saved {
             name: "grouped".into(),
             arguments: vec![],

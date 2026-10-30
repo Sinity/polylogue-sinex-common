@@ -594,11 +594,11 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
             }
             Source::Saved { .. } | Source::Result { .. } => {
                 scope.fields = catalog
-                    .source_output(&q.source)
+                    .source_scope(&q.source)
                     .map(|output| output.fields.clone())
                     .unwrap_or_default();
                 scope.unit = catalog
-                    .source_output(&q.source)
+                    .source_scope(&q.source)
                     .and_then(|output| output.unit.as_deref())
                     .and_then(|unit| catalog.unit(unit))
                     .map(|unit| unit.name.clone());
@@ -807,7 +807,7 @@ fn row_scope(
     let mut unit = match &query.source {
         Source::Unit { unit, .. } => Some(unit.clone()),
         Source::Saved { .. } | Source::Result { .. } => catalog
-            .source_output(&query.source)
+            .source_scope(&query.source)
             .and_then(|output| output.unit.clone()),
         _ => None,
     };

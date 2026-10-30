@@ -67,7 +67,13 @@ pub struct MatchOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SourceOutput {
     pub source: OutputSource,
+    /// Columns actually emitted by the product's projection.
     pub schema: OutputSchema,
+    /// Recomputed queryable relation fields from the retained bound definition.
+    /// This pure runtime snapshot is never part of canonical source bodies.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub relation_scope: Option<OutputSchema>,
 }
 impl Catalog {
     pub fn match_output(&self, source: &MatchSource) -> Option<&OutputSchema> {
@@ -77,6 +83,15 @@ impl Catalog {
             .map(|output| &output.schema)
     }
     pub fn source_output(&self, source: &Source) -> Option<&OutputSchema> {
+        self.source_snapshot(source).map(|output| &output.schema)
+    }
+    /// One semantic scope for parser, binder, identity and completion. Products
+    /// rebuild it from frozen bound syntax; absent metadata uses produced fields.
+    pub fn source_scope(&self, source: &Source) -> Option<&OutputSchema> {
+        self.source_snapshot(source)
+            .map(|output| output.relation_scope.as_ref().unwrap_or(&output.schema))
+    }
+    fn source_snapshot(&self, source: &Source) -> Option<&SourceOutput> {
         self.source_outputs.iter().find_map(|output| {
             let matches = match (&output.source, source) {
                 (
@@ -97,7 +112,7 @@ impl Catalog {
                 ) => reference == other && part == actual,
                 _ => false,
             };
-            matches.then_some(&output.schema)
+            matches.then_some(output)
         })
     }
 }
