@@ -12,6 +12,7 @@ Rust crates and development tooling shared by
 | [`web-shell`](crates/web-shell/README.md) | the rendering model, visual tokens, the shared key table, palette, copy, page frame, live fragments over one connection per browser, windowed lists and the timeline |
 | [`authored`](crates/authored/README.md) | the authored-record header, currency by the descendant rule, stale-base checks, atomic requests, uniqueness slots, order keys and the shared history generator |
 | [`ranking`](crates/ranking/README.md) | the Plackett–Luce fit of judgments with intervals, judge sets, components and warm starts, and next-set selection under three rules |
+| [`references`](crates/references/README.md) | the reference grammar (global and local forms), selectors, locators with their versioned canonicalizer and catalog patterns, URL patterns, the route catalog |
 | [`signals`](crates/signals/README.md) | the signal rule schema, evaluator, route function and host policy, outcomes, follow, wait and backtest, desktop notification state, and the Inbox, Why and Signals views |
 | [`signal-delivery`](crates/signal-delivery/README.md) | the one task that shows notices on the desktop or sends them to the away command |
 | [`devkit`](crates/devkit/README.md), [`devkit-macros`](crates/devkit-macros) | the core of each product's `xtask`: runs and their history, changed-package selection, test databases and NATS, fixtures, bench, coverage, fuzz and VM runners |
@@ -24,10 +25,10 @@ the shared mechanics.
 ## What is shared
 
 Code lives here only where the two products' mechanics are identical: storing
-bytes, the query language's grammar and meaning, how operations travel and
-fail, the rules of authored records, the web front end's shell, signal
-evaluation, and development runs. Shared signals also mean one budget for the
-operator's attention on a host.
+bytes, the query language's grammar and meaning, how things are referenced
+and addressed, how operations travel and fail, the rules of authored records,
+the web front end's shell, signal evaluation, and development runs. Shared
+signals also mean one budget for the operator's attention on a host.
 
 Concepts stay in their product even where the words are alike. Polylogue's
 assertion kinds, annotations, Pages and measures, Sinex's library precedence

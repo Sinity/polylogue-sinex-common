@@ -1,0 +1,222 @@
+# references
+
+One grammar for anything Polylogue or Sinex can address: the reference
+forms, the selectors that name a place inside a thing, the locators that name
+things outside both products, the canonicalizer that makes locators
+byte-identical in both products, and the route catalog that turns any
+reference into a link to its owner's web view and back.
+
+Each product supplies its own [catalog](#the-catalog): its kinds, their web
+sub-views, its web address and its provider-URL patterns. What an identity or
+a revision means stays the product's; this crate fixes where each part of a
+reference begins and ends, how it is written, and how it travels.
+
+## References
+
+A reference names one object of one product, or one locator, and optionally
+a place inside it.
+
+| Form | Example | Where it is written |
+|---|---|---|
+| global | `sinex:ev/0190a1b2`, `polylogue:assertion/r1@3#exact=once` | stored, sent between products, read anywhere |
+| local | `ev:0190a1b2` in Sinex, `session:claude-code:7f3a` in Polylogue | typed and printed inside the owning product |
+| locator | `url:https://example.com/a`, `youtube:dQw4w9WgXcQ#t=30`, `file:laptop/r1/notes.md#L4-9` | the same everywhere; no product owns it |
+
+The global form is `<product>:<kind>/<id>[@<revision>][#<selector>]`.
+
+- **Product** is `polylogue` or `sinex`. Product names and locator kinds are
+  reserved: no product declares a kind with one of them.
+- **Kind** is a lowercase letter followed by lowercase letters, digits, `-`
+  or `_`. The kind is the same word in both forms (`ev:` and `sinex:ev/`).
+- **Identity** runs to the first `@` or `#`. It may hold `:` and `/`
+  (`session:claude-code:abc`, `sinex:record/<material>/<offset>/<type>`).
+  `@`, `#`, `%`, whitespace and control characters inside it are
+  percent-encoded.
+- **Revision** follows `@` and runs to `#`. Its meaning is the owner's: an
+  exact revision of an authored record, for instance. Without one, a
+  reference names the object as it currently is.
+- **Selector** follows `#` ([selectors](#selectors)).
+
+A local form is normalised to the global form at input
+(`Catalog::parse`), so everything stored holds the global form and
+`Reference::parse` reads it without a catalog. Printing for a person inside a
+product (`Reference::written_in`) gives the local form for that product's own
+objects and the global form for everything else. Serde writes and reads the
+global form.
+
+A `%` that does not start an escape is a literal `%`; printing encodes it as
+`%25`. Every input therefore has one printed form, and nothing is refused for
+holding a `%`.
+
+### What a person types
+
+`Catalog::read_input` classifies text where a reference may stand:
+
+| Input | Becomes |
+|---|---|
+| `self`, `here`, `last`, `latest` | a context word: the calling session; the caller's working-directory scope (repository, worktree, project); the product's most recent object of the kind asked for |
+| `@3`, `@3.2`, `@2-5`, `@1,4`, `@*`, `@last` | a row pick from the last list printed for this terminal or session (rows and hits count from 1) |
+| a reference in any written form | that reference, normalised to global |
+| a local form of the other product's kind (`ev:e1` in Polylogue) | refused, with the global form (`sinex:ev/e1`) as the suggestion |
+| an absolute URL | a product's own web address read back; else a product's provider-URL pattern (the reading product's first); else the canonical locator |
+| anything else | bare text: a native identity or prefix the product resolves against its data |
+
+## Selectors
+
+A selector names a place inside the referenced thing. One parser serves both
+products. Parts are joined with `&` and always print in this order, so equal
+selectors print equal text:
+
+| Part | Form | Meaning |
+|---|---|---|
+| lines | `L40`, `L40-52` (`L40-L52` accepted) | lines counted from 1, both ends included |
+| time | `t=10,20`, `t=90.5` (`npt:`, `h:mm:ss`, `mm:ss` and `t=,20` accepted) | W3C Media Fragments time in seconds; without an end, to the end |
+| rectangle | `xywh=160,120,320,240`, `xywh=percent:0,0,50,50` (`pixel:` accepted) | W3C Media Fragments rectangle; width and height above 0 |
+| text range | `b=4-9`, `c=4-9`, `u16=4-9` | a half-open text range in UTF-8 bytes, code points or UTF-16 code units |
+| quote | `exact=…&prefix=…&suffix=…` | the W3C Web Annotation text quote: the exact text and the text around it, percent-encoded |
+| named place | `id=section-2` | a place the document itself names, kept as written: a web page's element id from its URL fragment, a media chapter (the Media Fragments `id` dimension) |
+
+- **Seconds are exact decimals.** Any number of fraction digits is kept;
+  trailing zeros are dropped.
+- **Out of range is invalid, never clamped.** `Selector::check` compares
+  every part with the bounds a product knows (duration, size, line count,
+  text length in each unit); an unknown bound is not checked.
+- **A span is kept by its range and its quote.** A text range with a quote
+  is found again in a container's current text by `Selector::span_in`:
+  `Current` when the stored range still holds the quote, `Moved` when prefix, quote and suffix occur
+  exactly once elsewhere, `ChangedSince` otherwise. Nothing is rewritten; the
+  stored reference stays as written. `TextQuote::around` builds the quote
+  with the context a writer chooses (Polylogue's assertions use 32
+  characters).
+
+## Locators
+
+A locator is the canonical native address of a thing outside both products'
+objects. Its canonical text is its identity: two things are one exactly when
+their locators are equal under the current canonicalizer.
+
+| Kind | Canonical form |
+|---|---|
+| `url:` | the URL with scheme and host lowercased, the default port dropped, dot segments removed, escapes of unreserved characters decoded and other escapes uppercased, the declared tracking parameters removed and the remaining query parameters sorted by name (values of one name keep their order); for `http` and `https` |
+| `file:` | `<host>/<root id>/<relative path at first sight>`, host lowercased, `.` and empty segments dropped, `..` resolved inside the root |
+| `part:` | `<source>/<native message id>/<part path>`: a message attachment |
+| `youtube:` | the 11-character video id |
+| `spotify:` | `<type>:<id>` for track, album, artist, playlist, episode, show, audiobook, chapter |
+| `doi:` | the DOI, lowercased |
+| `isbn:` | the ISBN-13; an ISBN-10 is converted; check digits are verified |
+| `arxiv:` | the identifier, new or old style, with its version suffix when one was written |
+| `booru:` | `<site>/<post number>` for danbooru, e621, gelbooru, safebooru, yandere, konachan |
+| `github:` | `<owner>/<repository>`, lowercased, `.git` dropped |
+| `wikipedia:` | `<language>/<title>` under MediaWiki's title rule: underscores for spaces, runs collapsed, the first letter upper case |
+
+- **A URL that a catalog pattern names becomes the catalog locator.**
+  `youtube.com/watch?v=X`, `youtu.be/X`, the embed and shorts forms, and a
+  Takeout watch record's URL all give `youtube:X`. This is exact
+  normalisation of one identifier: no time window, no similarity, no guessed
+  equivalence. A pattern whose output is not a valid identifier does not
+  match, and the URL stays a `url:` locator.
+- **Nothing is guessed.** Only declared tracking parameters (`utm_*`,
+  `fbclid`, `gclid`, `dclid`, `gbraid`, `wbraid`, `msclkid`, `yclid`,
+  `twclid`, `ttclid`, `li_fat_id`, `igshid`, `mc_cid`, `mc_eid`, `_hsenc`,
+  `_hsmi`, `mkt_tok`, `_gl`) are removed; `www.` stays; a trailing slash
+  stays.
+- **The fragment becomes the selector.** A URL's fragment that is selector
+  text (`#t=30`) is parsed as one; any other fragment is kept as an `id=`
+  part. A locator takes no revision, so `@` is plain inside it
+  (`medium.com/@name`, `node_modules/@types`).
+- **The original address is kept by the product** beside the locator; the
+  canonical form decides identity only.
+- **Catalog web addresses.** `Locator::web_url` gives the address a person
+  opens (`https://www.youtube.com/watch?v=X`), with the selector as its
+  fragment; files, attachments and ISBNs have none.
+- **Versioned.** `locator::VERSION` names the canonicalizer. Any changed
+  output for any input is a new version, and the table in
+  `src/laws/locator-cases.txt` pins the outputs of the current one. A product
+  that keyed things with an older version recomputes them by replay; it never
+  edits a key in place.
+
+## URL patterns
+
+`UrlPattern` declares a URL shape and the reference text it becomes. The
+shared catalog patterns are declared with it, and so is each product's
+provider-URL table:
+
+```rust
+UrlPattern::new("{language}.wikipedia.org", "/wiki/{title*}", &[], "wikipedia:{language}/{title}")
+UrlPattern::new("chatgpt.com", "/c/{id}", &[], "session:chatgpt:{id}") // Polylogue's
+```
+
+`{name}` captures one host label, path segment or query value, with literal
+text around it in the same piece (`intl-{locale}`, `{id}.pdf`); `{name*}`
+as the last path piece captures the rest of the path. Required query
+parameters are named; others are ignored. The scheme is not part of the
+shape. Captures enter the output still percent-encoded, and the output is
+parsed as ordinary reference text, which decodes and checks it. A malformed
+pattern is refused when declared.
+
+## The catalog
+
+`ProductCatalog` is what one product declares: its kinds with their web
+sub-views, its web base URL from deployment configuration, and its
+provider-URL patterns. `Catalog` holds the declarations of both products as
+read from one of them (`home`). A product whose declarations are absent is
+not checked: its kinds are accepted as written, and its references render as
+text.
+
+### The route catalog
+
+An object's web address follows from its reference:
+`<base>/<kind>/<id>[@<revision>][/<sub-view>][#<selector>]`, with the
+identity and revision percent-encoded once as one path segment. Read views
+and toggles are query parameters, outside the reference.
+
+- `Catalog::link` gives the owner's address, or text with the reason:
+  `Sinex not configured` (no base URL here), no web view (a file, an
+  attachment, an ISBN). A locator links to its catalog web address.
+- `Catalog::url` adds a sub-view, refused when the kind does not declare it.
+- `Catalog::route` reads an address back: a full URL under a configured
+  base, or a path in the home product. Collection, status and other
+  non-object routes are the product's own and read back as `None`.
+
+## Laws
+
+The Sinex library's `lib.locator.shared-module`, `lib.locator.catalog-folds`
+and `lib.locator.no-guess` are this crate's `locator-shared-module`,
+`locator-catalog-folds` and `locator-no-guess`.
+
+- **round-trip**: a generated reference prints in global form and parses
+  back equal; written in its own product's local form, it parses to the same
+  reference. Identities and revisions cover `:`, `/`, `@`, `#`, `%`, spaces
+  and non-ASCII text. (property)
+- **local-equals-global**: the local and global forms of one reference parse
+  equal in either product; a local form of the other product's kind is
+  refused with its global form. (table)
+- **selector-round-trip**: a generated selector of any combination of parts
+  prints and parses back equal, and prints the same text again; accepted
+  alternative spellings parse to the canonical one. (property and table)
+- **selector-out-of-range-is-invalid-not-clamped**: every part beyond a known
+  bound is refused, every part within bounds is accepted, and unknown bounds
+  are not checked. (table)
+- **quote-follows-moved-text**: with the container unchanged the span is `Current`;
+  after text is inserted before it, `Moved` to the shifted range; after the
+  quoted text changes, or when the quote occurs twice, `ChangedSince`.
+  (property and table)
+- **locator-shared-module**: the canonicalizer gives exactly the pinned
+  outputs in `src/laws/locator-cases.txt` for the version that table names.
+  Both products run the same table (`references::laws::shared_locator_cases`)
+  through the path by which they key URLs, files and catalog identifiers, so
+  their keys are byte-identical. (table, run by both products)
+- **locator-idempotent**: canonicalizing a generated URL's canonical locator
+  again changes nothing. (property)
+- **locator-catalog-folds**: every declared URL form of a catalog object
+  yields one locator. (table)
+- **locator-no-guess**: URLs differing in host case, default port, parameter
+  order or declared tracking parameters give one locator; adding any other
+  parameter gives a different one. (property)
+- **catalog-web-address-folds-back**: the web address of every catalog
+  locator, with its selector, canonicalizes back to it. (table)
+- **route-round-trip**: reading back the web address of a generated
+  reference, with or without a sub-view, gives the reference and the
+  sub-view. (property)
+- **unconfigured-product-is-text**: a reference to a product with no web
+  address here renders as text with "<Product> not configured". (unit)

@@ -1,0 +1,18 @@
+[package]
+name = "references"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "One reference grammar for Polylogue and Sinex: global and local forms, selectors, locators with their canonicalizer, URL patterns and the route catalog"
+
+[dependencies]
+serde = "1"
+thiserror = "2"
+url = "2.5"
+
+[dev-dependencies]
+proptest = "1"
+serde_json = "1"

@@ -39,6 +39,10 @@ in both products before changing a shared interface.
   one failure table for every surface of both products.
 - [`web-shell`](crates/web-shell/README.md): server-rendered HTML from typed answers,
   one TypeScript shell, one visual language.
+- [`references`](crates/references/README.md): one reference grammar,
+  `<product>:<kind>/<id>[@<revision>][#<selector>]` stored and `<kind>:<id>`
+  inside its product; shared selectors; locators canonicalized byte-identically
+  for both products; a web address that follows from the reference.
 - [`signals`](crates/signals/README.md): one rule schema and evaluator, one host
   policy with a pure route function and one interrupt budget; every delivery
   records its decision and reason.
