@@ -14,6 +14,11 @@ schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 blake3 = "1"
+maud = { version = "0.27", optional = true }
+
+[features]
+# The Inbox, Why and Signals views, rendered identically by both products.
+web = ["dep:maud"]
 
 [dev-dependencies]
 tempfile = "3"

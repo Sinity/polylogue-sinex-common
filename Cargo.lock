@@ -1324,7 +1324,6 @@ dependencies = [
  "signals",
  "tempfile",
  "tokio",
- "tokio-util",
  "zbus",
 ]
 
@@ -1354,6 +1353,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "jiff",
+ "maud",
  "query-language",
  "rusqlite",
  "schemars",
