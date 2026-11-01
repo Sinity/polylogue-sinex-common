@@ -7,9 +7,9 @@ Rust crates and development tooling shared by
 | Crate | Holds |
 |---|---|
 | [`hashed-blobs`](crates/hashed-blobs/README.md) | content-addressed blobs in an append-only segment container, checked reads, PAX member access, the on-demand scan |
-| [`query-language`](crates/query-language/README.md) | the shared grammar and spelling, the syntax tree's meaning, time expressions, the logical day, cursors, the completer and the shared law suite |
-| [`command-surface`](crates/command-surface/README.md) | the `Operation` trait, failures with their exit and HTTP table, request and answer envelopes, latency classes and deadlines, server-sent-event framing, the status figure format |
-| [`web-shell`](crates/web-shell/README.md) | the rendering model, visual tokens, the shared key table, palette, copy, page frame, live fragments and windowed lists |
+| [`query-language`](crates/query-language/README.md) | the one grammar and spelling, the syntax tree's meaning, order relations, the fusion of ranked lists, query objects and their hash, the federation planner's types, time expressions, the logical day, cursors, the completer and the shared law suite |
+| [`command-surface`](crates/command-surface/README.md) | the `Operation` trait, the answer contract, failures with their exit and HTTP table, callers and computed authors, the MCP tool grouping, the seen mark, latency classes and deadlines, server-sent-event framing, the status format |
+| [`web-shell`](crates/web-shell/README.md) | the rendering model, visual tokens, the shared key table, palette, copy, page frame, live fragments over one connection per browser, windowed lists and the timeline |
 | [`authored`](crates/authored/README.md) | the authored-record header, currency by the descendant rule, stale-base checks, atomic requests, uniqueness slots, order keys and the shared history generator |
 | [`ranking`](crates/ranking/README.md) | the Plackett–Luce fit of judgments with intervals, judge sets, components and warm starts, and next-set selection under three rules |
 | [`signals`](crates/signals/README.md) | the signal rule schema, evaluator, route function and host policy, outcomes, follow, wait and backtest, desktop notification state, and the Inbox, Why and Signals views |

@@ -32,6 +32,12 @@ interfaces page).
 | author, `via` | computed by the daemon, never supplied |
 
 Every author may write, revise, enable and withdraw rules, agents included.
+A rule is an authored record, written through each product's ordinary write
+verb, never through a separate signals command: `polylogue QUERY watch`,
+`polylogue assert signal:NAME …` and `sinexctl write signal:NAME …` write
+rules; acknowledging and snoozing a delivery are acts; `QUERY wait` and
+`signal:NAME backtest` are queries. Over MCP these are rows of each product's
+write, act and query tools, and `wait` is an option of the query tool.
 
 - A **watch** is a rule with `fires: on_change` and `deliver: notice`; there is
   no second watch mechanism.
@@ -176,8 +182,9 @@ that applies decides:
 7. The operator is away: sent away when an away command exists, otherwise
    held until presence returns and released into one summary.
 8. Deep work: held for the next breakpoint, at most 25 minutes from when it
-   first waited (`DeepWorkDeferral`: agents and producers by default, all
-   notices, or never).
+   first waited (`DeepWorkDeferral`: agents and producers, all notices, or
+   never). Only agents' and producers' notices wait (default; open operator
+   question).
 9. Otherwise shown.
 
 **Attention** is the deliverer's snapshot: an explicit quiet period,
@@ -383,50 +390,56 @@ The evaluator laws:
 
 Routing, attention, inhibition and outcomes:
 
-- **sig.route-pure**: `route` is a function of (notice, attention) only, and
+- **route-pure**: `route` is a function of (notice, attention) only, and
   the decision with its inputs is stored on the delivery.
-- **sig.attention-only-removes**: with every attention input unknown, routing
+- **attention-only-removes**: with every attention input unknown, routing
   is quiet hours and the budget alone; attention inputs never turn a notice
   that would not interrupt into one that does.
-- **sig.critical-never-deferred**: a critical delivery is shown at once in
+- **critical-never-deferred**: a critical delivery is shown at once in
   every attention state, including quiet hours.
-- **sig.deferral-bounded**: a breakpoint hold ends at the first breakpoint or
+- **deferral-bounded**: a breakpoint hold ends at the first breakpoint or
   at its bound, whichever comes first.
-- **sig.away-summary-once**: notices held or sent away while the operator is
+- **away-summary-once**: notices held or sent away while the operator is
   away produce exactly one summary at the return, listing each once, as
   held, sent away, cleared or acknowledged; none is shown on its own.
-- **sig.on-screen-is-passive-not-seen**: on-screen suppression records
+- **on-screen-is-passive-not-seen**: on-screen suppression records
   `passive (on screen)` and never marks the notice seen.
-- **sig.inhibit-folds**: while an inhibiting occurrence is open in scope,
+- **inhibit-folds**: while an inhibiting occurrence is open in scope,
   inhibited deliveries are recorded, passive and lines of the root's
   notification; when the root clears, those still current are shown at once
   as one grouped notification.
-- **sig.inhibit-shipped-only**: an authored rule can be neither inhibitor nor
+- **inhibit-shipped-only**: an authored rule can be neither inhibitor nor
   exempt.
-- **sig.own-notifications-excluded**: a captured notification carrying an
+- **own-notifications-excluded**: a captured notification carrying an
   `x-<product>-delivery` hint is a signal origin, and no rule's input
   includes it.
-- **sig.snooze-rechecks**: a snoozed current-state notice is shown again at
+- **snooze-rechecks**: a snoozed current-state notice is shown again at
   the snooze end only if its condition still holds; a historical one is shown
   again as is.
-- **sig.outcomes-append-only**: a delivery is handed off once and never
+- **outcomes-append-only**: a delivery is handed off once and never
   changes; acts and attempts append outcomes.
-- **sig.checkpoint-loss-never-refires**: rebuilding the evaluator from rules,
+- **checkpoint-loss-never-refires**: rebuilding the evaluator from rules,
   stored deliveries and stored observations never produces an existing
   delivery identity; at worst a threshold rule reports `rearmed_late`.
-- **sig.backtest-equals-live**: for rules enabled at one revision throughout,
+- **backtest-equals-live**: for rules enabled at one revision throughout,
   `backtest` over an interval returns exactly what the live evaluator and
   host policy handed off over it.
-- **sig.wait-is-follow**: `wait` returns at the instant `follow` with the same
+- **wait-is-follow**: `wait` returns at the instant `follow` with the same
   arguments would emit its first message, and records nothing.
-- **sig.external-notice-budgeted**: a producer notice asking to interrupt is
+- **external-notice-budgeted**: a producer notice asking to interrupt is
   charged to the budget and never exceeds it; a notice with an existing key
   replaces its notification in place.
-- **sig.forwarded-stale-holds**: a forwarded current-state notice whose
+- **forwarded-stale-holds**: a forwarded current-state notice whose
   producer has not confirmed being up to date since is held as `incomplete`,
   never shown.
-- **sig.trigger-never-starts-agent**: no delivery starts or resumes an agent;
+- **trigger-never-starts-agent**: no delivery starts or resumes an agent;
   a configured action command that is an agent launcher is refused.
+
+`trigger-never-starts-agent` and `on-screen-is-passive-not-seen` are the
+products' laws too: a page watch, a live-session trigger or a Sinex presence
+reading that must not start an agent, and a supervised session's on-screen
+notice, are cases of these laws, which each product runs rather than
+restating.
 
 The tests are in `tests/` (evaluator, adoption, route, host, follow, web and
 checkpoint schema) and in `signal-delivery`'s fake notification server suite.

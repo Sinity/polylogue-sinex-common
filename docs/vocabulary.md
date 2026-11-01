@@ -26,6 +26,9 @@ mechanic and nothing else in the shared crates.
 
 ## Queries
 
+`transform` (was "stage") and `answer` (was "run", for a query's evaluation)
+are renames the operator may still change (default; open operator question).
+
 | Name | Meaning |
 |---|---|
 | catalog | a product's units or tables, their fields, closed-set values and defaults |
@@ -36,7 +39,18 @@ mechanic and nothing else in the shared crates.
 | version binding | a schema, definition, grant or ranking version fixed for a continuation |
 | unit | what a query reads rows of (a product's sessions, events, tables …) |
 | condition | one test of a row; conditions side by side are joined by `AND` |
-| stage | one `\|` step of a query |
+| transform | one `\|` step of a query: a relation in, a relation out |
+| relation | what a query reads or produces: a unit, a saved query, a kept result or a reference |
+| natural match | what `field:value` means for a field's kind, declared once in the catalog |
+| order relation | `near`, `before`, `after`, `during` or `containing`, by time or by steps |
+| order scope | the sequence a unit's rows have steps in, such as a session's timeline |
+| ranked list | one ordering of selected rows (text relevance, `similar:`, `fuse` …); ranking never changes membership |
+| fusion | combining a query's ranked lists into one order by reciprocal rank |
+| answer (of a query) | one evaluation of a query, `answer:<id>`; `@last` is the caller's latest |
+| kept result | a stored answer with its read context, `result:<id>`; reading it never re-runs |
+| mixed query | a query whose units belong to both products |
+| part | the largest piece of a mixed query that one product evaluates alone |
+| coverage state | how completely a source covers an interval: `complete`, `gap`, `unknown`, `outside_span`, `not_yet`, `excluded`, `unavailable` |
 | unknown | the third truth value: a condition over a missing value is neither true nor false |
 | closed set | the fixed list of values a field may hold |
 | namespace | the `pl.` or `sx.` prefix that says which product a unit belongs to |
@@ -92,8 +106,16 @@ mechanic and nothing else in the shared crates.
 | latency class | the group an operation belongs to for its default deadline: local, status, completion, read, search, aggregate |
 | deadline | how long a request may run; a default any caller can lift |
 | position | where a product's stream of changes stands; an event's ID |
-| figure | one value in status, with its state, reason and age |
-| figure state | `measured`, `none_found`, `not_measured`, `unavailable`, `gap` |
+| envelope | the fields every answer carries: outcome, count, shown, left out, next, reading, positions, coverage, caller |
+| section status | how complete one section of an assembled answer is: `complete`, `partial`, `not_estimable`, `not_observed`, `empty` |
+| expand handle | a token in an answer that reads more of what was left out, at the answer's read context |
+| value state | how complete a number is: `complete`, `partial`, `inferred`, `unknown`, `not_recorded`, `not_applicable`, `pending` |
+| budget | how many tokens an answer may hold (`budget_tokens`); answers are fitted in whole lines |
+| caller, author | who sent a request, gathered from what it carries, and the author computed from it |
+| tool family | operation rows grouped into one MCP tool because their arguments share a shape and their hint |
+| seen mark | per consumer and target, the latest position displayed to that consumer |
+| measurement | one value in status, with its state, reason and age |
+| measurement state | `measured`, `none_found`, `not_measured`, `unavailable`, `gap` |
 | verdict | the one-word health of a product: `healthy`, `degraded`, `unknown` |
 
 ## Signals
@@ -141,7 +163,11 @@ mechanic and nothing else in the shared crates.
 | inspector | the right rail showing the facts of the page or the focused target |
 | palette | the list of every action available for the current selection |
 | copy menu | the forms a target can be copied as |
-| value state | how a value that is not a plain measured number is shown (unknown, partial, inferred …) |
+| value display | how each value state is shown (`≥ X (N unknown)`, `≈ X`, `—` …) |
+| lane | a timeline row defined by a query, with a render and a grouping |
+| series row | one mark of a lane: `(lane, start, end?, render, label?, agency?, ref)` |
+| card layer | the keys a focused decision card rebinds, shown on its buttons |
+| counterpart | the same place in the other product, reached with `g o` |
 | mark | the symbol that, with its word, carries a meaning that colour alone never does |
 
 ## Rankings
