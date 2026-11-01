@@ -946,13 +946,11 @@ impl Parser<'_> {
         if token.text.eq_ignore_ascii_case("since") || token.text.eq_ignore_ascii_case("until") {
             let resume = self.at;
             if let Some(next) = self.peek().cloned()
-                && !next.quoted
-                && !is_symbol(&next.text)
-                && let Ok(value) = self.value()
-                && self
-                    .time_bound(scope, token.text.eq_ignore_ascii_case("until"), value)
-                    .is_ok()
+                && (next.quoted || !is_symbol(&next.text))
+                && reads_as_time(&next.text)
+                && self.main_time(scope).is_some()
             {
+                self.at += 1;
                 let end = self.end();
                 return Err(Error::new(
                     ErrorKind::InvalidQuery,
@@ -1219,6 +1217,9 @@ impl Parser<'_> {
         if op == Op::Eq
             && self.is("[")
             && let Expression::Field { name } = &left
+            && !["since", "until", "in"]
+                .iter()
+                .any(|word| name.eq_ignore_ascii_case(word))
         {
             // `F = [a, b]` is the set match `F:(a|b)`.
             let (open, set) = self.bracket_list()?;
@@ -2081,24 +2082,27 @@ impl Parser<'_> {
                 TransformKind::Where { condition }
             }
             "since" | "until" => {
-                let bound = match self.peek().filter(|next| !is_symbol(&next.text)) {
-                    Some(next) => Span {
-                        start: t.span.start,
-                        end: next.span.end,
-                    },
-                    None => t.span,
-                };
-                let written = &self.text[bound.start..bound.end];
-                let joined = match written.split_once(char::is_whitespace) {
-                    Some((word, value)) => format!("{word}:{}", value.trim_start()),
-                    None => written.to_string(),
-                };
-                return Err(Error::new(
+                let error = Error::new(
                     ErrorKind::InvalidQuery,
                     "time bounds are conditions; write them after where",
                     start,
-                )
-                .suggestion(self.replace(bound, &format!("where {joined}"))));
+                );
+                // Suggest the joined bound only for a value that reads as a time.
+                return Err(
+                    match self.peek().filter(|next| {
+                        (next.quoted || !is_symbol(&next.text)) && reads_as_time(&next.text)
+                    }) {
+                        Some(next) => {
+                            let bound = Span {
+                                start: t.span.start,
+                                end: next.span.end,
+                            };
+                            let value = &self.text[next.span.start..next.span.end];
+                            error.suggestion(self.replace(bound, &format!("where {word}:{value}")))
+                        }
+                        None => error,
+                    },
+                );
             }
             "sort" => {
                 if !self.take("by") {
@@ -3011,6 +3015,20 @@ fn is_clock(text: &str) -> bool {
 /// duration or an amount of money.
 pub(crate) fn is_literal(text: &str) -> bool {
     crate::number::is_decimal(text) || is_duration(text) || is_money(text)
+}
+/// Whether a value reads as a time expression (`7d`, `yesterday`, a date).
+/// Only the spelling is checked; the clock is fixed and its answer unused.
+fn reads_as_time(text: &str) -> bool {
+    let Ok(day) =
+        crate::time::DaySetting::new(jiff::tz::TimeZone::UTC, jiff::civil::Time::midnight())
+    else {
+        return false;
+    };
+    crate::time::resolve(
+        text,
+        &crate::time::Clock::new(jiff::Timestamp::UNIX_EPOCH, day),
+    )
+    .is_ok()
 }
 pub(crate) fn is_money(text: &str) -> bool {
     let digits = text

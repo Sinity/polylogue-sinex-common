@@ -279,6 +279,16 @@ fn error_suggestion_runs() {
     ] {
         assert_eq!(suggestion(&polylogue, text), expected, "{text}");
     }
+    // Only a value that reads as a time is joined to `since:`.
+    for text in ["events where since cost", "events | since cost"] {
+        if let Err(error) = parse(text, &sinex) {
+            assert!(
+                !error.suggestion.as_deref().unwrap_or("").contains("since:"),
+                "{text}: {:?}",
+                error.suggestion
+            );
+        }
+    }
 }
 
 proptest! {

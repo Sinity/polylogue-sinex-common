@@ -806,12 +806,17 @@ impl<'a> ReferenceEvaluator<'a> {
             }
             // A coarse time takes part by its whole period: the half-open
             // stretch each side occupies, a precise time being one tick.
+            let tick_after = |at: i64| at.saturating_add(1);
             let (a_from, a_to) = if a.coarse {
-                (a.start, a.end)
+                (a.start, a.end.max(tick_after(a.start)))
             } else {
-                (point, point + 1)
+                (point, tick_after(point))
             };
-            let b_to = if b.coarse { b.end } else { b.start + 1 };
+            let b_to = if b.coarse {
+                b.end.max(tick_after(b.start))
+            } else {
+                tick_after(b.start)
+            };
             let matches = match relation {
                 OrderRelation::Near => true,
                 OrderRelation::Before => a_to <= b.start,
