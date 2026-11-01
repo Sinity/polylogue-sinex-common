@@ -181,16 +181,24 @@ are renames the operator may still change (default; open operator question).
 | Name | Meaning |
 |---|---|
 | token | a named value of the shared visual language (`--surface`, `--failure-ink` …) |
-| shell | the shared TypeScript that carries keys, palette, copy, live updates and windowed lists |
+| shell | the shared TypeScript that carries keys, palette, copy, live updates, windowed lists and the timeline |
+| element | one shell behaviour as a custom element (`<shell-window>`, `<shell-timeline>` …) wrapping markup that works without script |
 | fragment | server-rendered HTML for part of a page, sent live or fetched |
+| subscription | one followed reference, saved query or product stream, resumed after its own position |
+| union stream | a product's one event stream per browser, carrying every tab's subscriptions |
+| feed hub | the shell's holder of the union streams, in a SharedWorker or, where there is none, in the tab |
+| lane | a timeline row defined by a query, with a render (interval, point, count) and an optional grouping field |
+| series row | one drawable timeline row: lane, group, start and its shape |
+| shape | what a series row draws: an interval, a point, or a count of rows in one bin |
+| bin | the power-of-two span of time, aligned to the epoch, whose narrow rows one count row stands for |
+| card | a boxed decision in a view whose keys act only while it is entered |
+| card layer | the keys an entered card rebinds, shown on its buttons |
+| preview | a fragment of the same view shown on hover or focus; it never follows a feed or writes a seen mark |
 | page frame | the page layout: header, rails, main column, status strip, footer |
 | inspector | the right rail showing the facts of the page or the focused target |
 | palette | the list of every action available for the current selection |
 | copy menu | the forms a target can be copied as |
 | value display | how each value state is shown (`≥ X (N unknown)`, `≈ X`, `—` …) |
-| lane | a timeline row defined by a query, with a render and a grouping |
-| series row | one mark of a lane: `(lane, start, end?, render, label?, agency?, ref)` |
-| card layer | the keys a focused decision card rebinds, shown on its buttons |
 | counterpart | the same place in the other product, reached with `g o` |
 | mark | the symbol that, with its word, carries a meaning that colour alone never does |
 

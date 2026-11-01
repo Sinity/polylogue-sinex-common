@@ -53,6 +53,10 @@ pub fn serve_with_theme<B>(
             "text/javascript; charset=utf-8",
             include_bytes!("../assets/shell.js"),
         )),
+        "/assets/feed-worker.js" => Some((
+            "text/javascript; charset=utf-8",
+            include_bytes!("../assets/feed-worker.js"),
+        )),
         "/assets/fonts/IBMPlexSans-Regular.woff2" => Some((
             "font/woff2",
             include_bytes!("../assets/fonts/IBMPlexSans-Regular.woff2"),
