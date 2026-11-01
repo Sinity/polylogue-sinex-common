@@ -1,111 +1,407 @@
 # query-language
 
-The one surface language Polylogue and Sinex both speak. The crate holds the
-grammar, the syntax tree and its meaning, the parser, the completer, time
-expressions, the logical day, the cursor type, and the law suite every
-product compiler runs. It is pure: no I/O, no clock and no configuration of
-its own; the caller passes the time, the day setting and the catalog.
+The one surface language Polylogue and Sinex both speak. Both products accept
+the same text with the same meaning; only the units differ. The crate holds
+the grammar, the syntax tree and its meaning, the parser and formatter, the
+binder and typing, the normal form and its hash, time expressions, the
+logical day, the cursor type, the fusion of ranked lists, the federation
+planner's types, the completer and the law suite every product compiler
+runs. It is pure: no I/O, no clock and no configuration of its own; the
+caller passes the time, the day setting and the catalog.
 
-Each product keeps its own **catalog** (its units or tables, their fields,
-closed-set values and defaults) and its own **compiler** from the syntax tree
-to execution, and adds its own forms and laws: Polylogue in
+Each product keeps its own **catalog** (its units, their fields, closed-set
+values, defaults, order scopes, search fields and extensions) and its own
+**compiler** from the syntax tree to execution, and adds its own forms and
+laws: Polylogue in
 [its query page](https://github.com/Sinity/polylogue/blob/master/docs/query.md),
 Sinex in [its query page](https://github.com/Sinity/sinex/blob/master/docs/query.md).
 
+## Concepts
+
+The language has seven concepts, and nothing else is a language concept:
+
+- a **relation**: a unit, a saved query, a kept result or a reference (one
+  row);
+- a **condition**: a three-valued test of a row;
+- a **transform**: one step after `|`, a relation in and a relation out,
+  applied in written order;
+- a **ranking**: ranked lists over the selected rows, fused into one order;
+  it never changes which rows are in the answer;
+- an **order relation**: `near`, `before`, `after`, `during` or
+  `containing`, measured in time or in steps;
+- the **read context**: `now`, the day setting, resolved times, the random
+  seed, definition versions and each product's read position;
+- the **answer**: one evaluation of a query, in the answer envelope of
+  [command-surface](../command-surface/README.md#answers).
+
+Recall, briefs, facets, watches, Today and the web's lists are queries, or
+assemblies of queries that print the queries they ran.
+
 ## Spelling
 
+One spelling in both products (default; open operator question): there is
+no dialect switch, and a query written for one product parses with the same
+meaning in the other.
+
 - `AND`, `OR`, `NOT` in capitals; a leading `-` negates. Conditions written
-  side by side are joined by `AND`; parentheses group anywhere.
+  side by side are joined by `AND`; parentheses group anywhere. A lowercase
+  `and`, `or` or `not` standing between two conditions is refused with the
+  capitalised query as the suggestion; quoted, it is searched for.
 - Keywords are positional, so no word is reserved: a field may be called
   `where` or `count`.
-- `|` separates stages; the tabular output is a "table"; `page_size` is how
-  many rows travel in one response.
-- `~` means contains; `similar:` asks for semantic ranking.
+- Every transform follows `|`. The tabular output is a "table"; `page_size`
+  is how many rows travel in one response.
+- Aggregates take the function form: `agg sum(cost), p90(duration) as slow`.
+- Sets are written `F:(a|b|c)`.
 - `sort by random` and `sort by random()` both leave the seed unspecified;
-  `random(N)` retains the explicit unsigned seed.
-- `measure NAME` retains the complete product selector, including comma-separated
-  parts such as `compare:origin,words`. A following `by` starts group keys.
+  `random(N)` keeps the explicit unsigned seed.
 - Percentiles are nearest-rank.
 - Cursors are sealed keyset cursors.
+
+There is no command-name typo guessing. Ruling, 2026-07-05: "typo hint is
+actually unnecessary given we do not want bare query support anyway"
+(cc:900c6128-99a3-4986-8ed4-d5d7aacb38fe:e5f52f29-85e8-4cfc-9088-b5ea79b7bccc).
+Near-miss suggestions for fields, units and transforms inside a query
+remain.
 
 ## Shape
 
 ```
-[UNIT [where CONDITIONS]] [| STAGE]...
+query     := [source] [conditions] [attach] { "|" transform }
+source    := unit ["where"]
+           | "query:" (NAME ["(" args ")"] | HASH)
+           | "result:" ID [".matches"]
+           | reference
+unit      := NAME | ("pl" | "sx") "." NAME
+cond      := cond "OR" cond | cond ["AND"] cond | "NOT" cond | "-" atom
+           | "(" cond ")" | atom
+atom      := field ":" value | field cmp value | field "~" text | field "^" text
+           | field "in" range | field "between" v "and" v | field "in" "(" query ")"
+           | "since:" time | "until:" time
+           | term
+           | "exists" unit "(" cond ")" | "count(" unit ["where" cond] ")" cmp N
+           | order "(" query ")" ["within" distance] ["at" point] ["in" scope]
+           | "seq(" step { "->" [gap] step } ")"
+           | "in:" "result:" ID | "query:" NAME ["(" args ")"] | reference
+           | rankatom
+value     := word | "quoted" | "(" v "|" v … ")" | "*" | "unknown" | "known" | "$" param
+cmp       := "=" | "!=" | "<" | "<=" | ">" | ">="
+order     := "near" | "before" | "after" | "during" | "containing"
+distance  := duration | N "steps"
+attach    := "with" child "(" fields ")" ["[" cond ["," ("first:"|"last:") N] "]"] { "," … }
+transform := "where" cond | "sort by" keys | "limit" N | "offset" N | "first" N ["by" keys]
+           | "distinct" ["by" f] | "group by" keys | "agg" aggs | "count" | "fill"
+           | "fields" proj | "matches" | unit ["where" cond]
+           | ("union" | "intersect" | "except" | "fuse" | "diff") "(" query ")"
+           | "join" order "(" query ")" "within" distance | "join" "(" query ")" "on" f "=" g
+           | "as of" (position | time) | "segment by" "(" query ")" | extension
 ```
 
-- **Atoms:** `field:value`; `field OP value`; `field between A and B`;
-  `field ~ "text"`; a text term (bare word, `"phrase"`, `word*` prefix,
-  `word~` approximate); `exists UNIT(…)`; `count(UNIT [where …]) OP N`;
-  `FIELD in (QUERY)`; `similar:TEXT` or `similar:REFERENCE`; a namespaced
-  unit (`pl.sessions`, `sx.events`). A product's catalog adds its own atoms
-  and stages.
+Parenthesis and nesting depth is checked against 64: a bound on parser
+recursion, not on the size of a query.
+
 - **Values:** a word, a `"quoted"` string with backslash escapes, a set
   `(a|b|c)`, `*` (names the field without restricting it and drops its
-  default), `unknown`.
+  default), `unknown`, `known`, a `$` parameter.
 - **Comparisons:** `> >= < <= = !=`; durations in `ms s m h d w`; money as
-  `2.90` or `2.90usd`. There is one spelling: the compact `field:>=N` is
-  refused with `field >= N` as the suggestion.
-- **Command words:** a query whose first unquoted word is a command or unit
-  name is that command or unit, never a text search; quoting a word searches
-  for it. A first word within two typing mistakes of a command or unit name is
-  refused with the name as a suggestion (Damerau–Levenshtein distance 1 for
-  words of four to six letters, 2 for seven or more; words under four letters
-  never count). A field name is never taken for a search word.
+  `2.90` or `2.90usd`. The compact `field:>=N` is refused with
+  `field >= N` as the suggestion.
+- **Default unit.** Without a unit, the unit is the product's default
+  (Polylogue `sessions`, Sinex `events`). A mixed query names every unit.
+- **Namespaces.** Inside a product its own units are unprefixed; the other
+  product's units carry `pl.` or `sx.`.
+
+### Match operators
+
+Four operators, each with one meaning in both products:
+
+| Operator | Meaning |
+|---|---|
+| `F:v` | the field's **natural match**, declared once per field kind in the catalog: equality for closed sets, IDs, booleans and numbers; the whole-component subtree for paths, case-sensitive; case-insensitive substring for short text; word search for prose; inside the period for times (`started:yesterday`); the same object for references; `tag:name[:value]` for tags |
+| `F = v`, `!=`, `<`, `<=`, `>`, `>=` | exact comparison of the stored value, typed by field kind; `!=` is three-valued |
+| `F ~ "s"` | contains (case-insensitive substring); for prose fields, through the trigram index |
+| `F ^ "s"` | starts with; on path fields, is or lies under, by whole components |
+
+- `F:unknown` is true where the value is unknown and `F:known` where it is
+  known. Both are two-valued, so they select exactly the rows three-valued
+  conditions skip.
+- **Times.** `since:T` and `until:T` act on the unit's main time by overlap;
+  `F in RANGE` acts on any named time field (`when in last week`);
+  `F between A and B` takes two endpoints. A bare duration compared with `<`
+  or `>` (`when > 7d`) is refused, naming the two correct forms, because it
+  reads as the opposite of what it means.
+- **Text terms** (bare word, `"phrase"`, `word*` prefix, `word~`
+  approximate) search the unit's declared search fields.
+- **Related rows:** `exists child(C)`; `count(UNIT [where C]) OP N`, which is
+  two-valued; `F in (QUERY)`, whose inner query is a value set of the same
+  type; `seq(A -> [next|within D] B …)`; `in:result:<id>`, membership in a
+  kept result.
+- **Expressions.** `+ - * /` over typed numbers in conditions and in
+  `fields`, with dimensions checked at bind time: duration − duration is a
+  duration, money / count is money, time − time is a duration, money +
+  duration is refused. An unknown input makes the result unknown. Built-in
+  functions are the time buckets `hour`, `day`, `week`, `weekday`, `month`,
+  `month_day` and `year` on the logical day, and `len()`; a product adds its
+  own functions as catalog extensions. Built-in function names are
+  case-insensitive at their call position and stored under their declared
+  spelling (`DAY(when)` becomes `day(when)`).
 
 ## Meaning
 
 - **Three values.** A condition over an unknown value is neither true nor
   false: it satisfies neither the comparison nor its `NOT`. Unknown is never
   read as zero or empty.
+- **Defaults bind once.** A unit's default filters apply at binding; after
+  that, every condition only narrows. A condition on a defaulted field, or
+  `F:*`, drops that default. A reference used as a condition means "this row"
+  and drops the defaults for its own match.
 - **Filters compose.** Successive filters equal their conjunction.
-- **Grouped rows are a relation.** After `group by`, `where`, `sort`, `limit`
-  and the following stages act on the groups.
+- **Grouped rows are a relation.** After `group by`, `where`, `sort`,
+  `limit` and the following transforms act on the groups; there is no
+  `having`. Grouped output carries the implicit `count` beside its keys.
 - **Match order does not matter.** The order rows are enumerated in never
-  changes which row a join, `exists` or sequence selects.
+  changes which row a join, `exists`, sequence or order relation selects.
 - **The page is not the answer.** Selecting and ordering exist only in the
-  query text (`limit`, `sort`). `page_size` and the cursor travel beside the
-  query and never change the answer or its count.
+  query text (`limit`, `sort`). `page_size`, the presentation budget and the
+  deadline travel beside the query and never change the answer or its count.
 - **Closed sets refuse.** A value outside a closed-set field's values is
   refused, naming the set and the unit where that value exists; it never
   yields an empty result.
 - **Namespaces bind from the tree.** `pl.` and `sx.` bind from the parsed
   query's unit and operator nodes, never from the query string:
-  `pl.messages where text ~ "sx.events"` reads only `pl.messages`. A
-  `similar:` node stays semantic ranking and never becomes a temporal
-  relation.
+  `pl.messages where text ~ "sx.events"` reads only `pl.messages`.
+- **Exact numbers.** Integer and decimal fields are validated and compared
+  on their exact decimal text, with no machine-integer or float range and no
+  exponent cap; the bound value keeps its original spelling. A product's
+  store reports its own range errors.
+
+## Transforms
+
+| Transform | Meaning |
+|---|---|
+| `where C` | filter; after `group by` it filters groups |
+| `sort by K [asc\|desc], …` | total order; unknowns last; the row identity is the final key. `sort by random[(seed)]`; `sort by rank` names the fused rank |
+| `limit N`, `offset N` | selection; part of the question; no maximum |
+| `first N [by K]` | per-group selection after `group by` |
+| `distinct [by F]` | deduplication over the declared identity or a field |
+| `group by K, …` | grouped relation; keys are fields, expressions or time buckets |
+| `agg A, …`, `count` | `count`, `sum(F)`, `avg(F)`, `min(F)`, `max(F)`, `pNN(F)`, `count_distinct(F)`, `histogram(F)`, `corr(F, G)` and `covered(start, end)`, the length of the union of the intervals, so overlapping intervals are not counted twice. Each reports `unknown_F` and `partial_F` |
+| `fill` | after a time-bucketed group: every bucket of a finite range, each with the product's coverage state for it (below) |
+| `fields F [as N], E as N, …` | projection and computed columns |
+| `with CHILD(fields)[cond, first:k\|last:k]` | attached child lists; never changes the parents |
+| `matches` | one row per `exists` or `seq` match, with `match`, `step` and a reference to the matched row, whose fields are reached through `step.` |
+| `UNIT [where C]` | switch to the related rows of another unit (`messages … \| sessions` lifts to the containing sessions) |
+| `union (Q)`, `intersect (Q)`, `except (Q)` | set algebra over one unit, or over identical projected schemas |
+| `fuse (Q)` | adds Q's order as one more ranked list without adding rows |
+| `join REL (Q) within D`, `join (Q) on F = G` | pair relations: one row per matching pair, or the exact-key join (commit hash, URL, path, native ID) |
+| `diff (Q)` | for two relations of one unit: the rows that `joined` and `left`, and those that `moved` in rank, with old and new rank. It uses the comparison the signals evaluator uses for `on_change`, so a watch's report and a `diff` always agree |
+| `as of POSITION\|TIME` | read at an earlier read position; a unit whose product keeps no history for it refuses with `not_yet_available` |
+| `segment by (Q)` | splits each order-scope instance at Q's rows into consecutive segments, one output row per segment, with its delimiting rows as `segment.start` and `segment.end` |
+| extensions | a product's own transforms, declared in its catalog, never in the shared syntax tree |
+
+**Coverage states for `fill`.** A bucket's state is one of `complete`,
+`gap(reason)`, `unknown`, `outside_span`, `not_yet`, `excluded` or
+`unavailable(cause)`; the same vocabulary describes a source's coverage of an
+interval in both products. Polylogue answers `complete` inside its import
+span and `outside_span` outside it. A bucket with no rows and a `gap` state
+shows the gap, never `0`.
+
+## Order relations
+
+One form covers time and steps:
+
+```
+REL ( QUERY ) [within DISTANCE] [at when|start|end] [in SCOPE]
+REL      := near | before | after | during | containing
+DISTANCE := DURATION | N steps
+```
+
+- **As a condition** it is a semijoin: an outer row is kept when at least one
+  inner row stands in the relation, so matches never multiply rows. It
+  exposes `match.` (the nearest inner row, ties broken by the inner row's
+  identity) and `offset`, signed, in the distance's unit. An outer row whose
+  time or position is unknown is unknown. It composes with `NOT` and `OR`
+  like any condition.
+- **As a transform,** `| join REL (QUERY) within D` returns one row per
+  matching pair; the change of grain shows in the query and in its reading.
+- **Steps** count positions in a unit's declared **order scope**: the
+  sequence its rows have steps in (Polylogue's session timeline of messages
+  and tool calls; a Sinex shell session's commands). `before(Q) within 1 step`
+  is "immediately preceded by", and `next.` and `previous.` are the one-step
+  relations as fields. Steps never cross a scope instance.
+- **Time** distance crosses scopes, units and products. Spans are
+  half-open; a point inside a span is distinct from two spans overlapping.
+- `seq` stays for an ordered pattern of three or more steps; its steps may be
+  any units in the scope's order, and a step may carry `within N steps` or
+  `within D`.
+
+## Ranking
+
+Conditions select and ranking orders; ranking never changes membership or
+`count`. Ruling, 2026-01-24, on embeddings: "Not as a filter, but as a
+scoring criteria, to rank order items"
+(cc:1d6c0b33-94c7-4a2a-9957-347e5383f5c5:0bdc45a3-7aca-41a6-9b70-6f6fb086bbbe).
+
+- **Ranked lists.** A query's lists are `relevance` when text terms are
+  present; each ranking atom (`similar:"text"`, `similar:REF`,
+  `similar:(Q)`, `related:REF`, `around:T`) in a top-level `AND` position;
+  each `fuse (Q)` operand; and each ranked operand of a `union` chain. A
+  ranking atom anywhere else (under `OR` or `NOT`, inside `exists`) is
+  `invalid_query` with the reason.
+- **Fusion.** One n-ary reciprocal-rank fusion: a row's score is the sum,
+  over the lists that rank it, of 1/(60 + rank) (Cormack, Clarke and
+  Büttcher 2009). Ties go to the more recent row, then to identity. k = 60 is
+  a declared constant shown in the row explanation, not a setting.
+- **Exact early stop.** Fusion reads the lists one depth at a time. After
+  depth d an unseen row's best possible score is the sum over lists of
+  1/(60 + d + 1); once the page holds `page_size` rows whose scores all
+  exceed that bound, the page is final (the threshold algorithm of Fagin,
+  Lotem and Naor, specialised to this fusion). The order equals full fusion,
+  and no row is dropped. The cursor carries each list's depth and partial
+  scores, so the next page continues the lists.
+- **Rows outside every list** follow the ranked rows in the unit's default
+  order, counted as `unknown.rank`.
+- `sort by` replaces ranking; `sort by rank` uses the fused rank as a key.
+  An answer that only counts or groups computes no ranking.
+- **A list that cannot run** (no query vector while model calls are off; the
+  other product unreachable) is left out and named, and the answer is
+  `degraded`. Keeping a ranked answer whose ranking is incomplete is
+  refused, naming the list.
+
+The crate holds fusion as a pure function over each list's cursor; each
+product supplies its lists.
+
+## Query objects
+
+- **Normal form.** The bound syntax tree with every unit qualified by its
+  namespace, surface references and saved names resolved to stored forms,
+  scalars canonicalised by field type, commutative operands sorted, spans
+  and spelling dropped, and relative times kept as written (`since:7d`, not
+  the instant). Numeric-looking text stays text.
+- **`query:<hash>`** is the BLAKE3 of the normal form and its declared
+  parameter types. One algorithm serves both products, and a mixed query has
+  one hash. A name or a transport option is never part of the question.
+- **`answer:<id>`** names one evaluation: its query, read context, computed
+  author, outcome, count and exactness. The product appends the record
+  after the answer is sent; a read never waits on it. `answers` and
+  `queries` are units, and `@last` is the caller's latest answer.
+- **Names** are authored records pointing at hashes. Saving again re-points
+  the name; a name never changes an identity. A name two authors hold is
+  `ambiguous` until it is qualified (`query:NAME@AUTHOR`). Parameters are
+  typed scalars in value positions, substituted in the tree, never as text.
+  A saved relation (no transforms) can stand where a condition can, as
+  membership; a saved query with transforms or ranking is a source only
+  transforms may follow.
+- **`result:<id>`** is a kept answer with its read context, exactness,
+  columns and rows (or rows by reference where the product can reproduce
+  them `as of`), plus ranks and each list's contribution for ranked answers.
+  Reading it reads the stored rows, never a re-run; only transforms may
+  follow it.
+
+Before execution a product binds the parsed tree: it supplies the output
+schema of every saved and kept source it uses (their fields, main time and
+row unit), and binding checks fields, types and closed sets against them.
+Binding returns the typing of every scope, before and after each transform,
+so a compiler never reconstructs types from names. Binding, formatting,
+identity and completion all read one catalog snapshot, and no provider call
+or I/O runs inside parsing, binding or deserialisation.
 
 ## Errors
 
-At the end of an otherwise complete parenthesized condition, a missing closing
-parenthesis offers the complete balanced query. Quoted parentheses remain data;
-incomplete operands or random seeds never receive invented values.
+Every error carries `kind`, `message`, `position` (a byte offset, printed
+with a caret line), `suggestion` (a corrected query that parses, binds and
+runs as given, whenever one can be formed), `candidates`, `hint` and
+`retryable`. The language's kinds are `invalid_query`, `unknown_field`,
+`bad_value`, `not_a_query`, `ambiguous`, `stale_cursor`, `not_yet_available`
+and `not_configured`; a compiler may add its own. A language error becomes a
+command-surface failure in one conversion, here, with one exit code and HTTP
+status per kind
+([failure table](../command-surface/README.md#failures-and-exit-codes)).
 
-Every error carries `kind`, `message`, `position` (a byte offset, printed with
-a caret line), `suggestion` (a corrected query that runs as given, whenever
-one can be formed), `hint` and `retryable`. The language's kinds are
-`invalid_query`, `unknown_field`, `bad_value`, `not_a_query`, `ambiguous` and
-`stale_cursor`; a compiler may add its own. Each kind maps to one exit code and one HTTP status in
-[command-surface](../../docs/command-surface.md#failures-and-exit-codes).
+- An unknown field's `candidates` are the unit's nearest field names.
+- At the end of an otherwise complete parenthesised condition, a missing
+  closing parenthesis offers the balanced query. Quoted parentheses remain
+  data; incomplete operands and random seeds never receive invented values.
+- An unknown colon field such as `TODO:` is a field error, while `"TODO:"`
+  is text.
+- An empty answer is only the result of a read that succeeded, and comes
+  with the per-condition funnel and the nearest relaxation; a failure never
+  yields `empty`.
+
+## Reading and explaining
+
+- Every field, operator, transform, order relation and ranking atom declares
+  a short phrase, and `read_as` assembles the query's reading from them
+  without a model.
+- `explain` shows the parse with spans, the defaults applied and dropped,
+  each name with the hash it resolved to, resolved times, the ranking
+  lists, a mixed query's parts and connectors, `query:<hash>` and
+  `read_as`. With the plan, it adds each part's estimated rows per step and
+  a deadline prediction; run with the plan, the actual rows and time beside
+  the estimates.
+- Explain and completion never write, build, embed or call a model.
+
+## Cross-system queries
+
+A query whose bound units span both namespaces is **mixed**. Polylogue's
+daemon evaluates it, because it holds the AI text Sinex does not index;
+Sinex's daemon forwards a mixed query to Polylogue's configured endpoint and
+relays the answer. The crate holds the planner's types as pure values; the
+executor is Polylogue's.
+
+1. **Split** the bound tree into **parts**: maximal subtrees whose units all
+   belong to one product.
+2. **Connect** parts only through an order relation, `F in (Q)`,
+   `join … on`, `exists` over the other product's unit, set algebra over
+   projected rows, or `fuse (Q)`. Anything else across a namespace is
+   `invalid_query` with the reason.
+3. **Estimate** each part's rows from its product.
+4. **Bind** the smaller part first and pass its join values to the other as
+   a typed parameter: an interval set (each outer time widened by the
+   distance) for order relations, a key set for `on` and `in`. Values never
+   enter query text.
+5. **Batch.** A large bind set travels in batches, all read at the one Sinex
+   commit position the first batch pinned. The batch size is a transfer
+   unit; the answer does not depend on it.
+6. **Join** by the connector's meaning, then apply the transforms above the
+   join, and fuse ranked lists from either side once.
+
+The answer reports both products' read positions and lags. With Sinex
+unreachable its parts are `degraded`, named, never empty; with Sinex not
+configured, `sx.` units are refused as `not_configured`, naming the
+configuration key. Set algebra across products needs identical projected
+schemas, and a resulting row's identity is its side and source reference.
+Keeping a mixed answer stores both sides' rows (Sinex's by reference) with
+the pinned commit position.
 
 ## Time expressions
 
-- **Relative:** `7d`, `2w`, `3h` count back from now in exact hours. `last 7d` is the elapsed half-open span from that instant to `now`; `last 7 days` is a calendar span. Decimal durations retain nanoseconds and refuse unrepresentable precision.
+- **Relative:** `7d`, `2w`, `3h` count back from now in exact hours.
+  `last 7d` is the elapsed half-open span from that instant to `now`;
+  `last 7 days` is a calendar span. Decimal durations keep nanoseconds and
+  refuse precision that cannot be represented.
 - **Calendar:** ISO dates and datetimes, `today`, `yesterday`,
   `this|last week|month`, `last N days`, and a bare `HH:MM`, all on the
-  logical day in the configured zone.
+  logical day in the configured zone. A bare four-digit value is a calendar
+  year; `20:26` and `T2026` are clock times.
 - **Natural-language dates** (`monday`, `3 days ago`, `last tuesday`,
-  `march`) resolve to one instant or range, shown in the query's explanation;
-  an ambiguous phrase is an error listing the readings.
-- **Natural-language choices:** a bare weekday means its latest occurrence including today; `last WEEKDAY` is strictly earlier. A named month means that month in the current logical year. `last N days` includes the current logical day. Slash dates with two distinct valid readings are `ambiguous` and list their ISO readings.
-- **Bounds:** dates are half-open whole days; `between` two dates includes both days. `since DATE` (or `since:DATE`) starts at that logical day's start; `until DATE` (or `until:DATE`) includes that entire day and stops at its exclusive end. `until INSTANT` stops exclusively at that instant. These operations select spans by overlap. Explicit comparisons keep their operator meaning: `when < DATE` stops at the day's start.
-- **Bound syntax:** `ConditionKind::Since` and `ConditionKind::Until` retain the catalog's main-time operand and the unresolved value. They remain distinct from `Compare` through serialization, formatting and canonical identity. Compilers use `Time::start()` for a lower bound or explicit comparison and `Time::until_bound()` for an exclusive `until` bound; they never infer an operation from source spans.
+  `march`) resolve to one instant or range, shown in the query's reading. A
+  bare weekday is its latest occurrence including today; `last WEEKDAY` is
+  strictly earlier; a named month is that month of the current logical
+  year; `last N days` includes the current logical day. A phrase or slash
+  date with two readings is `ambiguous` and lists them.
+- **Bounds:** dates are half-open whole days; `between` two dates includes
+  both days. `since DATE` starts at that logical day's start; `until DATE`
+  includes that whole day; `until INSTANT` stops at that instant. These
+  select spans by overlap. An explicit comparison keeps its operator's
+  meaning: `when < DATE` stops at the day's start. `since` and `until` stay
+  their own operations through formatting and identity.
 - **Daylight saving:** a local time inside a skipped hour means the first
   instant after the gap; inside a repeated hour, the earlier instant, with a
   note.
-- **Resolution:** a query resolves its times once, against one `now` and one
-  zone, and records them in the answer. A cursor carries them, so every page
-  of one question uses the same times.
+- **Resolution:** a query resolves its times once, against one `now` and
+  one zone, and records them in the answer. A cursor carries them, so every
+  page of one question uses the same times.
 
 ## The logical day
 
@@ -136,172 +432,166 @@ system so that this works reliably, there are no unexpected exceptions"
 
 ## Coarse times
 
-`time::TimeQuality` is the shared closed set `intrinsic`, `captured`, `file_mtime`, `operator`, `unknown`; each product classifies its own producer evidence. Quality and precision are separate. Both enums expose `ALL` and `as_str` for catalog discovery using their canonical wire names. A time carries its precision: `instant`, `second`, `minute`, `day`, `month`,
-`year`, or `bounded` with an end. A coarse or bounded time satisfies a time
-condition only when its whole period does, fails when none of its period
-does, and is otherwise unknown. In a temporal join, a coarse time takes part
-only when the join's window is at least as wide as its period (a date cannot
-establish 60-second proximity), then as its whole period; the match is marked
-coarse and ranks after precise matches. A row whose time is unknown never
-matches a time condition.
-
-A bare four-digit value denotes a calendar year (`2026` covers that configured logical year). Explicit `20:26` and `T2026` denote a local clock time. Calendar years take precedence over the underlying basic `HHMM` clock spelling; invalid or unrepresentable calendar boundaries return a typed time error.
+A time carries its quality (`intrinsic`, `captured`, `file_mtime`,
+`operator`, `unknown`; each product classifies its own evidence) and its
+precision (`instant`, `second`, `minute`, `day`, `month`, `year`, or
+`bounded` with an end). A coarse or bounded time satisfies a time condition
+only when its whole period does, fails when none of it does, and is
+otherwise unknown. In an order relation, a coarse time takes part only when
+the window is at least as wide as its period (a date cannot establish
+60-second proximity), then as its whole period; the match is marked coarse
+and ranks after precise matches. A row whose time is unknown never matches a
+time condition.
 
 ## Cursors
 
 A cursor continues one question by key, never by offset. It holds the last
-row's order-key values with the row's identity as the final key, the resolved
-`now` and zone, the random seed, the product's read position, and a hash of
-the resolved question. It is sealed: opaque to the caller and checked on use.
+row's order-key values with the row's identity as the final key, the
+resolved `now` and zone, the random seed, the product's read positions and
+version bindings (schema, definitions, grants, ranking data), the ranked
+lists' depths, and the question's hash. It is sealed with a key the product
+holds: opaque to the caller and checked on use. The seal authenticates; it
+does not encrypt.
 
-- Only the page size may change between pages.
+- Only the page size may change between pages. The count is computed once
+  per question and read position and carried in the cursor.
 - A cursor from a different question is `invalid_query`. A cursor whose read
-  position the product no longer serves (a rebuilt index, a ranked cursor
+  context the product no longer serves (a rebuilt index, a ranked cursor
   after the ranking data changed) is `stale_cursor`, never a silent restart.
+- Order keys compare exactly: numbers as exact decimals, unknowns last in
+  either direction, identity ascending last. A continuation resumes from the
+  stored key even if the boundary row has since disappeared.
 - A page may be empty and still carry a cursor; only a page without a next
   cursor is the end.
 
-## Saved and kept output binding
-
-`Source::Saved` and `Source::Result` carry `OutputBinding::Deferred` until the product supplies their output in the immutable catalog's `source_outputs`. A `SourceOutput` identifies the saved name and arguments, or kept reference and `ResultPart`, and provides an `OutputSchema` of typed fields, optional main time and optional actual row unit. Products derive these schemas from expanded saved definitions or stored result columns. The parser performs no reads and never borrows the default unit's fields for either source.
-
-A deferred tree is syntax only. Before execution, the product calls `bind::bind` with the derived snapshot; the resulting `BoundQuery` contains a tree whose saved and kept scopes are all known, including nested sources. Binding reuses the shared parser's field, type and closed-set checks and refuses missing schemas, unknown suffix fields and invalid values. Products use that same snapshot for canonical identity. The binding marker is validation state and does not enter question identity; the `since`, `until`, source identity and kept result part do.
-
-A saved reference used as a boolean operand (`query:name OR …`) belongs to the enclosing row domain, just as when that expression is parenthesized. Its other operands use that domain's fields. An ordinary saved source and its inline or piped suffix retain the saved output schema.
-
-Inline conditions on saved and kept sources are stored in their source's `condition`, separately from a piped `StageKind::Where`. This preserves the product's distinction between conditions applied to an expanded base relation and filters applied after that relation's output has been selected.
-
-`Source::Unit.implicit` records whether the unit was omitted. An omitted nested source inherits its enclosing actual row unit and uses that unit's underlying catalog fields, even after grouping or projection; an explicit unit keeps its own row domain. Products supply `OutputSchema.unit` when a saved or kept source can contain such nested questions. Missing source schemas or unresolved inherited row domains cannot bind. Formatting preserves the omission, transport carries the marker, and canonical identity drops it once the actual unit is known.
-
-A kept reference's `.rows` or `.matches` selector is a typed `ResultPart`. A quoted identity retains those characters as literal data: `result:"example.matches"` reads rows from that identity, while `result:"example".matches` selects matches from `example`.
-
-## Matches projection scopes
-
-`StageKind::Matches` keeps its existing AST shape. A product supplies the actual emitted columns in `Catalog.match_outputs`, as `MatchOutput { source: MatchSource { parent_unit, pattern }, schema: OutputSchema }`. `MatchPattern` is `Exists { unit }` or `Sequence { unit, steps }`. These are canonical row-domain names. The sequence AST has one step domain for the whole sequence; `all`, `next` and `within` change selected occurrences, not the output-column shape. Different step counts require different declarations.
-
-`matches::patterns(condition)` is the one collector of top-level AND qualifiers. OR, NOT and nested child conditions do not nominate a projection of their enclosing relation. `parse::relation_patterns(text, catalog)` exposes that same parser's final relation state after all stages; products use it on the retained expanded saved AST, rather than guessing qualifiers from current saved names. `OutputSchema.match_patterns` carries that runtime state when a saved relation hides its original condition. `None` from the final-state helper means unresolved metadata; a known empty vector means no qualifying projection.
-
-A Matches stage needs exactly one qualifier in its actual entering relation. Zero qualifiers refuse; multiple qualifiers are ambiguous. Matches consumes the qualifier. Projection, grouping and aggregates invalidate it; limit, offset, first and distinct preserve the actual row domain and its per-row qualifiers; a scoped unit starts with its own condition. `parse::matches_requirements(text, catalog)` reports the needed `MatchSource` keys through the same parser. Load deferred saved/result schemas first, then load the actual product projection declarations and bind. Missing Matches output remains deferred syntax and exposes no default-unit fields; `bind::bind` refuses to execute it. The supplied output is authoritative for parsing, shared typing, scalar canonicalization and completion, including closed sets and numeric-looking text. Shared `scope::Origin::Matches { source }` retains the validated projection key on emitted fields, so product physical lowerers can read the same declaration without classifying the source again. Exhaustive origin matches in product adapters must handle this runtime variant; unsupported execution remains a typed refusal.
-
-`complete::requirements(...).match_outputs` reports the active projection declarations, including an inherited nested row scope. Products load those declarations before the active value section, then call `complete` with the same snapshot. No provider callback or I/O runs inside parsing, binding or deserialization.
-
-`match_patterns` and `match_outputs` are recomputable runtime metadata, skipped by both Serde and JsonSchema. They never add fields to stored QueryObject/FrozenQueryDefinition bodies, native source facts, their schema declarations or the semantic question hash. Rebuild them from frozen definitions and the owned column declarations before binding or replay; deserialization establishes no executable projection. A product's canonical-object factory keeps only the serialized schema fields in its immutable body and rebuilds runtime metadata when validating that body.
-
-The reference evaluator retains its synthetic sequence-identity tuples. It explicitly refuses Exists projections and suffixes that require product Matches columns. It does not invent `stepN_message`, gap values or aliases from column names. Product execution laws must prove those values against the actual producer. A product without a Matches adapter, including Sinex's current compiler, keeps its explicit unsupported refusal.
-
 ## Completion
 
-Completion uses the same typed output-schema snapshot as parsing and binding. Saved and kept sources offer their actual fields, help and closed-set values, including promoted or grouped aliases; rows and matches use separate schemas. Missing output schemas offer no default-unit fields. Every value position, including an open quote, reads the active schema's field declaration. Nested omitted sources use the enclosing actual row unit rather than its shaped output columns.
-
-`complete::requirements(text, byte_position, catalog)` reports the active `OutputSource` keys and optional value/reference input before completion. The caller loads missing saved/kept schemas first, repeats the pure request with that snapshot, then reads only the requested value or reference catalog section before calling `complete` as usual. A value request carries the canonical actual unit when known, exact field or output alias, and decoded literal prefix up to the UTF-8 cursor. A neutral reference request carries the raw prefix and a replacement span covering the whole current token, including an obsolete suffix after the cursor. Reference positions exclude quoted values, operators and stage arguments. Products decide which declared fields or reference prefixes map to their own catalog sections; the shared helper has no session naming rules or I/O. Both APIs use the same cursor, value-position, quote decoding and typed context helpers.
-
-
 The completer proposes what may come next at a grammar position (units,
-fields, closed-set values, stages, operators) from the catalog it is given.
-It does no I/O, so a product can run it inside its CLI process from a catalog
-file its daemon publishes, and answer within a keystroke whether the daemon
-is up or not.
+fields, closed-set values, transforms, operators, saved and kept sources'
+fields) from the catalog snapshot it is given. It does no I/O, so a product
+runs it in its CLI process from a catalog file its daemon publishes, and
+answers within a keystroke whether the daemon is up or not; Polylogue's
+catalog snapshot includes Sinex's published catalog, so a mixed query
+completes too. Inserting a candidate leaves text whose prefix parses; a
+candidate inside a quoted value includes its quotes and escapes.
 
 ## What a product supplies
 
-Its catalog (units or tables, fields with their meaning and unknown rule,
-closed sets, defaults), its compiler, its own atoms and stages, its read
-position for cursors, and the laws that are its own.
-
-## Library and adoption
-
-`parse::parse(text, &catalog)` returns an owned, byte-spanned `ast::Query`. The catalog holds unit names and aliases, field kinds, closed sets, defaults, identity keys, default order, reference forms, the sequence and recall-last domains, and structurally typed extension declarations. `catalog::STAGES`, `AGGREGATES` and `KEY_FUNCTIONS` expose the grammar declarations for product discovery and completion. Extension arguments are values, fields, units, conditions or subqueries; a compiler must implement or refuse each node. Namespace discovery walks those nodes and never reads literal text.
-
-`format::format_query(query, catalog)` emits shared surface text from typed syntax, safely quotes values and preserves conditions, stages and extension slots. It reparses the result against the same catalog and checks canonical identity, refusing a manually constructed tree that has no equivalent surface spelling. Transport-law adapters use this renderer to run the shared cases through their actual text interfaces.
-
-`time::Clock` fixes the question's `now` and `DaySetting`. `time::resolve` returns the original expression, its instant or half-open range, and any daylight-saving notes. Pass these resolved values onward to execution and every continuation. `DaySetting` is constructed from a caller-resolved named zone. `DaySettingWire`, `ClockWire` and `TimeValueWire` deserialize as pure records, then their `resolve` methods validate explicitly supplied resolved zones and construct runtime values. The runtime types serialize to those records and never resolve a zone implicitly.
-
-`SourceOutput.schema` declares produced columns. Its optional runtime-only `relation_scope` declares the queryable relation from the retained bound definition, so an unshaped saved source can retain native relation fields without storing parser atoms as produced columns. Products reconstruct plain field declarations from the same bound query's final scope, without copying structural operand paths between trees. `Catalog::source_scope` is the one lookup used by parsing, binding, identity and completion; when the runtime override is absent, produced fields remain the scope. Group, Fields and Matches narrow that entering scope normally. Binding checks both schema values and their common row domain. The override is skipped by Serde and JsonSchema, and must be rebuilt before replaying a definition that needs those relation fields. A product's private derived completion cache can retain the recomputed scope with its produced schema atomically; canonical query bodies keep only produced columns.
-
-`identity::normal_form(query, catalog)` drops source spans and scalar quoting, canonicalizes scalar spellings using their declared field types, sorts commutative boolean operands and sets, and preserves stage order and relative time expressions. Numeric-looking text stays text. `identity::question_id(query, catalog, parameter_types)` hashes this form together with declared parameter types using BLAKE3. Object keys have canonical lexical order across dependency feature unions. `identity::question_id_from_normal_form(value, parameter_types)` validates and hashes an already canonical stored form, so canonical object admission and replay use the same identity algorithm. The AST and source-output schema types implement `JsonSchema` for typed canonical products. Products resolve their field shorthands, saved names and surface references to canonical stored identities before hashing; a name or transport option is never a parameter type or part of the question.
-
-`cursor::CursorContext` binds that question identity, clock, resolved times, seed, product read positions and version bindings. Products put schema, definitions, grants and ranking-data versions in its version map. `CursorSeal` authenticates the opaque wire token with a caller-supplied 32-byte secret and checks the seal before reading its payload. Authentication does not encrypt the payload. `open` checks the question, obtains the named zone through an explicit caller callback, then asks the product whether its bound read context remains available. The callback supplies a resolved zone; the crate never consults a global zone database. A missing or mismatched cursor zone is `stale_cursor`. Keep the sealing key outside queries and request logs.
-
-`laws::check` runs the compiler/executor cases against independently specified answers, permutations and page sizes. `laws::check_modes` runs the same cases through caller-supplied execution modes and names a failing mode; `laws::check_refusals` checks catalog/compiler refusals. The reference interpreter is a synthetic-row oracle for the common relational mechanics. It explicitly refuses storage, ranking, time-bucket, saved-definition, coverage and extension mechanics that need product execution.
-
-The continuation records sort values and a separate row identity, which is the final tie-break. `cursor::compare_positions` defines compatible scalar ordering, exact decimal numeric comparisons, unknowns last in either direction, and the final ascending identity key. It continues from the stored key even if the boundary row has since disappeared. `PageRequest` carries a nonzero page size and optional continuation beside the query. Shared cursor, `ClockWire` and resolved-time wire types implement `schemars::JsonSchema`, so operation envelopes can embed them directly; cursors are schema strings. A product may return an empty page with a continuation; exhaustion is the absence of the next continuation.
-
-Polylogue's adoption replaces the grammar in `polylogue-query` while retaining the product compiler and its catalog of authored records. Convert its units and field registry into `Catalog`, translate the shared nodes into the existing SQL compiler, and remove its predecessor parser, AST, time resolver and page cursor in the same product change. Preserve product-specific reference resolution, defaults, saved-definition lookup, ranking and measure compilation at their existing seams.
-
-Sinex's adoption replaces parsing and time mechanics in `sinex-model::query` while keeping table/schema binding and execution in its model/store layers. Build the catalog from its table and alias declarations plus registered payload schemas, and compile the shared AST directly. Preserve typed payload checks, privacy/read context, fill evidence and provenance walks in Sinex. Retire its predecessor lexer, parser, time resolver and cursor encoding when their connected callers convert. Both products run their compiler against the shared law harness in addition to their own integration tests; a parsing test alone does not establish execution parity.
+Its catalog (units, fields with their natural-match kind and unknown rule,
+closed sets from its stored names, defaults, order scopes, search fields,
+phrases for `read_as`, extensions); its compiler and each ranked list's
+cursor; reference resolution against its data; `fill` coverage states and
+`as of`; its read positions; the output schemas of its saved and kept
+sources; the executor of mixed plans (Polylogue); and the laws that are its
+own.
 
 ## Laws
 
-The crate's law suite runs against both catalogs; each compiler runs it plus
-its own laws.
+The crate's suite runs against both catalogs, through each product's real
+compiler; each product also runs its own laws. The reference evaluator, a
+synthetic-row oracle, is the independent answer for relational mechanics,
+order relations, ranking and federation; it refuses storage, time-bucket and
+extension mechanics that need a product.
 
-- **matches-output-scope**: both catalogs validate suffix fields, types, closed values, completion and scalar spelling against the supplied projection only; absent metadata cannot bind, and consumed or changed relations cannot reuse qualifiers. Projection values are proved by the product producer laws.
-- **format-roundtrip**: parsing formatted syntax preserves the canonical question,
-  including implicit time bounds, explicit random seeds and complete measure selectors;
-  formatting the result again produces the same text. The law runs against both catalogs.
+Language:
+
+- **one-spelling**: every query example in both products' docs parses with
+  the one grammar, and no catalog carries a dialect switch.
+- **format-roundtrip**: formatting a parsed query and parsing it again gives
+  the same normal form, including implicit time bounds, explicit random
+  seeds and extension arguments; formatting twice gives the same text.
+- **identity-spelling**: spellings with one normal form have one
+  `query:<hash>` in both products; any changed condition changes it.
 - **filter-composition**: `Q | where A | where B` returns the same rows as
   `Q | where A AND B`.
 - **three-valued-filters**: a row whose value is unknown satisfies neither
-  `field OP v` nor `NOT field OP v`.
+  `C` nor `NOT C`; `F:unknown` and `F:known` partition the rows.
 - **grouped-rows-are-a-relation**: `where`, `sort` and `limit` after
   `group by` act on groups, equal to the same operations over the grouped
   result as a table.
 - **match-order-independent**: permuting the enumeration order of input rows
-  never changes which rows a join, `exists` or sequence selects.
-- **execution-mode-parity**: CLI, socket, HTTP, MCP and briefs give the same
-  rows, counts and refusals to the same query.
-- **command-words**: a first word that is a command or unit name runs it; one
-  within the typing-mistake distance is refused with the suggestion; a quoted
-  word searches; a field name is never a search word.
+  never changes which rows `exists`, `seq`, an order relation or a join
+  selects.
 - **page-is-not-the-answer**: the rows and count of a question are the same
   for every `page_size` and every way of paging through it.
 - **closed-sets-refuse**: a value outside a closed set is refused naming the
   set and the unit where the value exists.
-- **coarse-times**: a coarse time satisfies a condition only by its whole
-  period, joins only windows at least as wide as its period, and ranks after
-  precise matches.
-- **namespace-binding**: units bind only from tree nodes; namespace-like text
-  inside values never adds a unit.
+- **namespace-binding**: units bind only from tree nodes; namespace-like
+  text inside values never adds a unit.
+- **defaults-bound-once**: after binding, every further condition only
+  narrows the rows.
+- **lowercase-boolean**: lowercase `and`, `or`, `not` between conditions is
+  refused with the capitalised query as the suggestion; quoted, it searches.
 - **days-tile-time**: in every zone, consecutive logical days share their
   boundary and no instant lies in two days or none.
 - **instant-in-its-day**: every instant lies within the bounds of
   `logical_day(instant)`.
-- **cursor-refusals**: a cursor from another question is `invalid_query`; one
-  past its read position is `stale_cursor`.
+- **coarse-times**: a coarse time satisfies a condition only by its whole
+  period, takes part only in windows at least as wide as its period, and
+  ranks after precise matches.
+- **cursor-refusals**: a cursor from another question is `invalid_query`;
+  one past its read context is `stale_cursor`.
 - **cursor-keeps-rows**: rows whose order key did not change between pages
   are neither skipped nor repeated.
 
-Completion inside an unfinished quoted field value offers only declared catalog values. Replacements include the literal quotes and escapes and use UTF-8 byte spans; applying a candidate preserves the value as data. Grouped output includes the implicit numeric `count` alongside its group keys before any explicit aggregation, for filtering, sorting and completion.
+Order relations, ranking and transforms:
 
-Declared neutral builtin key functions are case-insensitive at their function-call position and are stored under their registered spelling (`DAY(when)` becomes `day(when)`). Builtin declarations with colliding case-insensitive names are ambiguous. Field names, scalar data, saved identities and product extension names retain their declared case. Boolean operators remain `AND`, `OR` and `NOT`; an unknown colon field such as `TODO:` is a typed field error, while `"TODO:"` is text.
+- **order-semijoin**: an order-relation condition never multiplies outer
+  rows, and `count` equals the semijoin's.
+- **order-join-grain**: `join REL` returns exactly the pairs whose semijoin
+  keeps the outer row.
+- **order-steps**: `within 1 step` equals the `next.` and `previous.`
+  relations, and steps never cross a scope instance.
+- **rank-membership**: adding, removing or reordering ranking atoms never
+  changes membership or `count`.
+- **rank-unranked-kept**: rows outside every list are returned after the
+  ranked rows and counted as unknown.
+- **rank-fusion-oracle**: the fused order equals an independent n-ary
+  reciprocal-rank fusion evaluator.
+- **rank-early-stop-exact**: the early-stop fusion returns the same page as
+  full fusion for every page size.
+- **union-fuses-once**: a chain of `union` and `fuse` at one level is one
+  fusion.
+- **diff-watch**: `A | diff (B)` reports exactly the membership, ranking and
+  top-k changes the signals evaluator reports for B → A.
+- **expr-dimensions**: arithmetic over incompatible dimensions is refused at
+  bind time; unknown in, unknown out.
+- **covered**: `covered(start, end)` equals the measure of the union of the
+  intervals, against a sweep-line oracle over generated intervals.
 
-Saved and kept reference prefixes accept optional whitespace around the colon (`QUERY : name`, `result: name`), including quoted names. Canonical formatting remains `query:name` and `result:name`. Parsing and completion share these tokens and preserve original UTF-8 byte spans.
+Objects, errors and explaining:
 
-Binding also returns owned semantic typing through `BoundQuery::typing()` or
-`into_parts()`. `scope::Typing` identifies each query by a `NodePath` in the
-returned bound tree, records its actual underlying row unit and source fields,
-and captures the scope before and after every stage. `TypedOperand` addresses
-field uses and function operands in source conditions, related conditions,
-attachments, sequences, nested queries, projections and aggregate inputs.
-Paths contain AST field names and array indexes; they do not use byte spans.
-Changing the tree or the catalog requires binding again.
+- **saved-reuse**: a saved relation selects the same rows by name and
+  inline.
+- **result-reread**: `result:<id>` reads back unchanged after new data and
+  after re-parsing.
+- **error-suggestion-runs**: every `suggestion` parses, binds and runs as
+  given on the same catalog.
+- **error-never-empty**: a failure never yields `empty`; `empty` comes only
+  from a successful read.
+- **read-as-coverage**: every field, operator, transform, order relation
+  and ranking atom has a phrase.
+- **explain-pure**: explain and completion never write, build, embed or call
+  a model.
+- **complete-offline**: completion answers from the catalog file with the
+  daemon down.
+- **complete-parses**: inserting any completion candidate leaves text whose
+  prefix parses.
+- **execution-mode-parity**: CLI, socket, HTTP, MCP and briefs give the same
+  rows, counts and refusals to the same query.
 
-Each `FieldInfo` retains the declared `catalog::Field`, including its closed
-values, and an `Origin`. Group origins name the exact key operand; aggregate
-origins name the aggregate and retain its inputs plus `TypeRule::Input` or
-`Fixed`; promoted temporal outputs name their nested query. Saved/result
-fields retain their caller-supplied `OutputSource`. Unchanged field snapshots
-share storage. The parser captures its existing scope transitions; consumers
-must not reconstruct grouping or alias types from names.
+Cross-system, run by Polylogue's executor against a devkit Sinex:
 
-These are semantic declarations, not a product's physical SQL or JSON schema.
-For example, a product can carry its path type through a grouped text field's
-validated source lineage, or refine a JSON input at the recorded operand and
-propagate it through an `Input` rule. A fixed result uses the declared output
-kind. `Json` remains `Json` until the product resolves its physical schema.
-Scalar spelling is retained in the bound tree: text and JSON literal `001`
-remain `001`; identity normalization applies only to declared scalar types.
-
-Declared `Integer` and `Number` fields use `number::is_integer` and `number::is_decimal`, the same lexical decimal rules used by canonical numeric handling. Integer validation tests the exact value, including integral decimal/scientific spellings, without an `i64` limit; number validation accepts finite decimal syntax without a float conversion or exponent cap. The bound scalar keeps its original text. Canonical identity and numeric key comparison use the same exact coefficient and symbolic exponent arithmetic, including exponents beyond machine integer ranges; they never expand zeros in proportion to an exponent. Product SQL lowerers pass that exact lexeme to their physical numeric binding and report actual database range errors; validation never rounds through a float.
-
-Typed builtin outputs preserve the declared label domains: `weekday` yields text such as `mon`, `month_day` yields text such as `09-14`, and `hour` yields an integer civil hour. Calendar bucket functions `day`, `week` and `month` retain semantic time kinds; products retain their actual physical label representation.
+- **mixed-split-equals-oracle**: federated execution equals the federation
+  oracle (both datasets as plain rows, the mixed query evaluated without
+  splitting).
+- **mixed-batching**: the answer does not depend on the bind batch size, and
+  every batch reads one Sinex commit position.
+- **mixed-positions**: every mixed answer reports both products' positions
+  and lags.
+- **mixed-incomplete**: with Sinex stopped, `sx.` parts are `degraded` and
+  named, never empty; with Sinex not configured, they are `not_configured`.
+- **mixed-forward**: `sinexctl` given a mixed query returns the same answer
+  as `polylogue` given it.
+- **mixed-typed-binds**: bind values cross only as typed parameters; a value
+  containing query punctuation stays one value.

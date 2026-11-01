@@ -1,40 +1,108 @@
 # command-surface
 
-How an operation travels between a caller and a product daemon. Each product
-declares one typed operation table; the CLI, the socket, HTTP and MCP are
-generated from it, so every operation is reachable the same way from every
-surface and none exists on one surface only. This crate holds the mechanics
-both products share: the `Operation` trait, the `Failure` type with its exit
-and HTTP table, the request and answer envelopes, latency classes and
-deadlines, server-sent-event framing, and the status figure-and-verdict
-format.
+How an operation travels between a caller and a product daemon, and what
+comes back. Each product declares one typed operation table; the CLI, the
+socket, HTTP and MCP are generated from it, so every operation is reachable
+the same way from every surface and none exists on one surface only. This
+crate holds the mechanics both products share: the `Operation` trait, the
+answer contract every surface of both products uses, the `Failure` type with
+its exit and HTTP table, who the caller is and who authored a write, the
+seen mark, latency classes and deadlines, server-sent-event framing, and the
+status format of measurements and a verdict.
 
 ## Operations
 
 An `Operation` is one row of a product's table. It declares:
 
-- its name and command words, and the MCP tool name derived from them;
-- its request and answer types (the MCP tool's `inputSchema` and
-  `outputSchema` come from these);
+- its name and command words;
+- its request and answer types (its part of the MCP tool's `inputSchema`
+  and `outputSchema` comes from these);
 - its HTTP route;
 - its latency class;
 - the failure kinds it can return.
 
 Answers are typed values. Each surface renders them from the type: text for
-the terminal, JSON for MCP and HTTP, HTML for the web. No surface assembles an
-answer of its own.
+the terminal and for a model, JSON for programs, HTML for the web. No surface
+assembles an answer of its own.
 
-## Requests and answers
+### MCP tools
+
+MCP tools are grouped from the operation table: one tool per family of rows
+whose arguments share a shape and whose read or write hint is the same for
+every row. Each tool's input schema is generated, with one `oneOf` branch per
+row where the rows differ, and its description is kept in the table. Every
+row that is not local-only is reachable from exactly one tool; local-only
+rows stay on the CLI. Completion is the protocol's `completion/complete`
+method, not a tool. Each product lists its tools on its own interfaces page.
+
+## Requests
 
 A **request** carries the operation, its typed arguments, a deadline, and a
 `request_id` chosen by the caller and reused on retry, so a write retried
-after a lost reply is applied once. Callers never send an author; the product
-computes authorship from how the request arrived.
+after a lost reply is applied once. Every request may also carry:
 
-An **answer** carries an outcome, the typed value, notes, and `next`: the
-runnable follow-ups a caller may take (the next page, a narrower query, the
-same query with the deadline lifted). A failure is returned in place of the
-value, never beside a partial one.
+- `budget_tokens`: how much text the answer may hold, the one name for it on
+  every surface; each operation has its own default, and a caller whose
+  harness declares a tool-output cap has the budget clamped to it;
+- `cursor`, to continue an answer;
+- `fresh`, which renders in full what the caller already holds (below);
+- `format`: `text` (the default) or `json`.
+
+Callers never send an author; the product computes authorship from how the
+request arrived.
+
+## Answers
+
+One answer contract serves every operation of both products on every
+surface. A failure is returned in place of the value, never beside a partial
+one.
+
+**The envelope:**
+
+| Field | Meaning |
+|---|---|
+| `outcome` | `ok`, `empty`, `degraded` or `stopped_early` (the failure table below) |
+| `count` | how many rows or items the question has, whatever was shown |
+| `shown` | how many this answer holds |
+| `left_out` | `[{what, count, expand}]`: what was not shown, how much, and an expand handle |
+| `next` | the runnable follow-ups: the next page, a narrower request, the same request with the deadline lifted |
+| `read_as` | the request's reading as a sentence |
+| `positions` | each product's read position and lag that the answer read at |
+| `coverage` | present only when a source's coverage state affects the answer, in the coverage vocabulary of the [query language](../query-language/README.md#transforms) |
+| `caller` | the computed author and channel |
+| `collapsed` | references rendered as one line because the caller already holds them |
+| `used_tokens` | the size of the rendered answer |
+
+**Sections.** An answer assembled from several queries (a pack, a brief, a
+status page) is a list of sections. Each section has a `status`:
+`complete`, `partial(reason)`, `not_estimable(reason)`,
+`not_observed(sources)` or `empty`. Every line is cited by reference, and an
+**expand handle** reads more of what was left out at the answer's own read
+context, so expanding never mixes two states of the archive.
+
+**Values.** A number carries `{value, unit, kind, state, unknown_count,
+denominator, query}`. Its `state` is one vocabulary for both products and the
+web: `complete`, `partial` (some inputs unknown, counted in
+`unknown_count`), `inferred`, `unknown(reason)`, `not_recorded`,
+`not_applicable` or `pending`. Unknown is never zero.
+[web-shell](../web-shell/README.md#visual-language) renders each state.
+
+**Fitting a budget.** The answer is fitted to `budget_tokens` in whole lines:
+pending before past, every omission counted in `left_out` with its expand
+handle, never a cut inside a structure. A deadline, a page size and a budget
+each bound only what they name; none changes the question.
+
+**Text and data.** The text part is the rendering: rows one line each,
+values every row shares printed once in a header line, absolute times, and
+`next` last. Rows travel as data only with `format: json`. Over MCP the text
+is the model's view and the envelope is `structuredContent`; the rows and the
+text are never both sent, so a model reads each row once.
+
+**What the caller already holds.** A product that records what it sent to an
+identified session (its deliveries) renders a passage that session already
+holds, by reference and content hash, as one line naming the earlier
+delivery, and lists it in `collapsed`. `fresh` turns this off for one
+request.
 
 ## Failures and exit codes
 
@@ -49,18 +117,49 @@ and one HTTP status:
 |---|---|---|
 | 0 | `ok` | 200 |
 | 1 | `empty` (the read succeeded and matched nothing) | 200 |
-| 2 | `invalid_query`, `unknown_field`, `bad_value`, `not_a_query`, `bad_request`, `ambiguous`, `stale_cursor`, `not_yet_available` (designed, with nothing producing it yet) | 400 (`not_yet_available`: 501) |
+| 2 | `invalid_query`, `unknown_field`, `bad_value`, `not_a_query`, `bad_request`, `ambiguous`, `stale_cursor`, `not_yet_available` (designed, with nothing producing it yet, or still starting: it then carries its progress), `not_configured` (the request needs something this deployment does not configure, such as the other product; the configuration key is named) | 400 (`not_yet_available`, `not_configured`: 501) |
 | 3 | `refused`, with the operation's stated reason | 403 |
 | 4 | `not_found`, `conflict`, `io` | 404, 409, 500 |
 | 5 | `degraded` (rows returned, part of what was needed is missing); `stopped_early` (an operation that did not finish; never reported as ok) | 200 with the outcome; 500 |
 | 6 | `not_running` (the daemon is down) | none: the client reports it |
 | 7 | `timeout`, `cancelled` | 504; none |
 
-A product adds precise codes of its own in `Failure::code`, each classified
-once into a shared `FailureKind` at its operation boundary. No refusal
+A failure teaches: an unknown name carries the nearest known names as
+`candidates`, and `explain` as `next`. Language errors become failures in one
+conversion, in the query language. A product adds precise codes of its own
+in `Failure::code`, each classified once into a shared `FailureKind` at its
+operation boundary. No refusal
 reason refers to the caller being an agent or lacking a terminal. With
 `--json`, a CLI prints `{"error": {...}}` on standard output and nothing on
 standard error.
+
+## Callers and authors
+
+Both products compute who a caller is with one implementation, and
+authorship from it with one function, `author_of(caller, via) → author`;
+each product keeps its own stored columns.
+
+- The **caller** is gathered from what the request carries: the harness's
+  session variables, MCP per-call metadata (`_meta`), the socket peer and
+  the controlling terminal. The server records it after its own
+  authentication; it never travels in the request JSON.
+- **A shared MCP server never guesses a session.** When one server process
+  serves several sessions, identity comes per call; without it the author
+  is `agent:<origin>`, never the session the server started in.
+- **The caller is told who they are.** Status begins with the computed
+  author and channel, and every write's answer names its author.
+
+## Seen marks
+
+A **seen mark** is, per consumer (the operator or an agent session) and
+target, the latest position that consumer was shown, plus the anchor inside
+a session: latest only, no history. It is written only when the target was
+displayed to that consumer (the web shell's
+[display rule](../web-shell/README.md#seen-marks)) or when an agent's read asks
+`since: seen`; previews, prerendering, polling and hidden tabs never write
+one. Each product stores seen marks with its authored state, so they survive
+a rebuild of everything derived. `--since seen` reads from the mark; an
+explicit position works as before.
 
 ## Latency classes and deadlines
 
@@ -97,11 +196,12 @@ one framing:
   silent restart;
 - events are sent after the commit they describe.
 
-## Status figures and verdicts
+## Status measurements and verdicts
 
-Each product's `status` is a list of figures and one verdict, in one format:
+Each product's `status` is a list of measurements and one verdict, in one
+format:
 
-- a **figure** is `{name, value, state, reason, age}`;
+- a **measurement** is `{name, value, state, reason, age}`;
 - its **state** is one of `measured`, `none_found` (measured, and there are
   none), `not_measured` (with the reason, such as `timed out`), `unavailable`
   (the thing measured cannot be reached), or `gap` (a known interval with
@@ -109,18 +209,20 @@ Each product's `status` is a list of figures and one verdict, in one format:
 - the **verdict** is `healthy`, `degraded` or `unknown`, with the first reason
   when not healthy.
 
-Every figure has its own deadline; one that misses it is
+Every measurement has its own deadline; one that misses it is
 `not_measured: timed out` and the rest still answer within the class. A
-figure is reused only while its key (file times, counters, positions) is
+measurement is reused only while its key (file times, counters, positions) is
 unchanged, and is then shown with its age; time alone never makes an old
 value reusable. A ratio with a zero denominator is `not_measured`.
 Unmeasured is never shown as zero or as healthy.
 
 ## What a product supplies
 
-Its operation table; its own failure kinds and their place in the table; its
-class budgets and default deadlines; its positions for event IDs; its status
-figures and which states they use.
+Its operation table, with each tool's description; its own failure kinds and
+their place in the table; its class budgets and default deadlines and its
+default budgets; its positions for event IDs and answers; the caller
+evidence its harnesses provide; where it stores seen marks; its status
+measurements and which states they use.
 
 ## Using the crate
 
@@ -128,7 +230,8 @@ Implement `Operation` with typed `Request` and `Response` values that implement
 serde and `JsonSchema`. Register each implementation in `OperationTable`; its
 `OperationSpec` supplies the command words, route, summary, reason, latency
 class, declared failures and write flag. Registration rejects duplicate
-commands, names, routes and MCP tool names. The table provides CLI parsing,
+commands, names and routes, and a tool family whose rows differ in their
+read or write hint. The table provides CLI parsing,
 help and command completion, a JSONL duplex socket server/client, HTTP
 request/response dispatch, and MCP `tools/list` and `tools/call` JSON-RPC.
 MCP hosts retain responsibility for initialization, authentication, transport
@@ -194,10 +297,10 @@ with opaque generation/cursor positions. Retention advances explicitly with
 `retain_after`; a missing or obsolete resume position produces one reload
 event. The log does not infer a commit from a published event.
 
-`Figure` validates that an unmeasured state has a reason and no value.
-`FigureCache` reuses values only for an unchanged caller-supplied key;
-`measure_figure` gives each independent measurement its own timeout. Use
-`Status::new` to derive a verdict from those measured and missing states.
+A measurement with an unmeasured state must have a reason and no value. The
+measurement cache reuses values only for an unchanged caller-supplied key,
+and each independent measurement runs under its own timeout. The verdict is
+derived from those measured and missing states.
 
 The `surfaces` integration tests define a real typed sample table and send
 its requests through CLI parsing, a Unix socket pair, HTTP envelopes and MCP
@@ -223,7 +326,14 @@ byte boundary of SSE framing. Run `cargo xtask test -p command-surface`.
   once and both replies name the same committed row.
 - **resume-from-last-event-id**: a reconnect with `Last-Event-ID` receives
   exactly the events after it, or `reload`.
-- **unmeasured-never-zero**: a figure that was not measured is never rendered
-  as zero or counted as healthy.
-- **figure-reuse-needs-same-key**: a figure is reused only while its key is
-  unchanged.
+- **unmeasured-never-zero**: a measurement that was not taken is never
+  rendered as zero or counted as healthy.
+- **measurement-reuse-needs-same-key**: a measurement is reused only while
+  its key is unchanged.
+- **id-one**: Polylogue and Sinex compute the same author for the same caller
+  fixture, both through the shared `author_of`.
+- **tools-generated**: the MCP tool list equals the grouping of the operation
+  table: every row that is not local-only is reachable from exactly one
+  tool, and each tool's hint is the same for all its rows.
+- **once**: for each supported harness's recorded MCP fixture, the
+  model-visible bytes of an answer contain each row or passage once.

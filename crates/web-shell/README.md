@@ -17,12 +17,22 @@ shows which product it belongs to.
   [command-surface](../command-surface/README.md)). There is no web-only endpoint.
 - **One TypeScript shell** carries the behaviour the server cannot: the key
   table and palette, the copy menu, the event-stream client and fragment
-  swaps, follow-at-end, windowed lists, aborting superseded requests, and the
-  pointer handling of timelines and boards. It is checked by `tsc --strict`
-  and bundled by `esbuild`. The built `shell.js` is committed, and a check
-  rebuilds it and fails on any difference, so neither product needs a
-  TypeScript step to build. There is no npm, no framework and no third-party
-  script at run time.
+  swaps, follow-at-end, windowed lists, aborting superseded requests, the
+  pointer handling of timelines and boards, and drawing the timeline. It is
+  checked by `tsc --strict` and bundled by `esbuild`. The built `shell.js` is
+  committed, and a check rebuilds it and fails on any difference, so neither
+  product needs a TypeScript step to build. There is no npm, no framework and
+  no third-party script at run time.
+- **The shell is a set of custom elements.** Each behaviour is an
+  autonomous custom element wrapping server-rendered markup (windowed list,
+  feed subscription, composer, copy target, timeline, board, preview,
+  decision card), plus global controllers for keys, the palette and
+  navigation. An element's connect and disconnect give each behaviour its
+  lifecycle across fragment swaps, without a framework.
+- **Every view works without script.** Rows, links and forms render with
+  JavaScript disabled; every write is a form that works without the shell,
+  which turns it into a JSON POST of the same request. The shell only
+  enhances, so it never accumulates view logic.
 - **One content security policy** on every route:
   `default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`.
   No inline script or style attribute, no `eval`, no WebAssembly. Fonts are
@@ -55,9 +65,13 @@ primary buttons; an accent never carries a state.
 - **Meaning is never colour alone.** Failure, unknown, partial, inferred and
   not-applicable each have one mark and one word. Missing values in charts use
   the `--missing-pattern` hatch, never a zero-height bar.
-- **Value states:** unknown `—` or `unknown (reason)`; `not recorded`; `n/a`;
-  partial `≥ X (N unknown)`; inferred `≈ X`; `0`; `pending`; `error`; stale as
-  a banner. Unknown is never shown as zero.
+- **Value states** render the one value-state vocabulary of
+  [command-surface](../command-surface/README.md#answers): `complete` as the
+  number (`0` only when measured zero); `partial` as `≥ X (N unknown)`;
+  `inferred` as `≈ X`; `unknown` as `—` or `unknown (reason)`;
+  `not_recorded` as `not recorded`; `not_applicable` as `n/a`; `pending` as
+  `pending`. A failure shows `error`, and a stale view a banner. Unknown is
+  never shown as zero.
 - **Density:** comfortable (default), compact, dense.
 - **Motion:** none except a live tick and progress, and none under
   `prefers-reduced-motion`.
@@ -78,8 +92,8 @@ primary buttons; an accent never carries a state.
   query field with completion.
 - The **status strip** is the daemon state indicator (`live`,
   `catching up · N waiting`, `disconnected · retrying`, `stopped` with the
-  command that starts it), followed by the product's figures; each item links
-  to its place in status.
+  command that starts it), followed by the product's status measurements;
+  each item links to its place in status.
 - The **main column** is at most 1,200 px wide; running text is 75 to 90
   characters. The **inspector** (280 to 320 px) shows the page's facts, or the
   focused target's, with a way back. A **left rail** appears only where it
@@ -111,6 +125,8 @@ another meaning.
 | `:` or `Ctrl-K` | palette |
 | `?` | key help |
 | `g` then a letter | go to a section (the letters are the product's navigation) |
+| `g n` | the notices inbox, in both products |
+| `g o` | the same place in the other product (its counterpart view) |
 | `j` / `k`, `↓` / `↑` | next / previous row, hit or item |
 | `gg` / `G` | top / bottom |
 | `Enter` | open the focused row |
@@ -119,6 +135,14 @@ another meaning.
 | `y` / `Y` | copy menu / copy the default form; `y c` copies the page's CLI command |
 | `n` / `N` | next / previous match of the active find |
 | `Esc` | close a disclosure, palette or editor; clear the selection |
+
+**Cards rebind visibly.** A focused decision card (a permission request, a
+judging pair, a chat turn awaiting approval) is entered with `Enter` and left
+with `Esc`; while it is open it rebinds a few letters and shows them on its
+buttons. No single keystroke made while moving through a list approves or
+denies anything. Keys belong to layers, not modes: shared keys work
+everywhere, and a product's letter that means something in one place means
+nothing elsewhere.
 
 Single-character keys can be switched off by a setting. Keys are ignored
 inside inputs and while text is selected. Focus is real DOM focus, and a live
@@ -148,7 +172,14 @@ clipboard service.
 
 ## Live updates
 
-- One event stream per visible tab, framed as in
+- **One event connection per browser.** The shell runs the event stream in
+  a SharedWorker: one connection per browser profile, carrying the union of
+  every tab's subscriptions, with each tab's resume position kept per
+  subscription; tabs receive their fragments over the worker's ports. A
+  browser holds only a few connections per host, and per-tab streams across
+  several windows, panes and previews would exhaust them. Where SharedWorker
+  is unavailable, the shell falls back to one stream per visible tab. The
+  stream is framed as in
   [command-surface](../command-surface/README.md#server-sent-events). Payloads are
   `append` (a fragment for an open list that asked for it), `replace` (a
   fragment for a target) or `ref` (a changed reference whose fragments the
@@ -159,17 +190,44 @@ clipboard service.
   and scrolled to the end, and otherwise shows "N new ↓"; a list holds
   reordering while a row has focus and shows "N updates · apply"; selection
   and focus are never removed by an update.
-- Hidden tabs close their stream and refresh on return.
+- A hidden tab drops its subscriptions and refreshes on return.
 - A newer request aborts the older one, and a stale reply never overwrites a
   newer selection.
 - Long lists are windowed: the shell keeps a window of rows in the DOM and
   fetches by anchor when scrolling past it, keeping focus and position.
 
+## Timeline
+
+One timeline element serves both products. It is drawn in the client from a
+typed **series**, so pan and zoom stay continuous over many marks; a
+server-rendered image per zoom step would not.
+
+- A **lane** is a timeline row defined by a query, with a render and a
+  grouping key. A **series row** is `(lane, start, end?, render, label?,
+  agency?, ref)`, with `render` one of `interval`, `point` or `count` (a state
+  is an interval with a label).
+- Each product serves the series for its lanes, binned on the server to at
+  most one mark per pixel at the requested zoom. Series hold geometry and
+  references, never record text: rows, previews and tables under a
+  selection stay server-rendered HTML.
+- The table under each timeline is its no-script equivalent.
+- Charts that do not zoom continuously stay server-rendered SVG, so each
+  chart kind has one renderer.
+
+## Seen marks
+
+The shell reports that a view was displayed when it becomes visible to a
+person; the product then writes the consumer's
+[seen mark](../command-surface/README.md#seen-marks). Prerendering, hidden
+tabs, polling and previews never count, and an agent reading the HTML writes
+none. "N new since you last looked" is read from that mark.
+
 ## What a product supplies
 
-Its views and routes, its navigation and `g` letters, keys for its own acts,
-its accent, its copy forms per target, its status-strip figures, and what each
-page follows.
+Its views and routes, its navigation and `g` letters, keys for its own acts
+and card layers, its accent, its copy forms per target, its status-strip
+measurements, the series for its lanes, its counterpart view for `g o`, and
+what each page follows.
 
 ## Integration
 
@@ -280,9 +338,8 @@ both to the same shared resume mechanism.
 
 Set `refresh` to the existing current-view operation returning `Refresh`:
 `{position, fragments}` read under one snapshot. On return from a hidden tab,
-that snapshot is applied before opening the stream strictly after its
-position. There is one stream per visible tab, and hidden tabs abort all
-requests. A late response to a superseded target is ignored even when its
+that snapshot is applied before subscribing strictly after its position.
+Hidden tabs abort all requests. A late response to a superseded target is ignored even when its
 transport ignores cancellation. A live update protects focus and selection;
 held changes appear as an adjacent apply control. Replacement events
 coalesce while held. An explicit apply still waits for protected rows to be
@@ -335,3 +392,9 @@ layouts in a real browser against their daemon and visual baseline.
   shows the text to copy and never reports success.
 - **narrow-width-usable**: at 390 px no view scrolls horizontally.
 - **unknown-never-zero**: no value state renders an unknown value as zero.
+- **one-connection-per-browser**: with SharedWorker available, any number of
+  visible tabs of one product in one browser profile hold one event
+  connection to its daemon.
+- **display-acknowledges-only-when-shown**: a seen mark is written only when a
+  view becomes visible to a person; prerendered, hidden, polled, previewed
+  and agent-read pages write none.

@@ -34,7 +34,8 @@ in both products before changing a shared interface.
   catalogs and two compilers; the language owns the laws that are properties
   of the language and runs them against both catalogs.
 - [`command-surface`](crates/command-surface/README.md): one operation table per
-  product, from which every transport is generated; one failure table.
+  product, from which every transport is generated; one answer contract and
+  one failure table for every surface of both products.
 - [`web-shell`](crates/web-shell/README.md): server-rendered HTML from typed answers,
   one TypeScript shell, one visual language.
 - [`signals`](crates/signals/README.md): one rule schema and evaluator, one host

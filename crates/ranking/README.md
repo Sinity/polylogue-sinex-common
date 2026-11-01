@@ -128,7 +128,7 @@ proposal and each proposal takes `min(k, uncompared)` of them
   judging picker, `rank`, `judge next` and the levels that bin scores are
   product code over this crate.
 - **Polylogue** (`comparisons`): the same fit for `| sort by rank(scale)` and
-  the review queue (assertions design AN §3.1).
+  the review queue.
 
 ## Laws
 
