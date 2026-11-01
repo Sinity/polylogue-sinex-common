@@ -1,0 +1,67 @@
+# The shared locator cases: input TAB canonical locator, or `refused`.
+# Raise the version with any changed output (crate::locator::VERSION).
+version 1
+
+# URLs: scheme and host case, default port, dot segments, sorted query, fragment as selector
+HTTPS://Example.COM:443/a/./b/../c?b=2&a=1#intro	url:https://example.com/a/c?a=1&b=2#id=intro
+https://example.com/page?utm_source=x&utm_medium=y&id=7&fbclid=abc	url:https://example.com/page?id=7
+https://example.com/%7euser/%3f	url:https://example.com/~user/%3F
+http://example.com:80	url:http://example.com/
+https://example.com/?	url:https://example.com/
+https://example.com/a?x=1&x=0&a=2	url:https://example.com/a?a=2&x=1&x=0
+https://example.com/a?ref=x	url:https://example.com/a?ref=x
+https://medium.com/@someone/post	url:https://medium.com/@someone/post
+url:https://Example.com/	url:https://example.com/
+https://example.com/a b	url:https://example.com/a%20b
+https://example.com/video.mp4#t=10,20	url:https://example.com/video.mp4#t=10,20
+https://example.com/v.mp4#t=npt:0:01:30.50,120	url:https://example.com/v.mp4#t=90.5,120
+https://example.com/i.png#xywh=pixel:10,20,30,40	url:https://example.com/i.png#xywh=10,20,30,40
+not a url	refused
+
+# YouTube
+https://www.youtube.com/watch?v=dQw4w9WgXcQ	youtube:dQw4w9WgXcQ
+https://youtu.be/dQw4w9WgXcQ?si=abc	youtube:dQw4w9WgXcQ
+https://m.youtube.com/watch?v=dQw4w9WgXcQ&t=42	youtube:dQw4w9WgXcQ
+https://www.youtube.com/embed/dQw4w9WgXcQ	youtube:dQw4w9WgXcQ
+https://www.youtube.com/shorts/dQw4w9WgXcQ	youtube:dQw4w9WgXcQ
+https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ	youtube:dQw4w9WgXcQ
+https://www.youtube.com/watch?v=dQw4w9WgXcQ#t=30	youtube:dQw4w9WgXcQ#t=30
+https://www.youtube.com/watch?v=short	url:https://www.youtube.com/watch?v=short
+youtube:dQw4w9WgXcQ	youtube:dQw4w9WgXcQ
+youtube:bad	refused
+
+# Spotify, DOI, ISBN, arXiv
+https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC?si=x	spotify:track:4uLU6hMCjMI75M1A2tKUQC
+https://open.spotify.com/intl-de/track/4uLU6hMCjMI75M1A2tKUQC	spotify:track:4uLU6hMCjMI75M1A2tKUQC
+spotify:album:1DFixLWuPkv3KT3TnV35m3	spotify:album:1DFixLWuPkv3KT3TnV35m3
+https://doi.org/10.1000/ABC.def	doi:10.1000/abc.def
+https://dx.doi.org/10.1000/ABC.def	doi:10.1000/abc.def
+doi:10.1000/ABC.def	doi:10.1000/abc.def
+doi:11.1000/x	refused
+isbn:0-306-40615-2	isbn:9780306406157
+isbn:978-0-306-40615-7	isbn:9780306406157
+isbn:0-306-40615-3	refused
+https://arxiv.org/abs/2101.00001v2	arxiv:2101.00001v2
+https://arxiv.org/pdf/2101.00001v2.pdf	arxiv:2101.00001v2
+https://arxiv.org/abs/hep-th/9901001	arxiv:hep-th/9901001
+
+# Boorus, GitHub, Wikipedia
+https://danbooru.donmai.us/posts/123456	booru:danbooru/123456
+https://gelbooru.com/index.php?page=post&s=view&id=42	booru:gelbooru/42
+https://github.com/Sinity/Polylogue-Sinex-Common	github:sinity/polylogue-sinex-common
+https://github.com/rust-lang/rust/	github:rust-lang/rust
+https://github.com/rust-lang/rust/issues/1	url:https://github.com/rust-lang/rust/issues/1
+https://github.com/features/actions	url:https://github.com/features/actions
+https://en.wikipedia.org/wiki/Rust_(programming_language)	wikipedia:en/Rust_(programming_language)
+https://en.m.wikipedia.org/wiki/AC%2FDC	wikipedia:en/AC/DC
+https://en.wikipedia.org/wiki/Rust_(programming_language)#History	wikipedia:en/Rust_(programming_language)#id=History
+https://de.wikipedia.org/wiki/%C3%84rger	wikipedia:de/Ärger
+wikipedia:en/rust  language	wikipedia:en/Rust_language
+
+# Files and attachments
+file:Host-A/root-1/docs/./a/../b.md	file:host-a/root-1/docs/b.md
+file:host/root/../escape	refused
+file:host/root/notes#L40-52	file:host/root/notes#L40-52
+file:host/root/node_modules/@types/x.d.ts	file:host/root/node_modules/@types/x.d.ts
+file:host/root/100%	file:host/root/100%25
+part:gmail/18c2f/attachments/1	part:gmail/18c2f/attachments/1

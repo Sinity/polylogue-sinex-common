@@ -1,0 +1,28 @@
+//! One reference grammar for Polylogue and Sinex.
+//!
+//! - [`Reference`]: `<product>:<kind>/<id>[@<revision>][#<selector>]` in
+//!   global form, `<kind>:<id>…` inside its own product, or a [`Locator`].
+//! - [`Selector`]: media fragments, line ranges, text ranges, quotes and named places.
+//! - [`Locator`]: canonical native addresses, from the versioned
+//!   canonicalizer and its catalog patterns.
+//! - [`Catalog`]: each product's kinds, web address and provider-URL
+//!   patterns; input normalisation, links and web addresses.
+//!
+//! The crate's README states the design and its laws.
+
+mod catalog;
+mod escape;
+pub mod laws;
+pub mod locator;
+mod pattern;
+mod reference;
+pub mod selector;
+
+pub use catalog::{
+    Catalog, CatalogError, ContextWord, Input, Kind, Link, ProductCatalog, RowPick, RowSpan,
+    Unlinked, WebAddress,
+};
+pub use locator::{Located, Locator, LocatorError, LocatorKind};
+pub use pattern::{PatternError, UrlPattern};
+pub use reference::{Object, Product, Reference, ReferenceError, Target, is_kind_name};
+pub use selector::{Selector, SelectorError};

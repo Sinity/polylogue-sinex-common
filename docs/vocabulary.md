@@ -120,6 +120,28 @@ are renames the operator may still change (default; open operator question).
 | measurement state | `measured`, `none_found`, `not_measured`, `unavailable`, `gap` |
 | verdict | the one-word health of a product: `healthy`, `degraded`, `unknown` |
 
+## References
+
+| Name | Meaning |
+|---|---|
+| reference | the one written form of anything addressable: an object of one product or a locator, with an optional selector |
+| global form | `<product>:<kind>/<id>[@<revision>][#<selector>]`: what is stored and sent |
+| local form | `<kind>:<id>…`, written inside the object's own product and normalised to the global form at input |
+| kind | the word after the product that says what sort of object a reference names (`session`, `ev`) |
+| identity | the part of a reference that says which object of its kind, as its owner writes it |
+| revision | the part after `@`: one exact revision, as the owner defines it |
+| selector | the part after `#`: a place inside the thing (lines, time, rectangle, text range, quote, named place) |
+| quote | the exact text a span held, with the text before and after it, for finding the span again |
+| locator | the canonical native address of a thing outside both products' objects (`url:`, `file:`, `part:`, a catalog form) |
+| catalog form | a locator from an outside catalog's identifier (`youtube:`, `doi:`, `isbn:` …) that URLs of that catalog fold into |
+| canonicalizer | the versioned rules and data that turn an address into its locator |
+| tracking parameter | a declared query parameter that only records how a link was shared, removed by the canonicalizer |
+| URL pattern | a declared URL shape and the reference text it becomes |
+| route | an object's web address, `/<kind>/<id>[@<revision>]`, under its product's base URL |
+| sub-view | a named view of one object, a path segment after its route (`trace`, `history`) |
+| context word | `self`, `here`, `last`, `latest`: words the caller's context resolves |
+| row pick | `@N`, `@N.M`, `@N-M`, `@N,M`, `@*`, `@last`: rows of the last list printed for a caller |
+
 ## Signals
 
 | Name | Meaning |
