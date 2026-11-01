@@ -131,6 +131,22 @@ mechanic and nothing else in the shared crates.
 | value state | how a value that is not a plain measured number is shown (unknown, partial, inferred …) |
 | mark | the symbol that, with its word, carries a meaning that colour alone never does |
 
+## Rankings
+
+| Name | Meaning |
+|---|---|
+| judgment | one judge's ordering of targets, best first, with tie groups |
+| tie group | targets a judgment places equally; one element of its order |
+| judge set | which judges' judgments a fit counts: all, or a named set |
+| fit | the scores, intervals, ranks, supports and components for one judge set |
+| score | a target's log-worth on the fit's scale, relative to the prior's reference |
+| interval | the 95 percent Laplace interval on a score |
+| rank range | the best and worst positions the intervals allow |
+| component | targets linked by counted judgments; scores compare across components only through the prior |
+| warm start | a previous fit's scores used as the starting point of the next fit |
+| proposal, seat | a proposed set of targets to compare, and one target in it with the reason it was chosen |
+| uncompared | a target that no counted judgment names yet |
+
 ## Development runs
 
 | Name | Meaning |
