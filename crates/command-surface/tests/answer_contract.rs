@@ -33,7 +33,7 @@ impl Operation for Search {
             )
         }
     }
-    fn execute(&self, request: Find, _: RequestContext) -> OperationFuture<'_, Answer<Rows>> {
+    fn execute(&self, request: Find, context: RequestContext) -> OperationFuture<'_, Answer<Rows>> {
         Box::pin(async move {
             let rows = Rows {
                 rows: vec!["row-one-unique".into()],
@@ -67,8 +67,50 @@ impl Operation for Search {
                     answer
                 }
                 "long" => Answer::ok(Rows {
-                    rows: vec!["word ".repeat(400)],
+                    rows: (0..100)
+                        .map(|n| format!("row {n} of a long answer"))
+                        .collect(),
                 }),
+                "packed" => {
+                    // A pack fitted the way an operation should: through the
+                    // context, with its envelope as it stands.
+                    let mut envelope = Envelope {
+                        count: Some(Count::exact(40)),
+                        coverage: vec![SourceCoverage {
+                            source: "shell".into(),
+                            state: CoverageState::Gap {
+                                reason: "overflow".into(),
+                            },
+                            not_complete: vec![],
+                        }],
+                        ..Envelope::default()
+                    };
+                    let section = Section {
+                        title: "rows".into(),
+                        status: SectionStatus::Complete,
+                        pending: false,
+                        entries: (0..40)
+                            .map(|n| {
+                                Entry::new(format!("row {n} with a few words"), format!("ref:{n}"))
+                            })
+                            .collect(),
+                        expand: Some(RunnableRequest::new(
+                            "find",
+                            json!({"query": "packed"}),
+                            "more",
+                        )),
+                    };
+                    let fitted = context.fit(vec![section], context.budget(60, None), &envelope);
+                    envelope.shown =
+                        Some(fitted.sections.iter().map(|s| s.entries.len() as u64).sum());
+                    envelope.left_out = fitted.left_out;
+                    Answer {
+                        outcome: Outcome::Ok(Rows {
+                            rows: fitted.text.lines().map(str::to_owned).collect(),
+                        }),
+                        envelope,
+                    }
+                }
                 "unknown" => {
                     let query = "sessions where reop:sinex";
                     let error = query_language::Error::new(
@@ -191,23 +233,42 @@ async fn text_answers_read_back() {
 #[tokio::test]
 async fn text_within_budget() {
     let table = table();
-    // The answer's text, value and envelope lines together, is held to the
-    // request's budget; an operation that exceeds it is reported, not cut.
-    let over = table
-        .mcp(
+    let call = |query: &str, budget: u32| {
+        table.mcp(
             json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
                 "name": "example_query",
-                "arguments": {"arguments": {"query": "long"}, "request_id": "r-1", "budget_tokens": 100}
+                "arguments": {"arguments": {"query": query}, "request_id": "r-1", "budget_tokens": budget}
             }}),
             CancellationToken::new(),
         )
-        .await["result"]
-        .clone();
-    assert_eq!(over["isError"], true);
-    let message = over["structuredContent"]["error"]["message"]
-        .as_str()
-        .unwrap();
-    assert!(message.contains("over its budget of 100"), "{message}");
+    };
+    // An operation that fits through its context fits once dispatch has
+    // finished the envelope: the count's line and its lower bound included.
+    let packed = call("packed", 60).await["result"].clone();
+    assert_eq!(packed["isError"], false);
+    let text = packed["content"][0]["text"].as_str().unwrap();
+    assert!(approximate_tokens(text) <= 60, "{text}");
+    assert!(text.contains("shown "), "{text}");
+    assert!(text.contains("of at least 40"), "{text}");
+    assert!(!text.contains("lines of this answer"), "{text}");
+    assert_eq!(packed["structuredContent"]["left_out"][0]["what"], "rows");
+    // Text over its budget is fitted by whole lines and named as left out,
+    // never turned into a failure.
+    let over = call("long", 100).await["result"].clone();
+    assert_eq!(over["isError"], false);
+    assert_eq!(over["structuredContent"]["outcome"], "ok");
+    let text = over["content"][0]["text"].as_str().unwrap();
+    assert!(approximate_tokens(text) <= 100, "{text}");
+    assert!(text.starts_with("row 0 of a long answer\n"));
+    let left = &over["structuredContent"]["left_out"][0];
+    assert_eq!(left["what"], "lines of this answer");
+    assert!(left["count"].as_u64().unwrap() > 0);
+    assert!(left["expand"].get("budget_tokens").is_none());
+    assert_eq!(
+        over["structuredContent"]["used_tokens"],
+        json!(approximate_tokens(text))
+    );
+    // The command line takes the same path.
     let cli = table
         .cli(
             &["find", "--query", "long", "--budget", "100"].map(str::to_string),
@@ -215,15 +276,22 @@ async fn text_within_budget() {
             CancellationToken::new(),
         )
         .await;
-    assert_eq!(cli.exit_code, 4);
-    assert!(cli.stdout.is_empty());
-    // Within its budget, `used_tokens` is what the whole text measures.
-    let within = tool_call(&table, "rows", "text").await;
-    let shown = within["content"][0]["text"].as_str().unwrap();
-    assert_eq!(
-        within["structuredContent"]["used_tokens"],
-        json!(approximate_tokens(shown))
-    );
+    assert_eq!(cli.exit_code, 0);
+    assert!(cli.stdout.starts_with("row 0 of a long answer\n"));
+    assert!(cli.stderr.contains("left out: "), "{}", cli.stderr);
+    assert!(approximate_tokens(&cli.stdout) + approximate_tokens(&cli.stderr) <= 100);
+    // A product's client renders an answer it read from the socket the
+    // same way.
+    let request = RunnableRequest {
+        budget_tokens: Some(100),
+        ..find("long")
+    };
+    let read = table
+        .call(request.clone(), Via::Cli, CancellationToken::new())
+        .await;
+    let rendered = table.render_answer(Via::Cli, Some(&request), read);
+    assert_eq!(rendered.value_text, cli.stdout);
+    assert_eq!(rendered.footer, cli.stderr);
 }
 
 #[tokio::test]

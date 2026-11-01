@@ -101,12 +101,16 @@ fn is_positional(form: ArgumentForm) -> bool {
 pub(crate) fn check(description: &OperationDescription) -> Result<(), Failure> {
     let spec = &description.spec;
     let refuse = |message: String| Err(bad_request(format!("{}: {message}", spec.name)));
-    // Every request field is written `--name` unless declared otherwise, so
-    // no field may take a flag every row already has.
+    // A field is written `--name` unless it is declared positional, so no
+    // field written as a flag may take a flag every row already has.
+    let positional = |name: &str| {
+        spec.argument(name)
+            .is_some_and(|argument| is_positional(argument.form))
+    };
     if let Some(properties) = description.input_schema["properties"].as_object()
-        && let Some(name) = properties
-            .keys()
-            .find(|name| GLOBAL_FLAGS.contains(&name.replace('_', "-").as_str()))
+        && let Some(name) = properties.keys().find(|name| {
+            !positional(name) && GLOBAL_FLAGS.contains(&name.replace('_', "-").as_str())
+        })
     {
         return refuse(format!(
             "request field {name} would be written as --{}, a flag of every row",
@@ -125,7 +129,9 @@ pub(crate) fn check(description: &OperationDescription) -> Result<(), Failure> {
         {
             return refuse(format!("argument {} is declared twice", argument.name));
         }
-        if GLOBAL_FLAGS.contains(&argument.flag().trim_start_matches('-')) {
+        if !is_positional(argument.form)
+            && GLOBAL_FLAGS.contains(&argument.flag().trim_start_matches('-'))
+        {
             return refuse(format!("{} is a flag of every row", argument.flag()));
         }
         if let Some(short) = argument.short

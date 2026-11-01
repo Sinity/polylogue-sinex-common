@@ -83,8 +83,12 @@ impl Operation for WhoAmI {
         Box::pin(async move {
             Answer::ok(Text {
                 text: format!(
-                    "{:?} {}",
+                    "{:?} {} {}",
                     context.via,
+                    context
+                        .caller()
+                        .authorship()
+                        .map_or("unknown".into(), |a| a.author.to_string()),
                     context.metadata().cloned().unwrap_or_default()
                 ),
             })
@@ -96,6 +100,22 @@ impl Operation for WhoAmI {
     }
     fn render_text(&self, text: &Text) -> String {
         format!("{}\n", text.text)
+    }
+}
+
+/// Runs until it is cancelled.
+struct Wait;
+impl Operation for Wait {
+    type Request = Text;
+    type Response = Text;
+    fn spec(&self) -> OperationSpec {
+        OperationSpec::request("wait", &["wait"], "inspect", "Wait", "Never finishes")
+    }
+    fn execute(&self, _: Text, _: RequestContext) -> OperationFuture<'_, Answer<Text>> {
+        Box::pin(std::future::pending())
+    }
+    fn render_text(&self, text: &Text) -> String {
+        text.text.clone()
     }
 }
 
@@ -176,6 +196,7 @@ fn table() -> OperationTable {
         })
         .unwrap();
     table.register(WhoAmI).unwrap();
+    table.register(Wait).unwrap();
     table
 }
 
@@ -767,46 +788,152 @@ async fn stream_lines_print_as_they_arrive() {
     assert_eq!(exit.unwrap(), 0);
 }
 
-#[tokio::test]
-async fn socket_carries_mcp_messages() {
+/// The evidence of a shared Codex MCP server, as a product's transport
+/// gathers it for its socket peer.
+fn shared_server() -> Caller {
+    Caller::default().with_evidence(CallerEvidence {
+        harness: Some(Harness::new("codex").unwrap()),
+        session: AgentSession::parse("codex:server-start"),
+        shared_server: true,
+        ..CallerEvidence::default()
+    })
+}
+
+/// Send `lines` over a socket served for `caller`, then read `replies`
+/// lines back before closing.
+async fn socket_exchange(
+    table: &OperationTable,
+    caller: Caller,
+    lines: &[&str],
+    replies: usize,
+) -> Vec<Value> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    let table = table();
     let (client, server) = tokio::net::UnixStream::pair().unwrap();
     let talking = async {
         let (reading, mut writing) = client.into_split();
-        let mut lines = BufReader::new(reading).lines();
-        let call = json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
-            "name": "example_inspect",
-            "arguments": {"arguments": {"text": "x"}, "request_id": "r-1"},
-            "_meta": {"session": "codex:thread-3"}
-        }});
-        writing
-            .write_all(format!("{call}\n").as_bytes())
-            .await
-            .unwrap();
-        // A notification gets no reply; the next line answers the call.
-        writing
-            .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
-            .await
-            .unwrap();
-        let reply: Value =
-            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        let mut read = BufReader::new(reading).lines();
+        for line in lines {
+            writing.write_all(line.as_bytes()).await.unwrap();
+        }
+        let mut received = vec![];
+        for _ in 0..replies {
+            received.push(serde_json::from_str(&read.next_line().await.unwrap().unwrap()).unwrap());
+        }
         drop(writing);
-        reply
+        received
     };
-    let (served, reply) = tokio::join!(table.serve_socket(server), talking);
+    let (served, received) = tokio::join!(table.serve_socket_as(server, caller), talking);
     served.unwrap();
+    received
+}
+
+fn whoami(id: u64, meta: Value) -> String {
+    format!(
+        "{}\n",
+        json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {
+            "name": "example_inspect",
+            "arguments": {"operation": "whoami", "arguments": {"text": "x"}, "request_id": "r-1"},
+            "_meta": meta
+        }})
+    )
+}
+
+#[tokio::test]
+async fn socket_carries_mcp_messages() {
+    let table = table();
+    let call = whoami(4, json!({"session": "codex:thread-3"}));
+    let replies = socket_exchange(
+        &table,
+        shared_server(),
+        &[
+            &call,
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+        ],
+        1,
+    )
+    .await;
+    let reply = &replies[0];
     assert_eq!(reply["id"], 4);
     let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    // The call is authored by the session its own metadata names, through
+    // the same gathering as a stdio MCP server.
     assert!(
-        text.starts_with(r#"Mcp {"session":"codex:thread-3"}"#),
+        text.starts_with(r#"Mcp agent:codex:thread-3 {"session":"codex:thread-3"}"#),
         "{text}"
+    );
+    assert_eq!(
+        reply["result"]["structuredContent"]["caller"],
+        json!({"author": "agent:codex:thread-3", "via": "mcp"})
     );
     // Its follow-up is written as the tool call that runs it.
     assert!(
         text.contains(r#"next: find more: example_query {"arguments":{"text":"more"},"operation":"find","request_id":"r-2"}"#),
         "{text}"
     );
+    // Without its own identity, a shared server's call is the harness.
+    let replies = socket_exchange(&table, shared_server(), &[&whoami(5, json!({}))], 1).await;
+    let text = replies[0]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("Mcp agent:codex {}"), "{text}");
+    // A stdio server calling `mcp_as` with the same evidence agrees.
+    let stdio: Value =
+        serde_json::from_str(&whoami(6, json!({"session": "codex:thread-3"}))).unwrap();
+    let stdio = table
+        .mcp_as(stdio, shared_server(), CancellationToken::new())
+        .await;
+    assert_eq!(
+        stdio["result"]["structuredContent"]["caller"]["author"],
+        "agent:codex:thread-3"
+    );
+}
+
+#[tokio::test]
+async fn socket_cancellation_answers_nothing_for_the_cancelled_call() {
+    let table = table();
+    let wait = format!(
+        "{}\n",
+        json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {
+            "name": "example_inspect",
+            "arguments": {"operation": "wait", "arguments": {"text": "x"}, "request_id": "r-9"}
+        }})
+    );
+    let other = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":8}}\n";
+    let cancel = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":9}}\n";
+    let next = whoami(10, json!({}));
+    // A cancellation of another request leaves the call running; its own
+    // cancels it, and the only reply is the next call's.
+    let replies =
+        socket_exchange(&table, Caller::default(), &[&wait, other, cancel, &next], 1).await;
+    assert_eq!(replies[0]["id"], 10);
+}
+
+#[tokio::test]
+async fn a_partial_line_does_not_hold_up_the_running_call() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let table = table();
+    let (client, server) = tokio::net::UnixStream::pair().unwrap();
+    let talking = async {
+        let (reading, mut writing) = client.into_split();
+        let mut read = BufReader::new(reading).lines();
+        // The call and the first half of a notification arrive together; the
+        // call is answered while the notification's line is still open.
+        let call = whoami(11, json!({}));
+        writing
+            .write_all(format!("{call}{{\"jsonrpc\":\"2.0\",\"meth").as_bytes())
+            .await
+            .unwrap();
+        let reply: Value = serde_json::from_str(&read.next_line().await.unwrap().unwrap()).unwrap();
+        writing
+            .write_all(b"od\":\"notifications/initialized\"}\n")
+            .await
+            .unwrap();
+        drop(writing);
+        // The notification gets no reply; the connection then ends.
+        assert!(read.next_line().await.unwrap().is_none());
+        reply
+    };
+    let (served, reply) = tokio::join!(table.serve_socket(server), talking);
+    served.unwrap();
+    assert_eq!(reply["id"], 11);
 }
 
 #[tokio::test]

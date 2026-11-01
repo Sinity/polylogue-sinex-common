@@ -194,10 +194,17 @@ each bound only what they name; none changes the question. The fitter:
 The budget is the request's `budget_tokens`, else the operation's default,
 lowered to the caller's output cap; a lowered budget is named in `notes`.
 Tokens are counted one per four bytes, rounded up (`approximate_tokens`),
-the same way everywhere. The surface that renders an answer for a person or
-model (the command line, MCP) measures its whole text into `used_tokens`;
-an answer whose text exceeds the request's budget is the operation's bug
-and becomes an `io` failure saying so, never a cut or an oversized answer.
+the same way everywhere. Every surface that shows an answer as text takes
+one path, `OperationTable::render_answer`: the command line and MCP here,
+and a product's client for an answer it read from the socket (the socket
+and HTTP carry the typed answer, and the web renders HTML). It measures the
+text after the envelope is final into `used_tokens`. Text over the budget
+is fitted, never failed: whole lines are dropped from the end of the
+value's text and named as left out ("lines of this answer"), with the
+request that reads them with its budget lifted. The outcome never changes,
+so a committed write still reads as done. `RequestContext::fit` counts the
+count's line in its longest form ("shown N of at least M") so an operation
+that fits through its context is not trimmed.
 
 **Text and data.** The text part is the rendering: rows one line each,
 values every row shares printed once in a header line, absolute times, and
@@ -415,7 +422,10 @@ one answer ends it; `StreamLine` reads either; a line holding an MCP
 JSON-RPC message is answered as MCP, so the stdio MCP server each harness
 starts is a proxy forwarding to the daemon's one socket, as the agent
 contract's performance design has it, with each call's `_meta` reaching the
-operation and follow-ups written as tool calls), HTTP dispatch at `POST
+operation and follow-ups written as tool calls; while a call runs, a
+`notifications/cancelled` naming it cancels it and it gets no reply, other
+notifications are taken, and lines are read whole without holding up the
+call), HTTP dispatch at `POST
 /v1` or each row's route (JSON, or a URL-encoded form with one `request`
 field, so a form works without JavaScript; `GET /v1/commands` lists the
 rows), `open_stream` for a product's server-sent events, and MCP
@@ -438,7 +448,12 @@ code, or a kind the operation did not declare (transport kinds excepted), as
 granted access and computed authorship; the identity stays a typed Rust
 value (`RequestContext::caller().identity::<T>()`). Products use a stable
 authenticated scope for retry identity across surfaces.
-`RequestContext::budget` resolves the answer's budget and
+An MCP call through `mcp_as` (stdio, or an MCP frame on the socket)
+computes its caller the same way: from the evidence the server attached
+(`Caller::with_evidence`) and the session the call names in
+`_meta.session` (`harness:native`), by `author_of` with `via` mcp, so the
+shared-server rule holds on every path. `RequestContext::budget` resolves
+the answer's budget and
 `RequestContext::fit` fits sections, counting left-out lines and the
 envelope's lines as the request's surface prints them. `RequestContext::via`
 is the channel the request arrived by (the transport sets it: `cli` for the
@@ -527,14 +542,17 @@ the serialization, command-line and fitter boundaries. Run
   left-out lines stays within any budget that can hold what every section is
   sure to need.
 - **text-within-budget**: the text a surface renders for an answer, value
-  and envelope lines together, is within the request's budget, or the
-  answer is an `io` failure naming the excess; `used_tokens` is what that
-  text measures.
+  and envelope lines together, is within the request's budget: an
+  operation that fits through its context fits as rendered, and other text
+  is fitted by whole lines named as left out, never failed; `used_tokens`
+  is what the text measures.
 - **text-answers-read-back**: an MCP answer in text format reads back as
   `Answer<Option<T>>` with the value `None` and `value_in_text`, and
   `Answer<T>` refuses it saying where the value is.
 - **socket-carries-mcp**: an MCP message sent over the socket is answered as
-  an MCP call, with its `_meta` and with follow-ups written as tool calls.
+  an MCP call, authored from the server's evidence and the call's `_meta`
+  as on stdio, with follow-ups written as tool calls; a cancelled call gets
+  no reply.
 - **streams-print-as-they-arrive**: a stream's events reach the command
   line's output while the stream is still open, and a stream with no events
   prints nothing and succeeds.

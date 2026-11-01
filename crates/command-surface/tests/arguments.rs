@@ -425,3 +425,47 @@ fn request_fields_cannot_take_a_flag_of_every_row() {
     let error = table.register(Clash).unwrap_err();
     assert!(error.message.contains("--cursor"), "{}", error.message);
 }
+
+#[test]
+fn a_positional_field_may_share_a_flags_name() {
+    // Declared positional, the field is never written as `--cursor`.
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    struct Paged {
+        cursor: String,
+    }
+    struct Positional;
+    impl Operation for Positional {
+        type Request = Paged;
+        type Response = Value;
+        fn spec(&self) -> OperationSpec {
+            OperationSpec {
+                arguments: vec![ArgumentSpec::new(
+                    "cursor",
+                    ArgumentForm::Positional,
+                    "where",
+                )],
+                ..OperationSpec::request("page", &["page"], "read", "Page", "Pages")
+            }
+        }
+        fn execute(&self, request: Paged, _: RequestContext) -> OperationFuture<'_, Answer<Value>> {
+            Box::pin(async move { Answer::ok(json!(request.cursor)) })
+        }
+        fn render_text(&self, value: &Value) -> String {
+            format!("{value}\n")
+        }
+    }
+    let mut table = OperationTable::new("example", Deadlines::default());
+    table
+        .declare_tool(ToolFamily {
+            name: "read".into(),
+            description: "read".into(),
+            open_world: false,
+            idempotent: true,
+        })
+        .unwrap();
+    table.register(Positional).unwrap();
+    let parsed = table
+        .parse_cli(&["page".into(), "c-7".into()], "r-1")
+        .unwrap();
+    assert_eq!(parsed.request.arguments, json!({"cursor": "c-7"}));
+}

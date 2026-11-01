@@ -33,5 +33,6 @@ pub use schemars::JsonSchema;
 pub use seen::*;
 pub use status::*;
 pub use tokio_util::sync::CancellationToken;
+pub use tools::RenderedAnswer;
 pub use transport::*;
 pub use values::*;

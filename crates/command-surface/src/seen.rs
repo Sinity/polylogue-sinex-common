@@ -63,6 +63,7 @@ impl SeenMark {
 /// How a target came to be in front of a consumer. Only a showing moves a
 /// seen mark.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum Showing {
     /// Visible to a person for at least `Showing::DISPLAY_TIME`.

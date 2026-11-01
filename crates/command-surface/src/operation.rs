@@ -33,6 +33,7 @@ pub type OperationFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
     Deserialize,
     JsonSchema,
 )]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum Access {
     #[default]
@@ -304,6 +305,7 @@ pub struct Caller {
     scope: String,
     identity: Option<Arc<dyn Any + Send + Sync>>,
     authorship: Option<Authorship>,
+    evidence: Option<crate::CallerEvidence>,
     access: Access,
 }
 impl Default for Caller {
@@ -312,6 +314,7 @@ impl Default for Caller {
             scope: String::new(),
             identity: None,
             authorship: None,
+            evidence: None,
             access: Access::Read,
         }
     }
@@ -328,6 +331,33 @@ impl Caller {
     pub fn with_authorship(mut self, authorship: Authorship) -> Self {
         self.authorship = Some(authorship);
         self
+    }
+    /// What the transport observed about the caller. An MCP call through
+    /// `mcp_as` (stdio, or an MCP frame on the socket) computes its author
+    /// from this and the call's own `_meta`, the same way on every path.
+    pub fn with_evidence(mut self, evidence: crate::CallerEvidence) -> Self {
+        self.evidence = Some(evidence);
+        self
+    }
+    pub fn evidence(&self) -> Option<&crate::CallerEvidence> {
+        self.evidence.as_ref()
+    }
+    /// The caller of one MCP call: with evidence, its author is computed by
+    /// `author_of` over that evidence and the session the call names in
+    /// `_meta.session` (`harness:native`). Without evidence the server's
+    /// authorship stands.
+    pub(crate) fn for_mcp_call(&self, metadata: Option<&Value>) -> Self {
+        let mut caller = self.clone();
+        if let Some(evidence) = &self.evidence {
+            let mut evidence = evidence.clone();
+            evidence.call_session = metadata
+                .and_then(|meta| meta.get("session"))
+                .and_then(Value::as_str)
+                .and_then(crate::AgentSession::parse);
+            caller.authorship = Some(crate::author_of(&evidence, Via::Mcp, None));
+            caller.evidence = Some(evidence);
+        }
+        caller
     }
     /// The highest access the caller's credential grants. A caller grants
     /// read access until the server says more.
@@ -397,6 +427,12 @@ impl RequestContext {
     pub fn fit(&self, sections: Vec<Section>, budget: Budget, envelope: &Envelope) -> Fitted {
         let mut rest = envelope.clone();
         rest.left_out.clear();
+        // Lines the answer will carry once dispatch and the fit are done:
+        // the count's line in its longest form ("shown N of at least N").
+        rest.mark_lower_bounds(true);
+        if let Some(count) = rest.count {
+            rest.shown = Some(count.value);
+        }
         let footer = self.forms.footer(
             self.via,
             &Answer {

@@ -149,11 +149,11 @@ impl OperationTable {
         let json = parsed
             .as_ref()
             .map_or_else(|_| args.iter().any(|a| a == "--json"), |p| p.json);
-        let (operation, budget, answer) = match parsed {
-            Err(error) => (String::new(), None, Answer::error(error)),
+        let (request, answer) = match parsed {
+            Err(error) => (None, Answer::error(error)),
             Ok(parsed) => {
-                let operation = parsed.request.operation.clone();
-                let budget = self.request_budget(&parsed.request);
+                let request = parsed.request.clone();
+                let operation = request.operation.clone();
                 let answer = match parsed.kind {
                     OperationKind::Request { .. } => {
                         self.call_as(parsed.request, Via::Cli, caller, cancellation)
@@ -167,12 +167,9 @@ impl OperationTable {
                         "{operation} runs in the calling process"
                     ))),
                 };
-                (operation, budget, answer)
+                (Some(request), answer)
             }
         };
-        let streamed = self
-            .spec_named(&operation)
-            .is_some_and(|spec| spec.kind == OperationKind::Stream);
         if json {
             let line = format!(
                 "{}\n",
@@ -182,9 +179,16 @@ impl OperationTable {
             stdout.flush().await?;
             return Ok(answer.exit_code());
         }
-        let operation = if streamed { "" } else { operation.as_str() };
-        let (answer, value_text, footer) =
-            self.rendered(Via::Cli, operation, budget, answer, Format::Text);
+        // The command line's text is never JSON rows: `--json` printed above.
+        let request = request.map(|mut request| {
+            request.format = Format::Text;
+            request
+        });
+        let crate::RenderedAnswer {
+            answer,
+            value_text,
+            footer,
+        } = self.render_answer(Via::Cli, request.as_ref(), answer);
         if answer.is_error() {
             stderr
                 .write_all(format!("{value_text}{footer}").as_bytes())
@@ -245,61 +249,71 @@ impl OperationTable {
         caller: Caller,
     ) -> std::io::Result<()> {
         let (reader, mut writer) = tokio::io::split(stream);
-        let mut reader = BufReader::new(reader);
-        let mut line = String::new();
+        // Whole lines only, and reading one is cancel-safe: a line arriving in
+        // parts never holds up the call that is running.
+        let mut lines = BufReader::new(reader).lines();
         // A request frame arrives as the server's caller says it came (a
         // command line or a hook); an MCP frame is an MCP call.
         let socket_via = caller.authorship().map_or(Via::Cli, |a| a.via);
-        loop {
-            line.clear();
-            if reader.read_line(&mut line).await? == 0 {
-                return Ok(());
-            }
+        while let Some(line) = lines.next_line().await? {
             if let Ok(message) = serde_json::from_str::<Value>(&line)
                 && message.get("jsonrpc").is_some()
             {
-                // An MCP message forwarded by a stdio proxy: answered by the
-                // same adapter as `mcp_as`, with the message's own `_meta`.
+                // An MCP message forwarded by a stdio proxy, answered by the
+                // same adapter as `mcp_as`.
+                let id = message.get("id").cloned();
                 let cancellation = CancellationToken::new();
-                let notification = message.get("id").is_none();
                 let call = self.mcp_as(message, caller.clone(), cancellation.clone());
                 tokio::pin!(call);
-                // Notifications may arrive while the call runs: a cancellation
-                // cancels it, any other is taken and ignored. A second
-                // request is a framing error.
-                let (reply, close) = loop {
+                // While the call runs, notifications may arrive: a
+                // cancellation of this call cancels it (and it gets no
+                // reply), any other is taken and ignored. A second request is
+                // a framing error.
+                let mut cancelled = false;
+                let outcome = loop {
                     tokio::select! {
                         biased;
-                        incoming = reader.fill_buf() => {
-                            if incoming?.is_empty() {
+                        reply = &mut call => break Some(reply),
+                        next = lines.next_line() => {
+                            let Some(next) = next? else {
                                 cancellation.cancel();
                                 return Ok(());
-                            }
-                            let mut next = String::new();
-                            reader.read_line(&mut next).await?;
+                            };
                             match serde_json::from_str::<Value>(&next) {
                                 Ok(other) if other.get("id").is_none() => {
-                                    if other["method"] == "notifications/cancelled" {
+                                    if other["method"] == "notifications/cancelled"
+                                        && id.is_some()
+                                        && other["params"]["requestId"] == *id.as_ref().expect("checked")
+                                    {
+                                        // Its answer is discarded; wait for
+                                        // the work to stop before reading on.
+                                        cancelled = true;
                                         cancellation.cancel();
+                                        break Some((&mut call).await);
                                     }
                                 }
                                 _ => {
                                     cancellation.cancel();
-                                    break (json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32600, "message": "wait for the reply before sending another request"}}), true);
+                                    break None;
                                 }
                             }
                         },
-                        reply = &mut call => break (reply, false),
                     }
                 };
-                if !notification || close {
+                let Some(reply) = outcome else {
+                    let refusal = json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32600, "message": "wait for the reply before sending another request"}});
+                    let mut encoded = serde_json::to_vec(&refusal)?;
+                    encoded.push(b'\n');
+                    writer.write_all(&encoded).await?;
+                    writer.flush().await?;
+                    return Ok(());
+                };
+                // A notification and a cancelled call get no reply.
+                if id.is_some() && !cancelled {
                     let mut encoded = serde_json::to_vec(&reply)?;
                     encoded.push(b'\n');
                     writer.write_all(&encoded).await?;
                     writer.flush().await?;
-                }
-                if close {
-                    return Ok(());
                 }
                 continue;
             }
@@ -323,9 +337,9 @@ impl OperationTable {
                             // a second request mid-stream is a framing error.
                             let event = tokio::select! {
                                 biased;
-                                incoming = reader.fill_buf() => {
+                                incoming = lines.next_line() => {
                                     cancellation.cancel();
-                                    if incoming?.is_empty() { return Ok(()); }
+                                    if incoming?.is_none() { return Ok(()); }
                                     close_after_reply = true;
                                     break Answer::error(bad_request("wait for the stream to end before sending another request"));
                                 },
@@ -353,13 +367,13 @@ impl OperationTable {
                     // Reading a second request before its reply is a framing error.
                     tokio::select! {
                         biased;
-                        disconnected=reader.fill_buf()=>{
+                        incoming = lines.next_line() => {
                             cancellation.cancel();
-                            if disconnected?.is_empty(){return Ok(());}
-                            close_after_reply=true;
+                            if incoming?.is_none() { return Ok(()); }
+                            close_after_reply = true;
                             Answer::error(bad_request("wait for the reply before sending another request"))
                         },
-                        answer=call=>answer,
+                        answer = call => answer,
                     }
                 }
             };
@@ -371,6 +385,7 @@ impl OperationTable {
                 return Ok(());
             }
         }
+        Ok(())
     }
     /// A socket client uses the class deadline plus the protocol's 50 ms grace.
     pub async fn socket_call<S: AsyncRead + AsyncWrite + Unpin>(

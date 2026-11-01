@@ -7,10 +7,19 @@
 //! Tools carry no output schema; `answer_schema` serves the answer's once.
 //! Stream and local rows are not tools.
 use crate::RequestOption;
+
+/// An answer as a surface shows it: the answer (its envelope completed by
+/// rendering), the value's text, and the envelope's lines.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RenderedAnswer {
+    pub answer: Answer<Value>,
+    pub value_text: String,
+    pub footer: String,
+}
 use crate::operation::{Forms, terminal_text};
 use crate::{
-    Access, Answer, Caller, CancellationToken, Deadline, Failure, FailureKind, Format, LeftOut,
-    OperationTable, Outcome, RunnableRequest, Suggestion, Via, approximate_tokens, bad_request,
+    Access, Answer, Caller, CancellationToken, Deadline, Failure, Format, LeftOut, OperationTable,
+    Outcome, RunnableRequest, Suggestion, Via, approximate_tokens, bad_request,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -455,15 +464,19 @@ impl OperationTable {
                     .iter()
                     .find(|tool| self.forms().tool_name(&tool.name) == name)
                 {
-                    Some(tool) => Ok(self
-                        .tool_result(
-                            &tool.name,
-                            message["params"]["arguments"].clone(),
-                            message["params"].get("_meta").cloned(),
-                            caller,
-                            cancellation,
-                        )
-                        .await),
+                    Some(tool) => {
+                        let metadata = message["params"].get("_meta").cloned();
+                        let caller = caller.for_mcp_call(metadata.as_ref());
+                        Ok(self
+                            .tool_result(
+                                &tool.name,
+                                message["params"]["arguments"].clone(),
+                                metadata,
+                                caller,
+                                cancellation,
+                            )
+                            .await)
+                    }
                     None => Err((-32602, "unknown tool")),
                 }
             }
@@ -493,20 +506,20 @@ impl OperationTable {
         let call = serde_json::from_value::<ToolCall>(arguments)
             .map_err(|error| bad_request(error.to_string()));
         let format = call.as_ref().map_or(Format::Text, |call| call.format);
-        let (operation, budget, answer) = match call.and_then(|call| self.tool_request(&rows, call))
-        {
-            Err(failure) => (String::new(), None, Answer::error(failure)),
+        let (request, answer) = match call.and_then(|call| self.tool_request(&rows, call)) {
+            Err(failure) => (None, Answer::error(failure)),
             Ok(request) => {
-                let operation = request.operation.clone();
-                let budget = self.request_budget(&request);
                 let answer = self
-                    .call_with(request, Via::Mcp, caller, metadata, cancellation)
+                    .call_with(request.clone(), Via::Mcp, caller, metadata, cancellation)
                     .await;
-                (operation, budget, answer)
+                (Some(request), answer)
             }
         };
-        let (mut answer, value_text, footer) =
-            self.rendered(Via::Mcp, &operation, budget, answer, format);
+        let RenderedAnswer {
+            mut answer,
+            value_text,
+            footer,
+        } = self.render_answer(Via::Mcp, request.as_ref(), answer);
         if format == Format::Text && !answer.is_error() {
             // The rows are in the text part; the structured part says so
             // instead of sending them twice.
@@ -558,53 +571,77 @@ impl OperationTable {
     }
     /// The token budget a request's answer text is held to: its own, else its
     /// row's default; none when neither says.
-    pub(crate) fn request_budget(&self, request: &RunnableRequest) -> Option<u32> {
+    pub fn request_budget(&self, request: &RunnableRequest) -> Option<u32> {
         request.budget_tokens.or_else(|| {
             self.spec_named(&request.operation)
                 .and_then(|spec| spec.default_budget_tokens)
         })
     }
-    /// An answer as a person or model reads it: the value's text (nothing
-    /// with `format: json`, whose rows travel as data) and the envelope's
-    /// lines. `used_tokens` becomes what that text measures. An answer whose
-    /// text exceeds its budget is the operation's bug, and becomes an `io`
-    /// failure saying so rather than a cut or an oversized answer.
-    pub(crate) fn rendered(
+    /// An answer as text for a person or model: the value's rendering
+    /// (nothing with `format: json`, whose rows travel as data, or for
+    /// `operation` empty) and the envelope's lines, measured after the
+    /// envelope is final. Every surface that shows an answer as text calls
+    /// this, the command line and MCP here and a product's client for an
+    /// answer it read from the socket.
+    ///
+    /// Text over the request's budget is fitted, never failed: whole lines
+    /// are dropped from the end of the value's text and named in the
+    /// envelope as left out, with the request that reads them all (its
+    /// budget lifted), until the text fits or no value line is left. The
+    /// outcome never changes, so a committed write still reads as done.
+    /// `used_tokens` is what the text measures.
+    pub fn render_answer(
         &self,
         via: Via,
-        operation: &str,
-        budget: Option<u32>,
+        request: Option<&RunnableRequest>,
         mut answer: Answer<Value>,
-        format: Format,
-    ) -> (Answer<Value>, String, String) {
-        let value_text = |answer: &Answer<Value>| -> String {
-            match &answer.outcome {
-                Outcome::Error(_) => self.render_text("", answer).unwrap_or_default(),
-                _ if format == Format::Json || operation.is_empty() => String::new(),
-                _ => self
-                    .render_text(operation, answer)
-                    .unwrap_or_else(|failure| format!("error (io): {}\n", failure.message)),
-            }
+    ) -> RenderedAnswer {
+        let operation = request.map_or("", |request| request.operation.as_str());
+        let streamed = self
+            .spec_named(operation)
+            .is_some_and(|spec| spec.kind == crate::OperationKind::Stream);
+        let json = request.is_some_and(|request| request.format == Format::Json);
+        let full = match &answer.outcome {
+            Outcome::Error(_) => self.render_text("", &answer).unwrap_or_default(),
+            _ if json || streamed || operation.is_empty() => String::new(),
+            _ => self
+                .render_text(operation, &answer)
+                .unwrap_or_else(|failure| format!("error (io): {}\n", failure.message)),
         };
-        let mut text = value_text(&answer);
-        let mut footer = self.forms().footer(via, &answer);
-        let used = approximate_tokens(&text) + approximate_tokens(&footer);
-        if let Some(budget) = budget
+        let lines: Vec<&str> = full.split_inclusive('\n').collect();
+        let budget = request.and_then(|request| self.request_budget(request));
+        let measure = |answer: &Answer<Value>, kept: usize| {
+            let value: String = lines[..kept].concat();
+            let footer = self.forms().footer(via, answer);
+            let used = approximate_tokens(&value) + approximate_tokens(&footer);
+            (value, footer, used)
+        };
+        let (mut value_text, mut footer, mut used) = measure(&answer, lines.len());
+        if let (Some(budget), Some(request)) = (budget, request)
             && used > budget
             && !answer.is_error()
         {
-            let caller = answer.envelope.caller.take();
-            answer = Answer::error(Failure::new(
-                FailureKind::Io,
-                format!(
-                    "{operation} answered with {used} tokens of text, over its budget of {budget}"
-                ),
-            ));
-            answer.envelope.caller = caller;
-            text = value_text(&answer);
-            footer = self.forms().footer(via, &answer);
+            let mut lifted = request.clone();
+            lifted.budget_tokens = None;
+            let at = answer.envelope.left_out.len();
+            for kept in (0..lines.len()).rev() {
+                answer.envelope.left_out.truncate(at);
+                answer.envelope.left_out.push(LeftOut {
+                    what: "lines of this answer".into(),
+                    count: (lines.len() - kept) as u64,
+                    expand: Some(lifted.clone()),
+                });
+                (value_text, footer, used) = measure(&answer, kept);
+                if used <= budget {
+                    break;
+                }
+            }
         }
-        answer.envelope.used_tokens = Some(approximate_tokens(&text) + approximate_tokens(&footer));
-        (answer, text, footer)
+        answer.envelope.used_tokens = Some(used);
+        RenderedAnswer {
+            answer,
+            value_text,
+            footer,
+        }
     }
 }
