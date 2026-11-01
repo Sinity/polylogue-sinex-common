@@ -21,11 +21,12 @@ interfaces page).
 | `fires` | `on_new`: each new matching row, once. `on_change` with `what` = `membership` (default), `ranking` or `top_k` (with `k`). `on_threshold` with `value` and `compare` (`<`, `>`): once per crossing into the condition. `at` a local time: once per logical day |
 | `for` | how long a row must keep matching before the rule fires, judged against the read-time clock. A rule with `for` is a current-state rule |
 | `min_change` | for `on_change`: how many rows must join or leave before a report (default 1) |
-| `deliver` | `notice`; `value` (a number written to a configured target); or `action` (a configured command run outside the daemon, with the triggering reference as its last argument) |
+| `deliver` | `notice`; `value` (a number written to a configured target); `action` (a configured command run outside the daemon, with the triggering reference as its last argument); or `ask` with `instrument: NAME`, a notice that carries a self-report question and accepts an answer ([elicitation](#elicitation); decided target, not built) |
 | `target` / `command` | for `value` and `action`: a name from the deployment's signal configuration. A rule can use only what the operator configured |
 | `interrupt` | whether a notice is shown as a desktop notification. Default `false` for every author, so whether a rule interrupts never depends on who wrote it; shipped rules declare their own |
 | `quiet_hours` | when interrupting notices wait; the global quiet hours apply when the rule names none |
 | `rate_limit` | a count per window; deliveries past it go to the next brief, marked "rate limit" |
+| `fresh_within` | how old a triggering fact may be and still interrupt; default the rule's own window (`for`, the threshold's window) or 15 minutes for rules that fire on single rows. An older fact, such as one a device held while it was offline, is delivered passively ([late facts](#the-route-function)) |
 | `scope` | optional: the repository, session or source the notices concern, for routing to a brief |
 | `to` | optional recipients besides the operator's inbox: `session:REF`, `@alias` or `role:NAME`; a session query is frozen into its sessions when the rule is written |
 | `enabled` | on or off |
@@ -171,21 +172,26 @@ that applies decides:
 
 1. Not interrupting: `passive (rule is passive)`.
 2. Folded into an open root cause: `passive (caused by delivery:X)`.
-3. `critical`: shown now, and also sent away if the operator is away and an
+3. Late: the triggering fact's own time is older than the rule's
+   `fresh_within` when the rule fires (it arrived late, for example from a
+   producer that held it while out of contact): `passive (late, held N)`.
+   The delivery is recorded and states its lateness; a week of held facts
+   never becomes a wall of interruptions on reconnection.
+4. `critical`: shown now, and also sent away if the operator is away and an
    away command is configured. Never held, never deferred.
-4. An agent's or producer's notice with the budget spent:
+5. An agent's or producer's notice with the budget spent:
    `passive (interrupt budget spent)`.
-5. Inside quiet hours (the rule's own, else the host's) or an explicit
+6. Inside quiet hours (the rule's own, else the host's) or an explicit
    `quiet until T`: held until their end.
-6. The subject is on screen (one of the notice's references is in the
+7. The subject is on screen (one of the notice's references is in the
    focused window): `passive (on screen)`, never counted as seen.
-7. The operator is away: sent away when an away command exists, otherwise
+8. The operator is away: sent away when an away command exists, otherwise
    held until presence returns and released into one summary.
-8. Deep work: held for the next breakpoint, at most 25 minutes from when it
+9. Deep work: held for the next breakpoint, at most 25 minutes from when it
    first waited (`DeepWorkDeferral`: agents and producers, all notices, or
    never). Only agents' and producers' notices wait (default; open operator
    question).
-9. Otherwise shown.
+10. Otherwise shown.
 
 **Attention** is the deliverer's snapshot: an explicit quiet period,
 presence, the focused window's references, deep work, whether a breakpoint
@@ -285,6 +291,36 @@ needs to be designed elegantly to not be a kludgy mess"
 - **Away command:** a command named in deployment configuration receives each
   sent-away notice as JSON on standard input, with a deadline. Exit 0 records
   `delivered`.
+
+## Elicitation
+
+Decided target (2026-11-01), not built. Elicitation is a signal with an
+answer, so whatever the operator decides about prompts is configuration, not
+a second mechanism. Which prompts may be sent, and when, is an open operator
+question; until it is answered no `ask` rule is enabled and nothing is asked.
+
+- An **instrument** is a named, revisioned, short question set that the
+  product declares as an authored record: items with an `id`, a `prompt`, an
+  answer type (`scale(min, max, labels)`, `choice`, `multi`, `duration`,
+  `text`, skip allowed) and an `expires_after` (default 30 minutes). An
+  instrument may declare `max_per_day`; it is the instrument's own limit,
+  because answer quality, not attention, sets it.
+- A **prompt** is a delivery of a rule with `deliver: ask` and an
+  instrument. Its trigger is the rule's ordinary `fires`: `on_new` over a
+  product unit for event-triggered prompts, `at` with a declared `jitter`
+  window for random-time ones. Its `interrupt` and the route function apply
+  unchanged.
+- An **answer** is the product's own self-report record with the prompt
+  delivery as its parent; the delivery gains the outcome `answered`. Answer
+  channels, in the order the notification server allows: notification
+  actions for scale and choice items (one click), inline reply where the
+  server reports that capability, the web inbox, the product's CLI, and MCP
+  elicitation in a harness that supports it.
+- A prompt not answered by `expires_after` gets the outcome `missed`, and an
+  answer after it is recorded as `late`. A missed prompt is never imputed.
+- Instruments are for the operator's self-reports only. An agent that needs
+  the operator pings `@operator` in its product; that ping is an
+  agent-authored notice under the budget.
 
 ## Configuration
 
@@ -434,6 +470,20 @@ Routing, attention, inhibition and outcomes:
   never shown.
 - **trigger-never-starts-agent**: no delivery starts or resumes an agent;
   a configured action command that is an agent launcher is refused.
+- **late-is-passive**: a triggering fact older than its rule's
+  `fresh_within` never produces an interrupting delivery, and the delivery
+  states its lateness.
+
+Elicitation (decided target, not built):
+
+- **elicit.answer-cites-prompt**: every prompted self-report has its prompt
+  delivery as parent; a spontaneous one has none.
+- **elicit.missed-is-recorded**: a prompt past `expires_after` without an
+  answer has the outcome `missed`, and no figure imputes it.
+- **elicit.cap**: an instrument never prompts more than `max_per_day` times
+  per logical day.
+- **elicit.none-until-enabled**: with no enabled `ask` rule, no prompt is
+  ever sent.
 
 `trigger-never-starts-agent` and `on-screen-is-passive-not-seen` are the
 products' laws too: a page watch, a live-session trigger or a Sinex presence

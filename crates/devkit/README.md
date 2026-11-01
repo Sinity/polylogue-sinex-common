@@ -121,6 +121,14 @@ crate READMEs and lists each law's key with the tests whose names carry it
 check one law), and the laws that have none. It is a report and fails nothing;
 a law without a test is a gap for the area's owner.
 
+A law's stored key is `<scope>.<area>.<name>` in lowercase with hyphens. The
+scope says whose law it is: `pl.` for Polylogue, `sx.` for Sinex, and the
+shared suites' own scopes (`ql.`, `sig.`, `joint.`, `authored.`, `elicit.`)
+for laws that both products run. A page omits the scope it belongs to, so
+`late-is-passive` on the signals page is stored as `sig.late-is-passive`, and
+a law that two products share has one key in the shared suite instead of two
+product keys.
+
 ## Tests and fixtures
 
 `#[devkit::test]` marks a test. A sync test without parameters is a plain
