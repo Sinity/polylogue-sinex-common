@@ -37,6 +37,9 @@ case "$backend" in
 __cloud_root=\$(git rev-parse --show-toplevel 2>/dev/null)
 if [ -n "\$__cloud_root" ] && [ -f $quoted/env."\${__cloud_root##*/}".sh ]; then
     export CARGO_TARGET_DIR="\${CARGO_TARGET_DIR:-\$__cloud_root/target}"
+    # Builds use the committed dependency graph, as the native backend does;
+    # a shell hook does not link a sibling common checkout.
+    export LINKING_COMMON=1
     . $quoted/env."\${__cloud_root##*/}".sh
 else
     echo "cloud environment: no prepared shell for \$PWD; run dev/cloud/setup.sh in that checkout" >&2
