@@ -95,10 +95,10 @@ run setup once per included checkout. The native backend's tool set does not
 depend on the checkout, and its `env.sh` holds it directly.
 
 Explicit sourcing is the supported initialization route in Claude Code cloud
-sessions and current Codex Cloud. `BASH_ENV` may point to the printed
-absolute `env.sh` path where the provider supports that variable; it selects
-by the directory the shell starts in. Provider startup fields can point to
-the repository instructions, which remain available in the checkout.
+sessions and current Codex Cloud. Claude Code's command tool does not apply
+`BASH_ENV`, so a variable pointing at `env.sh` initializes only the shells
+that commands start themselves. Provider startup fields can point to the
+repository instructions, which remain available in the checkout.
 `CLOUD_PREBUILD=1` builds all test
 binaries after fetching; the default leaves builds to the requested task.
 Run `cargo xtask` commands directly in cloud sessions. Each test run owns its
