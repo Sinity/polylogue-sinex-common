@@ -12,11 +12,11 @@ proptest! {
     }
     #[test]
     fn failure_candidates_survive_the_wire_in_order(candidates in proptest::collection::vec(".*", 0..4)){
-        let mut failure=Failure::new(FailureKind::Ambiguous,"synthetic name is ambiguous");
-        failure.candidates=candidates.clone();
+        let failure=Failure::new(FailureKind::Ambiguous,"synthetic name is ambiguous").with_candidates(candidates.clone());
         let value=serde_json::to_value(Answer::<Value>::error(failure.clone())).unwrap();
         prop_assert_eq!(value["error"].get("candidates").is_some(),!candidates.is_empty());
         let Answer::Error{error,..}=serde_json::from_value::<Answer<Value>>(value).unwrap() else { panic!("error answer") };
+        prop_assert_eq!(error.candidates(),candidates.as_slice());
         prop_assert_eq!(error,failure);
     }
     #[test]

@@ -104,12 +104,20 @@ pub struct Failure {
     pub hint: Option<String>,
     /// What the input could have meant, each runnable as given: the matches
     /// of an ambiguous reference, or known names close to an unknown one.
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub candidates: Vec<String>,
+    /// Boxed so a `Result` carrying a failure stays small; never empty.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    candidates: Option<Box<Vec<String>>>,
     pub retryable: bool,
 }
 
 impl Failure {
+    pub fn candidates(&self) -> &[String] {
+        self.candidates.as_deref().map_or(&[], Vec::as_slice)
+    }
+    pub fn with_candidates(mut self, candidates: Vec<String>) -> Self {
+        self.candidates = (!candidates.is_empty()).then(|| Box::new(candidates));
+        self
+    }
     pub fn with_suggestion(mut self, suggestion: Value) -> Self {
         self.suggestion = Some(Box::new(suggestion));
         self
@@ -122,7 +130,7 @@ impl Failure {
             position: None,
             suggestion: None,
             hint: None,
-            candidates: Vec::new(),
+            candidates: None,
             retryable: matches!(kind, FailureKind::Timeout | FailureKind::NotRunning),
         }
     }
