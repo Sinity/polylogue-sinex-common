@@ -11,6 +11,7 @@ Rust crates and development tooling shared by
 | [`command-surface`](crates/command-surface/README.md) | the `Operation` trait, failures with their exit and HTTP table, request and answer envelopes, latency classes and deadlines, server-sent-event framing, the status figure format |
 | [`web-shell`](crates/web-shell/README.md) | the rendering model, visual tokens, the shared key table, palette, copy, page frame, live fragments and windowed lists |
 | [`authored`](crates/authored/README.md) | the authored-record header, currency by the descendant rule, stale-base checks, atomic requests, uniqueness slots, order keys and the shared history generator |
+| [`ranking`](crates/ranking/README.md) | the Plackett–Luce fit of judgments with intervals, judge sets, components and warm starts, and next-set selection under three rules |
 | [`signals`](crates/signals/README.md) | the pure signal rule schema, evaluator, host policy and delivery checkpoint types |
 | [`signal-delivery`](crates/signal-delivery/README.md) | the desktop and command worker over the pure signal checkpoint |
 | [`devkit`](crates/devkit/README.md), [`devkit-macros`](crates/devkit-macros) | the core of each product's `xtask`: runs and their history, changed-package selection, test databases and NATS, fixtures, bench, coverage, fuzz and VM runners |

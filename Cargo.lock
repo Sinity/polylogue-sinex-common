@@ -1121,6 +1121,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ranking"
+version = "0.1.0"
+
+[[package]]
 name = "ref-cast"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
