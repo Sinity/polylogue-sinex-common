@@ -292,3 +292,39 @@ fn native_package_selection_builds_dependencies_without_unrelated_test_targets()
         ])
     );
 }
+
+#[test]
+fn tests_keep_state_in_a_directory_of_their_own() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("Cargo.toml"), "[package]\nname = \"devkit-state-probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n").unwrap();
+    fs::write(
+        root.join("src/lib.rs"),
+        "#[test] fn records_state_home() { let home = std::env::var(\"XDG_STATE_HOME\").unwrap(); assert!(std::path::Path::new(&home).is_dir()); std::fs::write(std::env::var(\"STATE_PROBE\").unwrap(), home).unwrap(); }\n",
+    )
+    .unwrap();
+    let target = root.join("target");
+    let probe = root.join("state-home");
+    let mut run = Run::unrecorded("devkit-state-probe", "test", &[]);
+    run.root = root.into();
+    run.target = Some(target.clone());
+    run.nextest(
+        "test",
+        &Nextest {
+            args: vec!["--offline".into()],
+            env: vec![
+                ("CARGO_TARGET_DIR".into(), target.display().to_string()),
+                ("STATE_PROBE".into(), probe.display().to_string()),
+            ],
+            ..Nextest::default()
+        },
+    )
+    .unwrap();
+    let home = PathBuf::from(fs::read_to_string(&probe).unwrap());
+    assert_ne!(
+        Some(home.as_os_str()),
+        env::var_os("XDG_STATE_HOME").as_deref()
+    );
+    assert!(!home.exists(), "the run removes its tests' state directory");
+}

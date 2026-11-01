@@ -24,6 +24,15 @@ gate: a store that cannot be opened is reported and the run continues.
 Passing tests keep no output and each diagnostic text is stored once, so the
 store stays small without deleting anything.
 
+A run records its process ID, the process's start time and the kernel's
+boot ID. A run still marked running reads as `interrupted` once the machine
+has booted since, its process is gone, or its process ID names a later
+process; nothing rewrites the record.
+
+The tests of `Run::nextest` get an `XDG_STATE_HOME` of their own, removed
+after the run, so a test that starts a run, devkit's own included, records
+it in a throwaway store and never in the user's.
+
 Nested Cargo commands use `devkit::cargo_command()`, which drops the parent's
 `CARGO_MANIFEST_DIR`, `CARGO_MANIFEST_PATH` and `CARGO_PKG_*` so they do not
 invalidate build-script fingerprints.
@@ -164,27 +173,53 @@ by abrupt owner death remains the platform init's responsibility.
 
 - Each schema version, named by a hash of the schema sources, is built once
   into a template database and copied to the read-only **schema database**
-  that `DATABASE_URL` points at. Every test clones the template
-  (`TestDatabase`) with PostgreSQL's `FILE_COPY` strategy.
-- A half-built template's name carries its builder's PID, and cleanup drops it
-  only after that process has exited. Schema builds and cleanup take the same
-  file lock in the server's socket directory; cleanup skips a busy version.
-- Cleanup in `Run::nextest` runs only when the run's environment names the
-  server in `DEVKIT_PG_SOCKET`; the library never discovers a service on its
-  own during a test run. Databases stamped used or failed within the last hour
-  stay; a missing or unreadable stamp counts as current use; timestamps and
-  connections are checked again before each drop. Failed-test databases keep
-  the newest five.
-- `xtask db ensure | url | psql | exec | drop-unused | ready` drives it.
+  that `DATABASE_URL` points at. Its builder holds a file lock in the
+  server's socket directory while it builds into `<project>_building_<hash>`
+  and renames that into place; a builder that was killed leaves that name
+  behind, and the next builder or cleanup, finding the lock free, drops it.
+- A test takes a **slot**: one of a fixed number of test database names per
+  project, `<project>_test<k>`. `test_database()` (or a `TestDatabase`
+  fixture) locks the slot's file in the socket directory, trying the slots
+  in order and waiting when all are taken, then drops whatever database the
+  slot holds and clones the template into it. A passing test drops it. The
+  kernel releases the lock however the test process ends, so a killed test's
+  database is simply replaced by the next taker. Tests whose databases grow
+  large, such as crash tests, use `large_test_database()` and its own slots,
+  `<project>_large<k>`. Every run on the server shares the slots, so waiting
+  for one also bounds the load that runs together put on a shared server.
+- A failing (panicking) test's database is renamed to one of a fixed set of
+  kept failed databases, `<project>_failed<j>`, replacing the oldest failure,
+  and its name printed with a `cargo xtask db psql <name>` line.
+- A project therefore never has more test databases on a server than its
+  ordinary and large slots plus its kept failed databases, whatever happens
+  to the tests. `Slots` holds the three numbers. Their defaults are the
+  host's parallelism (nextest's default thread count), 4 and 5, and
+  `DEVKIT_PG_SLOTS`, `DEVKIT_PG_LARGE_SLOTS` and `DEVKIT_PG_FAILED_KEPT`
+  replace them, set by the product's `xtask` (through `Nextest::env`) or by
+  the host. A slot's name is reused by later tests, so a test that needs a
+  unique path makes its own rather than deriving it from the database name.
+- Every copy uses PostgreSQL's `FILE_COPY` strategy. It forces a checkpoint
+  of the whole server per copy, yet on a tmpfs server without fsync it
+  copied about twice as fast as `WAL_LOG`, one copy at a time and from four
+  slots at once, idle and beside a writer.
+- Each server value that ensured a schema version holds a shared lock on it
+  until dropped. Cleanup drops versions beyond the newest eight per project
+  by last use, or unused for fourteen days, never one whose lock is held or
+  that has a connection; it runs at the start of `Run::nextest` only when
+  the run's environment names the server in `DEVKIT_PG_SOCKET`, so the
+  library never discovers a service on its own during a test run. It also
+  drops the uniquely named test databases of earlier devkit versions
+  (`t_<pid>_<seconds>_<number>`) once nothing is connected to them.
+- `xtask db ensure | url | psql [DATABASE] | exec | drop-unused | ready`
+  drives it.
 
-An ignored test, `benchmark_database_clones`, times batches of 50 clones for
-`FILE_COPY`, `WAL_LOG` and a four-entry pool replenished in the background, in
-its own throwaway cluster with a synthetic template, checking clone contents
-and isolation; drop times are reported apart. `DEVKIT_BENCH_ROUNDS`,
-`DEVKIT_BENCH_WRITES` (adds a half-gigabyte working set and a background
-writer), `DEVKIT_BENCH_TEMPLATE_BYTES` and `DEVKIT_BENCH_DIRECTORY` (default
-tmpfs; use a short path on the development service's filesystem for
-representative figures) set it up.
+An ignored test, `benchmark_database_clones`, times `FILE_COPY` and
+`WAL_LOG` in its own throwaway cluster with a synthetic template: 50 clones
+one after another, then four slots each replacing its database twelve times
+at once, checking clone contents and isolation; drop times are reported
+apart. `DEVKIT_BENCH_ROUNDS`, `DEVKIT_BENCH_WRITES` (adds a half-gigabyte
+working set and a background writer), `DEVKIT_BENCH_TEMPLATE_BYTES` and
+`DEVKIT_BENCH_DIRECTORY` (default tmpfs) set it up.
 
 ### NATS
 
@@ -273,6 +308,11 @@ targets; VM scenario names; development-stack services and readiness probes.
   build its template once.
 - **half-built-template-outlives-its-builder-only**: cleanup never drops a
   template whose builder process is alive.
+- **schema-version-in-use-never-dropped**: cleanup never drops a schema
+  version that a live server value ensured, whatever its use stamps say.
+- **test-databases-bounded-by-slots**: however many tests are killed, a
+  project's test databases on a server never outnumber its slots and kept
+  failed databases, and the next test takes a killed test's slot.
 - **intermittent-means-same-tree**: `intermittent` groups only results at the
   same tree and uncommitted-changes hash.
 - **stack-stopped-on-drop**: dropping a development stack leaves no process of
