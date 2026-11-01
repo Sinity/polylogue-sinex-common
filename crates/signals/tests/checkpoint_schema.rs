@@ -3,9 +3,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use signals::DeliveryOutcome;
 use signals::notifications::{
-    Completion, DesktopEvent, Notice, NotificationReceipt, NotificationState, Route,
+    Completion, DesktopEvent, Notice, NotificationReceipt, NotificationState, Outlet, Outlets,
 };
-use signals::{Condition, Evaluator, HostPolicy};
+use signals::{Evaluator, HostPolicy};
 use std::collections::BTreeSet;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -14,7 +14,6 @@ struct Checkpoint {
     host: HostPolicy,
     notifications: NotificationState,
     receipt: NotificationReceipt,
-    condition: Condition,
 }
 
 #[test]
@@ -24,7 +23,7 @@ fn product_checkpoint_schema_contains_complete_typed_private_state() {
         (
             "Evaluator",
             vec![
-                "now", "policy", "rules", "products", "inputs", "consumed", "pending",
+                "now", "rules", "products", "inputs", "consumed", "pending", "open", "reports",
             ],
         ),
         (
@@ -44,6 +43,7 @@ fn product_checkpoint_schema_contains_complete_typed_private_state() {
                 "last_value",
                 "observed_at",
                 "next_at",
+                "rebuilt",
             ],
         ),
         (
@@ -51,11 +51,33 @@ fn product_checkpoint_schema_contains_complete_typed_private_state() {
             vec!["trigger", "due", "matched", "basis", "change", "value"],
         ),
         ("Snapshot", vec!["at", "order", "rows"]),
+        ("Open", vec!["trigger", "basis", "change"]),
         (
             "HostPolicy",
-            vec!["quiet_hours", "budget", "pending", "consumed", "sent"],
+            vec![
+                "settings",
+                "budget",
+                "now",
+                "attention",
+                "inputs",
+                "pending",
+                "consumed",
+                "sent",
+                "rules",
+                "progress",
+                "open",
+                "caused",
+                "away",
+                "budget_passive",
+                "keys",
+                "news",
+                "rearmed_late",
+            ],
         ),
-        ("Held", vec!["intent", "due"]),
+        (
+            "Held",
+            vec!["fired", "due", "holds", "deferred_since", "release"],
+        ),
         (
             "NotificationState",
             vec![
@@ -70,7 +92,7 @@ fn product_checkpoint_schema_contains_complete_typed_private_state() {
             "Attempt",
             vec![
                 "notice",
-                "dbus",
+                "desktop",
                 "command",
                 "notification_id",
                 "notification_slot",
@@ -78,8 +100,6 @@ fn product_checkpoint_schema_contains_complete_typed_private_state() {
                 "retried",
                 "active",
                 "server_owner",
-                "handoff",
-                "held",
             ],
         ),
     ] {
@@ -100,39 +120,42 @@ fn product_checkpoint_schema_contains_complete_typed_private_state() {
         schema["$defs"]["NotificationState"]["properties"]["attempts"]["additionalProperties"]["$ref"],
         "#/$defs/Attempt"
     );
-    assert_eq!(
-        schema["$defs"]["Condition"]["enum"],
-        json!(["matching", "ended", "incomplete"])
-    );
 }
 
 #[test]
 fn typed_checkpoint_and_receipt_keep_existing_wire_values() {
     let evaluator: Evaluator = serde_json::from_value(json!({
-        "now": 42, "policy":{"private":[]}, "rules":{}, "products":[],
-        "inputs":[], "consumed":[], "pending":{}
+        "now": 42, "rules":{}, "products":[],
+        "inputs":[], "consumed":[], "pending":{}, "open":{}, "reports":[]
     }))
     .unwrap();
     let notice = Notice {
         delivery_id: "delivery".into(),
         product: "product".into(),
         icon: "utilities-terminal".into(),
+        desktop_entry: None,
         rule: "rule".into(),
         occurrence: "occurrence".into(),
         summary: "Synthetic signal".into(),
         body: "A current synthetic fact".into(),
+        lines: vec![],
         reference: "record:example".into(),
         command_hint: "read record:example".into(),
-        interrupt: true,
         current: true,
-        data_loss: false,
-        budget_passive_count: None,
+        transient: false,
+        critical: false,
+        outlets: Outlets {
+            desktop: true,
+            command: false,
+        },
+        actions: vec![],
+        showing: 0,
     };
     let mut notifications = NotificationState::default();
-    notifications.begin(notice, Route::Dbus);
+    notifications.begin(notice);
     notifications.completed(
         "delivery",
-        Route::Dbus,
+        Outlet::Desktop,
         Completion {
             outcome: DeliveryOutcome::Delivered,
             notification_id: Some(7),
@@ -146,17 +169,15 @@ fn typed_checkpoint_and_receipt_keep_existing_wire_values() {
         notifications,
         receipt: NotificationReceipt {
             delivery_id: "delivery".into(),
-            route: Route::Dbus,
+            outlet: Outlet::Desktop,
             outcome: DeliveryOutcome::Delivered,
             notification_id: Some(7),
             event: Some(DesktopEvent::Acknowledged),
             via: Some("desktop".into()),
         },
-        condition: Condition::Matching,
     };
     let wire = serde_json::to_value(&checkpoint).unwrap();
-    assert_eq!(wire["condition"], "matching");
-    assert_eq!(wire["receipt"]["route"], "dbus");
+    assert_eq!(wire["receipt"]["outlet"], "desktop");
     assert_eq!(wire["receipt"]["event"], json!({"event":"acknowledged"}));
     assert_eq!(
         wire["notifications"]["attempts"]["delivery"]["notice"]["reference"],
@@ -166,80 +187,5 @@ fn typed_checkpoint_and_receipt_keep_existing_wire_values() {
         serde_json::from_value::<Checkpoint>(wire).unwrap(),
         checkpoint
     );
-    assert!(serde_json::from_value::<Condition>(Value::String("other".into())).is_err());
-}
-
-#[test]
-fn imported_attempt_is_immutable_across_receiver_progress_and_restart() {
-    let mut source = NotificationState::default();
-    let mut notice:Notice=serde_json::from_value(json!({"delivery_id":"a","product":"p","icon":"i","rule":"r","occurrence":"o","summary":"s","body":"b","reference":"record:a","command_hint":"","interrupt":true,"current":true,"data_loss":false,"budget_passive_count":null})).unwrap();
-    source.begin(notice.clone(), Route::Both);
-    source.completed(
-        "a",
-        Route::Dbus,
-        Completion {
-            outcome: DeliveryOutcome::NotSent("no_notification_server".into()),
-            notification_id: None,
-            server_owner: None,
-            slot: None,
-        },
-    );
-    let original = source.attempt("a").unwrap().clone();
-    let mut receiver = NotificationState::default();
-    assert_eq!(
-        receiver.import_attempt(original.clone()),
-        Ok(signals::notifications::ImportStatus::Imported)
-    );
-    receiver.prepare_retry("a");
-    receiver.completed(
-        "a",
-        Route::Dbus,
-        Completion {
-            outcome: DeliveryOutcome::Delivered,
-            notification_id: Some(7),
-            server_owner: Some(":1.2".into()),
-            slot: None,
-        },
-    );
-    let mut restored: NotificationState =
-        serde_json::from_slice(&serde_json::to_vec(&receiver).unwrap()).unwrap();
-    assert_eq!(
-        restored.import_attempt(original),
-        Ok(signals::notifications::ImportStatus::Known)
-    );
-    assert!(restored.attempt("a").unwrap().retried);
-    assert_eq!(
-        restored.attempt("a").unwrap().dbus,
-        Some(DeliveryOutcome::Delivered)
-    );
-    assert_eq!(
-        restored.attempt("a").unwrap().command,
-        Some(DeliveryOutcome::Unknown)
-    );
-    notice.body = "different".into();
-    let mut conflict = source.attempt("a").unwrap().clone();
-    conflict.notice = notice;
-    assert_eq!(
-        restored.import_attempt(conflict),
-        Err(signals::notifications::ImportError::Conflict)
-    );
-    assert!(restored.server_appeared().is_empty());
-}
-
-#[test]
-fn imported_holds_cannot_enable_an_unattempted_or_combined_route() {
-    let mut source = NotificationState::default();
-    let notice:Notice=serde_json::from_value(json!({"delivery_id":"a","product":"p","icon":"i","rule":"r","occurrence":"o","summary":"s","body":"b","reference":"record:a","command_hint":"","interrupt":true,"current":true,"data_loss":false,"budget_passive_count":null})).unwrap();
-    source.begin(notice, Route::Dbus);
-    for route in ["both", "command"] {
-        let mut wire = serde_json::to_value(source.attempt("a").unwrap()).unwrap();
-        wire["held"] = json!({(route):{"at":1000,"policy":"owner-policy:1"}});
-        let attempt = serde_json::from_value(wire).unwrap();
-        let mut receiver = NotificationState::default();
-        assert_eq!(
-            receiver.import_attempt(attempt),
-            Err(signals::notifications::ImportError::InvalidAttempt)
-        );
-        assert!(receiver.attempts().is_empty());
-    }
+    assert!(serde_json::from_value::<Outlet>(Value::String("dbus".into())).is_err());
 }

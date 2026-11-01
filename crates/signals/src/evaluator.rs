@@ -26,7 +26,7 @@ pub trait Calendar {
 )]
 pub struct Occurrence {
     pub id: String,
-    pub episode: String,
+    pub period: String,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -62,21 +62,12 @@ pub struct Evaluation {
     pub rows: Vec<Row>,
     pub value: Option<f64>,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct Interval {
-    pub start: Instant,
-    pub end: Instant,
-}
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct Policy {
-    pub private: Vec<Interval>,
-}
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
 pub struct Trigger {
     pub rule: RuleVersion,
     pub occurrence: Occurrence,
 }
-fn identity(value: &impl Serialize) -> String {
+pub(crate) fn identity(value: &impl Serialize) -> String {
     blake3::hash(&serde_json::to_vec(value).expect("signal identity contains no non-finite values"))
         .to_hex()
         .to_string()
@@ -86,20 +77,14 @@ impl Trigger {
         identity(self)
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// The channel a rule asks for. Routing decides what happens to a notice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Channel {
     Notice,
     Interrupt,
-    Brief,
     Value,
     Action,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum Downgrade {
-    RateLimit,
-    InterruptBudgetSpent,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Change {
@@ -110,25 +95,71 @@ pub struct Change {
     pub after: Vec<Occurrence>,
 }
 impl Change {
-    fn size(&self) -> usize {
+    pub fn size(&self) -> usize {
         self.joined.len() + self.left.len()
     }
 }
+/// One firing of a rule, before routing. Its basis (rows and their
+/// observation) is fixed when it matched, never when it is handed off.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct Delivery {
+pub struct Fired {
+    /// Deterministic: product, rule ID and revision, occurrence and period.
     pub id: String,
     pub trigger: Trigger,
+    pub rule_name: String,
     pub matched: Instant,
+    /// When the evaluator fired it.
     pub at: Instant,
     pub basis: Vec<Row>,
     pub channel: Channel,
-    pub downgrade: Option<Downgrade>,
     pub change: Option<Change>,
     pub value: Option<f64>,
     pub scope: Option<String>,
+    pub to: Vec<Recipient>,
+    pub author: Author,
+    pub quiet_hours: Option<QuietHours>,
+    pub rate_limit: Option<RateLimit>,
+    /// A current-state notice: it rechecks its condition until handoff and is
+    /// closed by a `Cleared` report when the condition ends.
+    pub current: bool,
+    pub shipped: Shipped,
 }
-/// A durable attempt begins unknown before effects run. Persist this record in
-/// the same owner as deliveries; only a returned receipt changes its outcome.
+/// What an evaluator tells the deliverer. A standalone product hands these to
+/// its own host policy; in primary mode Polylogue sends them to Sinex as facts.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "report", rename_all = "snake_case")]
+pub enum Report {
+    Fired(Box<Fired>),
+    /// A current-state condition ended, or its rule changed or was withdrawn.
+    Cleared {
+        delivery: String,
+        at: Instant,
+    },
+    /// The active revision of a rule, and whether it runs.
+    Rule {
+        version: RuleVersion,
+        enabled: bool,
+    },
+    Withdrawn {
+        product: String,
+        id: String,
+    },
+    /// The product's evaluation is up to date as of `at`, except the named
+    /// rules, whose data is behind.
+    Progress {
+        product: String,
+        at: Instant,
+        incomplete: BTreeSet<String>,
+    },
+    /// A rebuilt threshold rule found its condition already true, so a
+    /// crossing during the lost checkpoint cannot be told apart from the baseline.
+    RearmedLate {
+        rule: RuleVersion,
+        at: Instant,
+    },
+}
+/// A durable value or action effect starts with an unknown receipt. Persist it
+/// with the delivery; only a returned receipt changes its outcome.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "outcome", content = "reason", rename_all = "snake_case")]
 pub enum DeliveryOutcome {
@@ -141,36 +172,8 @@ pub enum DeliveryOutcome {
 pub struct DeliveryReceipt {
     pub delivery_id: String,
     pub at: Instant,
-    pub route: String,
+    pub outlet: String,
     pub outcome: DeliveryOutcome,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct InterruptBudget {
-    pub per_hour: usize,
-    pub handoffs: Vec<Instant>,
-}
-impl Default for InterruptBudget {
-    fn default() -> Self {
-        Self {
-            per_hour: 4,
-            handoffs: Vec::new(),
-        }
-    }
-}
-impl InterruptBudget {
-    /// One instance belongs to the host deliverer, covering both products.
-    pub fn admit(&mut self, at: Instant, author: &Author) -> bool {
-        self.handoffs
-            .retain(|previous| at.saturating_sub(*previous) < HOUR);
-        if author.budget_exempt() {
-            return true;
-        }
-        if self.handoffs.len() >= self.per_hour {
-            return false;
-        }
-        self.handoffs.push(at);
-        true
-    }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 struct Pending {
@@ -180,6 +183,13 @@ struct Pending {
     basis: Vec<Row>,
     change: Option<Change>,
     value: Option<f64>,
+}
+/// A fired current-state delivery whose condition is still checked.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+struct Open {
+    trigger: Trigger,
+    basis: Vec<Row>,
+    change: Option<Change>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 struct Snapshot {
@@ -203,6 +213,8 @@ struct RuleState {
     last_value: Option<f64>,
     observed_at: Option<Instant>,
     next_at: Option<Instant>,
+    /// Built after its checkpoint was lost, from stored deliveries.
+    rebuilt: bool,
 }
 fn current_match(
     active: &ActiveRule,
@@ -237,15 +249,19 @@ fn change_basis(before: &Snapshot, after: &Snapshot) -> Vec<Row> {
         .into_values()
         .collect()
 }
+/// The serializable evaluator checkpoint. Products persist it with the
+/// deliveries it produced.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Evaluator {
     now: Instant,
-    policy: Policy,
     rules: BTreeMap<String, RuleState>,
     products: BTreeSet<String>,
     inputs: Vec<Evaluation>,
     consumed: BTreeSet<Trigger>,
     pending: BTreeMap<String, Pending>,
+    open: BTreeMap<String, Open>,
+    /// Reports not yet handed to a host policy or returned to the caller.
+    reports: Vec<Report>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvaluationError(pub String);
@@ -255,7 +271,7 @@ impl std::fmt::Display for EvaluationError {
     }
 }
 impl std::error::Error for EvaluationError {}
-fn rule_id(version: &RuleVersion) -> String {
+pub(crate) fn rule_id(version: &RuleVersion) -> String {
     identity(&(&version.product, &version.id))
 }
 fn occurrence_id(occurrence: &Occurrence) -> String {
@@ -266,22 +282,22 @@ impl Evaluator {
     pub fn new(
         start: Instant,
         rules: Vec<ActiveRule>,
-        policy: Policy,
         calendar: &impl Calendar,
     ) -> Result<Self, EvaluationError> {
-        if policy.private.iter().any(|i| i.end <= i.start) {
-            return Err(EvaluationError("invalid private interval".into()));
-        }
         let mut evaluator = Self {
             now: start,
-            policy,
             rules: BTreeMap::new(),
             products: BTreeSet::new(),
             inputs: Vec::new(),
             consumed: BTreeSet::new(),
             pending: BTreeMap::new(),
+            open: BTreeMap::new(),
+            reports: Vec::new(),
         };
         for active in rules {
+            active
+                .validate_authorship()
+                .map_err(|error| EvaluationError(error.0))?;
             let key = rule_id(&active.version);
             if evaluator.rules.values().any(|state| {
                 state.active.version.product == active.version.product
@@ -293,9 +309,29 @@ impl Evaluator {
                 return Err(EvaluationError("duplicate rule identity".into()));
             }
             evaluator.products.insert(active.version.product.clone());
+            evaluator.reports.push(Report::Rule {
+                version: active.version.clone(),
+                enabled: active.rule.enabled,
+            });
             evaluator
                 .rules
                 .insert(key, Self::state(active, start, calendar));
+        }
+        Ok(evaluator)
+    }
+    /// Rebuild after the checkpoint was lost: from the rules, the triggers of
+    /// the deliveries already stored, and stored observations queued afterwards
+    /// with `observe`. No stored delivery identity is produced again.
+    pub fn rebuild(
+        start: Instant,
+        rules: Vec<ActiveRule>,
+        delivered: impl IntoIterator<Item = Trigger>,
+        calendar: &impl Calendar,
+    ) -> Result<Self, EvaluationError> {
+        let mut evaluator = Self::new(start, rules, calendar)?;
+        evaluator.consumed.extend(delivered);
+        for state in evaluator.rules.values_mut() {
+            state.rebuilt = true;
         }
         Ok(evaluator)
     }
@@ -319,6 +355,13 @@ impl Evaluator {
             last_value: None,
             observed_at: None,
             next_at,
+            rebuilt: false,
+        }
+    }
+    /// A follow has no baseline: rows already matching are its first message.
+    pub(crate) fn without_baseline(&mut self) {
+        for state in self.rules.values_mut() {
+            state.started = Instant::MIN;
         }
     }
     pub fn now(&self) -> Instant {
@@ -333,13 +376,6 @@ impl Evaluator {
             .filter(|state| state.incomplete)
             .map(|state| state.active.version.clone())
             .collect()
-    }
-    pub fn set_policy(&mut self, policy: Policy) -> Result<(), EvaluationError> {
-        if policy.private.iter().any(|i| i.end <= i.start) {
-            return Err(EvaluationError("invalid private interval".into()));
-        }
-        self.policy = policy;
-        Ok(())
     }
     /// Queue observations, never effective timestamps. Already observed rows
     /// may schedule future starts/ends; unseen metadata contributes no wakeup.
@@ -401,13 +437,17 @@ impl Evaluator {
     /// Adopt a revision at the owner's captured observation time, without
     /// advancing old rules first. Its first complete result is the new baseline.
     /// Retrying an identical active revision preserves its original baseline and
-    /// held occurrences. A changed revision cancels the previous pending work.
+    /// held occurrences. A changed revision cancels the previous pending work
+    /// and clears its open current-state deliveries.
     pub fn replace_rule(
         &mut self,
         active: ActiveRule,
         observed_at: Instant,
         calendar: &impl Calendar,
     ) -> Result<(), EvaluationError> {
+        active
+            .validate_authorship()
+            .map_err(|error| EvaluationError(error.0))?;
         let key = rule_id(&active.version);
         if let Some(old) = self.rules.get(&key) {
             if old.active == active {
@@ -430,13 +470,16 @@ impl Evaluator {
             ));
         }
         self.products.insert(active.version.product.clone());
+        self.reports.push(Report::Rule {
+            version: active.version.clone(),
+            enabled: active.rule.enabled,
+        });
         let mut state = Self::state(active, observed_at, calendar);
         // A revised query can read a different relation. Its first complete
         // evaluation, rather than the previous query's rows, is its baseline.
         state.revision_baseline = true;
         state.incomplete = true;
-        self.pending
-            .retain(|_, pending| rule_id(&pending.trigger.rule) != key);
+        self.forget(&key, observed_at);
         self.inputs
             .retain(|input| rule_id(&input.rule) != key || input.rule == state.active.version);
         self.rules.insert(key, state);
@@ -444,149 +487,120 @@ impl Evaluator {
     }
     pub fn withdraw(&mut self, version: &RuleVersion) {
         let key = rule_id(version);
-        self.rules.remove(&key);
-        self.pending
-            .retain(|_, pending| rule_id(&pending.trigger.rule) != key);
+        if self.rules.remove(&key).is_some() {
+            self.reports.push(Report::Withdrawn {
+                product: version.product.clone(),
+                id: version.id.clone(),
+            });
+        }
+        self.forget(&key, self.now);
         self.inputs.retain(|input| rule_id(&input.rule) != key);
     }
+    /// Cancel a rule's pending work and clear its open deliveries.
+    fn forget(&mut self, key: &str, at: Instant) {
+        self.pending
+            .retain(|_, pending| rule_id(&pending.trigger.rule) != key);
+        let cleared: Vec<_> = self
+            .open
+            .iter()
+            .filter(|(_, open)| rule_id(&open.trigger.rule) == key)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for delivery in cleared {
+            self.open.remove(&delivery);
+            self.reports.push(Report::Cleared { delivery, at });
+        }
+    }
+    /// Advance a standalone product: evaluation and its own host policy at
+    /// every causal boundary, so any partition gives the same handoffs.
     pub fn advance(
         &mut self,
         stop: Instant,
         calendar: &impl Calendar,
         host: &mut HostPolicy,
-    ) -> Result<Vec<Delivery>, EvaluationError> {
-        Ok(self
-            .advance_in_mode(
-                stop,
-                calendar,
-                EvaluationMode::Local {
-                    host,
-                    forwarded: &|_| Condition::Incomplete,
-                },
-            )?
-            .deliveries)
+    ) -> Result<Handoffs, EvaluationError> {
+        self.run(stop, calendar, Some(host), false)
     }
+    /// After downtime: take in what was observed without handing anything off
+    /// for past instants, then hand off overdue work once, at `stop`.
     pub fn resume(
         &mut self,
         stop: Instant,
         calendar: &impl Calendar,
         host: &mut HostPolicy,
-    ) -> Result<Vec<Delivery>, EvaluationError> {
-        Ok(self
-            .run(
-                stop,
-                calendar,
-                EvaluationMode::Local {
-                    host,
-                    forwarded: &|_| Condition::Incomplete,
-                },
-                true,
-            )?
-            .deliveries)
+    ) -> Result<Handoffs, EvaluationError> {
+        self.run(stop, calendar, Some(host), true)
     }
-    pub fn advance_in_mode(
+    /// Advance without a host: the reports a product sends to the host
+    /// deliverer of another product (Polylogue in primary mode).
+    pub fn reports(
         &mut self,
         stop: Instant,
         calendar: &impl Calendar,
-        mode: EvaluationMode<'_>,
-    ) -> Result<EvaluationOutput, EvaluationError> {
-        self.run(stop, calendar, mode, false)
+    ) -> Result<Vec<Report>, EvaluationError> {
+        self.run(stop, calendar, None, false)?;
+        Ok(std::mem::take(&mut self.reports))
     }
-    pub fn resume_in_mode(
+    pub fn resume_reports(
         &mut self,
         stop: Instant,
         calendar: &impl Calendar,
-        mode: EvaluationMode<'_>,
-    ) -> Result<EvaluationOutput, EvaluationError> {
-        self.run(stop, calendar, mode, true)
-    }
-    pub fn condition(&self, intent: &FiredIntent, at: Instant) -> Condition {
-        if self.private(at) {
-            return Condition::Ended;
-        }
-        let Some(state) = self.rules.get(&rule_id(&intent.delivery.trigger.rule)) else {
-            return Condition::Ended;
-        };
-        if state.active.version != intent.delivery.trigger.rule || !state.active.rule.enabled {
-            return Condition::Ended;
-        }
-        if state.incomplete {
-            return Condition::Incomplete;
-        }
-        if current_match(
-            &state.active,
-            &state.rows,
-            state.threshold,
-            state.latest.as_ref(),
-            &intent.delivery.basis,
-            intent.delivery.change.as_ref(),
-            at,
-        ) {
-            Condition::Matching
-        } else {
-            Condition::Ended
-        }
+    ) -> Result<Vec<Report>, EvaluationError> {
+        self.run(stop, calendar, None, true)?;
+        Ok(std::mem::take(&mut self.reports))
     }
     fn run(
         &mut self,
         stop: Instant,
         calendar: &impl Calendar,
-        mut mode: EvaluationMode<'_>,
+        mut host: Option<&mut HostPolicy>,
         resume: bool,
-    ) -> Result<EvaluationOutput, EvaluationError> {
-        if stop < self.now {
+    ) -> Result<Handoffs, EvaluationError> {
+        if stop < self.now || host.as_ref().is_some_and(|host| stop < host.now()) {
             return Err(EvaluationError("clock must be monotone".into()));
         }
-        let mut output = EvaluationOutput::default();
+        let mut output = Handoffs::default();
         loop {
             self.read(self.now, calendar);
-            if !resume || self.now == stop {
-                let intents = self.fire(self.now);
-                match &mut mode {
-                    EvaluationMode::Local { host, forwarded } => {
-                        for intent in intents {
-                            host.submit(intent, self.now);
-                        }
-                        output
-                            .deliveries
-                            .extend(host.advance(self.now, calendar, |intent| {
-                                if self
-                                    .products
-                                    .contains(&intent.delivery.trigger.rule.product)
-                                {
-                                    self.condition(intent, self.now)
-                                } else {
-                                    forwarded(intent)
-                                }
-                            }));
-                    }
-                    EvaluationMode::Forward => output.intents.extend(intents),
+            let handing_off = !resume || self.now == stop;
+            if handing_off {
+                self.fire(self.now);
+            }
+            self.progress(self.now);
+            if let Some(host) = host.as_deref_mut() {
+                host.absorb(std::mem::take(&mut self.reports));
+                if handing_off {
+                    output.extend(host.advance(self.now, calendar));
+                } else {
+                    host.pass(self.now);
                 }
-            } else if let EvaluationMode::Local { host, forwarded } = &mut mode {
-                host.fold(|intent| {
-                    if self
-                        .products
-                        .contains(&intent.delivery.trigger.rule.product)
-                    {
-                        self.condition(intent, self.now)
-                    } else {
-                        forwarded(intent)
-                    }
-                });
             }
             if self.now == stop {
                 break;
             }
             let next = self.boundary(stop);
-            self.now = match &mode {
-                EvaluationMode::Local { host, .. } => host
-                    .next_due()
-                    .filter(|due| *due > self.now)
-                    .map_or(next, |due| due.min(next)),
-                EvaluationMode::Forward => next,
-            };
+            self.now = host
+                .as_ref()
+                .and_then(|host| host.next_due())
+                .filter(|due| *due > self.now)
+                .map_or(next, |due| due.min(next));
         }
         Ok(output)
+    }
+    fn progress(&mut self, at: Instant) {
+        for product in &self.products {
+            let incomplete = self
+                .rules
+                .values()
+                .filter(|state| state.active.version.product == *product && state.incomplete)
+                .map(|state| state.active.version.id.clone())
+                .collect();
+            self.reports.push(Report::Progress {
+                product: product.clone(),
+                at,
+                incomplete,
+            });
+        }
     }
     fn boundary(&self, stop: Instant) -> Instant {
         let mut next = stop;
@@ -600,10 +614,6 @@ impl Evaluator {
         }
         for pending in self.pending.values() {
             consider(pending.due);
-        }
-        for interval in &self.policy.private {
-            consider(interval.start);
-            consider(interval.end);
         }
         for state in self.rules.values() {
             for row in state.rows.values() {
@@ -622,19 +632,12 @@ impl Evaluator {
         next
     }
     /// Earliest causal wakeup known at this checkpoint. The host also wakes on
-    /// complete-query changes, policy edits and rule edits.
+    /// complete-query changes, attention facts and rule edits.
     pub fn next_due(&self) -> Option<Instant> {
         let next = self.boundary(i64::MAX);
         (next != i64::MAX).then_some(next)
     }
-    fn private(&self, at: Instant) -> bool {
-        self.policy
-            .private
-            .iter()
-            .any(|interval| interval.start <= at && at < interval.end)
-    }
     fn read(&mut self, at: Instant, calendar: &impl Calendar) {
-        let private = self.private(at);
         let count = self.inputs.partition_point(|input| input.at <= at);
         let inputs: Vec<_> = self.inputs.drain(..count).collect();
         for input in inputs {
@@ -678,7 +681,7 @@ impl Evaluator {
             };
             match state.active.rule.fires {
                 Fires::OnChange { .. } => {
-                    if state.baseline.is_none() || private || !state.active.rule.enabled {
+                    if state.baseline.is_none() || !state.active.rule.enabled {
                         state.baseline = Some(snapshot.clone());
                     }
                     state.latest = Some(snapshot);
@@ -686,16 +689,19 @@ impl Evaluator {
                 Fires::OnThreshold { value, compare } => {
                     if let Some(sample) = input.value {
                         let condition = compare.matches(sample, value);
-                        if state.threshold == Some(false)
-                            && condition
-                            && !private
-                            && state.active.rule.enabled
+                        if state.threshold.is_none() && condition && state.rebuilt {
+                            self.reports.push(Report::RearmedLate {
+                                rule: state.active.version.clone(),
+                                at: input.at,
+                            });
+                        }
+                        if state.threshold == Some(false) && condition && state.active.rule.enabled
                         {
                             let trigger = Trigger {
                                 rule: state.active.version.clone(),
                                 occurrence: Occurrence {
                                     id: "threshold".into(),
-                                    episode: input.at.to_string(),
+                                    period: input.at.to_string(),
                                 },
                             };
                             let pending = Pending {
@@ -731,15 +737,9 @@ impl Evaluator {
             }
             state.revision_baseline = false;
         }
-        if private {
-            for pending in self.pending.values() {
-                self.consumed.insert(pending.trigger.clone());
-            }
-            self.pending.clear();
-        }
         for state in self.rules.values_mut() {
             let active = &state.active;
-            if private || !active.rule.enabled {
+            if !active.rule.enabled {
                 for row in state.rows.values() {
                     self.consumed.insert(Trigger {
                         rule: active.version.clone(),
@@ -751,6 +751,16 @@ impl Evaluator {
                     state.baseline = Some(latest.clone());
                 }
                 self.pending.retain(|_, p| p.trigger.rule != active.version);
+                let cleared: Vec<_> = self
+                    .open
+                    .iter()
+                    .filter(|(_, open)| open.trigger.rule == active.version)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for delivery in cleared {
+                    self.open.remove(&delivery);
+                    self.reports.push(Report::Cleared { delivery, at });
+                }
             }
             if state.incomplete {
                 continue;
@@ -787,24 +797,40 @@ impl Evaluator {
                 }
             }
             if active.current() {
-                self.pending.retain(|_, pending| {
-                    if pending.trigger.rule != active.version {
-                        return true;
-                    }
-                    let matching = current_match(
+                let matching = |basis: &[Row], change: Option<&Change>| {
+                    current_match(
                         active,
                         &state.rows,
                         state.threshold,
                         state.latest.as_ref(),
-                        &pending.basis,
-                        pending.change.as_ref(),
+                        basis,
+                        change,
                         at,
-                    );
-                    if !matching {
+                    )
+                };
+                self.pending.retain(|_, pending| {
+                    if pending.trigger.rule != active.version {
+                        return true;
+                    }
+                    let still = matching(&pending.basis, pending.change.as_ref());
+                    if !still {
                         self.consumed.insert(pending.trigger.clone());
                     }
-                    matching
+                    still
                 });
+                let ended: Vec<_> = self
+                    .open
+                    .iter()
+                    .filter(|(_, open)| {
+                        open.trigger.rule == active.version
+                            && !matching(&open.basis, open.change.as_ref())
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for delivery in ended {
+                    self.open.remove(&delivery);
+                    self.reports.push(Report::Cleared { delivery, at });
+                }
             }
             match active.rule.fires {
                 Fires::OnNew => {
@@ -813,8 +839,7 @@ impl Evaluator {
                             rule: active.version.clone(),
                             occurrence: row.occurrence.clone(),
                         };
-                        if private
-                            || !active.rule.enabled
+                        if !active.rule.enabled
                             || self.consumed.contains(&trigger)
                             || row.start > at
                         {
@@ -839,7 +864,7 @@ impl Evaluator {
                             });
                     }
                 }
-                Fires::OnChange { what, k } if !private && active.rule.enabled => {
+                Fires::OnChange { what, k } if active.rule.enabled => {
                     if let (Some(before), Some(after)) = (&state.baseline, &state.latest) {
                         let change = difference(&before.order, &after.order, what, k);
                         if let Some(change) = change.filter(|change| {
@@ -859,7 +884,7 @@ impl Evaluator {
                                     rule: active.version.clone(),
                                     occurrence: Occurrence {
                                         id: "change".into(),
-                                        episode: after.at.to_string(),
+                                        period: after.at.to_string(),
                                     },
                                 };
                                 self.pending
@@ -887,12 +912,12 @@ impl Evaluator {
                 }
                 Fires::At { minute } if state.next_at.is_some_and(|due| due <= at) => {
                     state.next_at = Some(calendar.next_at(at, minute));
-                    if !private && active.rule.enabled {
+                    if active.rule.enabled {
                         let trigger = Trigger {
                             rule: active.version.clone(),
                             occurrence: Occurrence {
                                 id: "logical_day".into(),
-                                episode: calendar.logical_day(at),
+                                period: calendar.logical_day(at),
                             },
                         };
                         if !self.consumed.contains(&trigger) {
@@ -913,10 +938,7 @@ impl Evaluator {
             }
         }
     }
-    fn fire(&mut self, at: Instant) -> Vec<FiredIntent> {
-        if self.private(at) {
-            return Vec::new();
-        }
+    fn fire(&mut self, at: Instant) {
         let mut pending: Vec<_> = self
             .pending
             .values()
@@ -930,7 +952,6 @@ impl Evaluator {
                 .cmp(&a.change.as_ref().map_or(0, Change::size))
                 .then_with(|| a.trigger.cmp(&b.trigger))
         });
-        let mut intents = Vec::new();
         for pending in pending {
             let id = pending.trigger.delivery_id();
             let Some(state) = self.rules.get(&rule_id(&pending.trigger.rule)) else {
@@ -967,26 +988,35 @@ impl Evaluator {
                 Deliver::Value => Channel::Value,
                 Deliver::Action => Channel::Action,
             };
-            intents.push(FiredIntent {
-                delivery: Delivery {
-                    id,
-                    trigger: pending.trigger,
-                    matched: pending.matched,
-                    at,
-                    basis: pending.basis,
-                    channel,
-                    downgrade: None,
-                    change: pending.change,
-                    value: pending.value,
-                    scope: active.rule.scope.clone(),
-                },
+            if active.current() {
+                self.open.insert(
+                    id.clone(),
+                    Open {
+                        trigger: pending.trigger.clone(),
+                        basis: pending.basis.clone(),
+                        change: pending.change.clone(),
+                    },
+                );
+            }
+            self.reports.push(Report::Fired(Box::new(Fired {
+                id,
+                trigger: pending.trigger,
+                rule_name: active.rule.name.clone(),
+                matched: pending.matched,
+                at,
+                basis: pending.basis,
+                channel,
+                change: pending.change,
+                value: pending.value,
+                scope: active.rule.scope.clone(),
+                to: active.rule.to.clone(),
                 author: active.author.clone(),
                 quiet_hours: active.rule.quiet_hours,
                 rate_limit: active.rule.rate_limit.clone(),
                 current: active.current(),
-            });
+                shipped: active.shipped.clone(),
+            })));
         }
-        intents
     }
 }
 /// Compare whole result sets. Scores and page boundaries do not enter here.

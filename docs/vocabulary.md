@@ -102,20 +102,33 @@ mechanic and nothing else in the shared crates.
 |---|---|
 | signal rule | a watched query with a delivery rule |
 | watch | a signal rule that reports changes as notices |
-| occurrence, episode | the thing a row is about, keyed by the product, and one stretch of it |
-| trigger | a rule revision paired with an occurrence and episode; fires at most once |
+| occurrence, condition period | the thing a row is about, keyed by the product, and one stretch during which its condition holds (`period` in code) |
+| trigger | a rule revision paired with an occurrence and condition period; fires at most once |
 | baseline | the matches a rule starts from, which never fire |
-| handoff | the moment a delivery leaves the evaluator |
-| delivery | the record of one firing: rule, revision, rows, channel, outcome |
-| delivery receipt | the returned outcome of one route attempt, recorded against its delivery identity |
-| attempt | one execution of a delivery route, initially unknown until a returned receipt |
-| attempt context | the process-local absolute work deadline and owner cancellation shared by a dispatched delivery and all its phases |
+| report | what an evaluator tells the deliverer: fired, cleared, a rule's revision, progress |
+| progress | a product's evaluation is up to date as of an instant, except the rules whose data is behind |
+| host policy | the one deliverer's holds, rechecks, rate limits, budget and routing on a host |
+| handoff | the moment a notice leaves the host policy with its decision |
+| delivery | the record of one handoff: the firing, its decision, holds and the attention it was decided under; it never changes |
+| outcome | what happened to a delivery afterwards, appended to it: an attempt, shown, closed, opened, acknowledged, snoozed, released, cleared, seen |
+| route, decision | the pure function from a notice and the attention to show, send away, hold or passive, and its answer with a reason |
+| attention | the deliverer's snapshot of quiet periods, presence, focus, deep work, breakpoints and budget used |
+| hold | a notice waiting until a time or until its releasing input changes: quiet, away, deep work, incomplete, snoozed |
+| breakpoint | a moment cheap to interrupt: an app or work-episode switch, the end of an input bout, an unlock |
+| inhibition | a shipped root-cause rule folding the notices of the rules it names while its occurrence is open |
+| summary | one notification standing for several deliveries: the budget summary, the away summary, consequences of a cleared root |
+| producer notice | a notice any credentialed program submits, a delivery of the implicit rule `producer:<name>` |
+| delivery receipt | the returned outcome of one value or action attempt, recorded against its delivery identity |
+| attempt | one execution of a delivery through one outlet, initially unknown until a returned receipt |
+| outlet | where an interrupting notice goes: the desktop or the away command |
+| away command | the deployment's command that receives notices sent away while the operator is away |
 | notice, value, action | the three kinds of delivery: a message, a number written to a target, a command run |
-| interrupting, passive | a notice shown as a desktop notification, or one that waits in status and briefs |
-| interrupt budget | how many interrupting notices per hour rules not authored by the operator may cause |
+| interrupting, passive | a notice shown as a desktop notification or sent away, or one that waits in the inbox, status and briefs |
+| interrupt budget | how many interrupting notices per hour rules not authored by the operator, and producers, may cause |
 | quiet hours | when interrupting notices wait |
 | deliverer | the one process on a host that shows desktop notifications |
 | shipped rule | a rule that comes with a product, replaceable by an authored rule of the same name |
+| follow, wait, backtest | the evaluator delivered to an open connection; follow with an exit at its first message; a replay of rules over stored history; none records anything |
 
 ## Web
 

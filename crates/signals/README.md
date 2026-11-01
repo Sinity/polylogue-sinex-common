@@ -27,6 +27,7 @@ interfaces page).
 | `quiet_hours` | when interrupting notices wait; the global quiet hours apply when the rule names none |
 | `rate_limit` | a count per window; deliveries past it go to the next brief, marked "rate limit" |
 | `scope` | optional: the repository, session or source the notices concern, for routing to a brief |
+| `to` | optional recipients besides the operator's inbox: `session:REF`, `@alias` or `role:NAME`; a session query is frozen into its sessions when the rule is written |
 | `enabled` | on or off |
 | author, `via` | computed by the daemon, never supplied |
 
@@ -35,14 +36,20 @@ Every author may write, revise, enable and withdraw rules, agents included.
 - A **watch** is a rule with `fires: on_change` and `deliver: notice`; there is
   no second watch mechanism.
 - **`follow`** is the same evaluator delivered to an open connection, with
-  nothing recorded.
+  nothing recorded and no baseline: rows already matching are its first
+  messages. **`wait`** is follow with an exit, and **`backtest`** replays a
+  rule over stored history (below).
 - **Shipped rules** are data in the product's code, listed and read like
   authored rules, with no author record. An authored rule with the same name
   replaces the shipped one; withdrawing it brings the shipped one back;
   disabling is an authored revision with `enabled: false`. Shipped rules count
-  as the operator's for the interrupt budget.
-- No rule starts or resumes an agent session (default; open operator
-  question): every agent run traces to an explicit address or launch.
+  as the operator's for the interrupt budget. Only a shipped rule declares an
+  `urgency` (`critical` only where captured data is being lost now) or
+  `inhibits` other rules; an authored revision of a shipped rule loses both.
+- No delivery starts or resumes an agent session (default; open operator
+  question): every agent run traces to an explicit address or launch. The
+  product names its agent launchers, and `refuse_agent_launchers` refuses a
+  configured action command that is one of them, at startup.
 
 ## Evaluation
 
@@ -50,9 +57,9 @@ Each statement is a law of the evaluator, tested by the conformance suite that
 each product runs against its own catalog and occurrence keys.
 
 - **Logical occurrences.** Each row a rule sees carries a stable occurrence ID
-  and an episode, keyed by the product (Polylogue: the logical work session;
-  Sinex: the citation). A trigger is the pair (rule identity and revision,
-  occurrence and episode), and a trigger fires at most once. Re-parsing,
+  and a condition period (one stretch of it), keyed by the product
+  (Polylogue: the logical work session; Sinex: the citation). A trigger is the pair (rule identity and revision,
+  occurrence and period), and a trigger fires at most once. Re-parsing,
   replaying or re-importing, which produce new readings of the same
   occurrence, never fire again.
 - **No self-amplification.** A rule's input never includes deliveries made by
@@ -72,13 +79,13 @@ each product runs against its own catalog and occurrence keys.
 - **Causality.** Only observed rows count. A row's future effective time (an
   end, a `for` deadline) becomes a wakeup only once the row has been
   observed. A `for` duration starts no earlier than the row's observation, so
-  a closed episode observed late never becomes a present-state reminder.
+  a closed period observed late never becomes a present-state reminder.
 - **Current and historical.** A current-state rule (any rule with `for`, and
   any rule over live state) rechecks at handoff that the row still matches; a
   reminder whose condition stopped being true before handoff is cancelled. A
   historical rule's match survives the row's later end.
 - **Duration.** A `for` rule fires at its deadline with no new data, and fires
-  nothing if the row stops matching first. A new episode of the same
+  nothing if the row stops matching first. A new period of the same
   occurrence rearms it.
 - **Changes.** `on_change` compares complete evaluations of the watched query;
   the first is the baseline. Membership compares row sets, ranking compares
@@ -95,8 +102,9 @@ each product runs against its own catalog and occurrence keys.
 - **Incomplete while catching up.** A rule evaluated while the data it reads
   is behind (the product's status is not up to date for it) reports
   `incomplete`, never a change and never a firing.
-- **Handoff rechecks.** At handoff the evaluator rechecks that the rule is
-  enabled at that revision, the quiet hours and the interrupt budget.
+- **Handoff rechecks.** At handoff the host policy rechecks that the rule is
+  enabled at that revision, that a current-state condition has not cleared,
+  that the producer is up to date, the quiet hours and the interrupt budget.
 - **Quiet hours.** An interrupting delivery inside quiet hours is held to
   their end; a passive notice is not held. The delivery's basis (the rows and
   their observation) is fixed when it matched, not when it is released. Rate
@@ -106,33 +114,131 @@ each product runs against its own catalog and occurrence keys.
   instants, then evaluates overdue work at the resumed clock: a current
   condition still true is delivered once, now; a condition that ended during
   the downtime is not delivered.
+- **Rebuilding a lost checkpoint.** `Evaluator::rebuild` starts from the
+  rules and the triggers of the deliveries already stored, then replays
+  stored observations; it never produces a delivery identity that exists. A
+  threshold rule whose condition is already true when rebuilt cannot tell a
+  missed crossing from its baseline and reports `rearmed_late`.
 - **Partition invariance.** Advancing the evaluator through any partition of
   a time interval produces the same handoffs as one advance over it.
 
-## Delivery and outcome
+## Reports and the host deliverer
 
-Every firing is recorded as a **delivery**: the rule and revision, the
-triggering occurrences with their observation, the time, the channel, the
-outcome, and the reason for any downgrade. Deliveries are inputs of the
-product that made them, so "why did this fire" is a query.
+The evaluator never shows anything. Each advance produces **reports**: a rule
+fired (`Fired`, with its basis fixed at match time), a current-state
+condition cleared (`Cleared`), a rule's active revision (`Rule`) or
+withdrawal (`Withdrawn`), and the product's **progress** (`Progress`: up to
+date as of an instant, except the rules whose data is behind).
 
-A **notice** is passive unless its rule interrupts. Passive notices go to the
-product's status, the next brief in their scope, its change feed and its web
-UI. **What interrupts:** a notice interrupts only when the operator would want
-to stop what he is doing for it; everything else is passive.
+The **host policy** (`HostPolicy`) is the one deliverer on a host. It takes in
+reports from every product's evaluator and notices from other producers,
+holds what must wait, rechecks at handoff, applies the rate limits and the
+interrupt budget, and routes each notice:
 
-**One interrupt budget.** Interrupting deliveries from rules the operator did
-not author share one budget, `signal.interrupts_per_hour` (default 4). Past
-it, such a delivery becomes passive and says "interrupt budget spent". The
-operator's rules and shipped rules are outside the budget, so rules written by
-agents can never silence an alert the operator asked for.
+- **Standalone,** a product advances its evaluator with its own host policy
+  (`Evaluator::advance`), at every causal boundary of both, so any partition
+  of an interval gives the same handoffs.
+- **Primary mode,** Polylogue advances without a host (`Evaluator::reports`)
+  and sends its reports to Sinex as ordinary facts; Sinex's host policy takes
+  them in with its own. A forwarded current-state notice whose producer has
+  not confirmed being up to date since then is held as `incomplete`, never
+  shown. Polylogue shows one notice itself: Sinex being unreachable or
+  refusing its writes, because that path is what is broken.
+- **Other producers** (`sinexctl notify`) submit a `ProducerNotice`: a
+  delivery of the implicit rule `producer:<name>` with author class
+  `producer`, inside the budget and passive unless it asks to interrupt. A
+  notice with the same `key` replaces the earlier notification in place;
+  `clears: KEY` closes it.
 
-**One deliverer per host.** Where Polylogue runs on Sinex, Polylogue's
-interrupting notices travel to Sinex with its other deliveries, and Sinex's
-deliverer shows them under the one budget and quiet hours, which are then
-Sinex's settings. Polylogue shows its own notices only when it runs alone, and
-for the one notice that Sinex cannot deliver: Sinex being unreachable or
-refusing Polylogue's writes.
+There is no transfer of attempts between owners and no per-effect policy
+callback: deliveries travel as facts, conditions end with `Cleared`, and the
+policy decides once, at handoff.
+
+## The route function
+
+`route(notice, attention) → show | send-away | hold(until, reason) |
+passive(reason)` is a pure function. Every delivery stores the decision, the
+attention it was taken under and its holds, so "why did this interrupt me"
+and "why didn't it" are both answered by the record (`Delivery::why`:
+`held 11m (deep work) · budget 2 of 4 this hour · shown`). The first rule
+that applies decides:
+
+1. Not interrupting: `passive (rule is passive)`.
+2. Folded into an open root cause: `passive (caused by delivery:X)`.
+3. `critical`: shown now, and also sent away if the operator is away and an
+   away command is configured. Never held, never deferred.
+4. An agent's or producer's notice with the budget spent:
+   `passive (interrupt budget spent)`.
+5. Inside quiet hours (the rule's own, else the host's) or an explicit
+   `quiet until T`: held until their end.
+6. The subject is on screen (one of the notice's references is in the
+   focused window): `passive (on screen)`, never counted as seen.
+7. The operator is away: sent away when an away command exists, otherwise
+   held until presence returns and released into one summary.
+8. Deep work: held for the next breakpoint, at most 25 minutes from when it
+   first waited (`DeepWorkDeferral`: agents and producers by default, all
+   notices, or never).
+9. Otherwise shown.
+
+**Attention** is the deliverer's snapshot: an explicit quiet period,
+presence, the focused window's references, deep work, whether a breakpoint
+happens now, the budget used, whether an away command exists, and the
+deep-work setting. Products feed it as timed `AttentionInput` facts, which
+apply at their instant like evaluations. Every input has an unknown value,
+`unknown` presence never counts as away, and with every input unknown
+routing is quiet hours and the budget alone: attention only removes
+interruptions.
+
+Value and action deliveries are not routed; their decision is `run`.
+
+## Inhibition and grouping
+
+A shipped rule may declare `inhibits: [rule names]` of its own product, in
+the scope `host` or `source` (the delivery's `scope`). While it has an open
+current-state occurrence (held or shown), interrupting deliveries of those
+rules are recorded and routed `passive (caused by delivery:X)`, and the
+product renders them as lines of the root's notification. When the root
+clears, inhibited occurrences that are still current are shown at once as one
+grouped notification. Inhibition never changes whether a delivery is
+recorded, only whether it interrupts. Authored rules neither inhibit nor are
+exempt.
+
+Notifications are grouped as before: one per occurrence, updated with
+`replaces_id`; a rule's further open occurrences fold into one summary
+notification. **Summaries** (`Summary`) stand for several deliveries and are
+replaced in place by the next of their kind: the budget summary (notices held
+passive in the last hour), the away summary at the operator's return (each
+notice once, as held, sent away, cleared or acknowledged), and the
+consequences of a cleared root.
+
+## Outcomes
+
+A delivery never changes. What happens to it later is an **outcome**
+appended to it: an outlet's attempt (`unknown`, `delivered`,
+`not_sent:<reason>`), `shown`, `updated`, `closed` (expired, dismissed,
+cleared, replaced), `opened` (via desktop, web or CLI), `acknowledged`,
+`snoozed until T`, `released` (a snoozed or folded notice routed again),
+`cleared`, and `seen` (displayed to an explicit consumer; previews, on-screen
+suppression and agent reads never count). `DeliveryState::fold` gives a
+delivery's state and `Usefulness` a rule's figures: shown, opened, dismissed
+within 3 s of being shown, expired.
+
+Acts go through the host policy: `acknowledge` (a held notice is handed off
+passive), `snooze(delivery, until)` (at `until` a current-state notice is
+shown again only if its condition still holds; a historical one as is).
+
+## Watches, wait and backtest
+
+- A **watch** is a rule with `fires: on_change` and `deliver: notice`; the
+  product supplies the query that defines "changed" for a reference.
+- **`Wait`** returns at the instant `Follow` with the same arguments would
+  emit its first message (or, with `until: empty`, at the first complete
+  evaluation with no rows), or at its required timeout with the last
+  evaluation. It records nothing.
+- **`backtest`** replays rules over stored observations and attention facts:
+  the deliveries they would have made, each with the decision it would have
+  received. For a rule enabled at one revision throughout, it equals what the
+  live evaluator and host policy produced. It writes nothing.
 
 ## Desktop notifications
 
@@ -141,138 +247,93 @@ needs to be designed elegantly to not be a kludgy mess"
 (cc:ee52794c-8a9e-43b6-9fbc-9749c7e78e8f:3ae3257e-e70a-433a-be97-d1222670c284).
 
 - **Transport:** the freedesktop Notifications interface
-  (`org.freedesktop.Notifications`) on the session bus, with the product's
-  name and icon. Only interrupting notices are sent.
-- **One notification per occurrence.** The delivery identity maps to the
-  server's notification ID. Later news about the same occurrence (a stall
-  still going, a grown count, an `on_change` summary) calls `Notify` with
-  `replaces_id`, so it changes in place instead of stacking. When a
-  current-state condition clears, the notification is closed
-  (`CloseNotification`).
-- **Urgency:** `normal` for interrupting notices; `critical` (no expiry) only
-  where captured data is being lost now, such as a stalled capture whose spool
-  cannot grow.
-- **Actions,** when the server reports the `actions` capability: the default
-  action opens the notice's reference in the product's web UI; `acknowledge`
-  marks the delivery seen. Actions run as the operator's acts with
-  `via: desktop`. `ActionInvoked` and `NotificationClosed` are recorded on the
-  delivery (seen, acknowledged, dismissed, expired). Without the capability,
-  the body names the command to run.
-- **Grouping:** notifications carry a category per product and rule. While one
-  rule has several open occurrences, those after the first fold into one
-  summary notification replaced in place ("3 sources unreadable"). When the
-  budget is spent, one summary notification replaced in place counts the
-  notices held passive.
+  (`org.freedesktop.Notifications`, specification 1.2) on the session bus,
+  for notices whose decision interrupts and for summaries. `Outlets::of`
+  maps a decision to the desktop, the away command, or both.
+- **Content:** summary `<subject> · <what>` on one line; the body is the
+  evidence and the folded consequences; `app_name` the product,
+  `category` `<product>.<rule>`, `desktop-entry` the product's web app,
+  `x-<product>-delivery` the delivery ID, `transient` for notices that should
+  not stay in the server's history, `resident` for current-state notices
+  that their condition closes.
+- **One notification per occurrence,** replaced in place; a cleared
+  condition closes it (`CloseNotification`).
+- **Urgency:** `normal`; `critical` (no expiry) only for critical notices.
+- **Actions,** when the server reports the `actions` capability: `default`
+  (Open), `snooze`, `acknowledge`, and rule-supplied actions (Live sessions:
+  Approve, Deny). The `ActivationToken` the server sends before
+  `ActionInvoked` comes with the Open event, so the product passes it to the
+  browser launch and focus moves under Wayland's activation rules. Without the
+  capability the body names the command to run.
+- **Own notifications:** Sinex's D-Bus source marks a captured notification
+  carrying an `x-<product>-delivery` hint as a signal origin
+  (`signal_origin`), so no rule reads the products' own notifications.
 - **Outcome:** an attempt starts `unknown`; a returned notification ID records
   `delivered`; an error records `not_sent:<reason>`, including
-  `no_notification_server`. A `not_sent` attempt is retried under the same
-  delivery identity when the notification service appears (a current-state
-  notice rechecks its condition first). A `delivered` notice is never shown
-  again automatically, and an `unknown` attempt (no answer within the
-  deadline) is not resent. A slow notification server never holds a writer.
-- **Optional route:** a command named in deployment configuration receives each
-  interrupting notice as JSON on standard input, with a deadline, instead of
-  or beside D-Bus (`route: dbus | command | both`, default `dbus`), for
-  forwarding to a phone or another device. Exit 0 records `delivered`.
+  `no_notification_server`. A `not_sent` desktop attempt is retried once
+  under the same identity when the notification service appears. A
+  `delivered` notice is never shown again automatically, and an `unknown`
+  attempt (no answer within the deadline) is not resent. A slow notification
+  server never holds a writer.
+- **Away command:** a command named in deployment configuration receives each
+  sent-away notice as JSON on standard input, with a deadline. Exit 0 records
+  `delivered`.
 
 ## Configuration
 
 Deployment configuration (the products' Nix modules, configuration file or
-environment) names the value targets, action commands and the notification
-route; a rule can reach only those. Quiet hours and the interrupt budget are
-changeable settings of the deliverer's product.
+environment) names the value targets, action commands and the away command;
+a rule can reach only those. Quiet hours, the interrupt budget and the
+deep-work deferral are changeable settings of the deliverer's product.
 
 ## Rust interface and product adoption
 
 `Rule` contains only authored fields. Products stamp `ActiveRule.version`,
-`author` and `via` from their write path and set `live` when the query reads
-current state. `Rule::validate` checks deployment target and command names;
-`effective_rules` overlays authored rules on shipped defaults by product and
-name. An authored disabled revision overrides its shipped default too.
-
-`FIELDS` is the authored field table for help and schema rendering. Identity
-and authorship are separate because they must never be client supplied.
-`fires` serializes as `"on_new"`, `{"on_change":{"what":"membership","k":null}}`,
+`author`, `via` and, for shipped rules, `shipped`, and set `live` when the
+query reads current state. `Rule::validate` checks deployment target and
+command names; `effective_rules` overlays authored rules on shipped defaults
+by product and name. `FIELDS` is the authored field table for help and
+schema rendering. `fires` serializes as `"on_new"`,
+`{"on_change":{"what":"membership","k":null}}`,
 `{"on_threshold":{"value":10,"compare":">"}}` or `{"at":{"minute":600}}`.
 Durations accept milliseconds or strings such as `20m`; quiet hours are
-`{"from":1320,"to":480}` in local civil minutes. Local times use the product's
-configured logical day, resolved through the common query language's
-`DaySetting`. `DayCalendar` is its shared adapter for both products, including
-scheduled gaps, earlier folds, skipped dates and complete quiet intervals.
-Repeated civil minutes cannot re-enter an interval whose earlier-fold end
-already passed. `Calendar` remains the test seam. Neither reads the system
-zone or environment. Duration text uses the query language's duration parser
-and must resolve to whole milliseconds, the evaluator clock's precision.
+`{"from":1320,"to":480}` in local civil minutes, resolved through the query
+language's `DaySetting` by `DayCalendar`.
 
 A product queues a complete `Evaluation` for each watched query, with all
 pages joined in query order. Its `at` is the observation checkpoint, and each
-`Row` names the logical `Occurrence` and episode, its original observation,
-its effective start and optional end, a reference, and evidence. A new reading
-keeps that occurrence and episode. New stretches use a new episode. Delivered
+`Row` names the logical `Occurrence` and period, its original observation,
+its effective start and optional end, a reference, and evidence. Delivered
 signals and injected context are marked by `Origin` and excluded before any
-mode evaluates. A complete evaluation replaces the current matches; an
-incomplete evaluation preserves them and prevents handoffs until a complete
-one arrives. A newly installed query is incomplete until its first complete
-evaluation, including scheduled rules. Numeric threshold samples use `value`.
+mode evaluates. A newly installed query is incomplete until its first
+complete evaluation. The deterministic delivery ID hashes the product, rule
+ID and revision, occurrence and period.
 
-`Evaluator::advance` visits every known causal boundary; `resume` folds
-observations during downtime and hands overdue work off at the resumed
-clock. Products persist the serializable evaluator checkpoint with the
-owning query/delivery state. Revisions replace the observed baseline and
-cancel pending work; withdrawal removes it. Private intervals consume their
-observations and cancel pending outward work, including quiet-held work.
-The evaluator's deterministic delivery ID hashes the product, rule ID and
-revision, occurrence and episode. Evidence and reading IDs never enter it.
-Change and threshold crossings use evaluator episodes; scheduled rules use
-the logical day. Keep consumed triggers when rebuilding indexes.
-
-The host deliverer's one `HostPolicy` owns quiet hours, the `InterruptBudget`,
-actual handoff rate limits, pending intents and consumed delivery IDs. Persist
-it atomically with emitted deliveries. `Evaluator::advance` and `resume` apply
-this policy for a standalone product. Runtime wakeups combine the evaluator's
-and host policy's `next_due`; neither is a polling interval.
-
-In primary mode Polylogue uses the trusted `EvaluationMode::Forward`, which
-emits `FiredIntent`s and spends no host budget. Sinex submits those intents to
-its one `HostPolicy`, alongside its own local rules. Its `EvaluationMode::Local`
-receives a trusted forwarded-condition callback for other products; its own
-conditions use `Evaluator::condition`. The callback returns `Matching`,
-`Ended` or `Incomplete`, checking enabled revision, current condition and source
-freshness. Incomplete intents wait; ended intents are consumed without an
-outward handoff. These modes are Rust runtime choices and cannot be supplied
-in an authored rule or deserialized from a client request. The forwarding
-adapter obtains authorship from authenticated product context. Duplicate
-submissions preserve the first immutable basis and cannot consume the host
-budget twice, including after a checkpoint restore. Commit the source evaluator
-checkpoint and forwarded intent to its durable outbox together; commit the host
-policy checkpoint and emitted delivery together. Transport retries reuse that
-intent identity. The desktop worker then owns per-route attempt receipts under
-the same identity.
+Products persist the `Evaluator` checkpoint with the reports it produced, and
+the deliverer's `HostPolicy` atomically with the deliveries, outcomes and
+summaries each advance returns. Both expose their complete serialized state
+through `JsonSchema`. Runtime wakeups combine the evaluator's and host
+policy's `next_due`; neither is a polling interval.
 
 Products execute `value` and `action` handoffs through the configured target
-and command, outside their writer. The action reference is the last command
-argument. No signal command is an agent launch.
+and command, outside their writer, with an unknown `DeliveryReceipt` committed
+before the effect. Interrupting notices and summaries go to
+[`signal_delivery::run`](../signal-delivery/README.md) through a channel,
+never through a writer lock; desktop acts come back as receipts, which
+`NotificationReceipt::outcomes` turns into outcomes, and the product applies
+snooze, acknowledge and rule actions through its operation table as the
+operator's acts with `via: desktop`.
 
-A durable effect starts with an unknown `DeliveryReceipt`. The desktop
-[`signal_delivery::Deliverer`](../signal-delivery/README.md) additionally persists `NotificationState` and
-per-route `NotificationReceipt`s. Call `begin`, commit the unknown receipts
-and state, then call `send`. Restored unknown attempts cannot become eligible
-for a send. The asynchronous `signal_delivery::run` worker enforces this order
-with a persistence acknowledgement and handles service appearance and desktop
-protocol signals. It receives committed notices through a channel, never
-through a writer lock. Products apply returned desktop actions through their
-operation table as operator acts with `via: desktop`. The worker receives a
-fresh policy callback for every effect, including historical occurrences and grouped replacements. The adapter applies current authorization and visibility even when historical occurrence matching remains valid.
-
-When adopting, Polylogue removes its old signal evaluator and `notify-send`
-command path, maps logical sessions/notes to occurrences, and saves checkpoints
-with deliveries. Sinex maps citations to occurrences and uses the same worker
-for its own and forwarded deliveries. Both run the shared reference/law cases
-against their catalog adapters and retain the delivery outlets their product
-docs own. Rule target execution and product routing are adapters, not a second
-evaluator or notification implementation.
+The `web` feature renders the **Inbox** (`/notices`: interrupted, held and
+passive notices, unseen first, with the attention line), the **Why** panel
+(rule, matched rows, route decision and its inputs, outcomes) and the
+**Signals** view (rules with author, channel, last firing, deliveries in
+seven days and usefulness) as maud functions, so both products show the same
+view for the same data. Products supply titles, links and their time format.
 
 ## Laws
+
+The evaluator laws:
 
 - **trigger-fires-once**: a trigger fires at most once, and new readings of
   the same occurrence never fire again.
@@ -285,7 +346,7 @@ evaluator or notification implementation.
 - **only-observed-rows-wake**: a time not yet observed never adds a wakeup.
 - **duration-from-observation**: a `for` rule fires at its deadline without
   new data, fires nothing if the row stops matching first, and never turns a
-  late-observed closed episode into a present-state reminder.
+  late-observed closed period into a present-state reminder.
 - **current-state-rechecks-at-handoff**: a current-state reminder whose
   condition ended before handoff is cancelled; a historical match survives
   the row's end.
@@ -308,9 +369,9 @@ evaluator or notification implementation.
   clock.
 - **partition-invariance**: any partition of an interval gives the same
   handoffs as one advance over it.
-- **one-deliverer-per-host**: with Polylogue on Sinex, an interrupting
-  Polylogue notice is shown by Sinex's deliverer and Polylogue makes no
-  notification call except when Sinex is unreachable.
+- **one-deliverer-per-host**: with Polylogue on Sinex, Polylogue only
+  reports; its interrupting notices are routed by Sinex's host policy under
+  the one budget and quiet hours.
 - **notification-replaced-in-place**: a second notice about one occurrence
   replaces the first through `replaces_id`, and a cleared condition closes it.
 - **not-sent-retried-once-unknown-never**: with no notification server, an
@@ -320,25 +381,52 @@ evaluator or notification implementation.
 - **slow-server-never-holds-writer**: a notification server that never answers
   does not delay any commit.
 
-`Evaluator`, `HostPolicy` and `NotificationState` expose the complete serialized checkpoint through `JsonSchema`, including private nested state. Products embed these types and the typed notification receipts directly in their atomic signal commit DTOs. Authenticated host rechecks use `Condition` with the closed wire values `matching`, `ended` and `incomplete`.
+Routing, attention, inhibition and outcomes:
 
-## Pure checkpoint and platform worker
+- **sig.route-pure**: `route` is a function of (notice, attention) only, and
+  the decision with its inputs is stored on the delivery.
+- **sig.attention-only-removes**: with every attention input unknown, routing
+  is quiet hours and the budget alone; attention inputs never turn a notice
+  that would not interrupt into one that does.
+- **sig.critical-never-deferred**: a critical delivery is shown at once in
+  every attention state, including quiet hours.
+- **sig.deferral-bounded**: a breakpoint hold ends at the first breakpoint or
+  at its bound, whichever comes first.
+- **sig.away-summary-once**: notices held or sent away while the operator is
+  away produce exactly one summary at the return, listing each once, as
+  held, sent away, cleared or acknowledged; none is shown on its own.
+- **sig.on-screen-is-passive-not-seen**: on-screen suppression records
+  `passive (on screen)` and never marks the notice seen.
+- **sig.inhibit-folds**: while an inhibiting occurrence is open in scope,
+  inhibited deliveries are recorded, passive and lines of the root's
+  notification; when the root clears, those still current are shown at once
+  as one grouped notification.
+- **sig.inhibit-shipped-only**: an authored rule can be neither inhibitor nor
+  exempt.
+- **sig.own-notifications-excluded**: a captured notification carrying an
+  `x-<product>-delivery` hint is a signal origin, and no rule's input
+  includes it.
+- **sig.snooze-rechecks**: a snoozed current-state notice is shown again at
+  the snooze end only if its condition still holds; a historical one is shown
+  again as is.
+- **sig.outcomes-append-only**: a delivery is handed off once and never
+  changes; acts and attempts append outcomes.
+- **sig.checkpoint-loss-never-refires**: rebuilding the evaluator from rules,
+  stored deliveries and stored observations never produces an existing
+  delivery identity; at worst a threshold rule reports `rearmed_late`.
+- **sig.backtest-equals-live**: for rules enabled at one revision throughout,
+  `backtest` over an interval returns exactly what the live evaluator and
+  host policy handed off over it.
+- **sig.wait-is-follow**: `wait` returns at the instant `follow` with the same
+  arguments would emit its first message, and records nothing.
+- **sig.external-notice-budgeted**: a producer notice asking to interrupt is
+  charged to the budget and never exceeds it; a notice with an existing key
+  replaces its notification in place.
+- **sig.forwarded-stale-holds**: a forwarded current-state notice whose
+  producer has not confirmed being up to date since is held as `incomplete`,
+  never shown.
+- **sig.trigger-never-starts-agent**: no delivery starts or resumes an agent;
+  a configured action command that is an agent launcher is refused.
 
-This crate has no desktop or asynchronous runtime dependency. `notifications`
-owns the serialized notice, attempt, receipt and checkpoint, with pure methods
-for each transition. Its checkpoint exposes read-only attempt access. Platform
-connections, process execution and persistence acknowledgements belong to
-[`signal-delivery`](../signal-delivery/README.md).
-
-Attempt handoff imports the original immutable snapshot without `begin`.
-Repeating that snapshot preserves receiver progress, including after restart;
-a conflicting snapshot under the same delivery identity is refused. An unknown
-route remains terminal. Only an explicit D-Bus failure may use its one service
-appearance retry; command outcomes are never selected by that retry. Server
-identity scopes replacement IDs and desktop actions.
-
-The desktop guard returns typed `SendDecision` values for a batch of notices.
-A quiet hold retains its absolute owner-policy deadline and provenance per route
-in the same `NotificationState`. A held retry retains its original identity and
-retry flag; expiry permits a fresh policy check, not an automatic send. The I/O
-worker owns clock injection and the pre-effect unknown persistence boundary.
+The tests are in `tests/` (evaluator, adoption, route, host, follow, web and
+checkpoint schema) and in `signal-delivery`'s fake notification server suite.

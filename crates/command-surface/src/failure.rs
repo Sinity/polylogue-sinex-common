@@ -104,18 +104,27 @@ pub struct Failure {
     pub hint: Option<String>,
     /// What the input could have meant, each runnable as given: the matches
     /// of an ambiguous reference, or known names close to an unknown one.
-    /// Boxed so a `Result` carrying a failure stays small; never empty.
+    /// Behind a thin box so a `Result` carrying a failure stays small; never
+    /// empty.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    candidates: Option<Box<Vec<String>>>,
+    candidates: Option<Box<Candidates>>,
     pub retryable: bool,
 }
 
+/// A failure's candidates, a one-word box away from the failure: a boxed
+/// slice would be a two-word pointer and grow every `Result<_, Failure>`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+struct Candidates(Vec<String>);
+
 impl Failure {
     pub fn candidates(&self) -> &[String] {
-        self.candidates.as_deref().map_or(&[], Vec::as_slice)
+        self.candidates
+            .as_deref()
+            .map_or(&[], |candidates| candidates.0.as_slice())
     }
     pub fn with_candidates(mut self, candidates: Vec<String>) -> Self {
-        self.candidates = (!candidates.is_empty()).then(|| Box::new(candidates));
+        self.candidates = (!candidates.is_empty()).then(|| Box::new(Candidates(candidates)));
         self
     }
     pub fn with_suggestion(mut self, suggestion: Value) -> Self {

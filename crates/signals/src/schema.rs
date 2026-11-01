@@ -136,8 +136,73 @@ pub struct Rule {
     pub quiet_hours: Option<QuietHours>,
     pub rate_limit: Option<RateLimit>,
     pub scope: Option<String>,
+    /// Recipients besides the operator's inbox. `scope` only routes to briefs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub to: Vec<Recipient>,
     #[serde(default = "enabled")]
     pub enabled: bool,
+}
+
+/// Where a notice goes besides the operator's inbox. A session query is frozen
+/// into its sessions when the rule is written, so it is a list of `Session`s.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Recipient {
+    /// `session:REF`
+    Session(String),
+    /// `@alias`
+    Alias(String),
+    /// `role:NAME`
+    Role(String),
+}
+impl JsonSchema for Recipient {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Recipient".into()
+    }
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({"type":"string","pattern":"^(session:.+|@.+|role:.+)$"})
+    }
+}
+impl std::fmt::Display for Recipient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Session(reference) => write!(f, "session:{reference}"),
+            Self::Alias(alias) => write!(f, "@{alias}"),
+            Self::Role(role) => write!(f, "role:{role}"),
+        }
+    }
+}
+impl std::str::FromStr for Recipient {
+    type Err = InvalidRule;
+    fn from_str(text: &str) -> Result<Self, InvalidRule> {
+        let nonempty = |value: &str| {
+            (!value.is_empty())
+                .then(|| value.to_string())
+                .ok_or_else(|| InvalidRule(format!("recipient `{text}` names nothing")))
+        };
+        if let Some(reference) = text.strip_prefix("session:") {
+            nonempty(reference).map(Self::Session)
+        } else if let Some(alias) = text.strip_prefix('@') {
+            nonempty(alias).map(Self::Alias)
+        } else if let Some(role) = text.strip_prefix("role:") {
+            nonempty(role).map(Self::Role)
+        } else {
+            Err(InvalidRule(format!(
+                "recipient `{text}` must be session:REF, @alias or role:NAME"
+            )))
+        }
+    }
+}
+impl Serialize for Recipient {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+impl<'de> Deserialize<'de> for Recipient {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Configuration {
@@ -152,6 +217,23 @@ impl std::fmt::Display for InvalidRule {
     }
 }
 impl std::error::Error for InvalidRule {}
+/// No delivery starts or resumes an agent. The product names the programs that
+/// launch agents; a configured action command whose program is one of them is
+/// refused at startup.
+pub fn refuse_agent_launchers<'a>(
+    commands: impl IntoIterator<Item = (&'a str, &'a std::path::Path)>,
+    launchers: &[&str],
+) -> Result<(), InvalidRule> {
+    for (name, program) in commands {
+        let file = program.file_name().and_then(|file| file.to_str());
+        if file.is_some_and(|file| launchers.contains(&file)) {
+            return Err(InvalidRule(format!(
+                "action command `{name}` starts an agent; no signal delivery may"
+            )));
+        }
+    }
+    Ok(())
+}
 impl Rule {
     pub fn validate(&self, configuration: &Configuration) -> Result<(), InvalidRule> {
         let refuse = |reason: &str| Err(InvalidRule(reason.into()));
@@ -215,6 +297,9 @@ impl Rule {
         if self.interrupt && self.deliver != Deliver::Notice {
             return refuse("only notices interrupt");
         }
+        if !self.to.is_empty() && self.deliver != Deliver::Notice {
+            return refuse("only notices have recipients");
+        }
         if self.duration.0 > 0 && self.fires != Fires::OnNew {
             return refuse("for applies to on_new rows");
         }
@@ -235,11 +320,55 @@ pub enum Author {
     Operator,
     Shipped,
     Agent(String),
+    /// A program that submitted a notice through its producer credential.
+    Producer(String),
+}
+/// The three classes routing distinguishes. Shipped rules count as the
+/// operator's; agents and producers share the interrupt budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthorClass {
+    Operator,
+    Agent,
+    Producer,
 }
 impl Author {
-    pub fn budget_exempt(&self) -> bool {
-        !matches!(self, Self::Agent(_))
+    pub fn class(&self) -> AuthorClass {
+        match self {
+            Self::Operator | Self::Shipped => AuthorClass::Operator,
+            Self::Agent(_) => AuthorClass::Agent,
+            Self::Producer(_) => AuthorClass::Producer,
+        }
     }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Urgency {
+    #[default]
+    Normal,
+    /// Only where captured data is being lost now; never deferred.
+    Critical,
+}
+/// Where an inhibiting rule's open occurrence folds the inhibited rules:
+/// anywhere on the host, or only deliveries with the same `scope` (a source).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InhibitionScope {
+    #[default]
+    Host,
+    Source,
+}
+/// What only a shipped rule may declare, because it encodes product knowledge.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Shipped {
+    #[serde(default)]
+    pub urgency: Urgency,
+    /// Names of the same product's rules folded into this rule's notification
+    /// while it has an open current-state occurrence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inhibits: Vec<String>,
+    #[serde(default)]
+    pub inhibition_scope: InhibitionScope,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ActiveRule {
@@ -249,10 +378,22 @@ pub struct ActiveRule {
     pub via: String,
     /// The adapter marks queries over live state, independently of `for`.
     pub live: bool,
+    /// Urgency and inhibition, from the product's shipped table only.
+    #[serde(default)]
+    pub shipped: Shipped,
 }
 impl ActiveRule {
     pub fn current(&self) -> bool {
         self.live || self.rule.duration.0 > 0
+    }
+    /// Authored rules can neither set urgency nor inhibit other rules.
+    pub fn validate_authorship(&self) -> Result<(), InvalidRule> {
+        if self.author != Author::Shipped && self.shipped != Shipped::default() {
+            return Err(InvalidRule(
+                "only shipped rules declare urgency or inhibition".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -279,6 +420,10 @@ pub const FIELDS: &[(&str, &str)] = &[
         "handoffs per window; excess goes to next brief",
     ),
     ("scope", "brief routing scope"),
+    (
+        "to",
+        "recipients besides the operator's inbox: session:REF, @alias or role:NAME",
+    ),
     ("enabled", "whether this revision runs"),
 ];
 
@@ -292,6 +437,7 @@ pub fn effective_rules(
     for group in [shipped, authored] {
         let mut seen = BTreeSet::new();
         for rule in group {
+            rule.validate_authorship()?;
             let key = (rule.version.product.clone(), rule.rule.name.clone());
             if !seen.insert(key.clone()) {
                 return Err(InvalidRule("ambiguous rule name".into()));

@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 impl NotificationState {
     pub fn attempts(&self) -> &BTreeMap<String, Attempt> {
         &self.attempts
@@ -15,163 +16,27 @@ impl NotificationState {
             self.server_owner = owner;
         }
     }
-    /// Import an immutable handoff without creating a new attempt. Repeating the
-    /// same snapshot after local progress preserves that progress.
-    pub fn import_attempt(&mut self, mut attempt: Attempt) -> Result<ImportStatus, ImportError> {
-        if attempt.held.keys().any(|route| match route {
-            Route::Dbus => attempt.dbus != Some(DeliveryOutcome::Unknown),
-            Route::Command => attempt.command != Some(DeliveryOutcome::Unknown),
-            Route::Both => true,
-        }) {
-            return Err(ImportError::InvalidAttempt);
-        }
-        attempt.handoff = None;
-        let identity = blake3::hash(&serde_json::to_vec(&attempt).expect("attempt JSON"))
-            .to_hex()
-            .to_string();
-        if let Some(existing) = self.attempts.get(&attempt.notice.delivery_id) {
-            return if existing.handoff.as_ref() == Some(&identity) {
-                Ok(ImportStatus::Known)
-            } else {
-                Err(ImportError::Conflict)
-            };
-        }
-        attempt.handoff = Some(identity);
-        if attempt.server_owner.as_deref() != self.server_owner() {
-            attempt.notification_id = None;
-            attempt.shown = false;
-        }
-        if attempt.active
-            && let (Some(id), Some(slot)) =
-                (attempt.notification_id, attempt.notification_slot.clone())
-        {
-            if slot.starts_with("occurrence:") {
-                self.first_occurrence.insert(
-                    Self::group(&attempt.notice),
-                    attempt.notice.occurrence.clone(),
-                );
-            }
-            self.slots.insert(slot, id);
-            if attempt.shown {
-                self.shown_delivery
-                    .insert(id, attempt.notice.delivery_id.clone());
-            }
-        }
-        self.attempts
-            .insert(attempt.notice.delivery_id.clone(), attempt);
-        Ok(ImportStatus::Imported)
-    }
-    /// Stops this owner without rewriting the frozen handoff outcomes.
-    pub fn release(&mut self, id: &str) -> Option<Attempt> {
-        let attempt = self.attempts.get_mut(id)?;
-        if !attempt.active {
-            return None;
-        }
-        let original = attempt.clone();
-        attempt.active = false;
-        Some(original)
-    }
-    pub fn prepare_retry(&mut self, id: &str) -> Vec<NotificationReceipt> {
-        let Some(attempt) = self.attempts.get_mut(id) else {
-            return Vec::new();
-        };
-        if !attempt.active
-            || attempt.retried
-            || !matches!(attempt.dbus, Some(DeliveryOutcome::NotSent(_)))
-        {
-            return Vec::new();
-        }
-        attempt.retried = true;
-        attempt.dbus = Some(DeliveryOutcome::Unknown);
-        vec![receipt(attempt, Route::Dbus)]
-    }
-    pub fn group_members(&self, notice: &Notice) -> Vec<Notice> {
-        self.attempts
-            .values()
-            .filter(|a| {
-                a.active
-                    && a.notice.product == notice.product
-                    && a.notice.rule == notice.rule
-                    && a.notice.budget_passive_count.is_some()
-                        == notice.budget_passive_count.is_some()
-            })
-            .map(|a| a.notice.clone())
-            .collect()
-    }
-    pub fn hold(
-        &mut self,
-        id: &str,
-        routes: impl IntoIterator<Item = Route>,
-        until: i64,
-        policy: &str,
-    ) {
-        if let Some(a) = self.attempts.get_mut(id)
-            && a.active
-        {
-            for route in routes {
-                a.held.insert(
-                    route,
-                    HeldRoute {
-                        at: until,
-                        policy: policy.to_string(),
-                    },
-                );
-            }
-        }
-    }
-    pub fn held_until(&self, id: &str, route: Route) -> Option<&HeldRoute> {
-        self.attempts.get(id)?.held.get(&route)
-    }
-    pub fn next_hold(&self) -> Option<crate::Instant> {
-        self.attempts
-            .values()
-            .filter(|a| a.active)
-            .flat_map(|a| a.held.values())
-            .map(|held| held.at)
-            .min()
-    }
-    /// A due hold is converted to a terminal-on-crash unknown checkpoint before
-    /// the worker may send. Its next policy check may hold it again.
-    pub fn resume_holds(&mut self, now: crate::Instant) -> Vec<NotificationReceipt> {
-        let mut receipts = Vec::new();
-        for a in self.attempts.values_mut().filter(|a| a.active) {
-            let due: Vec<_> = a
-                .held
-                .iter()
-                .filter(|(_, held)| held.at <= now)
-                .map(|(route, _)| *route)
-                .collect();
-            for route in due {
-                a.held.remove(&route);
-                receipts.push(receipt(a, route));
-            }
-        }
-        receipts
-    }
     /// An already-shown group update is a new replace operation, whose unknown
     /// checkpoint must also be committed before touching the platform.
     pub fn prepare_refresh(&mut self, id: &str) -> Option<NotificationReceipt> {
         let a = self.attempts.get_mut(id)?;
-        if !a.active || a.dbus != Some(DeliveryOutcome::Delivered) {
+        if !a.active || a.desktop != Some(DeliveryOutcome::Delivered) {
             return None;
         }
-        a.dbus = Some(DeliveryOutcome::Unknown);
-        Some(receipt(a, Route::Dbus))
+        a.desktop = Some(DeliveryOutcome::Unknown);
+        Some(receipt(a, Outlet::Desktop))
     }
     pub fn presentation(&mut self, notice: &Notice, actions: bool) -> Presentation {
         let slot = self.slot(notice);
-        let data_loss = notice.data_loss
+        let critical = notice.critical
             || (slot.starts_with("summary:")
                 && self.attempts.values().any(|a| {
                     a.active
-                        && a.notice.budget_passive_count.is_none()
-                        && a.notice.data_loss
+                        && a.notice.critical
                         && a.notice.product == notice.product
                         && a.notice.rule == notice.rule
                 }));
-        let summary = if let Some(count) = notice.budget_passive_count {
-            format!("{count} notices held passive (interrupt budget spent)")
-        } else if slot.starts_with("summary:") {
+        let summary = if slot.starts_with("summary:") {
             format!(
                 "{}: {} open occurrences",
                 notice.summary,
@@ -181,8 +46,17 @@ impl NotificationState {
             notice.summary.clone()
         };
         let mut body = notice.body.clone();
+        for line in &notice.lines {
+            if !body.is_empty() {
+                body.push('\n');
+            }
+            body.push_str("└ ");
+            body.push_str(line);
+        }
         if !actions && !notice.command_hint.is_empty() {
-            body.push('\n');
+            if !body.is_empty() {
+                body.push('\n');
+            }
             body.push_str(&notice.command_hint);
         }
         Presentation {
@@ -190,13 +64,13 @@ impl NotificationState {
             slot,
             summary,
             body,
-            data_loss,
+            critical,
         }
     }
     pub fn completed(
         &mut self,
         id: &str,
-        route: Route,
+        outlet: Outlet,
         completion: Completion,
     ) -> NotificationReceipt {
         let Completion {
@@ -206,7 +80,7 @@ impl NotificationState {
             slot,
         } = completion;
         let notice = self.attempts[id].notice.clone();
-        if outcome == DeliveryOutcome::Delivered && route == Route::Dbus {
+        if outcome == DeliveryOutcome::Delivered && outlet == Outlet::Desktop {
             self.replaced(&notice);
         }
         if let (Some(id), Some(slot)) = (notification_id, slot.as_ref()) {
@@ -221,9 +95,8 @@ impl NotificationState {
             }
         }
         let attempt = self.attempts.get_mut(id).expect("existing attempt");
-        attempt.held.remove(&route);
-        if route == Route::Dbus {
-            attempt.dbus = Some(outcome.clone());
+        if outlet == Outlet::Desktop {
+            attempt.desktop = Some(outcome.clone());
             attempt.notification_id = notification_id;
             attempt.notification_slot = slot;
             attempt.shown = outcome == DeliveryOutcome::Delivered && notification_id.is_some();
@@ -231,8 +104,10 @@ impl NotificationState {
         } else {
             attempt.command = Some(outcome);
         }
-        receipt(attempt, route)
+        receipt(attempt, outlet)
     }
+    /// The condition ended or the operator acted: stop this occurrence and
+    /// close its notification unless another active notice still shows there.
     pub fn deactivate(&mut self, id: &str) -> Cancellation {
         let Some(notice) = self.attempts.get(id).map(|a| a.notice.clone()) else {
             return Cancellation::default();
@@ -245,20 +120,19 @@ impl NotificationState {
             .filter(|a| same_occurrence(&a.notice, &notice))
         {
             a.active = false;
-            a.held.clear();
             result.deactivated.push(a.notice.delivery_id.clone());
             if let Some(id) = a.notification_id {
                 ids.insert(id);
             }
-            for route in [Route::Dbus, Route::Command] {
-                let outcome = if route == Route::Dbus {
-                    &mut a.dbus
+            for outlet in [Outlet::Desktop, Outlet::Command] {
+                let outcome = if outlet == Outlet::Desktop {
+                    &mut a.desktop
                 } else {
                     &mut a.command
                 };
                 if outcome.is_some() && *outcome != Some(DeliveryOutcome::Delivered) {
                     *outcome = Some(DeliveryOutcome::Cancelled);
-                    result.receipts.push(receipt(a, route));
+                    result.receipts.push(receipt(a, outlet));
                 }
             }
         }
@@ -275,11 +149,10 @@ impl NotificationState {
         }
         result
     }
+    /// After an occurrence of a rule closes: promote the next open occurrence
+    /// into the rule's first notification, refresh or close its summary.
     pub fn group_update(&mut self, notice: &Notice) -> GroupUpdate {
         let mut result = GroupUpdate::default();
-        if notice.budget_passive_count.is_some() {
-            return result;
-        }
         let group = Self::group(notice);
         let open = self.open_occurrences(notice);
         let first = self.first_occurrence.get(&group).cloned();
@@ -305,8 +178,7 @@ impl NotificationState {
         }
         let eligible = |a: &&Attempt| {
             a.active
-                && a.dbus == Some(DeliveryOutcome::Delivered)
-                && a.notice.budget_passive_count.is_none()
+                && a.desktop == Some(DeliveryOutcome::Delivered)
                 && a.notice.product == notice.product
                 && a.notice.rule == notice.rule
         };
@@ -334,49 +206,56 @@ impl NotificationState {
         }
         result
     }
-    pub fn begin(&mut self, notice: Notice, route: Route) -> Vec<NotificationReceipt> {
-        if self.attempts.contains_key(&notice.delivery_id)
-            || (!notice.interrupt && notice.budget_passive_count.is_none())
+    /// Records unknown for each outlet before any effect. A later showing of
+    /// the same delivery (a snooze ending) replaces its attempt.
+    pub fn begin(&mut self, notice: Notice) -> Vec<NotificationReceipt> {
+        if self
+            .attempts
+            .get(&notice.delivery_id)
+            .is_some_and(|existing| existing.notice.showing >= notice.showing)
+            || notice.outlets == Outlets::default()
         {
             return Vec::new();
         }
         let mut attempt = Attempt {
+            desktop: notice.outlets.desktop.then_some(DeliveryOutcome::Unknown),
+            command: notice.outlets.command.then_some(DeliveryOutcome::Unknown),
             notice,
-            dbus: None,
-            command: None,
             notification_id: None,
             notification_slot: None,
             shown: false,
             retried: false,
             active: true,
             server_owner: None,
-            handoff: None,
-            held: BTreeMap::new(),
         };
-        let mut receipts = Vec::new();
-        if matches!(route, Route::Dbus | Route::Both) {
-            attempt.dbus = Some(DeliveryOutcome::Unknown);
-            receipts.push(receipt(&attempt, Route::Dbus));
+        if let Some(previous) = self.attempts.get(&attempt.notice.delivery_id) {
+            attempt.notification_id = previous.notification_id;
+            attempt.notification_slot = previous.notification_slot.clone();
         }
-        if matches!(route, Route::Command | Route::Both) {
-            attempt.command = Some(DeliveryOutcome::Unknown);
-            receipts.push(receipt(&attempt, Route::Command));
+        let mut receipts = Vec::new();
+        if attempt.desktop.is_some() {
+            receipts.push(receipt(&attempt, Outlet::Desktop));
+        }
+        if attempt.command.is_some() {
+            receipts.push(receipt(&attempt, Outlet::Command));
         }
         self.attempts
             .insert(attempt.notice.delivery_id.clone(), attempt);
         receipts
     }
+    /// Called when the notification service appears. Each explicit desktop
+    /// failure is retried once under its identity; unknown never is.
     pub fn server_appeared(&mut self) -> Vec<NotificationReceipt> {
         self.invalidate_server();
         let mut receipts = Vec::new();
         for attempt in self.attempts.values_mut() {
             if attempt.active
                 && !attempt.retried
-                && matches!(&attempt.dbus, Some(DeliveryOutcome::NotSent(_)))
+                && matches!(&attempt.desktop, Some(DeliveryOutcome::NotSent(_)))
             {
                 attempt.retried = true;
-                attempt.dbus = Some(DeliveryOutcome::Unknown);
-                receipts.push(receipt(attempt, Route::Dbus));
+                attempt.desktop = Some(DeliveryOutcome::Unknown);
+                receipts.push(receipt(attempt, Outlet::Desktop));
             }
         }
         receipts
@@ -390,25 +269,19 @@ impl NotificationState {
         }
     }
     pub(super) fn group(notice: &Notice) -> String {
-        // JSON tuples keep product/rule/occurrence separators unambiguous.
+        // JSON tuples keep product/rule separators unambiguous.
         serde_json::to_string(&(&notice.product, &notice.rule)).expect("string tuple")
     }
     pub(super) fn open_occurrences(&self, notice: &Notice) -> BTreeSet<String> {
         self.attempts
             .values()
             .filter(|a| {
-                a.active
-                    && a.notice.budget_passive_count.is_none()
-                    && a.notice.product == notice.product
-                    && a.notice.rule == notice.rule
+                a.active && a.notice.product == notice.product && a.notice.rule == notice.rule
             })
             .map(|a| a.notice.occurrence.clone())
             .collect()
     }
     pub(super) fn slot(&mut self, notice: &Notice) -> String {
-        if notice.budget_passive_count.is_some() {
-            return "budget".into();
-        }
         let group = Self::group(notice);
         let first = self
             .first_occurrence
@@ -439,12 +312,14 @@ impl NotificationState {
             .filter(|a| a.active && a.notification_id == Some(notification_id))
         {
             let event = match &event {
-                DesktopEvent::OpenReference { .. }
-                    if self.shown_delivery.get(&notification_id)
-                        == Some(&attempt.notice.delivery_id) =>
+                DesktopEvent::OpenReference {
+                    activation_token, ..
+                } if self.shown_delivery.get(&notification_id)
+                    == Some(&attempt.notice.delivery_id) =>
                 {
                     DesktopEvent::OpenReference {
                         reference: attempt.notice.reference.clone(),
+                        activation_token: activation_token.clone(),
                     }
                 }
                 DesktopEvent::OpenReference { .. } => DesktopEvent::Seen,
@@ -456,7 +331,7 @@ impl NotificationState {
             ) {
                 attempt.active = false;
             }
-            let mut receipt = receipt(attempt, Route::Dbus);
+            let mut receipt = receipt(attempt, Outlet::Desktop);
             receipt.event = Some(event);
             receipt.via = Some("desktop".into());
             receipts.push(receipt);
@@ -479,18 +354,15 @@ impl NotificationState {
     }
 }
 fn same_occurrence(a: &Notice, b: &Notice) -> bool {
-    a.product == b.product
-        && a.rule == b.rule
-        && a.occurrence == b.occurrence
-        && a.budget_passive_count.is_some() == b.budget_passive_count.is_some()
+    a.product == b.product && a.rule == b.rule && a.occurrence == b.occurrence
 }
 
-fn receipt(attempt: &Attempt, route: Route) -> NotificationReceipt {
+fn receipt(attempt: &Attempt, outlet: Outlet) -> NotificationReceipt {
     NotificationReceipt {
         delivery_id: attempt.notice.delivery_id.clone(),
-        route,
-        outcome: if route == Route::Dbus {
-            attempt.dbus.clone()
+        outlet,
+        outcome: if outlet == Outlet::Desktop {
+            attempt.desktop.clone()
         } else {
             attempt.command.clone()
         }
@@ -518,19 +390,7 @@ pub struct Presentation {
     pub replaces: u32,
     pub summary: String,
     pub body: String,
-    pub data_loss: bool,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ImportStatus {
-    Imported,
-    Known,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ImportError {
-    Conflict,
-    InvalidAttempt,
+    pub critical: bool,
 }
 
 /// The platform result, applied without selecting a new effect.
@@ -540,17 +400,3 @@ pub struct Completion {
     pub server_owner: Option<String>,
     pub slot: Option<String>,
 }
-
-impl std::fmt::Display for ImportError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Conflict => {
-                f.write_str("notification attempt identity reused with a different body")
-            }
-            Self::InvalidAttempt => {
-                f.write_str("held routes must name an original unknown attempt")
-            }
-        }
-    }
-}
-impl std::error::Error for ImportError {}
