@@ -122,9 +122,12 @@ check one law), and the laws that have none. It is a report and fails nothing;
 a law without a test is a gap for the area's owner.
 
 A law's stored key is `<scope>.<area>.<name>` in lowercase with hyphens. The
-scope says whose law it is: `pl.` for Polylogue, `sx.` for Sinex, and the
-shared suites' own scopes (`ql.`, `sig.`, `joint.`, `authored.`, `elicit.`)
-for laws that both products run. A page omits the scope it belongs to, so
+scope says whose law it is: `pl.` for Polylogue, `sx.` for Sinex, and for
+laws both products run, the scope of the shared page that states them: a
+common crate's own scope (`ql.` for query-language, `sig.` for signals,
+`authored.`, `ranking.`, `references.`, `scoring.` and so on), or a named
+shared suite (`joint.` for the joint web laws, `elicit.` for elicitation).
+A page omits the scope it belongs to, so
 `late-is-passive` on the signals page is stored as `sig.late-is-passive`, and
 a law that two products share has one key in the shared suite instead of two
 product keys.
