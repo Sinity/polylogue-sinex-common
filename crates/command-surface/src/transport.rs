@@ -545,11 +545,8 @@ pub fn quote_argument(value: &str) -> String {
 impl OperationTable {
     pub fn cli_command(&self, request: &RunnableRequest) -> Result<String, Failure> {
         let spec = self
-            .descriptions()
-            .into_iter()
-            .find(|d| d.spec.name == request.operation)
-            .ok_or_else(|| bad_request("unknown operation"))?
-            .spec;
+            .spec_named(&request.operation)
+            .ok_or_else(|| bad_request("unknown operation"))?;
         let mut words = vec![quote_argument(&self.product)];
         words.extend(spec.command.iter().map(|s| quote_argument(s)));
         words.push("--request".into());

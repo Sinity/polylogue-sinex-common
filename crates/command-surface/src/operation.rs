@@ -401,15 +401,15 @@ impl OperationTable {
     pub fn describe(&self) -> impl Iterator<Item = &OperationDescription> {
         self.operations.iter().map(|op| op.description())
     }
+    /// The named operation's spec, borrowed from the table without cloning.
+    pub fn spec_named(&self, name: &str) -> Option<&OperationSpec> {
+        self.describe()
+            .find(|d| d.spec.name == name)
+            .map(|d| &d.spec)
+    }
     pub fn deadline(&self, request: &RunnableRequest) -> Option<Duration> {
-        self.descriptions()
-            .into_iter()
-            .find(|d| d.spec.name == request.operation)
-            .and_then(|d| {
-                request
-                    .deadline
-                    .duration(self.deadlines.get(d.spec.latency))
-            })
+        self.spec_named(&request.operation)
+            .and_then(|spec| request.deadline.duration(self.deadlines.get(spec.latency)))
     }
     pub fn socket_timeout(&self, request: &RunnableRequest) -> Option<Duration> {
         self.deadline(request)

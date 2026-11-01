@@ -107,15 +107,12 @@ impl Action {
         key: Option<String>,
     ) -> Result<Self, String> {
         let spec = table
-            .descriptions()
-            .into_iter()
-            .find(|description| description.spec.name == request.operation)
-            .ok_or("action is absent from the operation table")?
-            .spec;
+            .spec_named(&request.operation)
+            .ok_or("action is absent from the operation table")?;
         let cli = table
             .cli_command(request)
             .map_err(|error| error.to_string())?;
-        Self::from_operation(&spec, availability, request, cli, key)
+        Self::from_operation(spec, availability, request, cli, key)
     }
     pub fn from_operation(
         spec: &command_surface::OperationSpec,
