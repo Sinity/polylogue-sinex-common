@@ -52,6 +52,30 @@ mechanic and nothing else in the shared crates.
 | bound query | a query whose source output scopes and suffix fields have passed shared binding |
 | time bound | a `since` lower bound or `until` exclusive upper bound, preserved as its own query operation |
 
+## Authored records
+
+| Name | Meaning |
+|---|---|
+| authored record | anything a person or agent writes, in either product; shares the header and rules of the `authored` crate |
+| header | `{root, rev, kind, key, value, author, via, at, revises, withdraws}`, the part every authored record has |
+| root | the ID of a record's first revision, which names the record |
+| revision | one version of a record, `<root>@<rev>` |
+| withdrawal | a record that withdraws revisions or whole roots; withdrawing a withdrawal restores |
+| withdrawn | named by a withdrawal that is not itself withdrawn |
+| current | not withdrawn, and no descendant through `revises` is not withdrawn |
+| head | a current revision; two heads of one record are a conflict |
+| conflict | two or more current revisions of one record, resolved by one revision of every head |
+| base | a revision a write revises |
+| stale | a base that is no longer current: a command naming it is refused, markup and imports fork |
+| affected roots | the roots whose currency can change when a record is added |
+| arrival | how a request arrived: the computed author, the channel, the writer's time and the stale rule |
+| write ID | the ID of the n-th write of a request, `<request>.<n>`; a request of one write uses the request ID; a request's writes are placed together or not at all |
+| request digest | the hash of a request's content with keys sorted, for idempotent retries |
+| uniqueness key | the components that say which records occupy the same uniqueness slot |
+| uniqueness slot | one value of a kind's uniqueness key; one record holds it, or a write into it revises or answers "already" |
+| order key | a base-62 fraction that orders records; a key exists between any two |
+| sort key | an order key with the record root that breaks ties |
+
 ## Operations and transport
 
 | Name | Meaning |

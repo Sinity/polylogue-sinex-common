@@ -10,6 +10,7 @@ Rust crates and development tooling shared by
 | [`query-language`](crates/query-language/README.md) | the shared grammar and spelling, the syntax tree's meaning, time expressions, the logical day, cursors, the completer and the shared law suite |
 | [`command-surface`](crates/command-surface/README.md) | the `Operation` trait, failures with their exit and HTTP table, request and answer envelopes, latency classes and deadlines, server-sent-event framing, the status figure format |
 | [`web-shell`](crates/web-shell/README.md) | the rendering model, visual tokens, the shared key table, palette, copy, page frame, live fragments and windowed lists |
+| [`authored`](crates/authored/README.md) | the authored-record header, currency by the descendant rule, stale-base checks, atomic requests, uniqueness slots, order keys and the shared history generator |
 | [`signals`](crates/signals/README.md) | the pure signal rule schema, evaluator, host policy and delivery checkpoint types |
 | [`signal-delivery`](crates/signal-delivery/README.md) | the desktop and command worker over the pure signal checkpoint |
 | [`devkit`](crates/devkit/README.md), [`devkit-macros`](crates/devkit-macros) | the core of each product's `xtask`: runs and their history, changed-package selection, test databases and NATS, fixtures, bench, coverage, fuzz and VM runners |
@@ -23,13 +24,16 @@ the shared mechanics.
 
 Code lives here only where the two products' mechanics are identical: storing
 bytes, the query language's grammar and meaning, how operations travel and
-fail, the web front end's shell, signal evaluation, and development runs.
-Shared signals also mean one budget for the operator's attention on a host.
+fail, the rules of authored records, the web front end's shell, signal
+evaluation, and development runs. Shared signals also mean one budget for the
+operator's attention on a host.
 
 Concepts stay in their product even where the words are alike. Polylogue's
-authored records and their currency, annotations, Pages and measures, and
-Sinex's privacy rules, are different things, and neither product's concept is
-bent to fit the other. Each product supplies its own catalog, failure kinds,
+assertion kinds, annotations, Pages and measures, Sinex's library precedence
+and privacy rules, are different things, and neither product's concept is
+bent to fit the other. What both products' authored records share is their
+header and rules (currency, stale base, atomic requests, uniqueness, order);
+each keeps its own kinds and storage. Each product supplies its own catalog, failure kinds,
 budgets, views, rules and occurrence keys to the shared mechanics; each
 crate's page says what a product must supply.
 

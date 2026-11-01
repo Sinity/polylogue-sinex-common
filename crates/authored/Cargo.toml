@@ -1,0 +1,28 @@
+[package]
+name = "authored"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Authored-record rules shared by Polylogue and Sinex: currency, stale base, atomic requests, uniqueness slots and order keys"
+
+[features]
+# The shared history generator, for property tests in this crate and in the
+# products that check their stored indexes against the currency function.
+generator = ["dep:proptest"]
+
+[dependencies]
+blake3 = "1"
+proptest = { version = "1", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+proptest = "1"
+
+[[test]]
+name = "generated"
+required-features = ["generator"]
