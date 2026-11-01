@@ -204,7 +204,15 @@ impl Parser<'_> {
 /// other operand: a bare number beside money is money (`cost - 2.90`), so
 /// money needs no unit suffix in an expression.
 pub(super) fn operand_kind(expression: &Expression, other: &FieldKind) -> FieldKind {
+    // The formatter quotes every scalar it renders, so a comparison's literal
+    // is typed by its text whether or not it was quoted.
     let kind = match expression {
+        Expression::Value {
+            value: Value::Scalar { text, .. },
+        } => literal_kind(&Value::Scalar {
+            text: text.clone(),
+            quoted: false,
+        }),
         Expression::Value { value } => literal_kind(value),
         _ => return FieldKind::Json,
     };

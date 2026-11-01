@@ -196,10 +196,21 @@ fn format_roundtrip_time_bounds_precede_initial_field_guard() {
             .clone()
             .unwrap();
         for (keyword, upper, until) in [("since", "SINCE", false), ("until", "UNTIL", true)] {
-            for spelling in [
-                format!("{keyword}:2026-10-02"),
+            // The one spelling is `since:T` (README grammar, `"since:" time`);
+            // the spaced form is refused with the joined one.
+            for spaced in [
                 format!("{keyword} 2026-10-02"),
                 format!("{upper} 2026-10-02"),
+            ] {
+                let error = parse(&spaced, &catalog).unwrap_err();
+                assert_eq!(
+                    error.suggestion.as_deref(),
+                    Some(format!("{keyword}:2026-10-02").as_str())
+                );
+            }
+            for spelling in [
+                format!("{keyword}:2026-10-02"),
+                format!("{upper}:2026-10-02"),
             ] {
                 let query = parse(&spelling, &catalog).unwrap();
                 let Source::Unit {

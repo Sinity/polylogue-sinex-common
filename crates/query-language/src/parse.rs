@@ -792,7 +792,7 @@ impl Parser<'_> {
         if !followed {
             return Ok(());
         }
-        Err(Error::new(
+        let error = Error::new(
             ErrorKind::InvalidQuery,
             format!(
                 "`{}` between conditions reads as a search word; boolean operators are AND, OR and NOT in capitals",
@@ -801,8 +801,14 @@ impl Parser<'_> {
             t.span.start,
         )
         .length(t.text.len())
-        .suggestion(self.replace(t.span, &t.text.to_uppercase()))
-        .hint("quote the word to search for it"))
+        .hint("quote the word to search for it");
+        // Suggest the capitalised query only when it is itself a query.
+        let capitalised = self.replace(t.span, &t.text.to_uppercase());
+        Err(if parse(&capitalised, self.catalog).is_ok() {
+            error.suggestion(capitalised)
+        } else {
+            error
+        })
     }
     fn atom(&mut self, scope: &Scope) -> Result<Condition, Error> {
         let start = self.pos();

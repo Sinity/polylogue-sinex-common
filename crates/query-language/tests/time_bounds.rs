@@ -29,8 +29,13 @@ fn both_catalogs_preserve_keyword_and_colon_bounds_as_typed_nodes() {
         let main_time = catalog.unit(&unit).unwrap().main_time.as_ref().unwrap();
         for (keyword, until) in [("since", false), ("until", true)] {
             for value in ["2026-10-05", "2026-10-05T12:00Z", "7d", "\"this week\""] {
-                let keyword_query =
-                    parse(&format!("{unit} where {keyword} {value}"), &catalog).unwrap();
+                // The spaced form is refused with the one spelling, `since:T`
+                // (README grammar, `"since:" time`).
+                let error =
+                    parse(&format!("{unit} where {keyword} {value}"), &catalog).unwrap_err();
+                let joined = format!("{unit} where {keyword}:{value}");
+                assert_eq!(error.suggestion.as_deref(), Some(joined.as_str()));
+                let keyword_query = parse(&joined, &catalog).unwrap();
                 let colon_query =
                     parse(&format!("{unit} where {keyword}:{value}"), &catalog).unwrap();
                 assert_eq!(
