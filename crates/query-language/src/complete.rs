@@ -509,7 +509,7 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
                     )
                 {
                     let (unit, sources) = row_scope(&text[start..at], catalog);
-                    let unit = unit.unwrap_or_else(|| "$deferred_completion".into());
+                    let unit = unit.unwrap_or_else(|| "$unknown_completion".into());
                     let entry = stack.last_mut().unwrap();
                     entry.unit = unit;
                     entry.inherited = true;
@@ -530,8 +530,8 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
     let inner_first = inner.split_whitespace().next().unwrap_or("");
     let inner_source =
         catalog.unit(inner_first).is_some() || crate::parse::starts_with_source(inner, catalog);
-    let inherited_deferred = explicit.is_some_and(|frame| {
-        frame.inherited && frame.unit == "$deferred_completion" && !inner_source
+    let inherited_unknown = explicit.is_some_and(|frame| {
+        frame.inherited && frame.unit == "$unknown_completion" && !inner_source
     });
     let current = if let Some(frame) = explicit {
         if frame.inherited && inner_source {
@@ -549,7 +549,7 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
     let parsed = parse_prefix(&current, catalog);
     // A source-like prefix cannot acquire the default unit's fields merely
     // because an unfinished suffix forced the parser to shorten its input.
-    let source_like = crate::parse::starts_with_source(&current, catalog) || inherited_deferred;
+    let source_like = crate::parse::starts_with_source(&current, catalog) || inherited_unknown;
     let mut scope = if source_like {
         CompletionScope::default()
     } else {

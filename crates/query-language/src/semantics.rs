@@ -11,8 +11,8 @@
 //! steps are counted in), its order within that parent and its time extent;
 //! enumeration order has no meaning.
 use crate::ast::*;
-use crate::catalog::NaturalMatch;
-use crate::coverage::Coverage;
+use crate::catalog::{Catalog, NaturalMatch};
+use crate::coverage::CoverageState;
 use crate::{Error, ErrorKind};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -377,9 +377,9 @@ pub fn fill(
     key: &str,
     aggregates: &[Aggregate],
     buckets: &[Scalar],
-    coverage: impl Fn(&Scalar) -> Coverage,
+    coverage: impl Fn(&Scalar) -> CoverageState,
 ) -> Vec<Row> {
-    let label = |row: &mut Row, state: &Coverage| {
+    let label = |row: &mut Row, state: &CoverageState| {
         row.fields.insert(
             crate::coverage::STATE_FIELD.into(),
             Scalar::Text(state.state().into()),
@@ -406,7 +406,7 @@ pub fn fill(
             }
             None => {
                 let zero = |counting: bool| {
-                    if counting && state.observed() {
+                    if counting && state.is_complete() {
                         Scalar::Number(0.)
                     } else {
                         Scalar::Unknown
@@ -444,9 +444,10 @@ pub fn fill(
 
 pub struct ReferenceEvaluator<'a> {
     pub data: &'a Dataset,
-    /// The natural match of each field written `field:value`; a field not
-    /// listed matches by equality.
-    pub natural: BTreeMap<String, NaturalMatch>,
+    /// The natural match of each field written `field:value`, read from a
+    /// catalog's declarations; a field the catalog does not declare matches
+    /// by equality.
+    natural: BTreeMap<String, NaturalMatch>,
 }
 impl<'a> ReferenceEvaluator<'a> {
     pub fn new(data: &'a Dataset) -> Self {
@@ -455,8 +456,13 @@ impl<'a> ReferenceEvaluator<'a> {
             natural: BTreeMap::new(),
         }
     }
-    pub fn with_natural(mut self, field: impl Into<String>, kind: NaturalMatch) -> Self {
-        self.natural.insert(field.into(), kind);
+    /// Read each field's natural match from the catalog's declarations, by
+    /// field name; the oracle's fixtures name fields, not units.
+    pub fn with_catalog(mut self, catalog: &Catalog) -> Self {
+        for field in catalog.units.iter().flat_map(|unit| &unit.fields) {
+            self.natural
+                .insert(field.name.clone(), field.natural_match());
+        }
         self
     }
     fn relation(&self, unit: &str) -> Result<Vec<Row>, Error> {
@@ -786,9 +792,10 @@ impl<'a> ReferenceEvaluator<'a> {
             }) {
                 continue;
             }
-            // A coarse time joins only a window at least as wide as its period.
+            // A coarse time joins only a window at least as wide as its period;
+            // no window is wider than every period.
             if (a.coarse || b.coarse)
-                && window.is_none_or(|w| {
+                && window.is_some_and(|w| {
                     u128::from(w)
                         < (i128::from(a.end) - i128::from(a.start))
                             .unsigned_abs()
@@ -797,10 +804,18 @@ impl<'a> ReferenceEvaluator<'a> {
             {
                 continue;
             }
+            // A coarse time takes part by its whole period: the half-open
+            // stretch each side occupies, a precise time being one tick.
+            let (a_from, a_to) = if a.coarse {
+                (a.start, a.end)
+            } else {
+                (point, point + 1)
+            };
+            let b_to = if b.coarse { b.end } else { b.start + 1 };
             let matches = match relation {
                 OrderRelation::Near => true,
-                OrderRelation::Before => point < b.start,
-                OrderRelation::After => point > b.start,
+                OrderRelation::Before => a_to <= b.start,
+                OrderRelation::After => a_from >= b_to,
                 OrderRelation::During => {
                     if a.coarse {
                         a.start >= b.start && a.end <= b.end
@@ -1205,11 +1220,43 @@ impl<'a> ReferenceEvaluator<'a> {
         Ok(rows)
     }
     fn filter(&self, rows: Vec<Row>, c: &Condition) -> Result<Vec<Row>, Error> {
+        let mut orders = Vec::new();
+        collect_orders(c, &mut orders);
+        // One top-level order relation exposes its nearest inner row as
+        // `match.F` and, with a distance, the signed `offset`.
+        let exposed = match orders.as_slice() {
+            [
+                ConditionKind::Order {
+                    relation,
+                    query,
+                    within,
+                    at,
+                    ..
+                },
+            ] => Some((self.execute(query)?.rows, *relation, within.as_ref(), *at)),
+            _ => None,
+        };
         let mut selected = vec![];
-        for row in rows {
-            if self.condition(&row, c)?.matches() {
-                selected.push(row);
+        for mut row in rows {
+            if !self.condition(&row, c)?.matches() {
+                continue;
             }
+            if let Some((inner, relation, within, at)) = &exposed
+                && let Some((nearest, offset)) = self
+                    .related(&row, inner, *relation, *within, *at)?
+                    .and_then(|pairs| pairs.into_iter().next())
+            {
+                row.fields
+                    .insert("match.id".into(), Scalar::Text(nearest.id.clone()));
+                for (name, value) in &nearest.fields {
+                    row.fields.insert(format!("match.{name}"), value.clone());
+                }
+                if within.is_some() {
+                    row.fields
+                        .insert("offset".into(), Scalar::Number(offset as f64));
+                }
+            }
+            selected.push(row);
         }
         Ok(selected)
     }
@@ -1475,6 +1522,14 @@ fn apply_fusion(rows: Vec<Row>, lists: Vec<Vec<crate::fusion::Entry<String>>>) -
         .filter_map(|key| by_id.remove(key))
         .chain(unranked)
         .collect()
+}
+/// The order relations standing in a condition's top-level AND.
+fn collect_orders<'a>(condition: &'a Condition, out: &mut Vec<&'a ConditionKind>) {
+    match &condition.kind {
+        ConditionKind::And { conditions } => conditions.iter().for_each(|c| collect_orders(c, out)),
+        kind @ ConditionKind::Order { .. } => out.push(kind),
+        _ => {}
+    }
 }
 fn collect_qualifiers<'a>(condition: &'a Condition, out: &mut Vec<&'a Condition>) {
     match &condition.kind {

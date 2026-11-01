@@ -93,11 +93,26 @@ impl Parser<'_> {
                 left,
                 right,
             } => {
-                let left = self.expression_info(scope, left);
-                let right = self.expression_info(scope, right);
-                let kind =
-                    crate::scope::arithmetic_kind(*operator, &left.field.kind, &right.field.kind)
-                        .unwrap_or(FieldKind::Json);
+                let left_expression = left;
+                let right_expression = right;
+                let left = self.expression_info(scope, left_expression);
+                let right = self.expression_info(scope, right_expression);
+                let kind = crate::scope::arithmetic_kind(
+                    *operator,
+                    &operand_kind_in(
+                        *operator,
+                        left_expression,
+                        &left.field.kind,
+                        &right.field.kind,
+                    ),
+                    &operand_kind_in(
+                        *operator,
+                        right_expression,
+                        &right.field.kind,
+                        &left.field.kind,
+                    ),
+                )
+                .unwrap_or(FieldKind::Json);
                 FieldInfo {
                     field: Field {
                         name: expression.column(),
@@ -160,7 +175,7 @@ impl Parser<'_> {
                 .iter()
                 .map(|field| field.name.clone())
                 .collect()
-        } else if scope.deferred {
+        } else if scope.columns_unknown {
             BTreeSet::new()
         } else {
             self.catalog
@@ -183,6 +198,57 @@ impl Parser<'_> {
             unit: self.catalog.unit(&scope.unit).map(|unit| unit.name.clone()),
             fields: self.visible(scope).into(),
         }
+    }
+}
+/// The kind of one operand of a comparison or an addition, read against the
+/// other operand: a bare number beside money is money (`cost - 2.90`), so
+/// money needs no unit suffix in an expression.
+pub(super) fn operand_kind(expression: &Expression, other: &FieldKind) -> FieldKind {
+    let kind = match expression {
+        Expression::Value { value } => literal_kind(value),
+        _ => return FieldKind::Json,
+    };
+    if *other == FieldKind::Money && matches!(kind, FieldKind::Integer | FieldKind::Number) {
+        FieldKind::Money
+    } else {
+        kind
+    }
+}
+/// `operand_kind` inside arithmetic: only `+` and `-` read a bare number as
+/// money; `cost * 2` and `cost / 2` scale money by a plain number.
+pub(super) fn operand_kind_in(
+    operator: Arithmetic,
+    expression: &Expression,
+    kind: &FieldKind,
+    other: &FieldKind,
+) -> FieldKind {
+    if matches!(expression, Expression::Value { .. })
+        && matches!(operator, Arithmetic::Add | Arithmetic::Subtract)
+    {
+        operand_kind(expression, other)
+    } else {
+        kind.clone()
+    }
+}
+/// Whether values of the two kinds can be compared. Kinds without a
+/// dimension (text, documents, references, booleans) compare with any
+/// literal, which the catalog's own value checks govern; numbers, money,
+/// durations and times compare only within their dimension. A time compares
+/// with text, the spelling of dates and relative times.
+pub(super) fn comparable(left: &FieldKind, right: &FieldKind) -> bool {
+    use FieldKind::*;
+    let dimension = |kind: &FieldKind| match kind {
+        Integer | Number => Some(0),
+        Money => Some(1),
+        Duration => Some(2),
+        Time => Some(3),
+        _ => None,
+    };
+    match (dimension(left), dimension(right)) {
+        (Some(3), None) | (None, Some(3)) => true,
+        (Some(l), Some(r)) => l == r,
+        (Some(_), None) | (None, Some(_)) => matches!(left, Json) || matches!(right, Json),
+        (None, None) => true,
     }
 }
 /// The kind of an unquoted or quoted literal in an expression.

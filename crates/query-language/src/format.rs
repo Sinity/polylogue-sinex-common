@@ -166,8 +166,8 @@ impl Renderer<'_> {
                     other => self.expression(other)?,
                 }
             ),
-            ConditionKind::Since { value: literal, .. } => format!("since {}", value(literal)?),
-            ConditionKind::Until { value: literal, .. } => format!("until {}", value(literal)?),
+            ConditionKind::Since { value: literal, .. } => format!("since:{}", value(literal)?),
+            ConditionKind::Until { value: literal, .. } => format!("until:{}", value(literal)?),
             ConditionKind::Between { left, from, to } => format!(
                 "{} between {} and {}",
                 self.expression(left)?,

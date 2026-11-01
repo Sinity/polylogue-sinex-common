@@ -29,20 +29,22 @@ pub enum Source {
         name: String,
         arguments: Vec<Argument>,
         condition: Option<Condition>,
-        output: OutputBinding,
+        output: SourceColumns,
     },
     Result {
         reference: String,
         part: ResultPart,
         condition: Option<Condition>,
-        output: OutputBinding,
+        output: SourceColumns,
     },
 }
-/// Deferred output scopes are syntax only and must pass shared binding before execution.
+/// Whether a saved query's or kept result's columns were known when the
+/// text was read. A source whose columns are unknown is syntax only: binding
+/// against the catalog's declared outputs must resolve it before execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum OutputBinding {
-    Deferred,
+pub enum SourceColumns {
+    Unknown,
     Known,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

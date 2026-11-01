@@ -35,6 +35,9 @@ pub struct Vocabulary {
     /// A second number of the same kind, the end of `number`'s interval.
     pub end: String,
     pub category: String,
+    /// A short-text field of `outer`, whose natural match is a
+    /// case-insensitive substring.
+    pub text: String,
 }
 impl Default for Vocabulary {
     fn default() -> Self {
@@ -44,6 +47,7 @@ impl Default for Vocabulary {
             number: "value".into(),
             end: "end".into(),
             category: "category".into(),
+            text: "title".into(),
         }
     }
 }
@@ -241,6 +245,33 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
         ),
         vec![rows[0].clone(), rows[1].clone()],
     ));
+    // `field:value` on short text is a case-insensitive substring, not
+    // equality.
+    let titled = |id: &str, title: &str| Row::new(id).with(&v.text, title);
+    output.push(Case {
+        law: "ql.match.natural".into(),
+        query: query(
+            &v.outer,
+            Some(c(ConditionKind::Match {
+                field: v.text.clone(),
+                value: Value::scalar("parser"),
+            })),
+            vec![],
+        ),
+        fixture: BTreeMap::from([(
+            v.outer.clone(),
+            vec![
+                titled("fix", "Fix the Parser"),
+                titled("plan", "parse later"),
+                titled("same", "parser"),
+                Row::new("untitled"),
+            ],
+        )]),
+        expected: answer(vec![
+            titled("fix", "Fix the Parser"),
+            titled("same", "parser"),
+        ]),
+    });
     let doubled = Expression::Arithmetic {
         operator: Arithmetic::Multiply,
         left: Box::new(Expression::field(&v.number)),
@@ -451,7 +482,9 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
         law: "ql.order.semijoin".into(),
         query: query(&v.outer, Some(near_condition.clone()), vec![]),
         fixture: timed.clone(),
-        expected: answer(vec![outer.clone()]),
+        expected: answer(vec![
+            outer.clone().with("match.id", "near-a").with("offset", -1.),
+        ]),
     });
     output.push(Case {
         law: "ql.order.semijoin".into(),
@@ -474,8 +507,102 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     output.push(case(
         "ql.order.steps",
         query(&v.children, Some(after_one), vec![]),
-        vec![children[1].clone()],
+        vec![
+            children[1]
+                .clone()
+                .with("match.id", "x")
+                .with(format!("match.{}", v.number), 1.)
+                .with("offset", -1.),
+        ],
     ));
+    // A coarse time takes part by its whole period: a day that contains an
+    // event is neither before nor after it, and a window narrower than the
+    // day leaves the day out.
+    let mut day = Row::new("day");
+    day.time = Some(Extent {
+        start: 0,
+        end: 10,
+        coarse: true,
+    });
+    let point = at("point", 5);
+    let coarse_fixture = BTreeMap::from([
+        (v.outer.clone(), vec![day.clone(), point.clone()]),
+        (v.children.clone(), vec![at("early", 3), at("late", 15)]),
+    ]);
+    let order = |relation, within: Option<u64>| {
+        c(ConditionKind::Order {
+            relation,
+            query: Box::new(query(&v.children, None, vec![])),
+            within: within.map(|w| Distance::Time {
+                duration: Value::scalar(w.to_string()),
+            }),
+            at: TimePoint::When,
+            scope: None,
+        })
+    };
+    let matched = |row: &Row, inner: &str, offset: Option<f64>| {
+        let row = row.clone().with("match.id", inner);
+        match offset {
+            Some(offset) => row.with("offset", offset),
+            None => row,
+        }
+    };
+    for (relation, within, expected) in [
+        (
+            OrderRelation::Before,
+            None,
+            vec![matched(&day, "late", None), matched(&point, "late", None)],
+        ),
+        (
+            OrderRelation::Before,
+            Some(20),
+            vec![
+                matched(&day, "late", Some(15.)),
+                matched(&point, "late", Some(10.)),
+            ],
+        ),
+        (
+            OrderRelation::After,
+            None,
+            vec![matched(&point, "early", None)],
+        ),
+        (
+            OrderRelation::Near,
+            Some(5),
+            vec![matched(&point, "early", Some(-2.))],
+        ),
+    ] {
+        output.push(Case {
+            law: "ql.order.coarse".into(),
+            query: query(&v.outer, Some(order(relation, within)), vec![]),
+            fixture: coarse_fixture.clone(),
+            expected: answer(expected),
+        });
+    }
+    // Ranking orders the selected rows and never changes which are selected.
+    let east = || Some(comparison(&v.category, Op::Eq, "east"));
+    output.push(case(
+        "ql.rank.membership",
+        query(&v.outer, east(), vec![]),
+        vec![rows[0].clone(), rows[1].clone()],
+    ));
+    for (descending, expected) in [
+        (true, vec![rows[1].clone(), rows[0].clone()]),
+        (false, vec![rows[0].clone(), rows[1].clone()]),
+    ] {
+        output.push(case(
+            "ql.rank.membership",
+            query(
+                &v.outer,
+                east(),
+                vec![t(TransformKind::Combine {
+                    how: Combination::Fuse,
+                    query: Box::new(query(&v.outer, None, vec![sort(&v.number, descending)])),
+                })],
+            ),
+            expected,
+        ));
+    }
     output.push(case(
         "ql.order.steps",
         query(

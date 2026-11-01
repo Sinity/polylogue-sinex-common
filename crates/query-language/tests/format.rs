@@ -234,7 +234,7 @@ fn format_roundtrip_time_bounds_precede_initial_field_guard() {
         .units
         .iter_mut()
         .for_each(|unit| unit.main_time = None);
-    assert!(parse("since 2026-10-02", &no_time).is_err());
+    assert!(parse("since:2026-10-02", &no_time).is_err());
 }
 
 #[test]

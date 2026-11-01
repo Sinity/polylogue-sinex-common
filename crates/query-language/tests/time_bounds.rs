@@ -60,8 +60,8 @@ fn both_catalogs_preserve_keyword_and_colon_bounds_as_typed_nodes() {
 fn bound_identity_is_distinct_from_explicit_comparison_and_survives_serde() {
     let catalog = support::sinex();
     for (bound, comparison) in [
-        ("until 2026-10-05", "when < 2026-10-05"),
-        ("since 2026-10-05", "when >= 2026-10-05"),
+        ("until:2026-10-05", "when < 2026-10-05"),
+        ("since:2026-10-05", "when >= 2026-10-05"),
     ] {
         let bound = parse(&format!("events where {bound}"), &catalog).unwrap();
         let comparison = parse(&format!("events where {comparison}"), &catalog).unwrap();
@@ -76,8 +76,8 @@ fn bound_identity_is_distinct_from_explicit_comparison_and_survives_serde() {
         let decoded: Query = serde_json::from_value(serde_json::to_value(&bound).unwrap()).unwrap();
         assert_eq!(decoded, bound);
     }
-    let a = parse("events where until 2026-10-05T12:00Z", &catalog).unwrap();
-    let b = parse("events where until 2026-10-05T14:00+02:00", &catalog).unwrap();
+    let a = parse("events where until:2026-10-05T12:00Z", &catalog).unwrap();
+    let b = parse("events where until:2026-10-05T14:00+02:00", &catalog).unwrap();
     assert_eq!(
         question_id(&a, &catalog, &BTreeMap::new()).unwrap(),
         question_id(&b, &catalog, &BTreeMap::new()).unwrap()
@@ -136,5 +136,5 @@ fn bounds_keep_unit_visitors_and_formatter_field_bindings() {
     }
     assert!(format_query(&invalid, &catalog).is_err());
     let sinex = support::sinex();
-    assert!(parse("queries where until 2026-10-05", &sinex).is_err());
+    assert!(parse("queries where until:2026-10-05", &sinex).is_err());
 }

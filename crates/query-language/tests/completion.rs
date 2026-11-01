@@ -280,7 +280,7 @@ fn grouped_completion_includes_implicit_count_before_explicit_aggregation() {
 #[test]
 fn saved_output_completion_uses_typed_snapshot_fields_and_every_value_path() {
     use query_language::{
-        ast::OutputBinding,
+        ast::SourceColumns,
         catalog::{Field, FieldKind, OutputSchema, OutputSource, SourceOutput},
         complete::CompletionKind,
         parse::parse,
@@ -376,7 +376,7 @@ fn saved_output_completion_uses_typed_snapshot_fields_and_every_value_path() {
         assert!(matches!(
             parse(&applied, &catalog).unwrap().source,
             query_language::ast::Source::Saved {
-                output: OutputBinding::Known,
+                output: SourceColumns::Known,
                 ..
             }
         ));
@@ -384,7 +384,7 @@ fn saved_output_completion_uses_typed_snapshot_fields_and_every_value_path() {
 }
 
 #[test]
-fn deferred_and_incomplete_saved_or_result_sources_never_offer_default_fields() {
+fn unknown_and_incomplete_saved_or_result_sources_never_offer_default_fields() {
     use query_language::complete::CompletionKind;
     for catalog in [support::polylogue(), support::sinex()] {
         for prefix in [

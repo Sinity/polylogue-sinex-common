@@ -49,7 +49,7 @@ fn result(reference: &str, part: ResultPart, fields: Vec<Field>) -> SourceOutput
     }
 }
 #[test]
-fn saved_suffix_is_deferred_then_bound_to_actual_typed_output() {
+fn saved_suffix_columns_are_unknown_then_bound_to_actual_typed_output() {
     let mut catalog = catalog();
     let parsed = parse(
         "query:failing session.repo:morrow | sort by count desc",
@@ -59,7 +59,7 @@ fn saved_suffix_is_deferred_then_bound_to_actual_typed_output() {
     assert!(matches!(
         parsed.source,
         Source::Saved {
-            output: OutputBinding::Deferred,
+            output: SourceColumns::Unknown,
             ..
         }
     ));
@@ -78,7 +78,7 @@ fn saved_suffix_is_deferred_then_bound_to_actual_typed_output() {
     assert!(matches!(
         bound.query().source,
         Source::Saved {
-            output: OutputBinding::Known,
+            output: SourceColumns::Known,
             ..
         }
     ));
@@ -168,7 +168,7 @@ fn kept_columns_and_quoted_literal_ids_keep_rows_and_matches_distinct() {
     )
     .unwrap();
     assert!(
-        matches!(&query.source, Source::Result { reference: value, part: ResultPart::Rows, output: OutputBinding::Known, .. } if value == reference)
+        matches!(&query.source, Source::Result { reference: value, part: ResultPart::Rows, output: SourceColumns::Known, .. } if value == reference)
     );
     let text = format_query(&query, &catalog).unwrap();
     assert_eq!(
@@ -181,7 +181,7 @@ fn kept_columns_and_quoted_literal_ids_keep_rows_and_matches_distinct() {
         matches.source,
         Source::Result {
             part: ResultPart::Matches,
-            output: OutputBinding::Deferred,
+            output: SourceColumns::Unknown,
             ..
         }
     ));
@@ -213,7 +213,7 @@ fn binding_checks_nested_sources_and_never_trusts_serialized_known_marker() {
     assert!(bind(&query, &catalog).is_ok());
     let mut forged = parse("result:missing", &catalog).unwrap();
     if let Source::Result { output, .. } = &mut forged.source {
-        *output = OutputBinding::Known;
+        *output = SourceColumns::Known;
     }
     let forged: Query = serde_json::from_value(serde_json::to_value(forged).unwrap()).unwrap();
     assert!(bind(&forged, &catalog).is_err());
@@ -336,8 +336,8 @@ fn nested_implicit_units_inherit_the_row_domain_and_explicit_units_keep_their_ow
     );
     assert!(bind(&explicit, &catalog).is_ok());
 
-    let deferred = parse("result:kept | where id in (outcome:error)", &catalog).unwrap();
-    assert!(bind(&deferred, &catalog).is_err());
+    let unbound = parse("result:kept | where id in (outcome:error)", &catalog).unwrap();
+    assert!(bind(&unbound, &catalog).is_err());
     catalog.source_outputs.push(SourceOutput {
         source: OutputSource::Result {
             reference: "result:kept".into(),
@@ -349,7 +349,7 @@ fn nested_implicit_units_inherit_the_row_domain_and_explicit_units_keep_their_ow
             main_time: None,
         },
     });
-    let bound = bind(&deferred, &catalog).unwrap();
+    let bound = bind(&unbound, &catalog).unwrap();
     let TransformKind::Where { condition } = &bound.query().transforms[0].kind else {
         panic!("where")
     };

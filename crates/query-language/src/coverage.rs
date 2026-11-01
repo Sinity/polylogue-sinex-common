@@ -1,11 +1,12 @@
-//! Coverage: whether a source observed a period, one vocabulary in both
+//! CoverageState: whether a source observed a period, one vocabulary in both
 //! products. `fill` labels every time bucket with one of these states, so a
 //! period a source did not watch reads as missing data, never as zero.
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+/// The state of one source over one interval.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "state", rename_all = "snake_case")]
-pub enum Coverage {
+pub enum CoverageState {
     /// The source observed the whole period; an empty bucket holds nothing.
     Complete,
     /// The source should have observed the period and did not.
@@ -22,7 +23,7 @@ pub enum Coverage {
     /// The source exists but could not be read.
     Unavailable { cause: String },
 }
-impl Coverage {
+impl CoverageState {
     /// The closed set of state names, as `fill` writes them to `coverage`.
     pub const STATES: [&'static str; 7] = [
         "complete",
@@ -52,8 +53,9 @@ impl Coverage {
             _ => None,
         }
     }
-    /// Only a completely observed period makes an empty bucket a known zero.
-    pub fn observed(&self) -> bool {
+    /// Only a completely observed period makes an empty bucket a known zero;
+    /// every other state makes a count over the period a lower bound.
+    pub const fn is_complete(&self) -> bool {
         matches!(self, Self::Complete)
     }
 }

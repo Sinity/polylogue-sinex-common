@@ -1,6 +1,6 @@
 use query_language::ast::*;
-use query_language::catalog::NaturalMatch;
-use query_language::coverage::Coverage;
+use query_language::catalog::{Field, FieldKind, NaturalMatch};
+use query_language::coverage::CoverageState;
 use query_language::cursor::{PageRequest, SealedCursor};
 use query_language::laws::{self, Compiler, Executor, Page, Vocabulary};
 use query_language::semantics::*;
@@ -141,6 +141,25 @@ fn nearest_rank_uses_ceiling_and_omits_unknown_not_zero() {
     assert!(nearest_rank(&values, 101).is_err());
     assert!(nearest_rank(&[Scalar::Number(f64::NAN)], 50).is_err());
 }
+/// The declarations of the short-text fields the law vocabularies name: the
+/// default one, Polylogue's and Sinex's.
+fn reference_catalog() -> query_language::catalog::Catalog {
+    use query_language::catalog::{Catalog, Unit};
+    let mut catalog = Catalog::new("rows");
+    catalog.units.push(Unit {
+        name: "rows".into(),
+        fields: ["title", "host"]
+            .into_iter()
+            .map(|name| Field {
+                name: name.into(),
+                kind: FieldKind::Text,
+                ..Field::default()
+            })
+            .collect(),
+        ..Unit::default()
+    });
+    catalog
+}
 struct Reference;
 impl Compiler for Reference {
     type Plan = Query;
@@ -155,7 +174,9 @@ impl Executor<Query> for Reference {
         data: &Dataset,
         request: &PageRequest,
     ) -> Result<Page, Error> {
-        let answer = ReferenceEvaluator::new(data).execute(query)?;
+        let answer = ReferenceEvaluator::new(data)
+            .with_catalog(&reference_catalog())
+            .execute(query)?;
         let sliced = page(
             &answer,
             request.cursor.as_ref().map(SealedCursor::as_str),
@@ -185,6 +206,7 @@ fn compiler_laws_run_against_both_product_vocabularies() {
                 number: "cost".into(),
                 end: "tree_cost".into(),
                 category: "origin".into(),
+                text: "title".into(),
             },
         ),
         (
@@ -195,6 +217,7 @@ fn compiler_laws_run_against_both_product_vocabularies() {
                 number: "commit_seq".into(),
                 end: "offset".into(),
                 category: "source".into(),
+                text: "host".into(),
             },
         ),
     ] {
@@ -566,6 +589,8 @@ compiler_law!(page_not_answer, "ql.page-not-answer");
 compiler_law!(order_semijoin, "ql.order.semijoin");
 compiler_law!(order_join_grain, "ql.order.join-grain");
 compiler_law!(order_steps, "ql.order.steps");
+compiler_law!(order_coarse, "ql.order.coarse");
+compiler_law!(rank_membership, "ql.rank.membership");
 compiler_law!(diff_watch, "ql.diff.watch");
 compiler_law!(covered, "ql.covered");
 compiler_law!(rank_unranked_kept, "ql.rank.unranked-kept");
@@ -612,10 +637,20 @@ fn natural_matches_follow_the_declared_kind() {
         .with("cwd", "/src/demo/crate")
         .with("text", "the tests pass now");
     let data = Dataset::new();
-    let evaluator = ReferenceEvaluator::new(&data)
-        .with_natural("title", NaturalMatch::Contains)
-        .with_natural("cwd", NaturalMatch::Subtree)
-        .with_natural("text", NaturalMatch::Words);
+    let mut catalog = reference_catalog();
+    for (name, kind, natural) in [
+        ("cwd", FieldKind::Subtree, NaturalMatch::Subtree),
+        ("text", FieldKind::Words, NaturalMatch::Words),
+    ] {
+        let field = Field {
+            name: name.into(),
+            kind,
+            ..Field::default()
+        };
+        assert_eq!(field.natural_match(), natural);
+        catalog.units[0].fields.push(field);
+    }
+    let evaluator = ReferenceEvaluator::new(&data).with_catalog(&catalog);
     let natural = |field: &str, value: &str| {
         evaluator
             .condition(
@@ -851,9 +886,9 @@ fn fill_labels_every_bucket_and_never_reads_missing_as_zero() {
         &[count, average],
         &buckets,
         |bucket| match bucket {
-            Scalar::Text(day) if day == "d1" => Coverage::Complete,
-            Scalar::Text(day) if day == "d2" => Coverage::Complete,
-            _ => Coverage::Gap {
+            Scalar::Text(day) if day == "d1" => CoverageState::Complete,
+            Scalar::Text(day) if day == "d2" => CoverageState::Complete,
+            _ => CoverageState::Gap {
                 reason: "collector not running".into(),
             },
         },
@@ -871,18 +906,21 @@ fn fill_labels_every_bucket_and_never_reads_missing_as_zero() {
         Scalar::from("collector not running")
     );
     for state in [
-        Coverage::Complete,
-        Coverage::Gap { reason: "r".into() },
-        Coverage::Unknown,
-        Coverage::OutsideSpan,
-        Coverage::NotYet,
-        Coverage::Excluded,
-        Coverage::Unavailable { cause: "c".into() },
+        CoverageState::Complete,
+        CoverageState::Gap { reason: "r".into() },
+        CoverageState::Unknown,
+        CoverageState::OutsideSpan,
+        CoverageState::NotYet,
+        CoverageState::Excluded,
+        CoverageState::Unavailable { cause: "c".into() },
     ] {
-        assert!(Coverage::STATES.contains(&state.state()));
+        assert!(CoverageState::STATES.contains(&state.state()));
         let wire = serde_json::to_value(&state).unwrap();
         assert_eq!(wire["state"], state.state());
-        assert_eq!(serde_json::from_value::<Coverage>(wire).unwrap(), state);
+        assert_eq!(
+            serde_json::from_value::<CoverageState>(wire).unwrap(),
+            state
+        );
     }
 }
 

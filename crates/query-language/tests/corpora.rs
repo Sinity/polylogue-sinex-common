@@ -204,7 +204,7 @@ fn sinex_predecessor_corpus() {
                 "events near (commands) within 5m fields when, near, offset sort offset",
                 "events | join near (commands) within 5m | fields when, offset | sort by offset",
             ),
-            ("events since 7d", "events where since 7d"),
+            ("events since 7d", "events where since:7d"),
             (
                 "events where event_type = [command.executed, command.imported] and not material exists",
                 "events where event_type:(command.executed|command.imported) AND NOT material:known",
@@ -285,7 +285,7 @@ fn former_command_sources_are_search_words() {
         "recall last",
         "trace sinex:ev/0190",
         "related sinex:ev/0190",
-        "comands since 7d",
+        "comands since:7d",
         "sort algorithm",
     ] {
         let query = parse(text, &c).unwrap_or_else(|e| panic!("{text}: {e}"));

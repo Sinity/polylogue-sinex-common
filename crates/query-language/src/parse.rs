@@ -250,7 +250,7 @@ struct Scope {
     extra: BTreeSet<String>,
     bucketed: bool,
     output: Option<Arc<OutputSchema>>,
-    deferred: bool,
+    columns_unknown: bool,
     typed_extra: Arc<Vec<Field>>,
     origins: Arc<BTreeMap<String, Origin>>,
     group_input: Option<Arc<Scope>>,
@@ -268,7 +268,7 @@ impl Scope {
             extra: BTreeSet::new(),
             bucketed: false,
             output: None,
-            deferred: false,
+            columns_unknown: false,
             typed_extra: Arc::new(Vec::new()),
             origins: Arc::new(BTreeMap::new()),
             group_input: None,
@@ -423,7 +423,7 @@ impl Parser<'_> {
             // An omitted nested source inherits the row domain, rather than
             // the enclosing grouping/projection's visible output columns.
             let mut rows = Scope::new(parent.unit.clone());
-            rows.deferred = self.catalog.unit(&parent.unit).is_none();
+            rows.columns_unknown = self.catalog.unit(&parent.unit).is_none();
             rows
         } else {
             Scope::new(self.catalog.default_unit.clone())
@@ -447,7 +447,7 @@ impl Parser<'_> {
                     name,
                     arguments: self.arguments()?,
                     condition: None,
-                    output: OutputBinding::Deferred,
+                    output: SourceColumns::Unknown,
                 }
             } else {
                 let (mut id, quoted, end) = if raw.is_empty() {
@@ -481,7 +481,7 @@ impl Parser<'_> {
                     reference: format!("result:{id}"),
                     part,
                     condition: None,
-                    output: OutputBinding::Deferred,
+                    output: SourceColumns::Unknown,
                 }
             };
             if matches!(source, Source::Saved { .. }) && self.bool_is("OR") {
@@ -568,7 +568,7 @@ impl Parser<'_> {
                 name,
                 arguments,
                 condition: None,
-                output: OutputBinding::Deferred,
+                output: SourceColumns::Unknown,
             },
             Source::Unit {
                 implicit: true,
@@ -582,7 +582,7 @@ impl Parser<'_> {
                 reference,
                 part: ResultPart::Rows,
                 condition: None,
-                output: OutputBinding::Deferred,
+                output: SourceColumns::Unknown,
             },
             other => other,
         };
@@ -683,16 +683,16 @@ impl Parser<'_> {
         {
             scope.unit = unit.clone();
         }
-        scope.deferred = scope.output.is_none();
+        scope.columns_unknown = scope.output.is_none();
         scope.columns = scope
             .output
             .as_ref()
             .map(|output| output.fields.iter().map(|f| f.name.clone()).collect());
         if let Source::Saved { output, .. } | Source::Result { output, .. } = source {
-            *output = if scope.deferred {
-                OutputBinding::Deferred
+            *output = if scope.columns_unknown {
+                SourceColumns::Unknown
             } else {
-                OutputBinding::Known
+                SourceColumns::Known
             };
         }
     }
@@ -704,7 +704,7 @@ impl Parser<'_> {
             .or_else(|| {
                 if let Some(output) = &scope.output {
                     output.fields.iter().find(|field| field.name == name)
-                } else if scope.deferred {
+                } else if scope.columns_unknown {
                     None
                 } else {
                     self.catalog.field(&scope.unit, name)
@@ -714,8 +714,8 @@ impl Parser<'_> {
     fn main_time(&self, scope: &Scope) -> Option<String> {
         if let Some(output) = &scope.output {
             output.main_time.clone()
-        } else if scope.deferred {
-            Some("$deferred_main_time".into())
+        } else if scope.columns_unknown {
+            Some("$unknown_main_time".into())
         } else {
             self.catalog
                 .unit(&scope.unit)
@@ -941,10 +941,39 @@ impl Parser<'_> {
             return self.comparison(scope, start);
         }
         self.at += 1;
+        // `since 7d` is the spelling `since:7d` written apart: refuse it with
+        // the joined form, so the word does not silently become a search term.
         if token.text.eq_ignore_ascii_case("since") || token.text.eq_ignore_ascii_case("until") {
-            let value = self.value()?;
-            let kind = self.time_bound(scope, token.text.eq_ignore_ascii_case("until"), value)?;
-            return Ok(self.cond(start, kind));
+            let resume = self.at;
+            if let Some(next) = self.peek().cloned()
+                && !next.quoted
+                && !is_symbol(&next.text)
+                && let Ok(value) = self.value()
+                && self
+                    .time_bound(scope, token.text.eq_ignore_ascii_case("until"), value)
+                    .is_ok()
+            {
+                let end = self.end();
+                return Err(Error::new(
+                    ErrorKind::InvalidQuery,
+                    format!(
+                        "a time bound is written `{}:{}`",
+                        token.text.to_ascii_lowercase(),
+                        &self.text[next.span.start..end]
+                    ),
+                    start,
+                )
+                .length(end - start)
+                .suggestion(self.replace(
+                    Span { start, end },
+                    &format!(
+                        "{}:{}",
+                        token.text.to_ascii_lowercase(),
+                        &self.text[next.span.start..end]
+                    ),
+                )));
+            }
+            self.at = resume;
         }
         if token.text == "where" {
             return Err(Error::new(
@@ -1187,12 +1216,35 @@ impl Parser<'_> {
             return Ok(self.cond(start, ConditionKind::TimeRange { left, value }));
         }
         let op = self.op()?;
+        if op == Op::Eq
+            && self.is("[")
+            && let Expression::Field { name } = &left
+        {
+            // `F = [a, b]` is the set match `F:(a|b)`.
+            let (open, set) = self.bracket_list()?;
+            let end = self.end();
+            return Err(Error::new(
+                ErrorKind::InvalidQuery,
+                "a set is written (a|b) and matched with `:`",
+                open.span.start,
+            )
+            .suggestion(self.replace(
+                Span { start, end },
+                &format!("{name}:{}", value_surface(&set)),
+            )));
+        }
         let right = if let Some(t) = self.peek()
             && !t.quoted
             && self.next_is(1, "(")
             && self.catalog.function(&t.text)?.is_some()
         {
-            self.primary(scope, Place::Argument)?
+            let right = self.primary(scope, Place::Argument)?;
+            self.check_comparable(
+                &self.expression_info(scope, &left).field.kind,
+                &self.expression_info(scope, &right).field.kind,
+                start,
+            )?;
+            right
         } else {
             let mut value = self.value()?;
             self.normalize_expression_value(scope, &left, &mut value);
@@ -1255,6 +1307,10 @@ impl Parser<'_> {
     ) -> Result<Expression, Error> {
         let l = self.expression_info(scope, &left).field.kind;
         let r = self.expression_info(scope, &right).field.kind;
+        let (l, r) = (
+            typing::operand_kind_in(operator, &left, &l, &r),
+            typing::operand_kind_in(operator, &right, &r, &l),
+        );
         if crate::scope::arithmetic_kind(operator, &l, &r).is_none() {
             return Err(Error::new(
                 ErrorKind::InvalidQuery,
@@ -1349,6 +1405,16 @@ impl Parser<'_> {
             kind,
         }
     }
+    /// The former list spelling `[a, b]`, read only to refuse it.
+    fn bracket_list(&mut self) -> Result<(Token, Value), Error> {
+        let open = self.next()?;
+        let mut values = vec![self.value()?];
+        while self.take(",") {
+            values.push(self.value()?);
+        }
+        self.expect("]")?;
+        Ok((open, Value::Set { values }))
+    }
     fn op(&mut self) -> Result<Op, Error> {
         let t = self.next()?;
         Op::parse(&t.text).filter(|_| !t.quoted).ok_or_else(|| {
@@ -1397,13 +1463,7 @@ impl Parser<'_> {
             return Ok(Value::Set { values });
         }
         if self.is("[") {
-            let open = self.next()?;
-            let mut values = vec![self.value()?];
-            while self.take(",") {
-                values.push(self.value()?);
-            }
-            self.expect("]")?;
-            let set = Value::Set { values };
+            let (open, set) = self.bracket_list()?;
             return Err(Error::new(
                 ErrorKind::InvalidQuery,
                 "a set is written (a|b)",
@@ -1754,7 +1814,7 @@ impl Parser<'_> {
         }
     }
     fn field_known(&self, scope: &Scope, field: &str) -> bool {
-        if (scope.deferred && scope.columns.is_none()) || scope.extra.contains(field) {
+        if (scope.columns_unknown && scope.columns.is_none()) || scope.extra.contains(field) {
             return true;
         }
         scope.columns.as_ref().map_or_else(
@@ -1889,9 +1949,42 @@ impl Parser<'_> {
         position: usize,
     ) -> Result<(), Error> {
         if let Expression::Field { name } = left {
-            self.check_value(scope, name, value, position)
-        } else {
+            return self.check_value(scope, name, value, position);
+        }
+        let left_kind = self.expression_info(scope, left).field.kind;
+        let values = match value {
+            Value::Set { values } => values.as_slice(),
+            other => std::slice::from_ref(other),
+        };
+        for value in values {
+            if matches!(value, Value::Scalar { .. }) {
+                let right_kind =
+                    typing::operand_kind(&Expression::value(value.clone()), &left_kind);
+                self.check_comparable(&left_kind, &right_kind, position)?;
+            }
+        }
+        Ok(())
+    }
+    /// Refuse a comparison whose two sides have different dimensions:
+    /// `cost * 2 > 1h` compares money with a duration.
+    fn check_comparable(
+        &self,
+        left: &FieldKind,
+        right: &FieldKind,
+        position: usize,
+    ) -> Result<(), Error> {
+        if typing::comparable(left, right) {
             Ok(())
+        } else {
+            Err(Error::new(
+                ErrorKind::InvalidQuery,
+                format!(
+                    "cannot compare {} with {}",
+                    kind_name(left),
+                    kind_name(right)
+                ),
+                position,
+            ))
         }
     }
     fn saved_name(&mut self, raw: &str, position: usize) -> Result<String, Error> {
@@ -1988,12 +2081,24 @@ impl Parser<'_> {
                 TransformKind::Where { condition }
             }
             "since" | "until" => {
+                let bound = match self.peek().filter(|next| !is_symbol(&next.text)) {
+                    Some(next) => Span {
+                        start: t.span.start,
+                        end: next.span.end,
+                    },
+                    None => t.span,
+                };
+                let written = &self.text[bound.start..bound.end];
+                let joined = match written.split_once(char::is_whitespace) {
+                    Some((word, value)) => format!("{word}:{}", value.trim_start()),
+                    None => written.to_string(),
+                };
                 return Err(Error::new(
                     ErrorKind::InvalidQuery,
                     "time bounds are conditions; write them after where",
                     start,
                 )
-                .suggestion(self.replace(t.span, &format!("where {}", t.text))));
+                .suggestion(self.replace(bound, &format!("where {joined}"))));
             }
             "sort" => {
                 if !self.take("by") {
@@ -2138,7 +2243,7 @@ impl Parser<'_> {
                     Field {
                         name: crate::coverage::STATE_FIELD.into(),
                         kind: FieldKind::Match,
-                        values: crate::coverage::Coverage::STATES
+                        values: crate::coverage::CoverageState::STATES
                             .iter()
                             .map(|s| s.to_string())
                             .collect(),
@@ -2348,7 +2453,7 @@ impl Parser<'_> {
         word: &str,
         at: usize,
     ) -> Result<(), Error> {
-        if outer.deferred || inner.deferred {
+        if outer.columns_unknown || inner.columns_unknown {
             return Ok(());
         }
         let same = match (&outer.columns, &inner.columns) {

@@ -90,12 +90,12 @@ fn check_query(query: &Query, catalog: &Catalog) -> Result<(), Error> {
     }
     match &query.source {
         Source::Saved {
-            output: OutputBinding::Deferred,
+            output: SourceColumns::Unknown,
             name,
             ..
         } => return Err(unbound(format!("saved query {name:?}"))),
         Source::Result {
-            output: OutputBinding::Deferred,
+            output: SourceColumns::Unknown,
             reference,
             ..
         } => return Err(unbound(format!("kept result {reference:?}"))),

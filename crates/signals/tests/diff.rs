@@ -112,15 +112,37 @@ fn diff_watch() {
         let ranking = difference(&old, &new, ChangeKind::Ranking, None);
         assert_eq!(ranking.is_some(), !diffed.is_empty(), "seed {seed}");
 
-        for k in 0..4 {
-            let top = |list: &[String]| list.iter().take(k).cloned().collect::<Vec<_>>();
-            let changes = query_language::diff::changes(&top(&before), &top(&after));
-            let top_k = difference(&old, &new, ChangeKind::TopK, Some(k));
+        for k in 1..5u64 {
+            let limit = |mut query: Query| {
+                query.transforms.push(Transform {
+                    span: Span::default(),
+                    kind: TransformKind::Limit { count: k },
+                });
+                query
+            };
+            let mut top_query = limit(ranked("after_rank"));
+            top_query.transforms.push(Transform {
+                span: Span::default(),
+                kind: TransformKind::Diff {
+                    query: Box::new(limit(ranked("before_rank"))),
+                },
+            });
+            let top_diffed = ReferenceEvaluator::new(&data)
+                .execute(&top_query)
+                .unwrap()
+                .rows;
+            let joined = rows_of(&top_diffed, "joined");
+            let left = rows_of(&top_diffed, "left");
+            let top_k = difference(&old, &new, ChangeKind::TopK, Some(k as usize));
             assert_eq!(
                 top_k.is_some(),
-                query_language::diff::membership_changed(&changes),
+                !joined.is_empty() || !left.is_empty(),
                 "seed {seed}, k {k}"
             );
+            if let Some(change) = top_k {
+                assert_eq!(ids(&change.joined), joined, "seed {seed}, k {k}");
+                assert_eq!(ids(&change.left), left, "seed {seed}, k {k}");
+            }
         }
     }
 }

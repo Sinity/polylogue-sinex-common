@@ -335,8 +335,8 @@ Every error carries `kind`, `message`, `position` (a byte offset, printed
 with a caret line), `suggestion` (a corrected query that parses, binds and
 runs as given, whenever one can be formed), `candidates`, `hint` and
 `retryable`. The language's kinds are `invalid_query`, `unknown_field`,
-`bad_value`, `not_a_query`, `ambiguous`, `stale_cursor`, `not_yet_available`
-and `not_configured`; a compiler may add its own. A language error becomes a
+`bad_value`, `not_a_query`, `ambiguous` and `stale_cursor`; a compiler adds
+its own (`not_built`, `not_configured`) at its own boundary. A language error becomes a
 command-surface failure in one conversion, `Failure::from(query_language::Error)`
 in command-surface (this crate stays pure and depends on neither), with one
 exit code and HTTP status per kind
@@ -421,8 +421,8 @@ the pinned commit position.
   year; `last N days` includes the current logical day. A phrase or slash
   date with two readings is `ambiguous` and lists them.
 - **Bounds:** dates are half-open whole days; `between` two dates includes
-  both days. `since DATE` starts at that logical day's start; `until DATE`
-  includes that whole day; `until INSTANT` stops at that instant. These
+  both days. `since:DATE` starts at that logical day's start; `until:DATE`
+  includes that whole day; `until:INSTANT` stops at that instant. These
   select spans by overlap. An explicit comparison keeps its operator's
   meaning: `when < DATE` stops at the day's start. `since` and `until` stay
   their own operations through formatting and identity.

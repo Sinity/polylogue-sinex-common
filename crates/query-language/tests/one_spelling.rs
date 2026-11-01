@@ -19,13 +19,15 @@ fn parses(catalog: &Catalog, text: &str) -> Query {
     );
     query
 }
-/// The refusal's suggestion, which must itself parse.
+/// The refusal's suggestion, which must itself parse, bind and format back
+/// to the same normal form on the same catalog. Running it is each product's
+/// half of the law, through its own compiler.
 fn suggestion(catalog: &Catalog, text: &str) -> String {
     let error = parse(text, catalog).expect_err(text);
     let suggestion = error
         .suggestion
         .unwrap_or_else(|| panic!("{text}: no suggestion for {}", error.message));
-    parse(&suggestion, catalog).unwrap_or_else(|e| panic!("{text} suggested {suggestion}: {e}"));
+    parses(catalog, &suggestion);
     suggestion
 }
 
@@ -132,33 +134,83 @@ fn lowercase_boolean() {
     parse("rock and", &c).unwrap();
 }
 
-/// Law `ql.expr.dimensions`: arithmetic of incompatible dimensions is refused
-/// when the query is read; compatible ones carry their dimension.
+/// Law `ql.expr.dimensions`: arithmetic and comparison of incompatible
+/// dimensions are refused when the query is read, in both catalogs;
+/// compatible ones carry their dimension.
 #[test]
 fn expr_dimensions() {
-    let c = support::polylogue();
-    for text in [
-        "sessions | fields cost + tool_time as nonsense",
-        "sessions | fields title * 2 as nonsense",
-        "sessions where started + started > 1",
-        "sessions | fields cost - 1d as nonsense",
+    let polylogue = support::polylogue();
+    let sinex = support::sinex();
+    for (c, text, message) in [
+        (
+            &polylogue,
+            "sessions | fields cost + tool_time as nonsense",
+            "cannot combine",
+        ),
+        (
+            &polylogue,
+            "sessions | fields title * 2 as nonsense",
+            "cannot combine",
+        ),
+        (
+            &polylogue,
+            "sessions where started + started > 1",
+            "cannot combine",
+        ),
+        (
+            &polylogue,
+            "sessions | fields cost - 1d as nonsense",
+            "cannot combine",
+        ),
+        (&polylogue, "sessions where cost * 2 > 1h", "cannot compare"),
+        (
+            &polylogue,
+            "sessions where last_active - started > yesterday",
+            "cannot compare",
+        ),
+        (
+            &polylogue,
+            "sessions where tool_time * 2 > 3",
+            "cannot compare",
+        ),
+        (&polylogue, "sessions where cost + 1 > 1h", "cannot compare"),
+        (
+            &sinex,
+            "events | fields seen + when as nonsense",
+            "cannot combine",
+        ),
+        (&sinex, "commands where end - start > 5", "cannot compare"),
+        (
+            &sinex,
+            "commands where end - start > yesterday",
+            "cannot compare",
+        ),
+        (
+            &sinex,
+            "events where seen - when > 2026-01-01",
+            "cannot compare",
+        ),
     ] {
-        let error = parse(text, &c).unwrap_err();
+        let error = parse(text, c).unwrap_err();
         assert_eq!(error.kind, ErrorKind::InvalidQuery, "{text}");
-        assert!(
-            error.message.contains("cannot combine"),
-            "{text}: {}",
-            error.message
-        );
+        assert!(error.message.contains(message), "{text}: {}", error.message);
     }
-    for text in [
-        "sessions | fields last_active - started as span",
-        "sessions | fields cost / messages as each",
-        "sessions | fields cost / cost as ratio",
-        "sessions where started + 1d > 2026-01-01",
-        "sessions where tool_time * 2 > 1h",
+    for (c, text) in [
+        (
+            &polylogue,
+            "sessions | fields last_active - started as span",
+        ),
+        (&polylogue, "sessions | fields cost / messages as each"),
+        (&polylogue, "sessions | fields cost / cost as ratio"),
+        (&polylogue, "sessions where started + 1d > 2026-01-01"),
+        (&polylogue, "sessions where tool_time * 2 > 1h"),
+        (&polylogue, "sessions where cost - 2.90 > 0"),
+        (&polylogue, "sessions where cost * 2 > 2.90"),
+        (&sinex, "events where seen - when > 1d"),
+        (&sinex, "commands where end - start > 5m"),
+        (&sinex, "commands | fields end - start as took"),
     ] {
-        parses(&c, text);
+        parses(c, text);
     }
 }
 
@@ -174,7 +226,7 @@ fn error_suggestion_runs() {
         ),
         (
             "events where event_type = [command.executed, command.imported]",
-            "events where event_type = (command.executed|command.imported)",
+            "events where event_type:(command.executed|command.imported)",
         ),
         (
             "events where material exists",
@@ -188,7 +240,12 @@ fn error_suggestion_runs() {
             "commands | agg count, sum:duration",
             "commands | agg count, sum(duration)",
         ),
-        ("events | since 7d", "events | where since 7d"),
+        ("events | since 7d", "events | where since:7d"),
+        ("events where since 7d", "events where since:7d"),
+        (
+            "events where until yesterday",
+            "events where until:yesterday",
+        ),
         ("commands | sort when", "commands | sort by when"),
         (
             "commands where when > 2026-02-01 as of 2026-03-01",
@@ -225,22 +282,28 @@ fn error_suggestion_runs() {
 }
 
 proptest! {
-    /// Law `ql.error.suggestion-runs`, generated: whatever mistakes a query
-    /// carries, a suggestion never fails to parse.
+    /// Law `ql.error.suggestion-runs`, generated against both catalogs:
+    /// whatever mistakes a query carries, a suggestion parses and binds.
     #[test]
     fn suggestions_always_parse(
+        sinex in any::<bool>(),
         words in prop::collection::vec(prop::sample::select(vec![
             "origin:demo", "and", "or", "not", "cost", ">", "1", "sort", "by", "|", "group",
             "agg", "sum:cost", "count", "where", "(", ")", "[", "]", ",", "exists", "repo:x",
             "reop:x", "sesions", "similar:x", "OR", "NOT", "-", "*", "known", "within", "near",
+            "since", "7d", "events", "commands", "exit_code", "=", "source", "a", "when",
+            "duration", "comands", "sum(duration)",
         ]), 1..9),
     ) {
-        let catalog = support::polylogue();
+        let catalog = if sinex { support::sinex() } else { support::polylogue() };
         let text = words.join(" ");
         if let Err(error) = parse(&text, &catalog)
             && let Some(suggestion) = error.suggestion
         {
-            prop_assert!(parse(&suggestion, &catalog).is_ok(), "{} suggested {}", text, suggestion);
+            let parsed = parse(&suggestion, &catalog);
+            prop_assert!(parsed.is_ok(), "{} suggested {}: {:?}", text, suggestion, parsed.err());
+            let bound = bind(&parsed.unwrap(), &catalog);
+            prop_assert!(bound.is_ok(), "{} suggested {}: {:?}", text, suggestion, bound.err());
         }
     }
 }
@@ -358,7 +421,7 @@ fn transforms_declare_the_fields_they_add() {
     let scope = typed("since:7d | group by day(started) | count | fill");
     assert_eq!(
         scope.field("coverage").unwrap().field.values,
-        query_language::coverage::Coverage::STATES
+        query_language::coverage::CoverageState::STATES
     );
     // One top-level order relation exposes its nearest inner row.
     let scope = typed("messages where after(tool_calls) within 2 steps | sort by offset");
@@ -384,5 +447,60 @@ fn transforms_declare_the_fields_they_add() {
             "{text}: {}",
             error.message
         );
+    }
+}
+
+/// Law `ql.identity.spelling`: spellings with one normal form share one
+/// `query:<hash>` in both catalogs, and any changed condition changes it.
+#[test]
+fn identity_spelling_in_both_catalogs() {
+    use query_language::identity::question_id;
+    use std::collections::BTreeMap;
+    let id = |catalog: &Catalog, text: &str| {
+        question_id(&parses(catalog, text), catalog, &BTreeMap::new()).unwrap()
+    };
+    let polylogue = support::polylogue();
+    let sinex = support::sinex();
+    for (catalog, same, changed) in [
+        (
+            &polylogue,
+            vec![
+                "sessions where repo:demo cost > 2",
+                "sessions where cost > 2 AND repo:demo",
+                "sessions  where   (repo:demo)   cost >  2",
+                "sessions where cost > 2.0 repo:demo",
+            ],
+            vec![
+                "sessions where repo:demo cost > 3",
+                "sessions where repo:other cost > 2",
+                "sessions where repo:demo cost >= 2",
+                "sessions where repo:demo OR cost > 2",
+            ],
+        ),
+        (
+            &sinex,
+            vec![
+                "commands where exit_code != 0 | sort by when desc",
+                "commands where (exit_code != 0) | sort by when desc",
+                "commands  where exit_code  !=  0 | sort by when desc",
+            ],
+            vec![
+                "commands where exit_code != 1 | sort by when desc",
+                "commands where exit_code != 0 | sort by when",
+                "commands where exit_code = 0 | sort by when desc",
+            ],
+        ),
+    ] {
+        let first = id(catalog, same[0]);
+        for text in &same[1..] {
+            assert_eq!(
+                id(catalog, text),
+                first,
+                "{text} is spelled differently, not asked differently"
+            );
+        }
+        for text in changed {
+            assert_ne!(id(catalog, text), first, "{text} asks something else");
+        }
     }
 }
