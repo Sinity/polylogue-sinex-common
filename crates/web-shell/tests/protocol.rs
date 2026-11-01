@@ -36,9 +36,6 @@ fn unknown_never_zero() {
         ValueState::NotRecorded,
         ValueState::NotApplicable,
         ValueState::Pending,
-        ValueState::Unavailable {
-            reason: "source offline".into(),
-        },
     ];
     for state in states {
         let cell = value_cell(&state).into_string();
@@ -174,6 +171,9 @@ fn actions_are_operation_requests_and_keep_unavailable_reasons() {
         request_id: "request-1".into(),
         deadline: Deadline::Default,
         budget_tokens: None,
+        cursor: None,
+        fresh: false,
+        format: command_surface::Format::Text,
     };
     let action = Action::from_operation(
         &operation(true),
@@ -320,7 +320,7 @@ fn page_and_palette_cli_derive_from_registered_request() {
     let mut table =
         command_surface::OperationTable::new("app", command_surface::Deadlines::default());
     table
-        .declare_tool(command_surface::ToolGroup {
+        .declare_tool(command_surface::ToolFamily {
             name: "read".into(),
             description: "Read rows".into(),
             open_world: false,
@@ -333,6 +333,9 @@ fn page_and_palette_cli_derive_from_registered_request() {
         request_id: "r-1".into(),
         deadline: Deadline::None,
         budget_tokens: None,
+        cursor: None,
+        fresh: false,
+        format: command_surface::Format::Text,
     };
     let action = Action::from_table(&table, &Availability::Enabled, &request, None).unwrap();
     assert_eq!(action.cli, table.cli_command(&request).unwrap());

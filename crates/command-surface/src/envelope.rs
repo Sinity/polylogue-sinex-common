@@ -76,9 +76,33 @@ pub struct Request<T> {
     /// default. The caller's harness cap clamps it (see `Budget`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_tokens: Option<u32>,
+    /// Continues an earlier answer from where its page ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Render in full what the caller already holds, instead of one line
+    /// naming where it was delivered.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fresh: bool,
+    #[serde(default, skip_serializing_if = "Format::is_text")]
+    pub format: Format,
 }
 fn is_default(value: &Deadline) -> bool {
     matches!(value, Deadline::Default)
+}
+
+/// How the answer comes back: as text (rows rendered once, the envelope
+/// beside them), or with the rows as JSON too.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Format {
+    #[default]
+    Text,
+    Json,
+}
+impl Format {
+    pub fn is_text(&self) -> bool {
+        *self == Self::Text
+    }
 }
 /// Dynamic dispatch keeps arguments typed until the table's serialization boundary.
 pub type RunnableRequest = Request<Value>;
@@ -95,6 +119,9 @@ impl RunnableRequest {
             request_id: request_id.into(),
             deadline: Deadline::Default,
             budget_tokens: None,
+            cursor: None,
+            fresh: false,
+            format: Format::Text,
         }
     }
 }

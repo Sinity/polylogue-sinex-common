@@ -1,5 +1,5 @@
-//! Values that may not be plainly measured, in one vocabulary for every
-//! surface: status figures, numbers in answers, cells in the web shell.
+//! Values that may not be plainly measured, in one vocabulary for both
+//! products and the web shell: numbers in answers and their cells.
 //! Unknown is never zero: only a state that holds a value has one.
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -27,8 +27,6 @@ pub enum ValueState<T> {
     NotApplicable,
     /// Being computed; shown when it is ready.
     Pending,
-    /// What the value comes from cannot be reached.
-    Unavailable { reason: String },
 }
 
 impl<T> ValueState<T> {
@@ -50,7 +48,6 @@ impl<T> ValueState<T> {
             Self::NotRecorded => "not_recorded",
             Self::NotApplicable => "not_applicable",
             Self::Pending => "pending",
-            Self::Unavailable { .. } => "unavailable",
         }
     }
     /// The reason a value is missing or partial, when one was given.
@@ -58,17 +55,9 @@ impl<T> ValueState<T> {
         match self {
             Self::Partial { reason, .. } => reason.as_deref(),
             Self::Inferred { basis, .. } => Some(basis),
-            Self::Unknown { reason } | Self::Unavailable { reason } => Some(reason),
+            Self::Unknown { reason } => Some(reason),
             _ => None,
         }
-    }
-    /// Whether the value can be relied on as it stands: complete, inferred
-    /// from a stated basis, or not applicable.
-    pub fn is_sound(&self) -> bool {
-        matches!(
-            self,
-            Self::Complete { .. } | Self::Inferred { .. } | Self::NotApplicable
-        )
     }
     pub fn map<U>(self, map: impl FnOnce(T) -> U) -> ValueState<U> {
         match self {
@@ -90,15 +79,14 @@ impl<T> ValueState<T> {
             Self::NotRecorded => ValueState::NotRecorded,
             Self::NotApplicable => ValueState::NotApplicable,
             Self::Pending => ValueState::Pending,
-            Self::Unavailable { reason } => ValueState::Unavailable { reason },
         }
     }
 }
 
 impl<T: std::fmt::Display> ValueState<T> {
     /// The plain-text form: `0`, `≥ 3 (2 unknown)`, `≈ 4 (inferred)`,
-    /// `— unknown (timed out)`, `— not recorded`, `∅ n/a`, `◷ pending`,
-    /// `! unavailable (reason)`. No missing state contains a digit of its own.
+    /// `— unknown (timed out)`, `— not recorded`, `∅ n/a`, `◷ pending`. No
+    /// missing state contains a digit of its own.
     pub fn text(&self) -> String {
         match self {
             Self::Complete { value } => value.to_string(),
@@ -112,7 +100,6 @@ impl<T: std::fmt::Display> ValueState<T> {
             Self::NotRecorded => "— not recorded".into(),
             Self::NotApplicable => "∅ n/a".into(),
             Self::Pending => "◷ pending".into(),
-            Self::Unavailable { reason } => format!("! unavailable ({reason})"),
         }
     }
 }

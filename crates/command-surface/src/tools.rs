@@ -1,14 +1,14 @@
 //! MCP tools grouped from the operation table, and the text an agent reads.
 //!
-//! Each declared tool holds the request rows that name it. Its input schema
+//! Each declared tool family holds the request rows that name it. Its input schema
 //! is generated: the common envelope fields, the row as `operation` (when
 //! the tool has several), and `arguments` as one choice per row. Its hints
 //! come from its rows' access, which registration keeps uniform. Stream and
 //! local rows are not tools.
 use crate::operation::{Forms, terminal_text};
 use crate::{
-    Access, Answer, Caller, CancellationToken, Deadline, Failure, LeftOut, OperationTable, Origin,
-    Outcome, RunnableRequest, Suggestion, bad_request,
+    Access, Answer, Caller, CancellationToken, Deadline, Failure, Format, LeftOut, OperationTable,
+    Origin, Outcome, RunnableRequest, Suggestion, bad_request,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -89,6 +89,11 @@ pub(crate) fn tool_schemas(forms: &Forms, tool: &str) -> Result<(Value, Value), 
     properties.insert("request_id".into(), json!({"type": "string", "minLength": 1, "description": "Reused when retrying the same call, so a write is applied once."}));
     properties.insert("deadline".into(), json!({"type": ["integer", "null"], "minimum": 0, "description": "Milliseconds; null lifts the deadline."}));
     properties.insert("budget_tokens".into(), json!({"type": "integer", "minimum": 0, "description": "How many tokens the answer's text may use."}));
+    properties.insert("cursor".into(), json!({"type": "string", "description": "Continues an earlier answer from where its page ended."}));
+    properties.insert(
+        "fresh".into(),
+        json!({"type": "boolean", "description": "Render in full what you already hold."}),
+    );
     properties.insert("format".into(), json!({"type": "string", "enum": ["text", "json"], "description": "json adds the rows to the structured answer."}));
     let mut input = json!({
         "type": "object",
@@ -113,15 +118,6 @@ pub(crate) fn tool_schemas(forms: &Forms, tool: &str) -> Result<(Value, Value), 
     Ok((input, output))
 }
 
-/// How the model is asked for text or rows.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum Format {
-    #[default]
-    Text,
-    Json,
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ToolCall {
@@ -133,6 +129,10 @@ struct ToolCall {
     deadline: Deadline,
     #[serde(default)]
     budget_tokens: Option<u32>,
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    fresh: bool,
     #[serde(default)]
     format: Format,
 }
@@ -168,6 +168,15 @@ impl Forms {
         }
         if let Some(budget) = request.budget_tokens {
             call.insert("budget_tokens".into(), budget.into());
+        }
+        if let Some(cursor) = &request.cursor {
+            call.insert("cursor".into(), cursor.clone().into());
+        }
+        if request.fresh {
+            call.insert("fresh".into(), true.into());
+        }
+        if request.format == Format::Json {
+            call.insert("format".into(), "json".into());
         }
         Some(format!("{} {}", self.tool_name(tool), Value::Object(call)))
     }
@@ -427,6 +436,9 @@ impl OperationTable {
                             request_id: call.request_id,
                             deadline: call.deadline,
                             budget_tokens: call.budget_tokens,
+                            cursor: call.cursor,
+                            fresh: call.fresh,
+                            format: call.format,
                         };
                         let answer = self
                             .call_with(request, Origin::Mcp, caller, metadata, cancellation)

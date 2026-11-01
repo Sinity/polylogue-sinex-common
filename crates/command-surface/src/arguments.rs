@@ -3,7 +3,7 @@
 //! request back as a command line, and its usage line.
 use crate::operation::{Forms, GLOBAL_FLAGS, valid_word};
 use crate::{
-    ArgumentForm, ArgumentSpec, Deadline, Failure, OperationDescription, OperationKind,
+    ArgumentForm, ArgumentSpec, Deadline, Failure, Format, OperationDescription, OperationKind,
     OperationTable, RunnableRequest, bad_request, quote_argument,
 };
 use serde_json::{Map, Value};
@@ -173,14 +173,12 @@ pub(crate) fn check(description: &OperationDescription) -> Result<(), Failure> {
     Ok(())
 }
 
-/// A command line read against the table: the request, how the row runs,
-/// whether the caller asked for JSON, and the flags that act on the calling
-/// process.
+/// A command line read against the table: the request (`--json` is its
+/// format), how the row runs, and the flags that act on the calling process.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParsedCommand {
     pub request: RunnableRequest,
     pub kind: OperationKind,
-    pub json: bool,
     pub calling_process: Map<String, Value>,
 }
 
@@ -214,7 +212,8 @@ impl OperationTable {
     /// Read a command line into its row's request. Fields come from the
     /// row's argument declarations and request schema; `--request JSON`
     /// supplies the whole value for any type. `--json`, `--deadline MS|none`,
-    /// `--request-id ID` and `--budget N` work on every row.
+    /// `--request-id ID`, `--budget N`, `--cursor C` and `--fresh` work on
+    /// every row.
     pub fn parse_cli(
         &self,
         args: &[String],
@@ -229,6 +228,8 @@ impl OperationTable {
         let mut request = None;
         let mut deadline = Deadline::Default;
         let mut budget_tokens = None;
+        let mut cursor = None;
+        let mut fresh = false;
         let mut id = request_id.into();
         let mut json = false;
         let positionals: Vec<&ArgumentSpec> = spec
@@ -331,6 +332,8 @@ impl OperationTable {
                         };
                 }
                 "--request-id" => id = value()?,
+                "--cursor" => cursor = Some(value()?),
+                "--fresh" if inline.is_none() => fresh = true,
                 "--budget" => {
                     budget_tokens = Some(
                         value()?
@@ -438,9 +441,11 @@ impl OperationTable {
                 request_id: id,
                 deadline,
                 budget_tokens,
+                cursor,
+                fresh,
+                format: if json { Format::Json } else { Format::Text },
             },
             kind: spec.kind.clone(),
-            json,
             calling_process,
         })
     }
@@ -514,6 +519,15 @@ impl Forms {
         }
         if let Some(budget) = request.budget_tokens {
             words.extend(["--budget".into(), budget.to_string()]);
+        }
+        if let Some(cursor) = &request.cursor {
+            words.extend(["--cursor".into(), quote_argument(cursor)]);
+        }
+        if request.fresh {
+            words.push("--fresh".into());
+        }
+        if request.format == Format::Json {
+            words.push("--json".into());
         }
         if positionals.iter().any(|w| w.starts_with('-')) {
             words.push("--".into());

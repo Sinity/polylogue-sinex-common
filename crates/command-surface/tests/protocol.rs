@@ -25,7 +25,7 @@ proptest! {
     }
     #[test]
     fn envelope_serialization_preserves_unicode_and_identity(text in ".*",id in ".+"){
-        let request=RunnableRequest{operation:"read".into(),arguments:json!({"text":text}),request_id:id,deadline:Deadline::None,budget_tokens:Some(4000)};
+        let request=RunnableRequest{operation:"read".into(),arguments:json!({"text":text}),request_id:id,deadline:Deadline::None,budget_tokens:Some(4000),cursor:Some("c-1".into()),fresh:true,format:Format::Json};
         let bytes=serde_json::to_vec(&request).unwrap();prop_assert_eq!(serde_json::from_slice::<RunnableRequest>(&bytes).unwrap(),request);
         let answer=Answer::ok(json!({"text":text}));let bytes=serde_json::to_vec(&answer).unwrap();prop_assert_eq!(serde_json::from_slice::<Answer<Value>>(&bytes).unwrap(),answer);
     }
@@ -125,16 +125,26 @@ fn sse_comments_multiline_crlf_and_persistent_ids() {
     assert_eq!(events[1].id.as_deref(), Some("3"));
 }
 #[test]
-fn unmeasured_never_zero_and_figure_reuse_needs_same_key() {
-    let ratio = Figure::ratio("coverage", 0, 0);
-    assert_eq!(ratio.value().value(), None);
-    assert_eq!(ratio.value().reason(), Some("zero denominator"));
-    // A missing state cannot carry a value on the wire.
-    let malformed = json!({"name":"unknown","value":{"state":"unavailable","reason":"offline","value":0},"age":0});
-    assert!(serde_json::from_value::<Figure<u64>>(malformed).is_err());
-    let mut cache = FigureCache::default();
-    cache.insert("position-1", Figure::measured("rows", 0));
-    assert_eq!(cache.get(&"position-1").unwrap().value().value(), Some(&0));
+fn unmeasured_never_zero_and_measurement_reuse_needs_same_key() {
+    let ratio = Measurement::ratio("coverage", 0, 0);
+    assert_eq!(ratio.value(), None);
+    assert_eq!(ratio.state(), MeasurementState::NotMeasured);
+    assert!(
+        Measurement::new(
+            "unknown",
+            Some(0),
+            MeasurementState::NotMeasured,
+            Some("missing".into()),
+            0
+        )
+        .is_err()
+    );
+    let malformed =
+        json!({"name":"unknown","value":0,"state":"unavailable","reason":"offline","age":0});
+    assert!(serde_json::from_value::<Measurement<u64>>(malformed).is_err());
+    let mut cache = MeasurementCache::default();
+    cache.insert("position-1", Measurement::measured("rows", 0));
+    assert_eq!(cache.get(&"position-1").unwrap().value(), Some(&0));
     assert!(cache.get(&"position-2").is_none());
     assert!(matches!(
         Status::new(vec![ratio]).verdict,
@@ -142,20 +152,20 @@ fn unmeasured_never_zero_and_figure_reuse_needs_same_key() {
     ));
 }
 #[tokio::test(start_paused = true)]
-async fn figure_deadlines_are_independent() {
-    let missing = measure_figure(
+async fn measurement_deadlines_are_independent() {
+    let missing = measure(
         "slow",
         std::time::Duration::from_millis(10),
-        Box::pin(std::future::pending::<Figure<u64>>()),
+        Box::pin(std::future::pending::<Measurement<u64>>()),
     );
-    let measured = measure_figure(
+    let measured = measure(
         "fast",
         std::time::Duration::from_millis(10),
-        Box::pin(async { Figure::measured("fast", 7) }),
+        Box::pin(async { Measurement::measured("fast", 7) }),
     );
     let (slow, fast) = tokio::join!(missing, measured);
-    assert_eq!(slow.value().reason(), Some("timed out"));
-    assert_eq!(fast.value().value(), Some(&7));
+    assert_eq!(slow.reason(), Some("timed out"));
+    assert_eq!(fast.value(), Some(&7));
     assert!(matches!(
         Status::new(vec![slow, fast]).verdict,
         Verdict::Degraded { .. }

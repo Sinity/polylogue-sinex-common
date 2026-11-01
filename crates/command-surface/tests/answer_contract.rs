@@ -92,7 +92,7 @@ impl Operation for Search {
 fn table() -> OperationTable {
     let mut table = OperationTable::new("example", Deadlines::default());
     table
-        .declare_tool(ToolGroup {
+        .declare_tool(ToolFamily {
             name: "query".into(),
             description: "Search rows".into(),
             open_world: false,
@@ -118,7 +118,7 @@ async fn tool_call(table: &OperationTable, query: &str, format: &str) -> Value {
 }
 
 #[tokio::test]
-async fn answer_once() {
+async fn once() {
     let table = table();
     let text = tool_call(&table, "rows", "text").await;
     let shown = text["content"][0]["text"].as_str().unwrap();
@@ -335,9 +335,6 @@ fn unmeasured_never_zero() {
         ValueState::NotRecorded,
         ValueState::NotApplicable,
         ValueState::Pending,
-        ValueState::Unavailable {
-            reason: "offline".into(),
-        },
     ];
     for state in missing {
         assert_eq!(state.value(), None);

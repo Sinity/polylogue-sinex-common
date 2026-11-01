@@ -76,8 +76,8 @@ fn row(name: &str, tool: &str, access: Access) -> Echo {
         )
     })
 }
-fn tool(name: &str) -> ToolGroup {
-    ToolGroup {
+fn tool(name: &str) -> ToolFamily {
+    ToolFamily {
         name: name.into(),
         description: format!("The {name} tool"),
         open_world: name == "act",

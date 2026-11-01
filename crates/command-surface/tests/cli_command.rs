@@ -37,7 +37,7 @@ impl Operation for Note {
 fn table() -> OperationTable {
     let mut table = OperationTable::new("example", Deadlines::default());
     table
-        .declare_tool(ToolGroup {
+        .declare_tool(ToolFamily {
             name: "notes".into(),
             description: "Notes".into(),
             open_world: false,
@@ -65,6 +65,9 @@ fn request(operation: &str, text: &str, request_id: &str, deadline: Deadline) ->
         request_id: request_id.into(),
         deadline,
         budget_tokens: None,
+        cursor: None,
+        fresh: false,
+        format: Format::Text,
     }
 }
 

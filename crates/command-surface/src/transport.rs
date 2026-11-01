@@ -113,9 +113,10 @@ impl OperationTable {
             };
         }
         let parsed = self.parse_cli(args, request_id);
-        let json = parsed
-            .as_ref()
-            .map_or_else(|_| args.iter().any(|a| a == "--json"), |p| p.json);
+        let json = parsed.as_ref().map_or_else(
+            |_| args.iter().any(|a| a == "--json"),
+            |p| p.request.format == crate::Format::Json,
+        );
         let (operation, answer, events) = match parsed {
             Err(error) => (String::new(), Answer::error(error), String::new()),
             Ok(parsed) => {

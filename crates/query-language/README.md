@@ -146,15 +146,6 @@ Four operators, each with one meaning in both products:
   case-insensitive at their call position and stored under their declared
   spelling (`DAY(when)` becomes `day(when)`).
 
-## Coverage
-
-`coverage::CoverageState` is the one vocabulary for how much of a source's
-interval a product holds: `complete`, `gap` (with its reason), `unknown`,
-`outside_span` (outside what an import or export spans), `not_yet` (its next
-opportunity has not come), `excluded` and `unavailable` (with its cause).
-`fill` and every answer's coverage facet use it; any state but `complete`
-makes a count over the interval a lower bound.
-
 ## Meaning
 
 - **Three values.** A condition over an unknown value is neither true nor
@@ -213,7 +204,9 @@ makes a count over the interval a lower bound.
 `unavailable(cause)`; the same vocabulary describes a source's coverage of an
 interval in both products. Polylogue answers `complete` inside its import
 span and `outside_span` outside it. A bucket with no rows and a `gap` state
-shows the gap, never `0`.
+shows the gap, never `0`. The states are `coverage::CoverageState`, which
+command-surface's answer envelope uses for its coverage facet; any state but
+`complete` makes a count over the interval a lower bound.
 
 ## Order relations
 
@@ -323,8 +316,9 @@ runs as given, whenever one can be formed), `candidates`, `hint` and
 `retryable`. The language's kinds are `invalid_query`, `unknown_field`,
 `bad_value`, `not_a_query`, `ambiguous`, `stale_cursor`, `not_yet_available`
 and `not_configured`; a compiler may add its own. A language error becomes a
-command-surface failure in one conversion, here, with one exit code and HTTP
-status per kind
+command-surface failure in one conversion, `From<query_language::Error>` in
+command-surface (which depends on this crate for coverage states), with one
+exit code and HTTP status per kind
 ([failure table](../command-surface/README.md#failures-and-exit-codes)).
 
 - An unknown field's `candidates` are the unit's nearest field names.

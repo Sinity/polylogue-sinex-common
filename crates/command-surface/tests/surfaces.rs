@@ -116,7 +116,7 @@ fn table() -> (OperationTable, Arc<AtomicU64>, Arc<AtomicU64>) {
     let mut table = OperationTable::new("example", deadlines);
     for (name, description) in [("rows", "Read synthetic rows"), ("write", "Record rows")] {
         table
-            .declare_tool(ToolGroup {
+            .declare_tool(ToolFamily {
                 name: name.into(),
                 description: description.into(),
                 open_world: false,
@@ -141,6 +141,9 @@ fn request(text: &str) -> RunnableRequest {
         request_id: "r-1".into(),
         deadline: Deadline::None,
         budget_tokens: None,
+        cursor: None,
+        fresh: false,
+        format: Format::Text,
     }
 }
 async fn http(table: &OperationTable, request: &RunnableRequest) -> http::Response<Vec<u8>> {
@@ -352,6 +355,8 @@ async fn every_surface_times_out_without_partial_rows() {
     let mut request = request("wait");
     request.arguments["wait"] = json!(true);
     request.deadline = Deadline::Default;
+    // The command line asks with `--json`, and a follow-up keeps the format.
+    request.format = Format::Json;
     let cli = table
         .cli(
             &["read", "--text", "wait", "--wait", "true", "--json"].map(str::to_string),
@@ -505,7 +510,7 @@ impl Operation for Echo {
 async fn arbitrary_typed_requests_are_reachable_and_string_flags_do_not_change_mode() {
     let (mut table, _, _) = table();
     table
-        .declare_tool(ToolGroup {
+        .declare_tool(ToolFamily {
             name: "echo".into(),
             description: "Echo".into(),
             open_world: false,

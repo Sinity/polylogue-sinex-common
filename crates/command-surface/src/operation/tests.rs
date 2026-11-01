@@ -206,7 +206,7 @@ impl Operation for DurableWrite {
 fn make_table(store: &Arc<Store>, gate: Option<Arc<Gate>>) -> OperationTable {
     let mut table = OperationTable::new("fixture", Deadlines::default());
     table
-        .declare_tool(ToolGroup {
+        .declare_tool(ToolFamily {
             name: "write".into(),
             description: "Write".into(),
             open_world: false,
@@ -227,6 +227,9 @@ fn request(id: &str, value: &str) -> RunnableRequest {
         request_id: id.into(),
         deadline: Deadline::None,
         budget_tokens: None,
+        cursor: None,
+        fresh: false,
+        format: crate::Format::Text,
     }
 }
 fn kind(answer: &Answer<Value>) -> FailureKind {

@@ -13,7 +13,7 @@ struct ReadRequest {
     #[serde(default)]
     view: Option<String>,
     #[serde(default)]
-    fresh: bool,
+    full: bool,
     #[serde(default)]
     tag: Vec<String>,
     #[serde(default)]
@@ -35,7 +35,7 @@ impl Operation for Read {
                 ArgumentSpec::new("target", ArgumentForm::Positional, "what to read"),
                 ArgumentSpec::new("words", ArgumentForm::Words, "words to find"),
                 ArgumentSpec::new("view", ArgumentForm::Named, "the view").short('v'),
-                ArgumentSpec::new("fresh", ArgumentForm::Flag, "ignore what you hold"),
+                ArgumentSpec::new("full", ArgumentForm::Flag, "show every field"),
                 ArgumentSpec::new("tag", ArgumentForm::Repeated, "a tag"),
                 ArgumentSpec::new("out", ArgumentForm::Named, "write here").calling_process(),
             ],
@@ -95,7 +95,7 @@ fn table() -> OperationTable {
     let mut table = OperationTable::new("example", Deadlines::default());
     for name in ["read", "act"] {
         table
-            .declare_tool(ToolGroup {
+            .declare_tool(ToolFamily {
                 name: name.into(),
                 description: format!("{name} things"),
                 open_world: false,
@@ -116,11 +116,11 @@ fn positional_words_flags_and_repeats_fill_the_request() {
     let table = table();
     let parsed = table
         .parse_cli(
-            &words("read session-1 why it failed --fresh -v outline --tag a --tag b --out /tmp/x --budget 900 --json"),
+            &words("read session-1 why it failed --full -v outline --tag a --tag b --out /tmp/x --budget 900 --json"),
             "r-1",
         )
         .unwrap();
-    assert!(parsed.json);
+    assert_eq!(parsed.request.format, Format::Json);
     assert_eq!(
         parsed.calling_process,
         json!({"out": "/tmp/x"}).as_object().unwrap().clone()
@@ -128,7 +128,7 @@ fn positional_words_flags_and_repeats_fill_the_request() {
     assert_eq!(parsed.request.budget_tokens, Some(900));
     assert_eq!(
         parsed.request.arguments,
-        json!({"target": "session-1", "words": "why it failed", "fresh": true, "view": "outline", "tag": ["a", "b"]})
+        json!({"target": "session-1", "words": "why it failed", "full": true, "view": "outline", "tag": ["a", "b"]})
     );
     let rest = table
         .parse_cli(&words("exec git log --oneline -n 3"), "r-1")
@@ -145,12 +145,17 @@ fn positional_words_flags_and_repeats_fill_the_request() {
         json!({"target": "--target-like", "words": "-x"})
     );
     let inline = table
-        .parse_cli(&words("read s --fresh=false --limit=5"), "r-1")
+        .parse_cli(
+            &words("read s --full=false --limit=5 --fresh --cursor c-9"),
+            "r-1",
+        )
         .unwrap();
     assert_eq!(
         inline.request.arguments,
-        json!({"target": "s", "fresh": false, "limit": 5})
+        json!({"target": "s", "full": false, "limit": 5})
     );
+    assert!(inline.request.fresh);
+    assert_eq!(inline.request.cursor.as_deref(), Some("c-9"));
 }
 
 #[test]
@@ -170,7 +175,7 @@ fn malformed_command_lines_name_what_is_wrong() {
     for (line, message) in [
         ("read", "missing TARGET"),
         ("read s --unknown 1", "unknown argument --unknown"),
-        ("read s --fresh=maybe", "--fresh is true or false"),
+        ("read s --full=maybe", "--full is true or false"),
         ("read s --view", "--view needs a value"),
         ("read s --view a --view b", "duplicate --view"),
         ("read s --limit many", "--limit"),
@@ -224,7 +229,7 @@ fn declarations_the_request_cannot_hold_are_refused() {
         }
         let mut table = OperationTable::new("example", Deadlines::default());
         table
-            .declare_tool(ToolGroup {
+            .declare_tool(ToolFamily {
                 name: "read".into(),
                 description: "read".into(),
                 open_world: false,
@@ -241,7 +246,7 @@ fn help_shows_each_rows_usage() {
     assert_eq!(
         table.help(),
         concat!(
-            "example read TARGET [WORDS...] [--view VIEW] [--fresh] [--tag TAG...] [--out OUT] [--limit LIMIT]  Read a target\n",
+            "example read TARGET [WORDS...] [--view VIEW] [--full] [--tag TAG...] [--out OUT] [--limit LIMIT]  Read a target\n",
             "example exec -- COMMAND...  Run a command\n",
         )
     );
@@ -263,7 +268,7 @@ fn request_strategy() -> impl Strategy<Value = Value> {
         proptest::collection::vec(text, 0..3),
         proptest::option::of(any::<u64>()),
     )
-        .prop_map(|(target, words, view, fresh, tag, limit)| {
+        .prop_map(|(target, words, view, full, tag, limit)| {
             let mut object = serde_json::Map::new();
             object.insert("target".into(), target.into());
             if let Some(words) = words {
@@ -272,8 +277,8 @@ fn request_strategy() -> impl Strategy<Value = Value> {
             if let Some(view) = view {
                 object.insert("view".into(), view.into());
             }
-            if let Some(fresh) = fresh {
-                object.insert("fresh".into(), fresh.into());
+            if let Some(full) = full {
+                object.insert("full".into(), full.into());
             }
             if !tag.is_empty() {
                 object.insert("tag".into(), tag.into());
@@ -304,7 +309,14 @@ fn shell_words(command: &str) -> Vec<String> {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
     #[test]
-    fn cli_command_round_trips(arguments in request_strategy(), deadline in proptest::option::of(0u64..10_000), budget in proptest::option::of(1u32..100_000)) {
+    fn cli_command_round_trips(
+        arguments in request_strategy(),
+        deadline in proptest::option::of(0u64..10_000),
+        budget in proptest::option::of(1u32..100_000),
+        cursor in proptest::option::of("[ -~]{0,8}"),
+        fresh in any::<bool>(),
+        json in any::<bool>(),
+    ) {
         let table = table();
         let request = RunnableRequest {
             operation: "read".into(),
@@ -312,6 +324,9 @@ proptest! {
             request_id: "retry 1".into(),
             deadline: deadline.map_or(Deadline::Default, Deadline::Milliseconds),
             budget_tokens: budget,
+            cursor,
+            fresh,
+            format: if json { Format::Json } else { Format::Text },
         };
         let command = table.cli_command(&request).unwrap();
         let words = shell_words(&command);
@@ -326,12 +341,12 @@ fn cli_command_uses_the_rows_own_forms() {
     let table = table();
     let request = RunnableRequest::new(
         "read",
-        json!({"target": "session-1", "words": "why it failed", "fresh": true, "tag": ["a", "b"]}),
+        json!({"target": "session-1", "words": "why it failed", "full": true, "tag": ["a", "b"]}),
         "r-1",
     );
     assert_eq!(
         table.cli_command(&request).unwrap(),
-        "example read --fresh --tag a --tag b --request-id r-1 session-1 'why it failed'"
+        "example read --full --tag a --tag b --request-id r-1 session-1 'why it failed'"
     );
     let exec = RunnableRequest::new("exec", json!({"command": ["ls", "-la"]}), "r-1");
     assert_eq!(

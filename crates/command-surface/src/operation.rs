@@ -194,7 +194,7 @@ impl OperationSpec {
 /// whose access is the same.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ToolGroup {
+pub struct ToolFamily {
     /// `query`; the tool is `<product>_query`.
     pub name: String,
     /// Sent to the model verbatim.
@@ -270,6 +270,9 @@ pub struct RequestContext {
     caller: Caller,
     budget_tokens: Option<u32>,
     default_budget_tokens: Option<u32>,
+    cursor: Option<String>,
+    fresh: bool,
+    format: crate::Format,
     /// An MCP call's own `_meta`, where a harness puts per-call identity.
     metadata: Option<Value>,
     forms: Arc<Forms>,
@@ -345,6 +348,17 @@ impl RequestContext {
     }
     pub fn metadata(&self) -> Option<&Value> {
         self.metadata.as_ref()
+    }
+    /// The cursor the request continues from.
+    pub fn cursor(&self) -> Option<&str> {
+        self.cursor.as_deref()
+    }
+    /// Whether the caller asked to see in full what it already holds.
+    pub fn fresh(&self) -> bool {
+        self.fresh
+    }
+    pub fn format(&self) -> crate::Format {
+        self.format
     }
     /// The answer's budget: the request's, else the operation's default (or
     /// `fallback` when it declares none), lowered to the caller's `cap`.
@@ -424,12 +438,12 @@ pub struct OperationDescription {
 }
 
 /// What every surface needs to write a request back: the product name, the
-/// rows' descriptions and the tool groups. Shared with request contexts.
+/// rows' descriptions and the tool families. Shared with request contexts.
 #[derive(Clone)]
 pub(crate) struct Forms {
     pub(crate) product: String,
     pub(crate) descriptions: Vec<OperationDescription>,
-    pub(crate) tools: Vec<ToolGroup>,
+    pub(crate) tools: Vec<ToolFamily>,
 }
 impl Forms {
     pub(crate) fn description(&self, name: &str) -> Option<&OperationDescription> {
@@ -531,7 +545,15 @@ impl Deadlines {
 }
 
 /// The words the command line keeps for itself on every row.
-pub(crate) const GLOBAL_FLAGS: [&str; 5] = ["json", "deadline", "request-id", "request", "budget"];
+pub(crate) const GLOBAL_FLAGS: [&str; 7] = [
+    "json",
+    "deadline",
+    "request-id",
+    "request",
+    "budget",
+    "cursor",
+    "fresh",
+];
 
 /// Heterogeneous typed table. Registration rejects ambiguity once at startup.
 /// Retry identity lives with the product's writer, in the same transaction
@@ -561,7 +583,7 @@ impl OperationTable {
         &self.forms.product
     }
     /// Declare an MCP tool before registering its rows.
-    pub fn declare_tool(&mut self, tool: ToolGroup) -> Result<(), Failure> {
+    pub fn declare_tool(&mut self, tool: ToolFamily) -> Result<(), Failure> {
         if !valid_word(&tool.name, '_') || tool.description.is_empty() {
             return Err(bad_request("a tool needs a name and a description"));
         }
@@ -571,7 +593,7 @@ impl OperationTable {
         Arc::make_mut(&mut self.forms).tools.push(tool);
         Ok(())
     }
-    pub fn tools(&self) -> &[ToolGroup] {
+    pub fn tools(&self) -> &[ToolFamily] {
         &self.forms.tools
     }
     /// The row a command line runs when its first words name no command
@@ -856,6 +878,9 @@ impl OperationTable {
             caller,
             budget_tokens: request.budget_tokens,
             default_budget_tokens: description.spec.default_budget_tokens,
+            cursor: request.cursor.clone(),
+            fresh: request.fresh,
+            format: request.format,
             metadata,
             forms: self.forms.clone(),
             progress: Arc::default(),
