@@ -8,24 +8,23 @@ pub enum Db {
     Ensure,
     /// Print this schema version's `DATABASE_URL` without building anything.
     Url,
-    /// Open psql on this schema version's database.
-    Psql,
+    /// Open psql on this schema version's database, or on the named one,
+    /// such as a kept failed test database.
+    Psql { database: Option<String> },
     /// Run a command with `DATABASE_URL`, `PGHOST` and `PGPORT` set; without
     /// the per-user service, a throwaway server lives as long as the command.
     Exec {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
     },
-    /// Drop databases nothing will use again: test databases of exited
-    /// tests (keeping the newest `--failed` failed ones), and schema versions
-    /// beyond the newest `--keep` per project or unused for `--days`.
+    /// Drop schema versions nothing uses: those beyond the newest `--keep`
+    /// per project or unused for `--days`, never one a running command holds
+    /// or anything is connected to.
     DropUnused {
         #[arg(long, default_value_t = Reap::default().days)]
         days: u64,
         #[arg(long, default_value_t = Reap::default().schemas)]
         keep: usize,
-        #[arg(long, default_value_t = Reap::default().failed)]
-        failed: usize,
     },
     /// Exit 0 if the per-user service accepts connections.
     Ready,
@@ -67,10 +66,13 @@ fn run(command: Db, options: &ClusterOptions, schema: &Schema<'_>) -> Result<(),
             println!("{}", server.url(&names.schema, None));
             Ok(())
         }
-        Db::Psql => {
+        Db::Psql { database } => {
             let server = service()?;
-            let names = server.ensure_schema(schema)?;
-            exit(Process::new("psql").arg(server.url(&names.schema, None)))
+            let database = match database {
+                Some(database) => database,
+                None => server.ensure_schema(schema)?.schema,
+            };
+            exit(Process::new("psql").arg(server.url(&database, None)))
         }
         Db::Exec { command } => {
             let server = Server::service_or_start(options)?;
@@ -84,11 +86,10 @@ fn run(command: Db, options: &ClusterOptions, schema: &Schema<'_>) -> Result<(),
                     .envs(server.test_env(&names.template)),
             )
         }
-        Db::DropUnused { days, keep, failed } => {
+        Db::DropUnused { days, keep } => {
             let policy = Reap {
                 schemas: keep,
                 days,
-                failed,
             };
             for name in service()?.reap(&policy)? {
                 println!("dropped {name}");

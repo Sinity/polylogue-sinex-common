@@ -358,13 +358,13 @@ impl Run {
         if unchanged {
             return self.step(name, |_| Ok(()));
         }
-        let temp = if options.tmpfs {
-            Some(RunTemp::new()?)
-        } else {
-            None
-        };
+        let temp = RunTemp::new()?;
+        // Tests keep state, such as a history store of runs they start, in a
+        // directory of their own, never the user's.
+        let state = temp.path().join("state");
+        fs::create_dir(&state).map_err(|e| format!("{}: {e}", state.display()))?;
         let mut env = options.env.clone();
-        if let Some(temp) = &temp {
+        if options.tmpfs {
             let durable = self.target_dir()?.join("tmp");
             fs::create_dir_all(&durable).map_err(|e| format!("{}: {e}", durable.display()))?;
             env.push(("TMPDIR".into(), temp.path().display().to_string()));
@@ -420,6 +420,7 @@ impl Run {
             .arg("--tool-config-file")
             .arg(format!("devkit:{}", config.display()))
             .args(&args)
+            .env("XDG_STATE_HOME", &state)
             .envs(env.iter().cloned());
         let result = self.step(name, |run| {
             test.current_dir(&run.root);

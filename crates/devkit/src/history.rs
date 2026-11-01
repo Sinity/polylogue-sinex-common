@@ -31,13 +31,18 @@ CREATE TABLE IF NOT EXISTS runs (
     agentctl_job TEXT,
     started_ms INTEGER NOT NULL,
     duration_ms INTEGER,
-    -- running, passed or failed; a running row whose process is gone was interrupted
+    -- running, passed or failed; a running row whose process is gone, or
+    -- whose machine has booted since, was interrupted
     status TEXT NOT NULL,
     failure TEXT,
     -- the committed Git tree object; NULL when the checkout could not be read
     git_tree TEXT,
     -- why the checkout could not be read
-    observation_error TEXT
+    observation_error TEXT,
+    -- the kernel's boot ID and the process's start time in clock ticks after
+    -- boot: together with pid they identify the running process
+    boot_id TEXT,
+    process_start INTEGER
 );
 CREATE INDEX IF NOT EXISTS runs_by_checkout ON runs (project, checkout, id);
 CREATE TABLE IF NOT EXISTS stages (
@@ -153,6 +158,24 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.execute_batch(SCHEMA)?;
+        // Stores made before runs recorded their process identity.
+        for (column, kind) in [("boot_id", "TEXT"), ("process_start", "INTEGER")] {
+            let present = |conn: &Connection| {
+                conn.query_row(
+                    "SELECT count(*) FROM pragma_table_info('runs') WHERE name = ?1",
+                    [column],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map(|count| count > 0)
+            };
+            if !present(&conn)?
+                && let Err(error) =
+                    conn.execute_batch(&format!("ALTER TABLE runs ADD COLUMN {column} {kind}"))
+                && !present(&conn)?
+            {
+                return Err(error);
+            }
+        }
         Ok(Self { conn })
     }
 
@@ -167,8 +190,9 @@ impl Store {
             .map(|h| h.trim().to_owned());
         self.conn.execute(
             "INSERT INTO runs (project, checkout, command, args, head, dirty, toolchain, host,
-                               pid, agentctl_job, started_ms, status, git_tree, observation_error)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'running', ?12, ?13)",
+                               pid, agentctl_job, started_ms, status, git_tree, observation_error,
+                               boot_id, process_start)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'running', ?12, ?13, ?14, ?15)",
             params![
                 run.project,
                 run.root.display().to_string(),
@@ -183,6 +207,8 @@ impl Store {
                 millis(run.started),
                 run.tree.git_tree,
                 run.tree.observation_error,
+                boot_id(),
+                process_start(std::process::id().into()),
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -348,12 +374,12 @@ impl Store {
 }
 
 const RUN_SELECT: &str = "SELECT id, project, checkout, command, args, head, dirty, started_ms,
-                                 duration_ms, status, failure, pid, git_tree, observation_error FROM runs";
+                                 duration_ms, status, failure, pid, git_tree, observation_error,
+                                 boot_id, process_start FROM runs";
 
 fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
     let mut status: String = row.get(9)?;
-    let pid: i64 = row.get(11)?;
-    if status == "running" && !Path::new(&format!("/proc/{pid}")).exists() {
+    if status == "running" && interrupted(row.get(14)?, row.get(11)?, row.get(15)?) {
         status = "interrupted".into();
     }
     Ok(RunRow {
@@ -371,6 +397,39 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
         status,
         failure: row.get(10)?,
     })
+}
+
+/// Whether a run recorded as running has no process any more: the machine
+/// has booted since, its process is gone, or its pid now names a process
+/// that started later. Runs recorded without a boot ID or start time are
+/// judged by their pid alone.
+fn interrupted(boot: Option<String>, pid: i64, started: Option<i64>) -> bool {
+    if let (Some(boot), Some(current)) = (boot, boot_id())
+        && boot != current
+    {
+        return true;
+    }
+    match process_start(pid) {
+        None => true,
+        Some(start) => started.is_some_and(|started| started != start),
+    }
+}
+
+fn boot_id() -> Option<String> {
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .ok()
+        .map(|id| id.trim().to_owned())
+}
+
+/// A process's start time in clock ticks after boot, field 22 of its
+/// `/proc/<pid>/stat`; the command name before it may contain spaces.
+fn process_start(pid: i64) -> Option<i64> {
+    if pid <= 0 {
+        return None;
+    }
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let fields = &stat[stat.rfind(')')? + 1..];
+    fields.split_whitespace().nth(19)?.parse().ok()
 }
 
 fn millis(time: SystemTime) -> i64 {

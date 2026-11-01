@@ -116,6 +116,8 @@ mechanic and nothing else in the shared crates.
 | tree | the Git tree object of a run's HEAD; with the hash of uncommitted changes it says what a run tested |
 | fixture | a value `#[devkit::test]` creates for a test parameter |
 | schema database, template | the read-only database compile-time SQL checks use, and the database tests clone |
+| slot | one of a fixed number of test database names per project on a server, held through a file lock while a test uses it |
+| kept failed database | one of a fixed number of names a failed test's database is renamed to for inspection, replacing the oldest |
 | sample | corpus files drawn for a benchmark, written down in a manifest |
 | quiet run | a bench run during which every host-load reading was below the thresholds |
 | scenario | one exported NixOS check selected for a VM run |
