@@ -102,6 +102,10 @@ pub struct Failure {
     pub suggestion: Option<Box<Value>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub hint: Option<String>,
+    /// What the input could have meant, each runnable as given: the matches
+    /// of an ambiguous reference, or known names close to an unknown one.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub candidates: Vec<String>,
     pub retryable: bool,
 }
 
@@ -118,6 +122,7 @@ impl Failure {
             position: None,
             suggestion: None,
             hint: None,
+            candidates: Vec::new(),
             retryable: matches!(kind, FailureKind::Timeout | FailureKind::NotRunning),
         }
     }
