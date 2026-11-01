@@ -329,7 +329,9 @@ name = "command-surface"
 version = "0.1.0"
 dependencies = [
  "http",
+ "jiff",
  "proptest",
+ "query-language",
  "rusqlite",
  "schemars",
  "serde",
@@ -337,6 +339,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "ts-rs",
 ]
 
 [[package]]

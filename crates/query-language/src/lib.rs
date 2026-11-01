@@ -3,6 +3,7 @@ pub mod ast;
 pub mod bind;
 pub mod catalog;
 pub mod complete;
+pub mod coverage;
 pub mod cursor;
 pub mod format;
 pub mod identity;

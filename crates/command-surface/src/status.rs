@@ -1,96 +1,42 @@
-//! Status values preserve measured, missing and unavailable as distinct states.
-use crate::{Failure, OperationFuture, bad_request};
+//! A product's status: figures in the shared value states, and one verdict.
+use crate::{OperationFuture, ValueState};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum FigureState {
-    Measured,
-    NoneFound,
-    NotMeasured,
-    Unavailable,
-    Gap,
-}
+/// One value in a product's status: its name, its value with its state, and
+/// how old the measurement is in milliseconds.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(try_from = "FigureWire<T>")]
+#[serde(deny_unknown_fields)]
 pub struct Figure<T> {
     name: String,
-    value: Option<T>,
-    state: FigureState,
-    reason: Option<String>,
+    value: ValueState<T>,
     age: u64,
-}
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct FigureWire<T> {
-    name: String,
-    value: Option<T>,
-    state: FigureState,
-    reason: Option<String>,
-    age: u64,
-}
-impl<T> TryFrom<FigureWire<T>> for Figure<T> {
-    type Error = Failure;
-    fn try_from(w: FigureWire<T>) -> Result<Self, Failure> {
-        Self::new(w.name, w.value, w.state, w.reason, w.age)
-    }
 }
 impl<T> Figure<T> {
-    pub fn new(
-        name: impl Into<String>,
-        value: Option<T>,
-        state: FigureState,
-        reason: Option<String>,
-        age: u64,
-    ) -> Result<Self, Failure> {
-        let measured = matches!(state, FigureState::Measured | FigureState::NoneFound);
-        if measured != value.is_some() {
-            return Err(bad_request(
-                "only measured and none_found figures carry values",
-            ));
-        }
-        if !measured && reason.as_ref().is_none_or(|r| r.is_empty()) {
-            return Err(bad_request("unmeasured figures need a reason"));
-        }
-        Ok(Self {
+    pub fn new(name: impl Into<String>, value: ValueState<T>) -> Self {
+        Self {
             name: name.into(),
             value,
-            state,
-            reason,
-            age,
-        })
+            age: 0,
+        }
     }
     pub fn measured(name: impl Into<String>, value: T) -> Self {
-        Self {
-            name: name.into(),
-            value: Some(value),
-            state: FigureState::Measured,
-            reason: None,
-            age: 0,
-        }
+        Self::new(name, ValueState::Complete { value })
     }
     pub fn not_measured(name: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            value: None,
-            state: FigureState::NotMeasured,
-            reason: Some(reason.into()),
-            age: 0,
-        }
+        Self::new(
+            name,
+            ValueState::Unknown {
+                reason: reason.into(),
+            },
+        )
     }
     pub fn name(&self) -> &str {
         &self.name
     }
-    pub fn value(&self) -> Option<&T> {
-        self.value.as_ref()
-    }
-    pub fn state(&self) -> FigureState {
-        self.state
-    }
-    pub fn reason(&self) -> Option<&str> {
-        self.reason.as_deref()
+    pub fn value(&self) -> &ValueState<T> {
+        &self.value
     }
     pub fn age(&self) -> u64 {
         self.age
@@ -113,32 +59,29 @@ pub enum Verdict {
     Unknown { reason: String },
 }
 impl Verdict {
+    /// Healthy when every figure is sound; unknown when no figure holds a
+    /// value; degraded otherwise, naming the first figure that is not sound.
     pub fn from_figures<T>(figures: &[Figure<T>]) -> Self {
         if figures.is_empty() {
             return Self::Unknown {
                 reason: "no figures measured".into(),
             };
         }
-        let missing = figures
+        let Some(first) = figures.iter().find(|f| !f.value.is_sound()) else {
+            return Self::Healthy;
+        };
+        let reason = format!(
+            "{}: {}",
+            first.name,
+            first.value.reason().unwrap_or(first.value.name())
+        );
+        if figures
             .iter()
-            .find(|f| !matches!(f.state, FigureState::Measured | FigureState::NoneFound));
-        match missing {
-            None => Self::Healthy,
-            Some(first) => {
-                let reason = format!(
-                    "{}: {}",
-                    first.name,
-                    first.reason.as_deref().unwrap_or("not measured")
-                );
-                if figures
-                    .iter()
-                    .all(|f| !matches!(f.state, FigureState::Measured | FigureState::NoneFound))
-                {
-                    Self::Unknown { reason }
-                } else {
-                    Self::Degraded { reason }
-                }
-            }
+            .all(|f| !f.value.is_sound() && f.value.value().is_none())
+        {
+            Self::Unknown { reason }
+        } else {
+            Self::Degraded { reason }
         }
     }
 }

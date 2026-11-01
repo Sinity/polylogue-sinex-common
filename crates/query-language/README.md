@@ -146,6 +146,15 @@ Four operators, each with one meaning in both products:
   case-insensitive at their call position and stored under their declared
   spelling (`DAY(when)` becomes `day(when)`).
 
+## Coverage
+
+`coverage::CoverageState` is the one vocabulary for how much of a source's
+interval a product holds: `complete`, `gap` (with its reason), `unknown`,
+`outside_span` (outside what an import or export spans), `not_yet` (its next
+opportunity has not come), `excluded` and `unavailable` (with its cause).
+`fill` and every answer's coverage facet use it; any state but `complete`
+makes a count over the interval a lower bound.
+
 ## Meaning
 
 - **Three values.** A condition over an unknown value is neither true nor

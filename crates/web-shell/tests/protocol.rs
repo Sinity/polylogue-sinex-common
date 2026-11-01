@@ -1,4 +1,4 @@
-use command_surface::{Availability, Deadline, LatencyClass, OperationSpec, Request, SseDecoder};
+use command_surface::{Access, Availability, Deadline, OperationSpec, Request, SseDecoder};
 use http::{Method, Request as HttpRequest, Response, StatusCode};
 use serde_json::json;
 use web_shell::protocol::{Action, CopyForm, CopyTarget};
@@ -30,11 +30,13 @@ fn live_fragment_equals_reload() {
 #[test]
 fn unknown_never_zero() {
     let states: Vec<ValueState<u64>> = vec![
-        ValueState::Unknown { reason: None },
+        ValueState::Unknown {
+            reason: "timed out".into(),
+        },
         ValueState::NotRecorded,
         ValueState::NotApplicable,
         ValueState::Pending,
-        ValueState::Error {
+        ValueState::Unavailable {
             reason: "source offline".into(),
         },
     ];
@@ -43,22 +45,26 @@ fn unknown_never_zero() {
         assert!(!cell.contains('0'), "{cell}");
     }
     assert!(
-        value_cell(&ValueState::Measured(0))
+        value_cell(&ValueState::Complete { value: 0 })
             .into_string()
             .contains(">0<")
     );
     assert!(
         value_cell(&ValueState::Partial {
             value: 3,
-            unknown: 2
+            unknown_count: 2,
+            reason: None,
         })
         .into_string()
         .contains("≥ 3 (2 unknown)")
     );
     assert!(
-        value_cell(&ValueState::Inferred(4))
-            .into_string()
-            .contains("≈ 4 (inferred)")
+        value_cell(&ValueState::Inferred {
+            value: 4,
+            basis: "sampled".into(),
+        })
+        .into_string()
+        .contains("≈ 4 (inferred)")
     );
 }
 
@@ -150,14 +156,14 @@ fn fragment_event_round_trips_through_shared_sse_decoder() {
 
 fn operation(write: bool) -> OperationSpec {
     OperationSpec {
-        name: "read".into(),
-        command: vec!["read".into()],
-        summary: "Read selected row".into(),
-        reason: "read one row".into(),
-        http_route: "/v1/read".into(),
-        latency: LatencyClass::Read,
-        failures: vec![],
-        write,
+        access: if write { Access::Write } else { Access::Read },
+        ..OperationSpec::request(
+            "read",
+            &["read"],
+            "read",
+            "Read selected row",
+            "read one row",
+        )
     }
 }
 #[test]
@@ -167,6 +173,7 @@ fn actions_are_operation_requests_and_keep_unavailable_reasons() {
         arguments: json!({"ref": "row & <one>"}),
         request_id: "request-1".into(),
         deadline: Deadline::Default,
+        budget_tokens: None,
     };
     let action = Action::from_operation(
         &operation(true),
@@ -312,12 +319,20 @@ fn page_and_palette_cli_derive_from_registered_request() {
     }
     let mut table =
         command_surface::OperationTable::new("app", command_surface::Deadlines::default());
+    table
+        .declare_tool(command_surface::ToolGroup {
+            name: "read".into(),
+            description: "Read rows".into(),
+            open_world: false,
+        })
+        .unwrap();
     table.register(Read).unwrap();
     let request = Request {
         operation: "read".into(),
         arguments: json!({"ref":"row' & λ"}),
         request_id: "r-1".into(),
         deadline: Deadline::None,
+        budget_tokens: None,
     };
     let action = Action::from_table(&table, &Availability::Enabled, &request, None).unwrap();
     assert_eq!(action.cli, table.cli_command(&request).unwrap());

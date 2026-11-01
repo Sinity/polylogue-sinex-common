@@ -5,23 +5,27 @@ use serde_json::{Value, json};
 proptest! {
     #[test]
     fn failure_suggestion_preserves_its_wire_value(text in ".*"){
-        let suggestion=json!({"operation":"read","arguments":{"text":text}});
-        let failure=Failure::new(FailureKind::BadValue,"invalid synthetic value").with_suggestion(suggestion.clone());
-        let value=serde_json::to_value(&failure).unwrap();prop_assert_eq!(&value["suggestion"],&suggestion);
-        prop_assert_eq!(serde_json::from_value::<Failure>(value).unwrap(),failure);
+        let request=RunnableRequest::new("read",json!({"text":text}),"r-1");
+        for suggestion in [Suggestion::Request(request.clone()),Suggestion::Query(text.clone())]{
+            let failure=Failure::new(FailureKind::BadValue,"invalid synthetic value").with_suggestion(suggestion.clone());
+            let value=serde_json::to_value(&failure).unwrap();
+            prop_assert_eq!(serde_json::from_value::<Suggestion>(value["suggestion"].clone()).unwrap(),suggestion);
+            prop_assert_eq!(serde_json::from_value::<Failure>(value).unwrap(),failure);
+        }
     }
     #[test]
     fn failure_candidates_survive_the_wire_in_order(candidates in proptest::collection::vec(".*", 0..4)){
         let failure=Failure::new(FailureKind::Ambiguous,"synthetic name is ambiguous").with_candidates(candidates.clone());
         let value=serde_json::to_value(Answer::<Value>::error(failure.clone())).unwrap();
         prop_assert_eq!(value["error"].get("candidates").is_some(),!candidates.is_empty());
-        let Answer::Error{error,..}=serde_json::from_value::<Answer<Value>>(value).unwrap() else { panic!("error answer") };
+        let answer=serde_json::from_value::<Answer<Value>>(value).unwrap();
+        let error=answer.failure().expect("error answer");
         prop_assert_eq!(error.candidates(),candidates.as_slice());
-        prop_assert_eq!(error,failure);
+        prop_assert_eq!(error,&failure);
     }
     #[test]
     fn envelope_serialization_preserves_unicode_and_identity(text in ".*",id in ".+"){
-        let request=RunnableRequest{operation:"read".into(),arguments:json!({"text":text}),request_id:id,deadline:Deadline::None};
+        let request=RunnableRequest{operation:"read".into(),arguments:json!({"text":text}),request_id:id,deadline:Deadline::None,budget_tokens:Some(4000)};
         let bytes=serde_json::to_vec(&request).unwrap();prop_assert_eq!(serde_json::from_slice::<RunnableRequest>(&bytes).unwrap(),request);
         let answer=Answer::ok(json!({"text":text}));let bytes=serde_json::to_vec(&answer).unwrap();prop_assert_eq!(serde_json::from_slice::<Answer<Value>>(&bytes).unwrap(),answer);
     }
@@ -123,24 +127,14 @@ fn sse_comments_multiline_crlf_and_persistent_ids() {
 #[test]
 fn unmeasured_never_zero_and_figure_reuse_needs_same_key() {
     let ratio = Figure::ratio("coverage", 0, 0);
-    assert_eq!(ratio.value(), None);
-    assert_eq!(ratio.state(), FigureState::NotMeasured);
-    assert!(
-        Figure::new(
-            "unknown",
-            Some(0),
-            FigureState::NotMeasured,
-            Some("missing".into()),
-            0
-        )
-        .is_err()
-    );
-    let malformed =
-        json!({"name":"unknown","value":0,"state":"unavailable","reason":"offline","age":0});
+    assert_eq!(ratio.value().value(), None);
+    assert_eq!(ratio.value().reason(), Some("zero denominator"));
+    // A missing state cannot carry a value on the wire.
+    let malformed = json!({"name":"unknown","value":{"state":"unavailable","reason":"offline","value":0},"age":0});
     assert!(serde_json::from_value::<Figure<u64>>(malformed).is_err());
     let mut cache = FigureCache::default();
     cache.insert("position-1", Figure::measured("rows", 0));
-    assert_eq!(cache.get(&"position-1").unwrap().value(), Some(&0));
+    assert_eq!(cache.get(&"position-1").unwrap().value().value(), Some(&0));
     assert!(cache.get(&"position-2").is_none());
     assert!(matches!(
         Status::new(vec![ratio]).verdict,
@@ -160,8 +154,8 @@ async fn figure_deadlines_are_independent() {
         Box::pin(async { Figure::measured("fast", 7) }),
     );
     let (slow, fast) = tokio::join!(missing, measured);
-    assert_eq!(slow.reason(), Some("timed out"));
-    assert_eq!(fast.value(), Some(&7));
+    assert_eq!(slow.value().reason(), Some("timed out"));
+    assert_eq!(fast.value().value(), Some(&7));
     assert!(matches!(
         Status::new(vec![slow, fast]).verdict,
         Verdict::Degraded { .. }
