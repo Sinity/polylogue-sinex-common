@@ -4,7 +4,7 @@
 use crate::operation::{Forms, GLOBAL_FLAGS, valid_word};
 use crate::{
     ArgumentForm, ArgumentSpec, Deadline, Failure, Format, OperationDescription, OperationKind,
-    OperationTable, RunnableRequest, bad_request, quote_argument,
+    OperationTable, RequestOption, RunnableRequest, bad_request, quote_argument,
 };
 use serde_json::{Map, Value};
 
@@ -191,6 +191,9 @@ pub(crate) fn check(description: &OperationDescription) -> Result<(), Failure> {
 pub struct ParsedCommand {
     pub request: RunnableRequest,
     pub kind: OperationKind,
+    /// `--json`: print the answer as JSON. The request asks for JSON rows
+    /// too when the table serves the `format` option.
+    pub json: bool,
     pub calling_process: Map<String, Value>,
 }
 
@@ -455,9 +458,14 @@ impl OperationTable {
                 budget_tokens,
                 cursor,
                 fresh,
-                format: if json { Format::Json } else { Format::Text },
+                format: if json && self.accepts(RequestOption::Format) {
+                    Format::Json
+                } else {
+                    Format::Text
+                },
             },
             kind: spec.kind.clone(),
+            json,
             calling_process,
         })
     }

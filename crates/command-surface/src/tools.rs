@@ -6,6 +6,7 @@
 //! Its hints come from its rows' access, which registration keeps uniform.
 //! Tools carry no output schema; `answer_schema` serves the answer's once.
 //! Stream and local rows are not tools.
+use crate::RequestOption;
 use crate::operation::{Forms, terminal_text};
 use crate::{
     Access, Answer, Caller, CancellationToken, Deadline, Failure, FailureKind, Format, LeftOut,
@@ -165,10 +166,15 @@ pub(crate) fn tool_input(forms: &Forms, tool: &str) -> Result<Value, Failure> {
         "deadline".into(),
         json!({"type": ["integer", "null"], "description": "ms; null: none"}),
     );
-    properties.insert("budget_tokens".into(), json!({"type": "integer"}));
-    properties.insert("cursor".into(), json!({"type": "string"}));
-    properties.insert("fresh".into(), json!({"type": "boolean"}));
-    properties.insert("format".into(), json!({"enum": ["text", "json"]}));
+    for option in &forms.options {
+        let schema = match option {
+            RequestOption::BudgetTokens => json!({"type": "integer"}),
+            RequestOption::Cursor => json!({"type": "string"}),
+            RequestOption::Fresh => json!({"type": "boolean"}),
+            RequestOption::Format => json!({"enum": ["text", "json"]}),
+        };
+        properties.insert(option.name().into(), schema);
+    }
     Ok(json!({
         "type": "object",
         "properties": properties,
@@ -420,7 +426,7 @@ impl OperationTable {
                     "annotations": {
                         "readOnlyHint": access == Access::Read,
                         "destructiveHint": access == Access::Permanent,
-                        "idempotentHint": true,
+                        "idempotentHint": tool.idempotent,
                         "openWorldHint": tool.open_world,
                     }
                 }))

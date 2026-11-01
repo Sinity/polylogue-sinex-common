@@ -105,11 +105,15 @@ impl Operation for Search {
 
 fn table() -> OperationTable {
     let mut table = OperationTable::new("example", Deadlines::default());
+    for option in RequestOption::ALL {
+        table.accept(option);
+    }
     table
         .declare_tool(ToolFamily {
             name: "query".into(),
             description: "Search rows".into(),
             open_world: false,
+            idempotent: true,
         })
         .unwrap();
     table.register(Search).unwrap();

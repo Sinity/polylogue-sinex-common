@@ -41,6 +41,7 @@ fn table() -> OperationTable {
             name: "notes".into(),
             description: "Notes".into(),
             open_world: false,
+            idempotent: true,
         })
         .unwrap();
     table

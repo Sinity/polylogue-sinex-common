@@ -146,10 +146,9 @@ impl OperationTable {
             return Ok(0);
         }
         let parsed = self.parse_cli(args, request_id);
-        let json = parsed.as_ref().map_or_else(
-            |_| args.iter().any(|a| a == "--json"),
-            |p| p.request.format == Format::Json,
-        );
+        let json = parsed
+            .as_ref()
+            .map_or_else(|_| args.iter().any(|a| a == "--json"), |p| p.json);
         let (operation, budget, answer) = match parsed {
             Err(error) => (String::new(), None, Answer::error(error)),
             Ok(parsed) => {

@@ -90,6 +90,41 @@ fn is_default(value: &Deadline) -> bool {
     matches!(value, Deadline::Default)
 }
 
+/// A request option a product's table may accept beyond `request_id` and
+/// `deadline`, which every table takes. A table names the ones it serves;
+/// its tools offer only those, and dispatch refuses the others.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestOption {
+    BudgetTokens,
+    Cursor,
+    Fresh,
+    Format,
+}
+impl RequestOption {
+    pub const ALL: [Self; 4] = [Self::BudgetTokens, Self::Cursor, Self::Fresh, Self::Format];
+    /// The option's field name on the wire.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::BudgetTokens => "budget_tokens",
+            Self::Cursor => "cursor",
+            Self::Fresh => "fresh",
+            Self::Format => "format",
+        }
+    }
+    /// Whether `request` uses the option.
+    pub fn used_by<T>(self, request: &Request<T>) -> bool {
+        match self {
+            Self::BudgetTokens => request.budget_tokens.is_some(),
+            Self::Cursor => request.cursor.is_some(),
+            Self::Fresh => request.fresh,
+            Self::Format => request.format != Format::Text,
+        }
+    }
+}
+
 /// How the answer comes back: as text (rows rendered once, the envelope
 /// beside them), or with the rows as JSON too.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

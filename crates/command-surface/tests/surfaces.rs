@@ -114,12 +114,16 @@ fn table() -> (OperationTable, Arc<AtomicU64>, Arc<AtomicU64>) {
     let mut deadlines = Deadlines::default();
     deadlines.set(LatencyClass::Read, Some(Duration::from_millis(10)));
     let mut table = OperationTable::new("example", deadlines);
+    for option in RequestOption::ALL {
+        table.accept(option);
+    }
     for (name, description) in [("rows", "Read synthetic rows"), ("write", "Record rows")] {
         table
             .declare_tool(ToolFamily {
                 name: name.into(),
                 description: description.into(),
                 open_world: false,
+                idempotent: true,
             })
             .unwrap();
     }
@@ -516,6 +520,7 @@ async fn arbitrary_typed_requests_are_reachable_and_string_flags_do_not_change_m
             name: "echo".into(),
             description: "Echo".into(),
             open_world: false,
+            idempotent: true,
         })
         .unwrap();
     table.register(Echo).unwrap();

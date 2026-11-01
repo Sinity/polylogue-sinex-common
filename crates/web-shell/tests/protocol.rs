@@ -324,6 +324,7 @@ fn page_and_palette_cli_derive_from_registered_request() {
             name: "read".into(),
             description: "Read rows".into(),
             open_world: false,
+            idempotent: true,
         })
         .unwrap();
     table.register(Read).unwrap();

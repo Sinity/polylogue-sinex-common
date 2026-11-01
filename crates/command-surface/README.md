@@ -89,8 +89,11 @@ reduced to its shallow type (a scalar keeps its type and enum values; an
 object, a list or a choice among them is only its bare type), so a deeply
 nested request costs no more than a flat one. A field whose argument
 declaration is unlisted (`ArgumentSpec::unlisted`) is left out of the list
-and still accepted, since `arguments` admits any field; then `request_id`, `deadline`,
-`budget_tokens`, `cursor`, `fresh` and `format`. A field two rows type
+and still accepted, since `arguments` admits any field; then `request_id`,
+`deadline`, and those of `budget_tokens`, `cursor`, `fresh` and `format`
+the table serves (`OperationTable::accept(RequestOption)`; a table serves
+none of them until it names them, and dispatch refuses one it does not
+serve; the command line's `--json` still prints JSON). A field two rows type
 differently is a choice of its types, described by the rows that use each;
 nothing else is described, the names saying what they are. Each row's own
 schema checks the arguments at dispatch, so a field of another row or a
@@ -100,8 +103,10 @@ mistyped value is refused there. Tools carry no `outputSchema`: results keep
 (`OperationTable::family_schemas`) once, from its explain or capabilities
 answer. `laws::tools_list_within` holds a product's whole tool list to the
 byte budget it passes. Hints come from the
-family's access: read-only for read, destructive for permanent, idempotent
-always (a retried `request_id` is applied once), open-world as declared.
+family: read-only for read access, destructive for permanent, and
+idempotent (a retried `request_id` is applied once) and open-world as the
+family declares; a family whose rows start a new action on every call is
+not idempotent.
 Every request row is reachable from exactly one tool; stream and local rows
 stay off MCP (an MCP call answers once, and local rows run on the caller's
 machine). Completion is the protocol's `completion/complete` method, not a

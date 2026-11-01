@@ -216,6 +216,9 @@ pub struct ToolFamily {
     /// Its rows reach beyond the product (another session, a web chat).
     #[serde(default)]
     pub open_world: bool,
+    /// A retried call with the same `request_id` is applied once. A family
+    /// whose rows start a new action on every call says no.
+    pub idempotent: bool,
 }
 
 /// One request row. Its response type supplies every surface, including
@@ -467,6 +470,7 @@ pub(crate) struct Forms {
     pub(crate) product: String,
     pub(crate) descriptions: Vec<OperationDescription>,
     pub(crate) tools: Vec<ToolFamily>,
+    pub(crate) options: Vec<crate::RequestOption>,
 }
 impl Forms {
     pub(crate) fn description(&self, name: &str) -> Option<&OperationDescription> {
@@ -596,6 +600,7 @@ impl OperationTable {
                 product: product.into(),
                 descriptions: vec![],
                 tools: vec![],
+                options: vec![],
             }),
             deadlines,
             failure_codes: BTreeMap::new(),
@@ -618,6 +623,19 @@ impl OperationTable {
     }
     pub fn tools(&self) -> &[ToolFamily] {
         &self.forms.tools
+    }
+    /// Serve a request option on every row: tools offer it, and dispatch
+    /// takes it. A table serves only `request_id` and `deadline` until it
+    /// names more.
+    pub fn accept(&mut self, option: crate::RequestOption) {
+        let options = &mut Arc::make_mut(&mut self.forms).options;
+        if !options.contains(&option) {
+            options.push(option);
+            options.sort();
+        }
+    }
+    pub fn accepts(&self, option: crate::RequestOption) -> bool {
+        self.forms.options.contains(&option)
     }
     /// The row a command line runs when its first words name no command
     /// (`polylogue QUERY`).
@@ -858,6 +876,16 @@ impl OperationTable {
         })?;
         if request.request_id.is_empty() {
             return Err(bad_request("request_id must not be empty"));
+        }
+        if let Some(option) = crate::RequestOption::ALL
+            .into_iter()
+            .find(|option| option.used_by(request) && !self.accepts(*option))
+        {
+            return Err(bad_request(format!(
+                "{} does not take {}",
+                self.forms.product,
+                option.name()
+            )));
         }
         // Even a Request implementation that omits deny_unknown_fields cannot
         // silently accept an author or misspelled top-level argument.

@@ -210,6 +210,7 @@ fn make_table(store: &Arc<Store>, gate: Option<Arc<Gate>>) -> OperationTable {
             name: "write".into(),
             description: "Write".into(),
             open_world: false,
+            idempotent: true,
         })
         .unwrap();
     table

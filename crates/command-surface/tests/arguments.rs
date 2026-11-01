@@ -93,12 +93,16 @@ impl Operation for Exec {
 
 fn table() -> OperationTable {
     let mut table = OperationTable::new("example", Deadlines::default());
+    for option in RequestOption::ALL {
+        table.accept(option);
+    }
     for name in ["read", "act"] {
         table
             .declare_tool(ToolFamily {
                 name: name.into(),
                 description: format!("{name} things"),
                 open_world: false,
+                idempotent: true,
             })
             .unwrap();
     }
@@ -233,6 +237,7 @@ fn declarations_the_request_cannot_hold_are_refused() {
                 name: "read".into(),
                 description: "read".into(),
                 open_world: false,
+                idempotent: true,
             })
             .unwrap();
         let error = table.register(Declared(spec.clone())).unwrap_err();
@@ -414,6 +419,7 @@ fn request_fields_cannot_take_a_flag_of_every_row() {
             name: "read".into(),
             description: "read".into(),
             open_world: false,
+            idempotent: true,
         })
         .unwrap();
     let error = table.register(Clash).unwrap_err();

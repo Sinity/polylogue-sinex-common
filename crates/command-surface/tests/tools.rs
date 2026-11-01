@@ -142,6 +142,7 @@ fn tool(name: &str) -> ToolFamily {
         name: name.into(),
         description: format!("The {name} tool"),
         open_world: name == "act",
+        idempotent: name != "act",
     }
 }
 
@@ -225,6 +226,9 @@ fn tools_generated() {
     assert_eq!(status["inputSchema"]["required"][0], "arguments");
     assert_eq!(tools[2]["annotations"]["readOnlyHint"], false);
     assert_eq!(tools[3]["annotations"]["openWorldHint"], true);
+    // Hints are what each family declares, not derived.
+    assert_eq!(tools[2]["annotations"]["idempotentHint"], true);
+    assert_eq!(tools[3]["annotations"]["idempotentHint"], false);
     // No tool carries an output schema; the answer's is served once.
     for tool in &tools {
         assert!(tool.get("outputSchema").is_none());
@@ -803,4 +807,71 @@ async fn socket_carries_mcp_messages() {
         text.contains(r#"next: find more: example_query {"arguments":{"text":"more"},"operation":"find","request_id":"r-2"}"#),
         "{text}"
     );
+}
+
+#[tokio::test]
+async fn request_options_are_offered_and_taken_only_when_accepted() {
+    let mut table = table();
+    let options = |table: &OperationTable| -> Vec<String> {
+        let properties = table.mcp_tools()[0]["inputSchema"]["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut names: Vec<String> = properties
+            .into_iter()
+            .filter(|name| !["operation", "arguments"].contains(&name.as_str()))
+            .collect();
+        names.sort();
+        names
+    };
+    // Every table takes request_id and deadline; nothing else until named.
+    assert_eq!(options(&table), ["deadline", "request_id"]);
+    for (option, call_options) in [
+        (RequestOption::BudgetTokens, json!({"budget_tokens": 10})),
+        (RequestOption::Cursor, json!({"cursor": "c"})),
+        (RequestOption::Fresh, json!({"fresh": true})),
+        (RequestOption::Format, json!({"format": "json"})),
+    ] {
+        let mut arguments = json!({"arguments": {"text": "x"}, "request_id": "r-1"});
+        for (key, value) in call_options.as_object().unwrap() {
+            arguments[key] = value.clone();
+        }
+        let refused = call(&table, "example_status", arguments.clone()).await;
+        assert_eq!(
+            refused["result"]["structuredContent"]["error"]["message"],
+            format!("example does not take {}", option.name())
+        );
+        let mut accepting = self::table();
+        accepting.accept(option);
+        assert!(options(&accepting).contains(&option.name().to_owned()));
+        let taken = call(&accepting, "example_status", arguments).await;
+        assert_eq!(taken["result"]["isError"], false, "{option:?}");
+    }
+    for option in RequestOption::ALL {
+        table.accept(option);
+    }
+    assert_eq!(
+        options(&table),
+        [
+            "budget_tokens",
+            "cursor",
+            "deadline",
+            "format",
+            "fresh",
+            "request_id"
+        ]
+    );
+    // The command line's --json prints JSON either way.
+    let plain = self::table();
+    let cli = plain
+        .cli(
+            &["status", "--text", "x", "--json"].map(str::to_string),
+            "r-1",
+            CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(cli.exit_code, 0);
+    assert!(cli.stdout.starts_with('{'));
 }
