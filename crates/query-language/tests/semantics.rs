@@ -716,7 +716,7 @@ fn key_joins_pair_equal_exact_keys_and_skip_unknown_keys() {
         .unwrap();
     assert_eq!(ids(&joined), ["c1:k1", "c1:k2"]);
     assert_eq!(joined.rows[0].value("match.repo"), Scalar::from("one"));
-    assert_eq!(joined.rows[0].value("offset"), Scalar::Unknown);
+    assert_eq!(joined.rows[0].value("match.distance"), Scalar::Unknown);
 }
 
 #[test]
@@ -744,7 +744,7 @@ fn matches_expand_exists_into_one_row_per_matched_child() {
     assert_eq!(answer.rows[1].value("position"), Scalar::Number(1.));
     assert_eq!(answer.rows[1].value("step.n"), Scalar::Number(1.));
     assert_eq!(answer.rows[1].value("parent"), Scalar::from("p"));
-    // A relation with two qualifiers has no single expansion.
+    // A relation with two patterns has no single expansion.
     let two = condition(ConditionKind::And {
         conditions: vec![
             condition(ConditionKind::Exists {
@@ -824,8 +824,8 @@ fn steps_stay_inside_one_scope_instance() {
         ))
         .unwrap();
     assert_eq!(ids(&joined), ["a1:a2", "a3:a2", "b2:b1"]);
-    assert_eq!(joined.rows[0].value("offset"), Scalar::Number(1.));
-    assert_eq!(joined.rows[1].value("offset"), Scalar::Number(-1.));
+    assert_eq!(joined.rows[0].value("match.distance"), Scalar::Number(1.));
+    assert_eq!(joined.rows[1].value("match.distance"), Scalar::Number(-1.));
 }
 
 #[test]

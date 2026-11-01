@@ -202,7 +202,7 @@ fn sinex_predecessor_corpus() {
             ),
             (
                 "events near (commands) within 5m fields when, near, offset sort offset",
-                "events | join near (commands) within 5m | fields when, offset | sort by offset",
+                "events | join near (commands) within 5m | fields when, match.distance | sort by match.distance",
             ),
             ("events since 7d", "events where since:7d"),
             (

@@ -316,7 +316,7 @@ fn saved_output_completion_uses_typed_snapshot_fields_and_every_value_path() {
                     },
                     Field {
                         name: "outcome".into(),
-                        kind: FieldKind::Match,
+                        kind: FieldKind::Exact,
                         values: vec![
                             "error".into(),
                             "error with spaces".into(),

@@ -426,7 +426,7 @@ fn transforms_declare_the_fields_they_add() {
     );
     assert!(scope.field("old_rank").is_some() && scope.field("title").is_some());
     let scope = typed("messages | join near (tool_calls) within 2 steps");
-    assert!(scope.field("match.tool").is_some() && scope.field("offset").is_some());
+    assert!(scope.field("match.tool").is_some() && scope.field("match.distance").is_some());
     assert!(scope.field("text").is_some());
     let scope = typed("since:7d | group by day(started) | count | fill");
     assert_eq!(
@@ -434,7 +434,7 @@ fn transforms_declare_the_fields_they_add() {
         query_language::coverage::CoverageState::STATES
     );
     // One top-level order relation exposes its nearest inner row.
-    let scope = typed("messages where after(tool_calls) within 2 steps | sort by offset");
+    let scope = typed("messages where after(tool_calls) within 2 steps | sort by match.distance");
     assert!(scope.field("match.tool").is_some());
     for (text, fragment) in [
         ("query:saved | matches", "hides its own"),
@@ -513,4 +513,47 @@ fn identity_spelling_in_both_catalogs() {
             assert_ne!(id(catalog, text), first, "{text} asks something else");
         }
     }
+}
+
+/// Law `ql.generated-names`: a field the language generates never hides a
+/// stored field, in either catalog; Sinex's stored `events.offset` stays
+/// `offset` beside an order relation's `match.distance`.
+#[test]
+fn generated_names_never_hide_stored_fields() {
+    use query_language::catalog::{Field, FieldKind};
+    for catalog in [support::polylogue(), support::sinex()] {
+        assert_eq!(catalog.hidden_fields(), Vec::<String>::new());
+    }
+    let sinex = support::sinex();
+    let bound = bind(
+        &parse(
+            "events where near(commands) within 5m | sort by offset, match.distance",
+            &sinex,
+        )
+        .unwrap(),
+        &sinex,
+    )
+    .unwrap();
+    let scope = &bound.typing().queries[0].transforms.last().unwrap().after;
+    assert_eq!(
+        scope.field("offset").unwrap().field.kind,
+        FieldKind::Integer
+    );
+    assert_eq!(
+        scope.field("match.distance").unwrap().field.kind,
+        FieldKind::Duration
+    );
+    let mut clashing = support::sinex();
+    for name in ["distance", "change"] {
+        clashing.units[0].fields.push(Field {
+            name: name.into(),
+            kind: FieldKind::Integer,
+            ..Field::default()
+        });
+    }
+    let unit = &clashing.units[0].name;
+    assert_eq!(
+        clashing.hidden_fields(),
+        vec![format!("{unit}.distance"), format!("{unit}.change")]
+    );
 }

@@ -292,7 +292,7 @@ fn saved_and_result_scopes_retain_snapshot_fields_and_closed_values() {
 fn joined_fields_and_nested_group_types_come_from_the_checker() {
     let catalog = catalog("events");
     let bound = checked(
-        "events | join near (events | group by cwd) within 1h | where offset < 5m | group by match.cwd | count",
+        "events | join near (events | group by cwd) within 1h | where match.distance < 5m | group by match.cwd | count",
         &catalog,
     );
     let scope = &bound.typing().queries[0].transforms[0].after;
@@ -301,7 +301,7 @@ fn joined_fields_and_nested_group_types_come_from_the_checker() {
     assert!(matches!(&matched.origin, Origin::Matched { input }
         if matches!(&input.origin, Origin::Group { .. })));
     assert_eq!(
-        scope.field("offset").unwrap().field.kind,
+        scope.field("match.distance").unwrap().field.kind,
         FieldKind::Duration
     );
     assert_eq!(

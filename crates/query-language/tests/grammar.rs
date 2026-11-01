@@ -182,7 +182,7 @@ fn positional_keywords_and_escaping() {
 fn order_relations_and_as_of_preserve_inner_context() {
     let c = support::sinex();
     let q = parse(
-        "events | join near (commands | as of seq 42) within 5m at end | fields offset",
+        "events | join near (commands | as of seq 42) within 5m at end | fields match.distance",
         &c,
     )
     .unwrap();

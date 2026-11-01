@@ -189,7 +189,7 @@ Four operators, each with one meaning in both products:
 | `fill` | after a time-bucketed group: every bucket of a finite range, each with the product's coverage state for it (below) |
 | `fields F [as N], E as N, …` | projection and computed columns |
 | `with CHILD(fields)[cond, first:k\|last:k]` | attached child lists; never changes the parents |
-| `matches` | one row per step of each match of the relation's one top-level `exists` or `seq`: `parent` (the row that matched), `match` (its number within the parent), `position` (the step's place in the match), `step` (a reference to the matched row) and the step row's fields as `step.F`. Zero qualifiers are refused and two are ambiguous; a saved or kept source hides its own, so `matches` follows the `exists` or `seq` it expands |
+| `matches` | one row per step of each match of the relation's one top-level `exists` or `seq`: `parent` (the row that matched), `match` (its number within the parent), `position` (the step's place in the match), `step` (a reference to the matched row) and the step row's fields as `step.F`. A relation without such a pattern is refused, and one with two is ambiguous; a saved or kept source hides its own, so `matches` follows the `exists` or `seq` it expands |
 | `UNIT [where C]` | switch to the related rows of another unit (`messages … \| sessions` lifts to the containing sessions) |
 | `union (Q)`, `intersect (Q)`, `except (Q)` | set algebra over one unit, or over identical projected schemas |
 | `fuse (Q)` | adds Q's order as one more ranked list without adding rows |
@@ -219,7 +219,7 @@ DISTANCE := DURATION | N steps
 - **As a condition** it is a semijoin: an outer row is kept when at least one
   inner row stands in the relation, so matches never multiply rows. It
   exposes `match.` (the nearest inner row, ties broken by the inner row's
-  identity) and `offset`, signed, in the distance's unit. An outer row whose
+  identity) and `match.distance`, the signed distance in the distance's unit. An outer row whose
   time or position is unknown is unknown. It composes with `NOT` and `OR`
   like any condition.
 - **As a transform,** `| join REL (QUERY) within D` returns one row per
@@ -550,6 +550,9 @@ Language:
   for every `page_size` and every way of paging through it.
 - **closed-sets-refuse**: a value outside a closed set is refused naming the
   set and the unit where the value exists.
+- **generated-names**: a field the language generates (`match.distance`,
+  `diff`'s `change`, `old_rank` and `new_rank`, `fill`'s `coverage` and
+  `coverage_detail`) never hides a stored field in either catalog.
 - **namespace-binding**: units bind only from tree nodes; namespace-like
   text inside values never adds a unit.
 - **defaults-bound-once**: after binding, every further condition only

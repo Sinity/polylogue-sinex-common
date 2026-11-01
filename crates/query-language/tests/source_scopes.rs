@@ -99,7 +99,7 @@ fn saved_suffix_columns_are_unknown_then_bound_to_actual_typed_output() {
 #[test]
 fn grouped_promoted_aliases_types_and_closed_sets_come_from_output_snapshot() {
     let mut catalog = catalog();
-    let mut state = field("state", FieldKind::Match);
+    let mut state = field("state", FieldKind::Exact);
     state.values = vec!["Open".into(), "Closed".into()];
     catalog.source_outputs.push(saved(
         "grouped",

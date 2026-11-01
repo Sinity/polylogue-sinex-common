@@ -256,9 +256,9 @@ struct Scope {
     group_input: Option<Arc<Scope>>,
     output_source: Option<crate::catalog::OutputSource>,
     /// The step units of the relation's top-level `exists` and `seq`
-    /// qualifiers, which `matches` expands; None when a saved or kept source
+    /// patterns, which `matches` expands; None when a saved or kept source
     /// hides them.
-    qualifiers: Option<Vec<String>>,
+    patterns: Option<Vec<String>>,
 }
 impl Scope {
     fn new(unit: String) -> Self {
@@ -273,7 +273,7 @@ impl Scope {
             origins: Arc::new(BTreeMap::new()),
             group_input: None,
             output_source: None,
-            qualifiers: Some(Vec::new()),
+            patterns: Some(Vec::new()),
         }
     }
 }
@@ -605,8 +605,8 @@ impl Parser<'_> {
         if self.take("with") {
             attach = self.attachments()?;
         }
-        scope.qualifiers = match &source {
-            Source::Unit { condition, .. } => Some(qualifiers(condition.as_ref())),
+        scope.patterns = match &source {
+            Source::Unit { condition, .. } => Some(patterns(condition.as_ref())),
             Source::Saved { .. } | Source::Result { .. } => None,
         };
         match &source {
@@ -1762,7 +1762,7 @@ impl Parser<'_> {
         Ok((within, at, order_scope))
     }
     /// One top-level order relation in a relation's condition exposes its
-    /// nearest inner row as `match.F` and the signed distance as `offset`.
+    /// nearest inner row as `match.F` and the signed distance as `match.distance`.
     fn expose_order_match(&mut self, scope: &mut Scope, condition: &Condition) {
         let mut orders = Vec::new();
         top_level(condition, &mut |c| {
@@ -1792,7 +1792,7 @@ impl Parser<'_> {
             self.add_generated(
                 scope,
                 Field {
-                    name: "offset".into(),
+                    name: crate::catalog::MATCH_DISTANCE.into(),
                     kind: match within {
                         Distance::Steps { .. } => FieldKind::Integer,
                         Distance::Time { .. } => FieldKind::Duration,
@@ -2246,7 +2246,7 @@ impl Parser<'_> {
                     scope,
                     Field {
                         name: crate::coverage::STATE_FIELD.into(),
-                        kind: FieldKind::Match,
+                        kind: FieldKind::Exact,
                         values: crate::coverage::CoverageState::STATES
                             .iter()
                             .map(|s| s.to_string())
@@ -2332,7 +2332,7 @@ impl Parser<'_> {
                     scope,
                     Field {
                         name: "change".into(),
-                        kind: FieldKind::Match,
+                        kind: FieldKind::Exact,
                         values: crate::diff::ChangeKind::NAMES
                             .iter()
                             .map(|s| s.to_string())
@@ -2387,7 +2387,7 @@ impl Parser<'_> {
                     } else {
                         None
                     };
-                    scope.qualifiers = Some(qualifiers(condition.as_ref()));
+                    scope.patterns = Some(patterns(condition.as_ref()));
                     if let Some(condition) = &condition {
                         self.expose_order_match(scope, condition);
                     }
@@ -2433,7 +2433,7 @@ impl Parser<'_> {
                 | TransformKind::Join { .. }
                 | TransformKind::Diff { .. }
         ) {
-            scope.qualifiers = Some(Vec::new());
+            scope.patterns = Some(Vec::new());
         }
         if !matches!(
             kind,
@@ -2521,14 +2521,14 @@ impl Parser<'_> {
     /// One row per step of each match: `parent`, `match`, `position`, `step`,
     /// and the step row's fields as `step.F`.
     fn matches(&mut self, scope: &mut Scope, start: usize) -> Result<(), Error> {
-        let Some(qualifiers) = scope.qualifiers.clone() else {
+        let Some(patterns) = scope.patterns.clone() else {
             return Err(Error::new(
                 ErrorKind::InvalidQuery,
                 "matches expands an exists or seq written in this query; a saved or kept source hides its own",
                 start,
             ));
         };
-        let unit = match qualifiers.as_slice() {
+        let unit = match patterns.as_slice() {
             [unit] => unit.clone(),
             [] => {
                 return Err(Error::new(
@@ -2542,7 +2542,7 @@ impl Parser<'_> {
                     ErrorKind::Ambiguous,
                     format!(
                         "matches needs exactly one top-level exists or seq; this relation has {}",
-                        qualifiers.len()
+                        patterns.len()
                     ),
                     start,
                 ));
@@ -2787,8 +2787,8 @@ fn top_level<'a>(condition: &'a Condition, visit: &mut impl FnMut(&'a Condition)
         _ => visit(condition),
     }
 }
-/// The step units of a condition's top-level `exists` and `seq` qualifiers.
-fn qualifiers(condition: Option<&Condition>) -> Vec<String> {
+/// The step units of a condition's top-level `exists` and `seq` patterns.
+fn patterns(condition: Option<&Condition>) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(condition) = condition {
         top_level(condition, &mut |c| match &c.kind {

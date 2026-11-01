@@ -437,7 +437,10 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
         ),
     ]);
     let pair = |inner: &str, offset: f64| {
-        let mut row = outer.clone().with("match.id", inner).with("offset", offset);
+        let mut row = outer
+            .clone()
+            .with("match.id", inner)
+            .with("match.distance", offset);
         row.id = format!("outer:{inner}");
         row.matches = vec![inner.into()];
         row
@@ -483,7 +486,10 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
         query: query(&v.outer, Some(near_condition.clone()), vec![]),
         fixture: timed.clone(),
         expected: answer(vec![
-            outer.clone().with("match.id", "near-a").with("offset", -1.),
+            outer
+                .clone()
+                .with("match.id", "near-a")
+                .with("match.distance", -1.),
         ]),
     });
     output.push(Case {
@@ -512,7 +518,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
                 .clone()
                 .with("match.id", "x")
                 .with(format!("match.{}", v.number), 1.)
-                .with("offset", -1.),
+                .with("match.distance", -1.),
         ],
     ));
     // A coarse time takes part by its whole period: a day that contains an
@@ -543,7 +549,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     let matched = |row: &Row, inner: &str, offset: Option<f64>| {
         let row = row.clone().with("match.id", inner);
         match offset {
-            Some(offset) => row.with("offset", offset),
+            Some(offset) => row.with("match.distance", offset),
             None => row,
         }
     };

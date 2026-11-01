@@ -55,6 +55,9 @@ are renames the operator may still change (default; open operator question).
 | coverage state | how completely a source covers an interval: `complete`, `gap`, `unknown`, `outside_span`, `not_yet`, `excluded`, `unavailable` |
 | expression | a field, literal, function call or arithmetic, with checked dimensions |
 | step | one position in an order scope; `within 1 step` is adjacent |
+| pattern | a top-level `exists` or `seq` condition; `\| matches` lists one row per step of each of its matches |
+| exact text | a field kind for identifiers and closed words, whose `field:value` is equality |
+| generated field | a field the language adds to a relation (`match.distance`, `change`, `coverage`); it never hides a stored field |
 | catalog reference form | a reference a product declares: a prefix with an optional marker, a whole word, or a bare identifier |
 | unknown | the third truth value: a condition over a missing value is neither true nor false |
 | closed set | the fixed list of values a field may hold |

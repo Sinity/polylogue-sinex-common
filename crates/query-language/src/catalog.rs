@@ -144,8 +144,9 @@ pub enum FieldKind {
     /// Short text; its natural match is a case-insensitive substring.
     #[default]
     Text,
-    /// An identifier or closed word; its natural match is equality.
-    Match,
+    /// Exact text: an identifier or closed word, whose natural match is
+    /// equality.
+    Exact,
     Substring,
     /// Prose; its natural match is word search.
     Words,
@@ -194,7 +195,7 @@ fn natural_match(kind: &FieldKind) -> NaturalMatch {
         FieldKind::Time => NaturalMatch::Period,
         FieldKind::Reference => NaturalMatch::Same,
         FieldKind::List(kind) => natural_match(kind),
-        FieldKind::Match
+        FieldKind::Exact
         | FieldKind::Integer
         | FieldKind::Number
         | FieldKind::Money
@@ -238,6 +239,42 @@ pub const FUNCTIONS: &[&str] = &[
 ];
 /// Bucket functions whose groups `fill` can complete.
 pub const TIME_BUCKETS: &[&str] = &["hour", "day", "week", "month", "year"];
+/// The prefix of an order relation's or join's inner-row fields (`match.F`).
+pub const MATCH_PREFIX: &str = "match.";
+/// The signed distance from an outer row to its matched row, in the
+/// distance's unit (time or steps).
+pub const MATCH_DISTANCE: &str = "match.distance";
+/// Fields the language adds beside a unit's stored fields: the order
+/// relation's distance, `diff`'s change and ranks, and `fill`'s coverage.
+/// A generated field never hides a stored one; `Catalog::hidden_fields`
+/// finds a catalog that would.
+pub const GENERATED_FIELDS: &[&str] = &[
+    MATCH_DISTANCE,
+    "change",
+    "old_rank",
+    "new_rank",
+    crate::coverage::STATE_FIELD,
+    crate::coverage::DETAIL_FIELD,
+];
+impl Catalog {
+    /// Stored fields a generated field would hide, as `unit.field`: a field
+    /// named like a generated one, or one whose `match.` form is one.
+    pub fn hidden_fields(&self) -> Vec<String> {
+        let mut hidden = Vec::new();
+        for unit in &self.units {
+            for field in &unit.fields {
+                let matched = format!("{MATCH_PREFIX}{}", field.name);
+                if GENERATED_FIELDS
+                    .iter()
+                    .any(|name| *name == field.name || *name == matched)
+                {
+                    hidden.push(format!("{}.{}", unit.name, field.name));
+                }
+            }
+        }
+        hidden
+    }
+}
 fn builtin_functions() -> Vec<Function> {
     FUNCTIONS
         .iter()

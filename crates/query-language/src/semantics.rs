@@ -1002,7 +1002,7 @@ impl<'a> ReferenceEvaluator<'a> {
         if let Some(c) = condition {
             rows = self.filter(rows, c)?;
         }
-        let mut qualifier = condition.clone();
+        let mut pattern = condition.clone();
         let mut groups: Option<Vec<Vec<Row>>> = None;
         // Ranked lists of one level of fuse and union, fused once.
         let mut lists: Vec<Vec<crate::fusion::Entry<String>>> = Vec::new();
@@ -1058,7 +1058,7 @@ impl<'a> ReferenceEvaluator<'a> {
                         members.push(items);
                     }
                     groups = Some(members);
-                    qualifier = None;
+                    pattern = None;
                 }
                 TransformKind::Aggregate { aggregates } => {
                     let grouped = groups.is_some();
@@ -1088,7 +1088,7 @@ impl<'a> ReferenceEvaluator<'a> {
                             }
                         }
                     }
-                    qualifier = None;
+                    pattern = None;
                 }
                 TransformKind::Fields { columns } => {
                     for row in &mut rows {
@@ -1100,7 +1100,7 @@ impl<'a> ReferenceEvaluator<'a> {
                         row.fields = fields;
                     }
                     groups = None;
-                    qualifier = None;
+                    pattern = None;
                 }
                 TransformKind::Distinct => {
                     let mut seen = BTreeSet::new();
@@ -1135,18 +1135,18 @@ impl<'a> ReferenceEvaluator<'a> {
                     let inner = self.execute(query)?.rows;
                     rows = self.join(rows, &inner, on)?;
                     groups = None;
-                    qualifier = None;
+                    pattern = None;
                 }
                 TransformKind::Diff { query } => {
                     let before = self.execute(query)?.rows;
                     rows = diff_rows(&before, rows);
                     groups = None;
-                    qualifier = None;
+                    pattern = None;
                 }
                 TransformKind::Matches => {
-                    rows = self.matches(&rows, qualifier.as_ref(), at)?;
+                    rows = self.matches(&rows, pattern.as_ref(), at)?;
                     groups = None;
-                    qualifier = None;
+                    pattern = None;
                 }
                 other => return Err(unsupported(&format!("transform {other:?}"), at)),
             }
@@ -1228,7 +1228,7 @@ impl<'a> ReferenceEvaluator<'a> {
         let mut orders = Vec::new();
         collect_orders(c, &mut orders);
         // One top-level order relation exposes its nearest inner row as
-        // `match.F` and, with a distance, the signed `offset`.
+        // `match.F` and, with a distance, the signed `match.distance`.
         let exposed = match orders.as_slice() {
             [
                 ConditionKind::Order {
@@ -1257,8 +1257,10 @@ impl<'a> ReferenceEvaluator<'a> {
                     row.fields.insert(format!("match.{name}"), value.clone());
                 }
                 if within.is_some() {
-                    row.fields
-                        .insert("offset".into(), Scalar::Number(offset as f64));
+                    row.fields.insert(
+                        crate::catalog::MATCH_DISTANCE.into(),
+                        Scalar::Number(offset as f64),
+                    );
                 }
             }
             selected.push(row);
@@ -1266,7 +1268,7 @@ impl<'a> ReferenceEvaluator<'a> {
         Ok(selected)
     }
     /// One row per pair. A pair carries the outer row's fields, the inner
-    /// row's as `match.F`, and for an order relation the signed `offset`.
+    /// row's as `match.F`, and for an order relation the signed `match.distance`.
     fn join(&self, outer: Vec<Row>, inner: &[Row], on: &JoinOn) -> Result<Vec<Row>, Error> {
         let mut out = Vec::new();
         for row in outer {
@@ -1305,8 +1307,10 @@ impl<'a> ReferenceEvaluator<'a> {
                     pair.fields.insert(format!("match.{name}"), value.clone());
                 }
                 if let Some(offset) = offset {
-                    pair.fields
-                        .insert("offset".into(), Scalar::Number(offset as f64));
+                    pair.fields.insert(
+                        crate::catalog::MATCH_DISTANCE.into(),
+                        Scalar::Number(offset as f64),
+                    );
                 }
                 pair.matches = vec![other.id.clone()];
                 out.push(pair);
@@ -1318,14 +1322,14 @@ impl<'a> ReferenceEvaluator<'a> {
     fn matches(
         &self,
         rows: &[Row],
-        qualifier: Option<&Condition>,
+        pattern: Option<&Condition>,
         at: usize,
     ) -> Result<Vec<Row>, Error> {
         let mut found = Vec::new();
-        if let Some(condition) = qualifier {
-            collect_qualifiers(condition, &mut found);
+        if let Some(condition) = pattern {
+            collect_patterns(condition, &mut found);
         }
-        let [qualifier] = found.as_slice() else {
+        let [pattern] = found.as_slice() else {
             return Err(refusal(
                 "matches needs exactly one top-level exists or seq",
                 at,
@@ -1333,7 +1337,7 @@ impl<'a> ReferenceEvaluator<'a> {
         };
         let mut out = Vec::new();
         for row in rows {
-            let (unit, matches): (&str, Vec<Vec<String>>) = match &qualifier.kind {
+            let (unit, matches): (&str, Vec<Vec<String>>) = match &pattern.kind {
                 ConditionKind::Exists { unit, condition } => (
                     unit,
                     self.exists_matches(row, unit, condition.as_deref())?
@@ -1347,7 +1351,7 @@ impl<'a> ReferenceEvaluator<'a> {
                     steps,
                     gaps,
                 } => (unit, self.sequence(row, unit, *all, steps, gaps)?),
-                _ => unreachable!("collected qualifiers are exists or seq"),
+                _ => unreachable!("collected patterns are exists or seq"),
             };
             let steps: BTreeMap<String, Row> = self
                 .children(row, unit)?
@@ -1536,10 +1540,10 @@ fn collect_orders<'a>(condition: &'a Condition, out: &mut Vec<&'a ConditionKind>
         _ => {}
     }
 }
-fn collect_qualifiers<'a>(condition: &'a Condition, out: &mut Vec<&'a Condition>) {
+fn collect_patterns<'a>(condition: &'a Condition, out: &mut Vec<&'a Condition>) {
     match &condition.kind {
         ConditionKind::And { conditions } => {
-            conditions.iter().for_each(|c| collect_qualifiers(c, out))
+            conditions.iter().for_each(|c| collect_patterns(c, out))
         }
         ConditionKind::Exists { .. } | ConditionKind::Sequence { .. } => out.push(condition),
         _ => {}

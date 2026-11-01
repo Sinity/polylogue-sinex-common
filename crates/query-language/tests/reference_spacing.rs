@@ -22,7 +22,7 @@ fn catalog() -> Catalog {
             },
             Field {
                 name: "source".into(),
-                kind: FieldKind::Match,
+                kind: FieldKind::Exact,
                 ..Field::default()
             },
             Field {

@@ -53,7 +53,7 @@ fn polylogue_forms_roundtrip() {
         "sessions | diff (origin:demo)",
         "tool_calls where outcome:error | group by next.action | count",
         "messages where NOT after(tool_calls where outcome:ok) within 10 steps",
-        "messages | join near (tool_calls where outcome:error) within 2 steps | fields offset",
+        "messages | join near (tool_calls where outcome:error) within 2 steps | fields match.distance",
         "messages | join (tool_calls) on session = session",
         "sessions | group by day(started) | agg count, sum(cost) | fill",
         "session:origin:synthetic-id",
