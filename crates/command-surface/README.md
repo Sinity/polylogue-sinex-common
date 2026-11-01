@@ -40,7 +40,9 @@ value, never beside a partial one.
 
 A `Failure` carries `kind`, `message`, `position` where the input has one,
 `suggestion` (a corrected request that runs as given, whenever one can be
-formed), `hint` and `retryable`. One table maps every kind to one exit code
+formed), `hint`, `candidates` (what the input could have meant: an ambiguous
+reference's matches, or known names close to an unknown one) and
+`retryable`. One table maps every kind to one exit code
 and one HTTP status:
 
 | Exit | Kinds | HTTP |

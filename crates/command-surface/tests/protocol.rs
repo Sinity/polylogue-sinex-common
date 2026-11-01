@@ -11,6 +11,15 @@ proptest! {
         prop_assert_eq!(serde_json::from_value::<Failure>(value).unwrap(),failure);
     }
     #[test]
+    fn failure_candidates_survive_the_wire_in_order(candidates in proptest::collection::vec(".*", 0..4)){
+        let failure=Failure::new(FailureKind::Ambiguous,"synthetic name is ambiguous").with_candidates(candidates.clone());
+        let value=serde_json::to_value(Answer::<Value>::error(failure.clone())).unwrap();
+        prop_assert_eq!(value["error"].get("candidates").is_some(),!candidates.is_empty());
+        let Answer::Error{error,..}=serde_json::from_value::<Answer<Value>>(value).unwrap() else { panic!("error answer") };
+        prop_assert_eq!(error.candidates(),candidates.as_slice());
+        prop_assert_eq!(error,failure);
+    }
+    #[test]
     fn envelope_serialization_preserves_unicode_and_identity(text in ".*",id in ".+"){
         let request=RunnableRequest{operation:"read".into(),arguments:json!({"text":text}),request_id:id,deadline:Deadline::None};
         let bytes=serde_json::to_vec(&request).unwrap();prop_assert_eq!(serde_json::from_slice::<RunnableRequest>(&bytes).unwrap(),request);
