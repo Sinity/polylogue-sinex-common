@@ -990,3 +990,73 @@ async fn missing_bus_records_dbus_failure_and_still_runs_both_route_command() {
         worker.await.unwrap().unwrap();
     }
 }
+
+#[tokio::test]
+async fn historical_occurrence_still_requires_current_policy() {
+    let bus = PrivateBus::start();
+    let records = Records::default();
+    let _server = bus
+        .server(FakeServer {
+            records: records.clone(),
+            actions: true,
+            stall: false,
+        })
+        .await;
+    let mut d = Deliverer::new(bus.connect().await, config(), NotificationState::default());
+    let mut n = notice("historical", "once");
+    n.current = false;
+    d.begin(n);
+    let result = d.send("historical", &|_| false).await;
+    assert_eq!(result[0].outcome, DeliveryOutcome::Cancelled);
+    assert!(records.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn unknown_command_is_not_retried_when_dbus_appears() {
+    let bus = PrivateBus::start();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("count");
+    let mut configured = config();
+    configured.route = Route::Both;
+    configured.deadline = Duration::from_millis(100);
+    configured.command = Some(RouteCommand {
+        program: "sh".into(),
+        arguments: vec![
+            "-c".into(),
+            "cat >/dev/null; printf x >> \"$1\"; exec sleep 10".into(),
+            "route".into(),
+            path.to_string_lossy().into_owned(),
+        ],
+    });
+    let mut d = Deliverer::new(
+        bus.connect().await,
+        configured,
+        NotificationState::default(),
+    );
+    let first = send(&mut d, notice("a", "a")).await;
+    assert_eq!(
+        first[0].outcome,
+        DeliveryOutcome::NotSent("no_notification_server".into())
+    );
+    assert_eq!(first[1].outcome, DeliveryOutcome::Unknown);
+    assert_eq!(std::fs::read(&path).unwrap(), b"x");
+    let records = Records::default();
+    let _server = bus
+        .server(FakeServer {
+            records: records.clone(),
+            actions: true,
+            stall: false,
+        })
+        .await;
+    d.server_appeared();
+    let retry = d.send("a", &|_| true).await;
+    assert_eq!(retry.len(), 1);
+    assert_eq!(retry[0].route, Route::Dbus);
+    assert_eq!(retry[0].outcome, DeliveryOutcome::Delivered);
+    assert_eq!(
+        d.state.attempts["a"].command,
+        Some(DeliveryOutcome::Unknown)
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"x");
+}
+
