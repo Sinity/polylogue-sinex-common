@@ -33,6 +33,41 @@ sealed blob reaches the disk. The naming key uses HKDF-SHA256 with the
 An **extent** is the byte range in one segment that holds one blob's frames.
 A product's rows cite extents; a list of extents read in order is one stream.
 
+## Rewritten streams: content-defined chunks
+
+Some inputs are rewritten whole on every change (a JSON session snapshot, a
+browser capture of a conversation, a document revision). Stored as one blob
+per revision, a file that grows by one turn per revision costs the square of
+its size. Such a stream is instead stored as **chunks**: the stream is cut at
+content-defined points, each chunk is an ordinary blob, and a revision is the
+list of its chunks' extents. A new revision appends only the chunks the
+product does not already hold; every unchanged run of bytes cites the extents
+stored for an earlier revision.
+
+**Cut points.** Cuts are placed by FastCDC normalised chunking (Xia et al.,
+USENIX ATC 2016): a gear rolling hash over the bytes after the minimum length,
+a stricter mask (two more bits than the target's) before the target length and
+a looser one (two fewer) after it, and a cut at the maximum length if none
+came sooner. The defaults are a 16 KiB minimum, 64 KiB target and 256 KiB
+maximum. A cut depends only on the bytes from its chunk's start to the cut, so
+an edit changes the chunk it falls in and, until the cuts realign, the next
+one or two; every chunk before it, and the chunks after realignment, keep
+their names. The same bytes always cut the same way, however they are read.
+
+**Sealed chunks.** Plain chunking uses one public gear table, derived from the
+context `hashed-blobs chunk gear v1`. Sealed chunking derives the table from
+the data key (HKDF-SHA256 with the same context), so the chunk lengths visible
+in extents say nothing about the content to someone without the key, and
+equal content under one key still cuts and deduplicates the same way.
+
+**Nothing above the extent changes.** A revision reads back as the exact bytes
+of that revision through the ordinary reader over its extents in order; chunk
+names deduplicate like any blob's; every revision stays readable. The planner
+returns the whole stream's name (plain or keyed, as a blob's would be) and
+length, so a product can recognise an unchanged revision without comparing
+chunks. Whether a location is stored this way is the product's declaration;
+the crate never detects it.
+
 ## The segment container
 
 A **segment** is an append-only file of frames. Each product has one writer,
@@ -70,7 +105,8 @@ segment opens, from the list the product passes in. Punching an extent twice
 is harmless.
 
 **One format.** Segments are the only storage layout. A blob is never patched
-against another blob, and there is no second file-per-blob layout to read.
+against another blob, and there is no second file-per-blob layout to read; a
+chunked stream is a list of ordinary blobs.
 
 ## Reading
 
@@ -182,11 +218,36 @@ member's logical bytes, including zero-filled holes. Link entries retain
 their own payload and metadata; extraction and link policy belong to the
 product. `header_offset` and `data_offset` anchor original stream bytes.
 
+`Preparation::chunked(reader, level, ChunkSizes, key, lookup)` plans a stream
+as chunks, reading it once with at most twice the maximum chunk length in
+memory. `key` seals every chunk and keys the cut points; `None` stores plain
+chunks. Each chunk's name is passed to `lookup` (the product's committed hash
+index, and `SegmentWriter::uncommitted` for groups awaiting commit): a known
+chunk becomes `GroupEntry::Stored(extent)` and is neither compressed nor
+written, any other becomes `GroupEntry::Prepared`. A lookup answer whose name,
+length or kind differs from the chunk is refused. `chunked_checked` accepts a
+cancellation callback. The returned `Chunked` holds the entries, the stream's
+name and its length. `append_group` takes any items convertible to
+`GroupEntry`, a `Prepared` included; a stored entry is returned unchanged in
+its place, so the group's extents for a revision's entries, in order, are that
+revision. `Chunker` exposes the cut points alone (`cut`, `chunks`) for products
+that need boundaries without storage. `ChunkSizes::new` requires
+`0 < min <= target <= max` with the target a power of two of at least 8.
+
 `cargo run -p hashed-blobs --example group_metrics -- 10000` reports material
 throughput, group count, input bytes, appended bytes and byte amplification
 with a one-second group cadence. These synthetic figures qualify the shared
 container. Product first-build amplification is measured by the product's
 integration run.
+
+`cargo run --release -p hashed-blobs --example rewrite_metrics -- 200 3000`
+stores a synthetic session snapshot rewritten 200 times, gaining a user and an
+assistant turn each time, once as one blob per revision and once as chunks,
+and reports appended bytes per final and per input byte, blobs appended,
+preparation rate (chunking, hashing and compression), time spent committing
+one group with its data sync per revision, read rate, and checks every
+revision reads back byte-exact. Commit time is the storage device's sync
+latency and is reported apart from the hardware-independent byte figures.
 
 ## Laws
 
@@ -215,6 +276,24 @@ integration run.
   frame-table entry fails authentication on read.
 - **sealed-check-without-key**: the scan detects damage to a sealed blob
   without its key.
+- **rewrite-costs-changes**: 300 revisions of a JSON document, each adding one
+  2 KB message to a document of over 1 MB, store at most
+  `final size × 1.2 + 300 × maximum chunk` of new blob bytes, and every
+  revision reads back byte-exact.
+- **chunks-cover-the-stream**: a stream's chunks concatenate to the stream;
+  every chunk but the last lies between the minimum and maximum lengths; the
+  empty stream is one empty chunk.
+- **cut-points-depend-only-on-content**: the chunks are the same however the
+  stream is split into reads, match a direct (non-rolling) computation of the
+  gear hash, and appending to a stream keeps every chunk of the prefix but its
+  last.
+- **an-edit-changes-only-nearby-chunks**: inserting, removing or overwriting
+  100 bytes in the middle of 4 MiB yields at most three chunks not already in
+  the original.
+- **sealed-cut-points-are-keyed**: the same content cuts identically under one
+  data key, differently under another key and differently from plain.
+- **stored-chunks-are-not-prepared-again**: a chunk the lookup knows, committed
+  or awaiting commit, is cited and neither compressed nor appended.
 - **pax-members-match-gnu-tar**: members in GNU-produced streams and current directory captures equal GNU
   tar's extraction, including byte names, extended attributes, ACLs and sparse
   maps. Independent byte-range oracles establish the logical bytes of

@@ -5,9 +5,24 @@ formatter=(nix develop --command rustfmt)
 if [[ -n "${IN_NIX_SHELL:-}" ]] && command -v rustfmt >/dev/null; then
     formatter=(rustfmt)
 fi
+# The edition of the package owning a path: its own `edition = "…"`, or the
+# workspace's for `edition.workspace = true` and files outside any package.
+edition_of() {
+    local dir
+    dir=$(dirname "$1")
+    while [[ "$dir" != "." && ! -f "$dir/Cargo.toml" ]]; do
+        dir=$(dirname "$dir")
+    done
+    local own
+    own=$(sed -n 's/^edition = "\([0-9]*\)"/\1/p' "$dir/Cargo.toml" 2>/dev/null | head -n 1)
+    if [[ -z "$own" ]]; then
+        own=$(sed -n '/^\[workspace.package\]/,/^\[/s/^edition = "\([0-9]*\)"/\1/p' Cargo.toml | head -n 1)
+    fi
+    echo "$own"
+}
 while IFS= read -r -d '' path; do
     # Format the staged blob, including when the worktree has later edits.
     # rustfmt --check on stdin does not report a formatting difference.
-    git show ":$path" | "${formatter[@]}" --edition 2024 --emit stdout |
+    git show ":$path" | "${formatter[@]}" --edition "$(edition_of "$path")" --emit stdout |
         diff -u --label "staged:$path" --label "formatted:$path" <(git show ":$path") -
 done < <(git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs')

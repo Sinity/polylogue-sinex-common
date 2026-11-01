@@ -90,6 +90,10 @@ impl Index {
 pub(crate) fn name_key(key: &DataKey) -> [u8; 32] {
     derive(&key.key, None, b"hashed-blobs name v1")
 }
+/// Seeds the gear table that places a sealed stream's cut points.
+pub(crate) fn chunk_key(key: &DataKey) -> [u8; 32] {
+    derive(&key.key, None, b"hashed-blobs chunk gear v1")
+}
 pub(crate) fn frame_key(key: &DataKey, name: Hash, salt: &[u8; 32]) -> [u8; 32] {
     let mut info = b"hashed-blobs frame v3".to_vec();
     info.extend(name.0);

@@ -17,6 +17,8 @@ mechanic and nothing else in the shared crates.
 | frame | one independently decodable piece of a blob in a segment |
 | segment | an append-only file of frames, written by one product's writer |
 | extent | the byte range in one segment that holds one blob's frames; rows cite extents |
+| chunk | a blob holding one content-defined piece of a stream rewritten whole; a revision is the list of its chunks' extents |
+| cut point | where content-defined chunking ends a chunk, chosen by a rolling hash of the bytes before it |
 | group | the blobs the writer appends and syncs together before the product commits them |
 | commit | making a group's extents real, in the same transaction as the rows that cite them |
 | tail | bytes after a segment's last committed extent; truncated when the segment opens |
