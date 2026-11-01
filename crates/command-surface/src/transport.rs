@@ -19,7 +19,7 @@ pub struct CliOutput {
 #[derive(Clone, Debug, PartialEq)]
 pub enum StreamLine {
     Event(Value),
-    End(Answer<Value>),
+    End(Box<Answer<Value>>),
 }
 impl StreamLine {
     pub fn parse(line: &str) -> Result<Self, Failure> {
@@ -30,7 +30,7 @@ impl StreamLine {
                 Ok(Self::Event(value["event"].clone()))
             }
             _ => serde_json::from_value(value)
-                .map(Self::End)
+                .map(|answer| Self::End(Box::new(answer)))
                 .map_err(|e| Failure::new(FailureKind::Io, e.to_string())),
         }
     }
