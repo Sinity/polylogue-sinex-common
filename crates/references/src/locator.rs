@@ -601,7 +601,7 @@ fn isbn13(value: &str) -> Option<String> {
                 .enumerate()
                 .map(|(index, &digit)| u32::from(digit) * (10 - index as u32))
                 .sum();
-            if sum % 11 != 0 {
+            if !sum.is_multiple_of(11) {
                 return None;
             }
             let mut thirteen = vec![9, 7, 8];

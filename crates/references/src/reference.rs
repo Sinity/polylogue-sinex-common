@@ -71,7 +71,8 @@ pub enum Target {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Reference {
     target: Target,
-    selector: Option<Selector>,
+    /// Boxed: a selector is large and most references have none.
+    selector: Option<Box<Selector>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -190,7 +191,9 @@ impl Reference {
     pub fn new(target: Target, selector: Option<Selector>) -> Self {
         Self {
             target,
-            selector: selector.filter(|selector| !selector.is_empty()),
+            selector: selector
+                .filter(|selector| !selector.is_empty())
+                .map(Box::new),
         }
     }
 
@@ -207,7 +210,7 @@ impl Reference {
     }
 
     pub fn selector(&self) -> Option<&Selector> {
-        self.selector.as_ref()
+        self.selector.as_deref()
     }
 
     pub fn with_selector(self, selector: Option<Selector>) -> Self {
