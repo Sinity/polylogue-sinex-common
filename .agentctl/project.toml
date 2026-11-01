@@ -58,6 +58,7 @@ result = "exit"
 timeout_seconds = 1800
 scratch = "tmpfs"
 cache = "none"
+cap = "cargo"
 
 [operations.compile]
 description = "Selected package or target compilation in the normal development queue"
@@ -68,6 +69,7 @@ result = "exit"
 timeout_seconds = 1800
 scratch = "nvme"
 cache = "none"
+cap = "cargo"
 
 [operations.codex]
 description = "Run one Codex worker in this checkout: codex-worker <effort> <prompt-file> <output-schema> <output-dir> [model]"
