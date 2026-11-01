@@ -2,7 +2,11 @@
 //!
 //! Preparation owns no store. Products append and sync a group, commit its
 //! extents with their own rows, then acknowledge it. Opening truncates the tail
-//! to the product's committed end and finishes its recorded punches.
+//! to the product's committed end and finishes its recorded punches. A stream
+//! rewritten whole is planned as content-defined chunks, so a new revision
+//! appends only the chunks the product does not hold.
+mod chunking;
+pub use chunking::{ChunkSizes, Chunked, Chunker, Chunks};
 mod codec;
 mod encoded;
 pub use encoded::EncodedBlob;
@@ -13,7 +17,7 @@ mod reader;
 mod writer;
 pub use preparation::{PlainWriter, Preparation, Prepared};
 pub use reader::{BlobReader, Mismatch, ReadLimits, Reader, VerificationStats};
-pub use writer::{GroupMetrics, PendingGroup, SegmentWriter, SyncedGroup};
+pub use writer::{GroupEntry, GroupMetrics, PendingGroup, SegmentWriter, SyncedGroup};
 
 use std::{fmt, io};
 pub const DEFAULT_FRAME: usize = 4 << 20;

@@ -6,7 +6,7 @@ Rust crates and development tooling shared by
 
 | Crate | Holds |
 |---|---|
-| [`hashed-blobs`](crates/hashed-blobs/README.md) | content-addressed blobs in an append-only segment container, checked reads, PAX member access, the on-demand scan |
+| [`hashed-blobs`](crates/hashed-blobs/README.md) | content-addressed blobs in an append-only segment container, content-defined chunking of rewritten streams, checked reads, PAX member access, the on-demand scan |
 | [`query-language`](crates/query-language/README.md) | the one grammar and spelling, the syntax tree's meaning, order relations, the fusion of ranked lists, query objects and their hash, the federation planner's types, time expressions, the logical day, cursors, the completer and the shared law suite |
 | [`command-surface`](crates/command-surface/README.md) | the `Operation` trait, the answer contract, failures with their exit and HTTP table, callers and computed authors, the MCP tool grouping, the seen mark, latency classes and deadlines, server-sent-event framing, the status format |
 | [`web-shell`](crates/web-shell/README.md) | the rendering model, visual tokens, the shared key table, palette, copy, page frame, live fragments over one connection per browser, windowed lists and the timeline |

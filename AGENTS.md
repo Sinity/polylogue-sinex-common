@@ -25,7 +25,8 @@ in both products before changing a shared interface.
 - [`hashed-blobs`](crates/hashed-blobs/README.md): blobs in append-only
   segments; one sync per group; extents committed with the rows that cite
   them; a segment opens at its last committed extent, so a crash never needs a
-  repair step.
+  repair step; a stream rewritten whole is stored as content-defined chunks,
+  so a revision appends only what changed.
 - [`authored`](crates/authored/README.md): one header and one set of rules
   for every record a person or agent writes: currency by the descendant
   rule, requests placed together or not at all, one uniqueness function for

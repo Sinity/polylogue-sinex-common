@@ -21,6 +21,18 @@ pub struct GroupMetrics {
     pub appended_bytes: u64,
     pub syncs: u64,
 }
+/// One entry of an append group: a prepared blob to append, or a blob already
+/// stored, whose extent the group returns in its place.
+pub enum GroupEntry {
+    Prepared(Prepared),
+    Stored(Extent),
+}
+impl From<Prepared> for GroupEntry {
+    fn from(prepared: Prepared) -> Self {
+        Self::Prepared(prepared)
+    }
+}
+
 struct SyncRequest {
     reply: mpsc::Sender<std::io::Result<()>>,
 }
@@ -168,10 +180,11 @@ impl SegmentWriter {
         })
     }
     /// Append in input order. Committed and uncommitted dedup both return the
-    /// existing descriptor. An append or sync failure requires ordinary reopen.
-    pub fn append_group(
+    /// existing descriptor, as does a `Stored` entry. An append or sync failure
+    /// requires ordinary reopen.
+    pub fn append_group<E: Into<GroupEntry>>(
         &mut self,
-        prepared: impl IntoIterator<Item = Result<Prepared>>,
+        prepared: impl IntoIterator<Item = Result<E>>,
         mut lookup: impl FnMut(&Hash) -> Result<Option<Extent>>,
     ) -> Result<PendingGroup> {
         if self.failed.load(Ordering::Acquire) {
@@ -185,9 +198,13 @@ impl SegmentWriter {
         }
         result
     }
-    fn append(
+    /// The extent of a blob appended in a group not yet acknowledged.
+    pub fn uncommitted(&self, hash: &Hash) -> Option<Extent> {
+        self.pending.get(hash).cloned()
+    }
+    fn append<E: Into<GroupEntry>>(
         &mut self,
-        prepared: impl IntoIterator<Item = Result<Prepared>>,
+        prepared: impl IntoIterator<Item = Result<E>>,
         lookup: &mut impl FnMut(&Hash) -> Result<Option<Extent>>,
     ) -> Result<PendingGroup> {
         let mut extents = Vec::new();
@@ -197,11 +214,19 @@ impl SegmentWriter {
             ..GroupMetrics::default()
         };
         for item in prepared {
-            let mut item = item?;
+            let item = item?.into();
             metrics.materials = metrics
                 .materials
                 .checked_add(1)
                 .ok_or_else(|| Error::Refused("group material count overflows".into()))?;
+            let mut item = match item {
+                GroupEntry::Prepared(item) => item,
+                GroupEntry::Stored(extent) => {
+                    metrics.deduplicated_materials += 1;
+                    extents.push(extent);
+                    continue;
+                }
+            };
             let known = if let Some(extent) = self.pending.get(&item.hash) {
                 Some(extent.clone())
             } else {

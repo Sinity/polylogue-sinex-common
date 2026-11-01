@@ -315,7 +315,10 @@ fn lookup_failure_poison_requires_reopen() {
         )
         .is_err());
     assert!(writer
-        .append_group((vec![]).into_iter().map(Ok), |_| Ok(None))
+        .append_group(
+            Vec::<hashed_blobs::Prepared>::new().into_iter().map(Ok),
+            |_| Ok(None)
+        )
         .is_err());
     drop(writer);
     assert!(SegmentWriter::open(dir.path(), "segment.zst", 0, &[], 0o600).is_ok());
