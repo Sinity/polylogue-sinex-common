@@ -88,12 +88,18 @@ shell before development commands. An existing prepared prefix is reused;
 new and resumed tasks do not rerun installation just to initialize a shell.
 If the prefix is absent, choose the appropriate backend from this guide.
 
-Explicit sourcing is the supported initialization route in current Codex
-Cloud. `BASH_ENV` may point to the printed absolute `env.sh` path only where
-the provider supports that variable; it is optional. Provider startup fields
-can point to the repository instructions, which remain available in the
-checkout. The privileged Nix backend also keeps `/etc/devenv.sh` for existing
-profiles. `CLOUD_PREBUILD=1` builds all test
+One prefix serves every checkout of a multi-repository session. The Nix
+backend keeps each checkout's development shell in `env.<checkout>.sh`, and
+`env.sh` sources the one for the checkout holding the working directory, so
+run setup once per included checkout. The native backend's tool set does not
+depend on the checkout, and its `env.sh` holds it directly.
+
+Explicit sourcing is the supported initialization route in Claude Code cloud
+sessions and current Codex Cloud. `BASH_ENV` may point to the printed
+absolute `env.sh` path where the provider supports that variable; it selects
+by the directory the shell starts in. Provider startup fields can point to
+the repository instructions, which remain available in the checkout.
+`CLOUD_PREBUILD=1` builds all test
 binaries after fetching; the default leaves builds to the requested task.
 Run `cargo xtask` commands directly in cloud sessions. Each test run owns its
 throwaway services; no operator host services are required.
@@ -105,3 +111,32 @@ published environment to verify reuse. See the [current product's lifecycle
 documentation](https://learn.chatgpt.com/docs/environments/cloud-environments).
 NixOS VM tests and operator-data benchmarks need their corresponding host
 capabilities and data.
+
+In Claude Code on the web, one environment serves all three repositories.
+Sessions and routines include the checkouts they need under `/home/user`,
+which are cloned before the environment's setup script runs. The setup script
+prepares each included checkout and keeps going when one fails, so the
+session can read the log:
+
+```bash
+#!/bin/bash
+exec >>/root/cloud-setup.log 2>&1
+for repo in polylogue-sinex-common sinex polylogue; do
+    [ -f "/home/user/$repo/dev/cloud/setup.sh" ] || continue
+    started=$(date +%s)
+    if bash "/home/user/$repo/dev/cloud/setup.sh"; then
+        echo "$repo: prepared in $(($(date +%s) - started))s"
+    else
+        echo "$repo: setup failed"
+    fi
+done
+exit 0
+```
+
+Preparing all three takes about four and a half minutes, inside the
+platform's limit for caching the result; later sessions start from the
+cached filesystem. The environment's variables `CARGO_INCREMENTAL=0` and
+`CARGO_PROFILE_DEV_DEBUG=line-tables-only` keep `target/` within the
+session disk, and `BASH_MAX_TIMEOUT_MS=1800000` lets a foreground build run
+for up to 30 minutes. The trusted network list covers the Nix cache,
+GitHub, crates.io and npm.
