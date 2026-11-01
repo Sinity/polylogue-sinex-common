@@ -26,8 +26,9 @@ An operation is one row of a product's table. Its `OperationSpec` declares:
 - how each request field is written on the command line;
 - whether help lists it.
 
-Its request and answer types (or a stream's event type) supply its part of
-the MCP tool's `inputSchema` and `outputSchema`. A request row implements
+Its request type supplies its fields of the MCP tool's `inputSchema` and
+its own row's schema in `GET /v1/commands`, with its answer type (or a
+stream's event type). A request row implements
 `Operation`, a stream row `StreamOperation`; a local row registers its
 request type only, and the product runs it after `parse_cli` says it is
 local.
@@ -41,7 +42,7 @@ assembles an answer of its own.
 Each row needs one level: **read**, **write** (attributed writes that can be
 undone) or **permanent** (changes that cannot, such as a tombstone). A level
 includes the ones below it. The server states the highest level a caller's
-credential grants (all levels unless it says otherwise), and dispatch
+credential grants (read, unless it says more), and dispatch
 refuses a row above it before the row runs.
 
 ### The command line
@@ -80,12 +81,25 @@ with the description sent to the model and whether its rows reach beyond the
 product; registration refuses a row whose family is undeclared or whose
 access differs from the family's.
 
-Each tool's input schema is generated: `operation` names the row when the
-family has several, `arguments` holds the row's request as one choice per
-row, beside `request_id`, `deadline`, `budget_tokens`, `cursor`, `fresh` and
-`format`. The choice is an `anyOf` nested under `arguments`: model providers
-refuse a choice at the top level of a tool's schema, and rows whose arguments
-overlap would make a `oneOf` refuse a valid call. Hints come from the
+Each tool's input schema is generated small, because a harness sends the
+whole tool list in every session: `operation` is an enum of the family's
+rows (required when there are several); `arguments` is one flat object, the
+union of the rows' top-level request fields deduplicated by name, each
+reduced to its shallow type (a scalar keeps its type and enum values; an
+object, a list or a choice among them is only its bare type), so a deeply
+nested request costs no more than a flat one. A field whose argument
+declaration is unlisted (`ArgumentSpec::unlisted`) is left out of the list
+and still accepted, since `arguments` admits any field; then `request_id`, `deadline`,
+`budget_tokens`, `cursor`, `fresh` and `format`. A field two rows type
+differently is a choice of its types, described by the rows that use each;
+nothing else is described, the names saying what they are. Each row's own
+schema checks the arguments at dispatch, so a field of another row or a
+mistyped value is refused there. Tools carry no `outputSchema`: results keep
+`structuredContent`, and a product serves the answer's schema
+(`OperationTable::answer_schema`) and each family's full row schemas
+(`OperationTable::family_schemas`) once, from its explain or capabilities
+answer. `laws::tools_list_within` holds a product's whole tool list to the
+byte budget it passes. Hints come from the
 family's access: read-only for read, destructive for permanent, idempotent
 always (a retried `request_id` is applied once), open-world as declared.
 Every request row is reachable from exactly one tool; stream and local rows
@@ -126,7 +140,7 @@ one.
 | `next` | the runnable follow-ups: the next page, a narrower request, the same request with the deadline lifted |
 | `notes` | anything else the caller should know, such as a budget lowered to its output cap |
 | `read_as` | the request's reading as a sentence |
-| `positions` | each product's read position and lag that the answer read at |
+| `positions` | the position each product's read stood at (`{product, position, lag}`) |
 | `coverage` | present only when a source's coverage state affects the answer, in the coverage vocabulary of the [query language](../query-language/README.md#transforms) |
 | `facets` | for a sliced answer, counts of its rows by a field's values |
 | `caller` | the computed author and channel |
@@ -163,21 +177,33 @@ each bound only what they name; none changes the question. The fitter:
   the rest becoming one left-out item;
 - offers pending sections room first, then the rest in their order, and
   keeps the sections' own order in the text;
-- holds back room for one left-out line per section not yet placed, so no
-  section takes the room another needs to say it was left out; a section
-  with no room for its heading is left out whole;
+- holds back, for each section not yet placed, what it is sure to need
+  (being kept whole or named as left out, whichever is cheaper), so no
+  section takes the room another needs and everything is kept whenever
+  everything fits; a section with no room for its heading is left out whole;
 - counts each left-out line as the answer's surface prints it (a command
-  line, or an MCP tool call), so `used_tokens` stays within any budget that
-  can hold one left-out line per section.
+  line, or an MCP tool call), and holds back the envelope's other lines
+  (`RequestContext::fit` takes the envelope), so the whole text stays within
+  any budget that can hold what every section is sure to need.
 
 The budget is the request's `budget_tokens`, else the operation's default,
 lowered to the caller's output cap; a lowered budget is named in `notes`.
+Tokens are counted one per four bytes, rounded up (`approximate_tokens`),
+the same way everywhere. The surface that renders an answer for a person or
+model (the command line, MCP) measures its whole text into `used_tokens`;
+an answer whose text exceeds the request's budget is the operation's bug
+and becomes an `io` failure saying so, never a cut or an oversized answer.
 
 **Text and data.** The text part is the rendering: rows one line each,
 values every row shares printed once in a header line, absolute times, and
 `next` last. Rows travel as data only with `format: json`. Over MCP the text
 is the model's view and the envelope is `structuredContent`; the rows and the
-text are never both sent, so a model reads each row once. After the value
+text are never both sent, so a model reads each row once. In text format the
+structured part leaves the value out and says so (`value_in_text`); a client
+reads it as `Answer<Option<T>>`, whose value is then `None`, while an
+`Answer<T>` refuses it and says where the value is. With `format: json` the
+value is in the structured part and the text part holds only the envelope's
+lines. After the value
 come, in order: a failure's caret, hint, suggestion and candidates; what a
 degraded answer is missing; `shown N of [at least] M`; facets; coverage that
 is not complete; left-out items with the request that reads each; notes; and
@@ -185,8 +211,9 @@ is not complete; left-out items with the request that reads each; notes; and
 MCP, a command line elsewhere. On the command line the value goes to
 standard output and the rest to standard error.
 
-Dispatch completes every answer the same way: a count over a source whose
-coverage is not complete becomes a lower bound; a degraded answer naming
+Dispatch completes every answer the same way: in an answer that is
+degraded, or over a source whose coverage is not complete, the count and
+every facet's counts become lower bounds; a degraded answer naming
 nothing missing, an undeclared failure kind and an unregistered product code
 become `io` failures; and the caller's computed authorship is echoed in
 `caller`.
@@ -221,9 +248,14 @@ and one HTTP status:
 A failure teaches: an unknown name carries the nearest known names as
 `candidates`, and `explain` as `next`. Empty and degraded are outcomes,
 never failure kinds. Language errors become failures in one conversion,
-`From<query_language::Error>` here (or `Failure::from_query_error` with the
-query, which adds the caret); command-surface depends on the query language
-for its coverage states, so the conversion lives on this side. A product adds precise codes of its own
+`Failure::from_query_error(error, query)`, which keeps the kind, message,
+hint, suggestion, candidates and retryability and places the failure in the
+query with its span and caret; command-surface depends on the query language
+for its coverage states, so the conversion lives on this side.
+`not_yet_available` is temporary (the product is still opening, and says how
+far; retrying succeeds); `not_built` is a state (an index or derived product
+the request needs does not exist, and will not until it is built; the
+message names what to build). A product adds precise codes of its own
 in `Failure::code`, each classified once into a shared `FailureKind` at its
 operation boundary. No refusal
 reason refers to the caller being an agent or lacking a terminal. With
@@ -277,7 +309,12 @@ a session: latest only, no history, and it only moves forward. It is written
 only when the target was displayed to that consumer (the web shell's
 [display rule](../web-shell/README.md#seen-marks)) or when an agent's read asks
 `since: seen`; previews, prerendering, polling, hidden tabs and plain reads
-never write one (`Showing::moves_seen_mark`). Only the operator and an
+never write one (`Showing::moves_seen_mark`). A view counts as displayed
+once it has been visible for `Showing::DISPLAY_TIME` (one second, so
+scrolling past or a flicker never counts; `Showing::of_visible_view`); the
+web shell measures visibility and reports the showing. `SeenMark::show`
+applies a showing: it moves the mark only forward within one generation of
+the product's index, and a showing from a new generation replaces it. Only the operator and an
 identified session are consumers. Each product stores seen marks with its
 authored state, so they survive a rebuild of everything derived. `--since
 seen` reads from the mark; an explicit position works as before (`Since`).
@@ -366,9 +403,14 @@ one family that define one schema name two ways, and argument declarations
 the request type cannot hold or the command line cannot read back.
 
 The table provides `parse_cli` and `cli_command`, help and completion,
-`cli_as` (a request row's output, or a finite stream's events), a JSONL
-socket server and client (a stream's events arrive as `{"event": …}` lines,
-then one answer ends it; `StreamLine` reads either), HTTP dispatch at `POST
+`cli_write` (writing as it goes: a request row's output, or a stream's
+events as each arrives) and `cli_as` (the same, collected), a JSONL socket
+server and client (a stream's events arrive as `{"event": …}` lines, then
+one answer ends it; `StreamLine` reads either; a line holding an MCP
+JSON-RPC message is answered as MCP, so the stdio MCP server each harness
+starts is a proxy forwarding to the daemon's one socket, as the agent
+contract's performance design has it, with each call's `_meta` reaching the
+operation and follow-ups written as tool calls), HTTP dispatch at `POST
 /v1` or each row's route (JSON, or a URL-encoded form with one `request`
 field, so a form works without JavaScript; `GET /v1/commands` lists the
 rows), `open_stream` for a product's server-sent events, and MCP
@@ -392,13 +434,19 @@ granted access and computed authorship; the identity stays a typed Rust
 value (`RequestContext::caller().identity::<T>()`). Products use a stable
 authenticated scope for retry identity across surfaces.
 `RequestContext::budget` resolves the answer's budget and
-`RequestContext::fit` fits sections, counting left-out lines as the
-request's surface prints them.
+`RequestContext::fit` fits sections, counting left-out lines and the
+envelope's lines as the request's surface prints them. `RequestContext::via`
+is the channel the request arrived by (the transport sets it: `cli` for the
+command line and for socket request frames unless the server's caller says
+`hook`, `mcp` for MCP and MCP frames, `web` for HTTP); follow-ups are written
+for it.
 
 `SseEvent` encodes JSON without field injection; `SseDecoder` handles split
-UTF-8, multiline data and CRLF. `EventLog` accepts committed product events
-with opaque generation/cursor positions; a missing or obsolete resume
-position produces one reload event.
+UTF-8, multiline data and CRLF. A `Position` is a product's generation and
+commit counter, written `generation:counter`; counters compare only within a
+generation. Events, a read's positions and seen marks all use it. `EventLog`
+accepts committed product events; a missing or obsolete resume position, or
+one from another generation, produces one reload event.
 
 A measurement with an unmeasured state must have a reason and no value.
 `MeasurementCache` reuses values only for an unchanged caller-supplied key,
@@ -445,15 +493,20 @@ the serialization, command-line and fitter boundaries. Run
   local row is a tool, each tool's hints hold for all its rows, and every
   declared family holds a row. `laws::tools_generated` checks any table;
   each product runs it on its own.
+- **tools-list-within**: a table's `tools/list`, as compact JSON, is within
+  the byte budget its product passes (`laws::tools_list_within`); tools
+  carry flat, shallow, listed arguments and no output schema, and an
+  unlisted argument still dispatches.
 - **once**: for each supported harness's recorded MCP fixture, the
   model-visible bytes of an answer contain each row or passage once.
   The common test checks the property on a synthetic table: an MCP answer's
   text holds each row once, and its structured content repeats the rows only
   with `format: json`.
 - **access-checked**: a row above the caller's access is refused before it
-  runs.
+  runs, and a caller the server granted nothing more reads only.
 - **lower-bound-under-gaps**: a count over a source whose coverage is not
-  complete is a lower bound on every surface.
+  complete is a lower bound on every surface, and so are the count and
+  facets of a degraded answer.
 - **degraded-names-missing**: a degraded answer names what it lacks.
 - **error-teaches**: a failure in the input carries its position and caret,
   a suggestion that runs as given when one can be formed, and the
@@ -464,9 +517,22 @@ the serialization, command-line and fitter boundaries. Run
   request gives the same request.
 - **whole-entries**: the fitter keeps or leaves out each entry whole.
 - **pending-first**: pending sections are offered room before past ones.
-- **fit-within-budget**: what is kept and left out add up to every entry, and
-  the text with its left-out lines stays within any budget that can hold one
-  left-out line per section.
+- **fit-within-budget**: what is kept and left out add up to every entry;
+  everything is kept whenever everything fits; and the text with its
+  left-out lines stays within any budget that can hold what every section is
+  sure to need.
+- **text-within-budget**: the text a surface renders for an answer, value
+  and envelope lines together, is within the request's budget, or the
+  answer is an `io` failure naming the excess; `used_tokens` is what that
+  text measures.
+- **text-answers-read-back**: an MCP answer in text format reads back as
+  `Answer<Option<T>>` with the value `None` and `value_in_text`, and
+  `Answer<T>` refuses it saying where the value is.
+- **socket-carries-mcp**: an MCP message sent over the socket is answered as
+  an MCP call, with its `_meta` and with follow-ups written as tool calls.
+- **streams-print-as-they-arrive**: a stream's events reach the command
+  line's output while the stream is still open, and a stream with no events
+  prints nothing and succeeds.
 - **every-entry-cited**: an entry has at least one line and one citation.
 - **seen-mark-moves-forward**: a seen mark never moves to an earlier
   position.

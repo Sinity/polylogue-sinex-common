@@ -1,7 +1,7 @@
 //! Transport adapters contain framing only. None builds an answer of its own.
 use crate::{
-    Answer, Caller, CancellationToken, Failure, FailureKind, OperationKind, OperationTable, Origin,
-    RunnableRequest, bad_request,
+    Answer, Caller, CancellationToken, Failure, FailureKind, Format, OperationKind, OperationTable,
+    RunnableRequest, Via, bad_request,
 };
 use http::{Request as HttpRequest, Response as HttpResponse, StatusCode};
 use serde::Serialize;
@@ -96,8 +96,7 @@ impl OperationTable {
         self.cli_as(args, request_id, Caller::default(), cancellation)
             .await
     }
-    /// Run a command line in this process against the table. A local row is
-    /// the product's own to run: dispatch on `parse_cli` first.
+    /// Run a command line in this process and collect what it prints.
     pub async fn cli_as(
         &self,
         args: &[String],
@@ -105,107 +104,132 @@ impl OperationTable {
         caller: Caller,
         cancellation: CancellationToken,
     ) -> CliOutput {
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let exit_code = self
+            .cli_write(
+                args,
+                request_id,
+                caller,
+                cancellation,
+                &mut stdout,
+                &mut stderr,
+            )
+            .await
+            .expect("writing to memory does not fail");
+        CliOutput {
+            stdout: String::from_utf8(stdout).expect("rendered text is UTF-8"),
+            stderr: String::from_utf8(stderr).expect("rendered text is UTF-8"),
+            exit_code,
+        }
+    }
+    /// Run a command line in this process, writing as it goes: a request
+    /// row's value text to `stdout` and the envelope's lines to `stderr`
+    /// (all of it to `stdout` as JSON with `--json`), and a stream's events
+    /// to `stdout` as each arrives. Returns the exit code. A local row is the
+    /// product's own to run: dispatch on `parse_cli` first.
+    pub async fn cli_write<O, E>(
+        &self,
+        args: &[String],
+        request_id: impl Into<String>,
+        caller: Caller,
+        cancellation: CancellationToken,
+        stdout: &mut O,
+        stderr: &mut E,
+    ) -> std::io::Result<u8>
+    where
+        O: AsyncWrite + Unpin,
+        E: AsyncWrite + Unpin,
+    {
         if args == ["--help"] {
-            return CliOutput {
-                stdout: self.help(),
-                stderr: String::new(),
-                exit_code: 0,
-            };
+            stdout.write_all(self.help().as_bytes()).await?;
+            stdout.flush().await?;
+            return Ok(0);
         }
         let parsed = self.parse_cli(args, request_id);
         let json = parsed.as_ref().map_or_else(
             |_| args.iter().any(|a| a == "--json"),
-            |p| p.request.format == crate::Format::Json,
+            |p| p.request.format == Format::Json,
         );
-        let (operation, answer, events) = match parsed {
-            Err(error) => (String::new(), Answer::error(error), String::new()),
+        let (operation, budget, answer) = match parsed {
+            Err(error) => (String::new(), None, Answer::error(error)),
             Ok(parsed) => {
                 let operation = parsed.request.operation.clone();
-                match parsed.kind {
+                let budget = self.request_budget(&parsed.request);
+                let answer = match parsed.kind {
                     OperationKind::Request { .. } => {
-                        let answer = self
-                            .call_as(parsed.request, Origin::Cli, caller, cancellation)
-                            .await;
-                        (operation, answer, String::new())
+                        self.call_as(parsed.request, Via::Cli, caller, cancellation)
+                            .await
                     }
                     OperationKind::Stream => {
-                        let (answer, events) = self
-                            .collect_stream(parsed.request, caller, cancellation, json)
-                            .await;
-                        (operation, answer, events)
+                        self.write_stream(parsed.request, caller, cancellation, json, stdout)
+                            .await?
                     }
-                    OperationKind::Local => (
-                        operation.clone(),
-                        Answer::error(bad_request(format!(
-                            "{operation} runs in the calling process"
-                        ))),
-                        String::new(),
-                    ),
-                }
+                    OperationKind::Local => Answer::error(bad_request(format!(
+                        "{operation} runs in the calling process"
+                    ))),
+                };
+                (operation, budget, answer)
             }
         };
-        let exit_code = answer.exit_code();
+        let streamed = self
+            .spec_named(&operation)
+            .is_some_and(|spec| spec.kind == OperationKind::Stream);
         if json {
-            return CliOutput {
-                stdout: format!(
-                    "{events}{}\n",
-                    serde_json::to_string(&answer).expect("JSON value serializes")
-                ),
-                stderr: String::new(),
-                exit_code,
-            };
+            let line = format!(
+                "{}\n",
+                serde_json::to_string(&answer).expect("JSON value serializes")
+            );
+            stdout.write_all(line.as_bytes()).await?;
+            stdout.flush().await?;
+            return Ok(answer.exit_code());
         }
-        let footer = self.forms().footer(Origin::Cli, &answer);
+        let operation = if streamed { "" } else { operation.as_str() };
+        let (answer, value_text, footer) =
+            self.rendered(Via::Cli, operation, budget, answer, Format::Text);
         if answer.is_error() {
-            let text = self.render_text("", &answer).unwrap_or_default();
-            return CliOutput {
-                stdout: events,
-                stderr: format!("{text}{footer}"),
-                exit_code,
-            };
-        }
-        let text = if events.is_empty() {
-            self.render_text(&operation, &answer)
-                .unwrap_or_else(|e| e.to_string())
+            stderr
+                .write_all(format!("{value_text}{footer}").as_bytes())
+                .await?;
         } else {
-            events
-        };
-        CliOutput {
-            stdout: text,
-            stderr: footer,
-            exit_code,
+            stdout.write_all(value_text.as_bytes()).await?;
+            stderr.write_all(footer.as_bytes()).await?;
         }
+        stdout.flush().await?;
+        stderr.flush().await?;
+        Ok(answer.exit_code())
     }
-    /// Run a stream to its end, each event as a line of text or JSON.
-    async fn collect_stream(
+    /// Run a stream to its end, writing each event as it arrives: rendered,
+    /// or as an `{"event": …}` line with `--json`. The answer that ends it is
+    /// ok with no value of its own.
+    async fn write_stream<O: AsyncWrite + Unpin>(
         &self,
         request: RunnableRequest,
         caller: Caller,
         cancellation: CancellationToken,
         json: bool,
-    ) -> (Answer<Value>, String) {
+        stdout: &mut O,
+    ) -> std::io::Result<Answer<Value>> {
         let operation = request.operation.clone();
         let mut events = match self
-            .open_stream(request, Origin::Cli, caller, cancellation)
+            .open_stream(request, Via::Cli, caller, cancellation)
             .await
         {
             Ok(events) => events,
-            Err(failure) => return (Answer::error(failure), String::new()),
+            Err(failure) => return Ok(Answer::error(failure)),
         };
-        let mut text = String::new();
         while let Some(event) = events.next().await {
-            match event {
-                Err(failure) => return (Answer::error(failure), text),
-                Ok(event) if json => {
-                    text.push_str(&format!("{}\n", json!({ "event": event })));
-                }
+            let line = match event {
+                Err(failure) => return Ok(Answer::error(failure)),
+                Ok(event) if json => format!("{}\n", json!({ "event": event })),
                 Ok(event) => match self.render_event(&operation, event) {
-                    Ok(line) => text.push_str(&line),
-                    Err(failure) => return (Answer::error(failure), text),
+                    Ok(line) => line,
+                    Err(failure) => return Ok(Answer::error(failure)),
                 },
-            }
+            };
+            stdout.write_all(line.as_bytes()).await?;
+            stdout.flush().await?;
         }
-        (Answer::ok(Value::Null), text)
+        Ok(Answer::ok(Value::Null))
     }
     /// JSONL stream over a Unix socket (or any duplex byte stream). There is no
     /// input-size cap. EOF during execution cancels that request by dropping its
@@ -224,10 +248,61 @@ impl OperationTable {
         let (reader, mut writer) = tokio::io::split(stream);
         let mut reader = BufReader::new(reader);
         let mut line = String::new();
+        // A request frame arrives as the server's caller says it came (a
+        // command line or a hook); an MCP frame is an MCP call.
+        let socket_via = caller.authorship().map_or(Via::Cli, |a| a.via);
         loop {
             line.clear();
             if reader.read_line(&mut line).await? == 0 {
                 return Ok(());
+            }
+            if let Ok(message) = serde_json::from_str::<Value>(&line)
+                && message.get("jsonrpc").is_some()
+            {
+                // An MCP message forwarded by a stdio proxy: answered by the
+                // same adapter as `mcp_as`, with the message's own `_meta`.
+                let cancellation = CancellationToken::new();
+                let notification = message.get("id").is_none();
+                let call = self.mcp_as(message, caller.clone(), cancellation.clone());
+                tokio::pin!(call);
+                // Notifications may arrive while the call runs: a cancellation
+                // cancels it, any other is taken and ignored. A second
+                // request is a framing error.
+                let (reply, close) = loop {
+                    tokio::select! {
+                        biased;
+                        incoming = reader.fill_buf() => {
+                            if incoming?.is_empty() {
+                                cancellation.cancel();
+                                return Ok(());
+                            }
+                            let mut next = String::new();
+                            reader.read_line(&mut next).await?;
+                            match serde_json::from_str::<Value>(&next) {
+                                Ok(other) if other.get("id").is_none() => {
+                                    if other["method"] == "notifications/cancelled" {
+                                        cancellation.cancel();
+                                    }
+                                }
+                                _ => {
+                                    cancellation.cancel();
+                                    break (json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32600, "message": "wait for the reply before sending another request"}}), true);
+                                }
+                            }
+                        },
+                        reply = &mut call => break (reply, false),
+                    }
+                };
+                if !notification || close {
+                    let mut encoded = serde_json::to_vec(&reply)?;
+                    encoded.push(b'\n');
+                    writer.write_all(&encoded).await?;
+                    writer.flush().await?;
+                }
+                if close {
+                    return Ok(());
+                }
+                continue;
             }
             let request = serde_json::from_str::<RunnableRequest>(&line);
             let mut close_after_reply = false;
@@ -240,12 +315,7 @@ impl OperationTable {
                 {
                     let cancellation = CancellationToken::new();
                     let opened = self
-                        .open_stream(
-                            request,
-                            Origin::Socket,
-                            caller.clone(),
-                            cancellation.clone(),
-                        )
+                        .open_stream(request, socket_via, caller.clone(), cancellation.clone())
                         .await;
                     match opened {
                         Err(failure) => Answer::error(failure),
@@ -278,12 +348,8 @@ impl OperationTable {
                 }
                 Ok(request) => {
                     let cancellation = CancellationToken::new();
-                    let call = self.call_as(
-                        request,
-                        Origin::Socket,
-                        caller.clone(),
-                        cancellation.clone(),
-                    );
+                    let call =
+                        self.call_as(request, socket_via, caller.clone(), cancellation.clone());
                     // This protocol has one outstanding request per connection.
                     // Reading a second request before its reply is a framing error.
                     tokio::select! {
@@ -393,10 +459,7 @@ impl OperationTable {
                         Some(OperationKind::Stream) => Answer::error(bad_request(
                             "a stream is served as server-sent events at its route",
                         )),
-                        _ => {
-                            self.call_as(envelope, Origin::Http, caller, cancellation)
-                                .await
-                        }
+                        _ => self.call_as(envelope, Via::Web, caller, cancellation).await,
                     }
                 }
             }

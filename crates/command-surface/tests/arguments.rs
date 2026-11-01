@@ -306,28 +306,59 @@ fn shell_words(command: &str) -> Vec<String> {
         .collect()
 }
 
+fn deadline_strategy() -> impl Strategy<Value = Deadline> {
+    prop_oneof![
+        Just(Deadline::Default),
+        Just(Deadline::None),
+        (0u64..10_000).prop_map(Deadline::Milliseconds),
+    ]
+}
+
+/// One request of `operation` with every envelope option varied.
+fn envelope_strategy(
+    operation: &'static str,
+    arguments: impl Strategy<Value = Value>,
+) -> impl Strategy<Value = RunnableRequest> {
+    (
+        arguments,
+        "[ -~λ]{1,10}",
+        deadline_strategy(),
+        proptest::option::of(1u32..100_000),
+        proptest::option::of("[ -~]{0,8}"),
+        any::<bool>(),
+        any::<bool>(),
+    )
+        .prop_map(
+            move |(arguments, request_id, deadline, budget_tokens, cursor, fresh, json)| {
+                RunnableRequest {
+                    operation: operation.into(),
+                    arguments,
+                    request_id,
+                    deadline,
+                    budget_tokens,
+                    cursor,
+                    fresh,
+                    format: if json { Format::Json } else { Format::Text },
+                }
+            },
+        )
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
     #[test]
     fn cli_command_round_trips(
-        arguments in request_strategy(),
-        deadline in proptest::option::of(0u64..10_000),
-        budget in proptest::option::of(1u32..100_000),
-        cursor in proptest::option::of("[ -~]{0,8}"),
-        fresh in any::<bool>(),
-        json in any::<bool>(),
+        request in prop_oneof![
+            envelope_strategy("read", request_strategy()),
+            // A row whose last positional takes the rest of the line.
+            envelope_strategy(
+                "exec",
+                proptest::collection::vec("[ -~λ]{0,8}", 1..4)
+                    .prop_map(|command| json!({ "command": command })),
+            ),
+        ],
     ) {
         let table = table();
-        let request = RunnableRequest {
-            operation: "read".into(),
-            arguments,
-            request_id: "retry 1".into(),
-            deadline: deadline.map_or(Deadline::Default, Deadline::Milliseconds),
-            budget_tokens: budget,
-            cursor,
-            fresh,
-            format: if json { Format::Json } else { Format::Text },
-        };
         let command = table.cli_command(&request).unwrap();
         let words = shell_words(&command);
         prop_assert_eq!(&words[0], "example");
@@ -353,4 +384,38 @@ fn cli_command_uses_the_rows_own_forms() {
         table.cli_command(&exec).unwrap(),
         "example exec --request-id r-1 -- ls -la"
     );
+}
+
+#[test]
+fn request_fields_cannot_take_a_flag_of_every_row() {
+    // An undeclared field is written `--name`, so a field named like an
+    // envelope option would be read as that option.
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    struct Paged {
+        cursor: Option<String>,
+    }
+    struct Clash;
+    impl Operation for Clash {
+        type Request = Paged;
+        type Response = Value;
+        fn spec(&self) -> OperationSpec {
+            OperationSpec::request("page", &["page"], "read", "Page", "Pages")
+        }
+        fn execute(&self, _: Paged, _: RequestContext) -> OperationFuture<'_, Answer<Value>> {
+            Box::pin(async { Answer::ok(Value::Null) })
+        }
+        fn render_text(&self, _: &Value) -> String {
+            String::new()
+        }
+    }
+    let mut table = OperationTable::new("example", Deadlines::default());
+    table
+        .declare_tool(ToolFamily {
+            name: "read".into(),
+            description: "read".into(),
+            open_world: false,
+        })
+        .unwrap();
+    let error = table.register(Clash).unwrap_err();
+    assert!(error.message.contains("--cursor"), "{}", error.message);
 }

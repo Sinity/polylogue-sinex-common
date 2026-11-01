@@ -53,6 +53,22 @@ impl Operation for Search {
                     answer
                 }
                 "degraded-blank" => Answer::degraded(rows, vec![]),
+                "degraded" => {
+                    let mut answer = Answer::degraded(rows, vec!["the shell source".into()]);
+                    answer.envelope.count = Some(Count::exact(4));
+                    answer.envelope.facets = vec![Facet {
+                        field: "repo".into(),
+                        counts: vec![FacetCount {
+                            value: "sinex".into(),
+                            count: 4,
+                        }],
+                        lower_bound: false,
+                    }];
+                    answer
+                }
+                "long" => Answer::ok(Rows {
+                    rows: vec!["word ".repeat(400)],
+                }),
                 "unknown" => {
                     let query = "sessions where reop:sinex";
                     let error = query_language::Error::new(
@@ -60,11 +76,9 @@ impl Operation for Search {
                         "unknown field \"reop\" for sessions",
                         15,
                     )
-                    .suggestion("sessions where repo:sinex");
-                    Answer::error(
-                        Failure::from_query_error(error, query)
-                            .with_candidates(vec!["repo".into(), "role".into()]),
-                    )
+                    .suggestion("sessions where repo:sinex")
+                    .candidates(vec!["repo".into(), "role".into()]);
+                    Answer::error(Failure::from_query_error(error, query))
                 }
                 _ => {
                     let mut answer = Answer::ok(rows);
@@ -135,15 +149,98 @@ async fn once() {
         json["structuredContent"]["value"]["rows"],
         json!(["row-one-unique"])
     );
+    // "Rows travel as data only with `format: json`. Over MCP the text is
+    // the model's view and the envelope is `structuredContent`; the rows and
+    // the text are never both sent, so a model reads each row once."
+    // (README, Answers: Text and data.)
     let shown = json["content"][0]["text"].as_str().unwrap();
-    assert_eq!(shown.matches("row-one-unique").count(), 1);
+    assert_eq!(shown.matches("row-one-unique").count(), 0, "{shown}");
+    assert!(shown.contains("shown 1 of 3"));
+}
+
+#[tokio::test]
+async fn text_answers_read_back() {
+    let table = table();
+    let text = tool_call(&table, "rows", "text").await;
+    let structured = text["structuredContent"].clone();
+    assert_eq!(structured["value_in_text"], true);
+    let read: Answer<Option<Rows>> = serde_json::from_value(structured.clone()).unwrap();
+    assert_eq!(read.value(), Some(&None));
+    assert!(read.envelope.value_in_text);
+    assert_eq!(read.envelope.count, Some(Count::exact(3)));
+    // A reader that expects the rows is told where they are.
+    let error = serde_json::from_value::<Answer<Rows>>(structured)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("text part"), "{error}");
+    let json = tool_call(&table, "rows", "json").await;
+    let read: Answer<Option<Rows>> =
+        serde_json::from_value(json["structuredContent"].clone()).unwrap();
+    assert_eq!(
+        read.value(),
+        Some(&Some(Rows {
+            rows: vec!["row-one-unique".into()]
+        }))
+    );
+}
+
+#[tokio::test]
+async fn text_within_budget() {
+    let table = table();
+    // The answer's text, value and envelope lines together, is held to the
+    // request's budget; an operation that exceeds it is reported, not cut.
+    let over = table
+        .mcp(
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "example_query",
+                "arguments": {"arguments": {"query": "long"}, "request_id": "r-1", "budget_tokens": 100}
+            }}),
+            CancellationToken::new(),
+        )
+        .await["result"]
+        .clone();
+    assert_eq!(over["isError"], true);
+    let message = over["structuredContent"]["error"]["message"]
+        .as_str()
+        .unwrap();
+    assert!(message.contains("over its budget of 100"), "{message}");
+    let cli = table
+        .cli(
+            &["find", "--query", "long", "--budget", "100"].map(str::to_string),
+            "r-1",
+            CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(cli.exit_code, 4);
+    assert!(cli.stdout.is_empty());
+    // Within its budget, `used_tokens` is what the whole text measures.
+    let within = tool_call(&table, "rows", "text").await;
+    let shown = within["content"][0]["text"].as_str().unwrap();
+    assert_eq!(
+        within["structuredContent"]["used_tokens"],
+        json!(approximate_tokens(shown))
+    );
+}
+
+#[tokio::test]
+async fn degraded_counts_are_lower_bounds() {
+    let table = table();
+    let answer = table
+        .call(find("degraded"), Via::Cli, CancellationToken::new())
+        .await;
+    assert!(answer.envelope.count.unwrap().lower_bound);
+    assert!(answer.envelope.facets[0].lower_bound);
+    let complete = table
+        .call(find("rows"), Via::Cli, CancellationToken::new())
+        .await;
+    assert!(!complete.envelope.count.unwrap().lower_bound);
 }
 
 #[tokio::test]
 async fn lower_bound_under_gaps() {
     let table = table();
     let answer = table
-        .call(find("gap"), Origin::Cli, CancellationToken::new())
+        .call(find("gap"), Via::Cli, CancellationToken::new())
         .await;
     assert_eq!(
         answer.envelope.count,
@@ -171,11 +268,7 @@ async fn lower_bound_under_gaps() {
 async fn degraded_names_missing() {
     let table = table();
     let answer = table
-        .call(
-            find("degraded-blank"),
-            Origin::Cli,
-            CancellationToken::new(),
-        )
+        .call(find("degraded-blank"), Via::Cli, CancellationToken::new())
         .await;
     assert_eq!(answer.failure().unwrap().kind, FailureKind::Io);
     let missing = json!({"outcome": "degraded", "value": 1});
@@ -233,16 +326,21 @@ fn query_error_converts_once() {
         (ErrorKind::Ambiguous, FailureKind::Ambiguous),
         (ErrorKind::StaleCursor, FailureKind::StaleCursor),
     ] {
-        let failure = Failure::from(Error::new(kind, "synthetic", 3).hint("a hint"));
+        let error = Error::new(kind, "synthetic", 4)
+            .hint("a hint")
+            .candidates(vec!["near".into()]);
+        let failure = Failure::from_query_error(error, "abc reop:x more");
         assert_eq!(failure.kind, expected);
         assert_eq!(failure.kind.name(), kind.code());
         assert_eq!(
             failure.position,
             Some(InputSpan {
-                offset: 3,
-                length: 0
+                offset: 4,
+                length: 6
             })
         );
+        assert_eq!(failure.caret(), Some("abc reop:x more\n    ^^^^^^"));
+        assert_eq!(failure.candidates(), ["near"]);
         assert_eq!(failure.hint.as_deref(), Some("a hint"));
         assert_eq!(failure.suggestion(), None);
     }
@@ -284,7 +382,7 @@ async fn caller_is_echoed_in_every_answer() {
     let answer = table
         .call_as(
             find("rows"),
-            Origin::Mcp,
+            Via::Mcp,
             Caller::authenticated("codex:thread", ()).with_authorship(authorship.clone()),
             CancellationToken::new(),
         )
@@ -307,9 +405,9 @@ fn answer_wire_keeps_outcome_value_and_envelope_apart() {
     ] {
         let mut answer = answer.with_note("a note");
         answer.envelope.read_as = Some("rows in the synthetic unit".into());
-        answer.envelope.positions = vec![ReadPosition {
+        answer.envelope.positions = vec![ReadAt {
             product: "example".into(),
-            position: 12,
+            position: Position::new("g1", 12),
             lag: Some(0),
         }];
         answer.envelope.used_tokens = Some(40);

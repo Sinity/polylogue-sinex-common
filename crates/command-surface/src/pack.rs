@@ -4,7 +4,7 @@
 //! The fitter keeps whole entries, never part of one; it fills pending
 //! sections before past ones; and it says, per section, how many entries it
 //! left out and how to read them. Its text, left-out lines included, stays
-//! within any budget that can hold one left-out line per section.
+//! within any budget that can hold what every section is sure to need.
 use crate::{LeftOut, RunnableRequest};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -176,11 +176,12 @@ fn heading(section: &Section) -> String {
 /// split; a section that fits whole is kept whole, and otherwise the first
 /// entry that does not fit beside the section's left-out line ends it, the
 /// remaining entries becoming one left-out item. A section with no room for its heading
-/// is left out whole. Room for one left-out line per section not yet placed
-/// is held back, so no section can take the room a later one needs to say
-/// it was left out. A budget that cannot hold one left-out line per section
-/// leaves every section out whole; the answer is then those lines alone,
-/// and `used_tokens` says it is over the budget.
+/// is left out whole. Each section not yet placed holds back what it is sure
+/// to need (being kept whole or named as left out, whichever is cheaper), so
+/// no section can take the room a later one needs, and everything is kept
+/// whenever everything fits. A budget that cannot hold what every section is
+/// sure to need leaves every section out whole; the answer is then their
+/// left-out lines alone, and `used_tokens` says it is over the budget.
 pub fn fit(
     sections: Vec<Section>,
     budget: Budget,
@@ -192,12 +193,23 @@ pub fn fit(
         count: count as u64,
         expand: section.expand.clone(),
     };
-    let reserve = |section: &Section| {
+    let line_cost = |section: &Section| {
         u64::from(tokens(&left_out_line(&left_out(
             section,
             section.entries.len(),
         ))))
     };
+    let whole_cost = |section: &Section| {
+        u64::from(tokens(&heading(section)))
+            + section
+                .entries
+                .iter()
+                .map(|entry| u64::from(tokens(&entry.text())))
+                .sum::<u64>()
+    };
+    // What a section not yet placed is sure to need: being kept whole or
+    // being named as left out, whichever is cheaper.
+    let reserve = |section: &Section| line_cost(section).min(whole_cost(section));
     let mut reserved: u64 = sections.iter().map(reserve).sum();
     let mut remaining = u64::from(budget.tokens);
     // For each section, how many entries it keeps, or `None` when it is left
@@ -208,26 +220,22 @@ pub fn fit(
         order.sort_by_key(|&index| !sections[index].pending);
         for index in order {
             let section = &sections[index];
-            let own = reserve(section);
-            reserved -= own;
+            reserved -= reserve(section);
+            // Room for this section with every later one's need held back;
+            // never less than this section's own need.
             let free = remaining - reserved;
-            let heading_cost = u64::from(tokens(&heading(section)));
-            let costs: Vec<u64> = section
-                .entries
-                .iter()
-                .map(|entry| u64::from(tokens(&entry.text())))
-                .collect();
-            let whole = heading_cost + costs.iter().sum::<u64>();
+            let whole = whole_cost(section);
             if whole <= free {
-                // Everything fits: no left-out line is needed.
                 kept[index] = Some(section.entries.len());
                 remaining -= whole;
                 continue;
             }
             // Some entry is left out, so the section ends with its left-out line.
-            let mut used = heading_cost + own;
+            let line = line_cost(section);
+            let mut used = u64::from(tokens(&heading(section))) + line;
             let mut count = 0;
-            for cost in costs {
+            for entry in &section.entries {
+                let cost = u64::from(tokens(&entry.text()));
                 if used + cost > free {
                     break;
                 }
@@ -238,7 +246,8 @@ pub fn fit(
                 kept[index] = Some(count);
                 remaining -= used;
             } else {
-                remaining -= own;
+                // Its own need was the left-out line, which `free` holds.
+                remaining -= line;
             }
         }
     }

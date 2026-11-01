@@ -71,18 +71,13 @@ fn error_cannot_deserialize_beside_partial_value() {
 }
 #[test]
 fn resume_from_last_event_id_or_reload() {
-    let mut log = EventLog::new("g1");
-    let positions: Vec<_> = (0..4)
-        .map(|n| EventPosition {
-            generation: "g1".into(),
-            cursor: n.to_string(),
-        })
-        .collect();
+    let mut log = EventLog::new("g:1");
+    let positions: Vec<_> = (0..4).map(|n| Position::new("g:1", n)).collect();
     for position in &positions {
         log.append(CommittedEvent {
             position: position.clone(),
             event: "append".into(),
-            value: position.cursor.clone(),
+            value: position.counter.to_string(),
         })
         .unwrap();
     }
@@ -102,10 +97,12 @@ fn resume_from_last_event_id_or_reload() {
         panic!()
     };
     assert_eq!(events.len(), 1);
-    let old = EventPosition {
-        generation: "old".into(),
-        cursor: "3".into(),
-    };
+    let old = Position::new("old", 3);
+    assert_eq!(positions[2].event_id(), "g:1:2");
+    assert_eq!(Position::parse("g:1:2").unwrap(), positions[2]);
+    assert!(Position::parse("g1").is_err());
+    assert_eq!(positions[2].is_after(&positions[1]), Some(true));
+    assert_eq!(old.is_after(&positions[1]), None);
     assert!(
         log.resume(Some(&old.event_id()))
             .encode()

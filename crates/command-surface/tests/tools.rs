@@ -64,6 +64,67 @@ impl StreamOperation for Follow {
     }
 }
 
+/// Says how its call arrived: the transport's channel and the MCP call's
+/// own metadata, with a follow-up written for that channel.
+struct WhoAmI;
+impl Operation for WhoAmI {
+    type Request = Text;
+    type Response = Text;
+    fn spec(&self) -> OperationSpec {
+        OperationSpec::request(
+            "whoami",
+            &["whoami"],
+            "inspect",
+            "Say how this call came",
+            "Shows the channel",
+        )
+    }
+    fn execute(&self, _: Text, context: RequestContext) -> OperationFuture<'_, Answer<Text>> {
+        Box::pin(async move {
+            Answer::ok(Text {
+                text: format!(
+                    "{:?} {}",
+                    context.via,
+                    context.metadata().cloned().unwrap_or_default()
+                ),
+            })
+            .with_next(
+                "find more",
+                RunnableRequest::new("find", json!({"text": "more"}), "r-2"),
+            )
+        })
+    }
+    fn render_text(&self, text: &Text) -> String {
+        format!("{}\n", text.text)
+    }
+}
+
+/// Sends what the test gives it, as it gives it.
+struct Ticks(std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<u64>>>);
+impl StreamOperation for Ticks {
+    type Request = Text;
+    type Event = u64;
+    fn spec(&self) -> OperationSpec {
+        OperationSpec {
+            kind: OperationKind::Stream,
+            ..OperationSpec::request("ticks", &["ticks"], "", "Live ticks", "A live stream")
+        }
+    }
+    fn open(
+        &self,
+        _: Text,
+        _: RequestContext,
+    ) -> OperationFuture<'_, Result<tokio::sync::mpsc::Receiver<u64>, Failure>> {
+        let receiver = self.0.lock().unwrap().take();
+        Box::pin(
+            async move { receiver.ok_or_else(|| Failure::new(FailureKind::Io, "opened twice")) },
+        )
+    }
+    fn render_event(&self, event: &u64) -> String {
+        format!("tick {event}\n")
+    }
+}
+
 fn row(name: &str, tool: &str, access: Access) -> Echo {
     Echo(OperationSpec {
         access,
@@ -86,7 +147,7 @@ fn tool(name: &str) -> ToolFamily {
 
 fn table() -> OperationTable {
     let mut table = OperationTable::new("example", Deadlines::default());
-    for name in ["status", "query", "assert", "act"] {
+    for name in ["status", "query", "assert", "act", "inspect"] {
         table.declare_tool(tool(name)).unwrap();
     }
     table
@@ -113,6 +174,7 @@ fn table() -> OperationTable {
             )
         })
         .unwrap();
+    table.register(WhoAmI).unwrap();
     table
 }
 
@@ -137,39 +199,286 @@ fn tools_generated() {
             "example_status",
             "example_query",
             "example_assert",
-            "example_act"
+            "example_act",
+            "example_inspect"
         ]
     );
     let query = &tools[1];
+    let input = &query["inputSchema"];
+    // One flat set of arguments per family, `operation` naming the row.
     assert_eq!(
-        query["inputSchema"]["properties"]["operation"]["enum"],
+        input["properties"]["operation"]["enum"],
         json!(["find", "diff"])
     );
+    assert_eq!(input["required"][0], "operation");
     assert_eq!(
-        query["inputSchema"]["properties"]["arguments"]["anyOf"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
+        input["properties"]["arguments"],
+        json!({"type": "object", "properties": {"text": {"type": "string"}}})
     );
-    assert_eq!(query["inputSchema"]["required"][0], "operation");
-    assert!(query["inputSchema"].get("oneOf").is_none());
+    assert!(input.get("anyOf").is_none());
     assert_eq!(query["annotations"]["readOnlyHint"], true);
     let status = &tools[0];
-    assert!(
-        status["inputSchema"]["properties"]
-            .get("operation")
-            .is_none()
-    );
     assert_eq!(
-        status["inputSchema"]["properties"]["arguments"]["title"],
-        "status"
+        status["inputSchema"]["properties"]["operation"]["enum"],
+        json!(["status"])
     );
+    assert_eq!(status["inputSchema"]["required"][0], "arguments");
     assert_eq!(tools[2]["annotations"]["readOnlyHint"], false);
     assert_eq!(tools[3]["annotations"]["openWorldHint"], true);
+    // No tool carries an output schema; the answer's is served once.
     for tool in &tools {
-        assert!(tool["outputSchema"]["properties"].get("outcome").is_some());
+        assert!(tool.get("outputSchema").is_none());
     }
+    assert!(
+        OperationTable::answer_schema()["properties"]
+            .get("outcome")
+            .is_some()
+    );
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct Counted {
+    /// The text to count in.
+    text: String,
+    limit: u64,
+    #[serde(default)]
+    nested: Option<Inner>,
+}
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+struct Inner {
+    depth: u32,
+}
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct Numbered {
+    text: u64,
+}
+struct Typed<R>(&'static str, std::marker::PhantomData<R>);
+impl<R> Operation for Typed<R>
+where
+    R: Serialize + serde::de::DeserializeOwned + JsonSchema + Send + Sync + 'static,
+{
+    type Request = R;
+    type Response = Value;
+    fn spec(&self) -> OperationSpec {
+        OperationSpec::request(self.0, &[self.0], "count", "Count", "A synthetic row")
+    }
+    fn execute(&self, request: R, _: RequestContext) -> OperationFuture<'_, Answer<Value>> {
+        let value = serde_json::to_value(request).unwrap();
+        Box::pin(async move { Answer::ok(value) })
+    }
+    fn render_text(&self, value: &Value) -> String {
+        format!("{value}\n")
+    }
+}
+
+#[tokio::test]
+async fn family_arguments_merge_flat_and_each_row_checks_its_own() {
+    let mut table = OperationTable::new("example", Deadlines::default());
+    table.declare_tool(tool("count")).unwrap();
+    table
+        .register(Typed::<Counted>("words", std::marker::PhantomData))
+        .unwrap();
+    table
+        .register(Typed::<Numbered>("chars", std::marker::PhantomData))
+        .unwrap();
+    let tools = table.mcp_tools();
+    let arguments = &tools[0]["inputSchema"]["properties"]["arguments"]["properties"];
+    // A scalar keeps its type; a nested object is only its bare type; a
+    // field two rows type differently is a choice that names its rows.
+    assert_eq!(arguments["limit"], json!({"type": "integer"}));
+    assert_eq!(arguments["nested"], json!({"type": "object"}));
+    assert_eq!(
+        arguments["text"],
+        json!({"anyOf": [{"type": "string"}, {"type": "integer"}], "description": "typed per operation: words; chars"})
+    );
+    assert!(
+        serde_json::to_string(&tools)
+            .unwrap()
+            .find("$defs")
+            .is_none()
+    );
+    // The full schema of each row is served apart from the tool list.
+    let full = table.family_schemas("count");
+    assert!(
+        full["words"]["$defs"]["Inner"]["properties"]
+            .get("depth")
+            .is_some()
+    );
+    assert_eq!(full["chars"]["properties"]["text"]["type"], "integer");
+    // The flat schema admits a field of another row; dispatch refuses it.
+    let crossed = call(
+        &table,
+        "example_count",
+        json!({"operation": "chars", "arguments": {"text": 3, "limit": 1}, "request_id": "r-1"}),
+    )
+    .await;
+    assert_eq!(
+        crossed["result"]["structuredContent"]["error"]["kind"],
+        "bad_request"
+    );
+    let typed = call(
+        &table,
+        "example_count",
+        json!({"operation": "chars", "arguments": {"text": "three"}, "request_id": "r-1"}),
+    )
+    .await;
+    assert_eq!(
+        typed["result"]["structuredContent"]["error"]["kind"],
+        "bad_request"
+    );
+    let fine = call(
+        &table,
+        "example_count",
+        json!({"operation": "chars", "arguments": {"text": 3}, "request_id": "r-1"}),
+    )
+    .await;
+    assert_eq!(fine["result"]["isError"], false);
+}
+
+/// A request type nested six levels deep, with an enum and a list at each.
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum Mode {
+    Fast,
+    Careful,
+}
+macro_rules! nested {
+    ($name:ident, $inner:ty) => {
+        #[derive(Clone, Serialize, Deserialize, JsonSchema)]
+        struct $name {
+            /// A long description that a tool list must not repeat for every level.
+            label: String,
+            mode: Mode,
+            items: Vec<$inner>,
+            child: Option<$inner>,
+        }
+    };
+}
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+struct Leaf {
+    value: u64,
+}
+nested!(Level5, Leaf);
+nested!(Level4, Level5);
+nested!(Level3, Level4);
+nested!(Level2, Level3);
+nested!(Level1, Level2);
+nested!(Deep, Level1);
+
+/// A row whose rarely used field is left out of the tool list.
+struct Search;
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SearchRequest {
+    text: String,
+    #[serde(default)]
+    sort_by_the_earliest_time_first: bool,
+}
+impl Operation for Search {
+    type Request = SearchRequest;
+    type Response = Value;
+    fn spec(&self) -> OperationSpec {
+        OperationSpec {
+            arguments: vec![
+                ArgumentSpec::new(
+                    "sort_by_the_earliest_time_first",
+                    ArgumentForm::Flag,
+                    "oldest first",
+                )
+                .unlisted(),
+            ],
+            ..OperationSpec::request("search", &["search"], "count", "Search", "A synthetic row")
+        }
+    }
+    fn execute(
+        &self,
+        request: SearchRequest,
+        _: RequestContext,
+    ) -> OperationFuture<'_, Answer<Value>> {
+        Box::pin(async move { Answer::ok(json!(request.sort_by_the_earliest_time_first)) })
+    }
+    fn render_text(&self, value: &Value) -> String {
+        format!("oldest first: {value}\n")
+    }
+}
+
+#[tokio::test]
+async fn unlisted_arguments_stay_off_the_list_and_still_dispatch() {
+    let mut table = OperationTable::new("example", Deadlines::default());
+    table.declare_tool(tool("count")).unwrap();
+    table.register(Search).unwrap();
+    let with_unlisted = serde_json::to_vec(&json!({ "tools": table.mcp_tools() }))
+        .unwrap()
+        .len();
+    let arguments = &table.mcp_tools()[0]["inputSchema"]["properties"]["arguments"];
+    assert_eq!(arguments["properties"], json!({"text": {"type": "string"}}));
+    assert!(arguments.get("additionalProperties").is_none());
+    // The size law counts only what is listed.
+    laws::tools_list_within(&table, with_unlisted).unwrap();
+    assert!(
+        !String::from_utf8(serde_json::to_vec(&table.mcp_tools()).unwrap())
+            .unwrap()
+            .contains("earliest")
+    );
+    // The explain answer still has it, and a call that uses it runs.
+    assert!(
+        table.family_schemas("count")["search"]["properties"]
+            .get("sort_by_the_earliest_time_first")
+            .is_some()
+    );
+    let reply = call(
+        &table,
+        "example_count",
+        json!({"arguments": {"text": "x", "sort_by_the_earliest_time_first": true}, "request_id": "r-1"}),
+    )
+    .await;
+    assert_eq!(
+        reply["result"]["content"][0]["text"],
+        "oldest first: true\n"
+    );
+    // A mistyped unlisted field is refused by its row.
+    let refused = call(
+        &table,
+        "example_count",
+        json!({"arguments": {"text": "x", "sort_by_the_earliest_time_first": "yes"}, "request_id": "r-1"}),
+    )
+    .await;
+    assert_eq!(
+        refused["result"]["structuredContent"]["error"]["kind"],
+        "bad_request"
+    );
+}
+
+#[test]
+fn tools_list_within() {
+    let mut deep = OperationTable::new("example", Deadlines::default());
+    deep.declare_tool(tool("count")).unwrap();
+    deep.register(Typed::<Deep>("deep", std::marker::PhantomData))
+        .unwrap();
+    let full = serde_json::to_vec(&deep.family_schemas("count"))
+        .unwrap()
+        .len();
+    let listed = serde_json::to_vec(&json!({ "tools": deep.mcp_tools() }))
+        .unwrap()
+        .len();
+    assert!(full > 2 * listed, "full {full}, listed {listed}");
+    laws::tools_list_within(&deep, 1024).unwrap();
+    let arguments = &deep.mcp_tools()[0]["inputSchema"]["properties"]["arguments"]["properties"];
+    assert_eq!(arguments["mode"], json!({"enum": ["fast", "careful"]}));
+    assert_eq!(arguments["items"], json!({"type": "array"}));
+    assert_eq!(arguments["child"], json!({"type": "object"}));
+
+    let table = table();
+    let bytes = serde_json::to_vec(&json!({ "tools": table.mcp_tools() }))
+        .unwrap()
+        .len();
+    laws::tools_list_within(&table, bytes).unwrap();
+    let error = laws::tools_list_within(&table, bytes - 1).unwrap_err();
+    assert!(error.contains(&format!("{bytes} bytes")), "{error}");
+    // Five families of synthetic rows stay small without output schemas.
+    assert!(bytes < 4096, "{bytes}");
 }
 
 #[test]
@@ -247,7 +556,7 @@ async fn streams_and_local_rows_are_not_tools() {
     let local = table
         .call(
             RunnableRequest::new("install", json!({"text": "x"}), "r-1"),
-            Origin::Socket,
+            Via::Cli,
             CancellationToken::new(),
         )
         .await;
@@ -382,7 +691,7 @@ proptest! {
         let reachable: usize = table
             .mcp_tools()
             .iter()
-            .map(|t| t["inputSchema"]["properties"]["operation"]["enum"].as_array().map_or(1, Vec::len))
+            .map(|t| t["inputSchema"]["properties"]["operation"]["enum"].as_array().map_or(0, Vec::len))
             .sum();
         prop_assert_eq!(reachable, plans.iter().filter(|p| p.kind == 0).count());
     }
@@ -404,4 +713,94 @@ async fn commands_list_reads_back_as_descriptions() {
     assert_eq!(specs, expected);
     assert_eq!(read[5].spec.kind, OperationKind::Stream);
     assert_eq!(read[1].spec.tool(), Some("query"));
+}
+
+#[tokio::test]
+async fn zero_event_stream_prints_nothing_and_succeeds() {
+    let table = table();
+    let cli = table
+        .cli(
+            &["follow", "--text", "0"].map(str::to_string),
+            "r-1",
+            CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(
+        (cli.stdout.as_str(), cli.stderr.as_str(), cli.exit_code),
+        ("", "", 0)
+    );
+}
+
+#[tokio::test]
+async fn stream_lines_print_as_they_arrive() {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let (sender, receiver) = tokio::sync::mpsc::channel(4);
+    let mut table = OperationTable::new("example", Deadlines::default());
+    table
+        .register_stream(Ticks(std::sync::Mutex::new(Some(receiver))))
+        .unwrap();
+    let (mut stdout, reading) = tokio::io::duplex(1024);
+    let mut stderr = Vec::new();
+    let args = ["ticks".to_string(), "--text".into(), "x".into()];
+    let running = table.cli_write(
+        &args,
+        "r-1",
+        Caller::default(),
+        CancellationToken::new(),
+        &mut stdout,
+        &mut stderr,
+    );
+    let watching = async {
+        let mut lines = BufReader::new(reading).lines();
+        sender.send(1).await.unwrap();
+        // The first line arrives while the stream is still open.
+        assert_eq!(lines.next_line().await.unwrap().as_deref(), Some("tick 1"));
+        sender.send(2).await.unwrap();
+        assert_eq!(lines.next_line().await.unwrap().as_deref(), Some("tick 2"));
+        drop(sender);
+    };
+    let (exit, ()) = tokio::join!(running, watching);
+    assert_eq!(exit.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn socket_carries_mcp_messages() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let table = table();
+    let (client, server) = tokio::net::UnixStream::pair().unwrap();
+    let talking = async {
+        let (reading, mut writing) = client.into_split();
+        let mut lines = BufReader::new(reading).lines();
+        let call = json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
+            "name": "example_inspect",
+            "arguments": {"arguments": {"text": "x"}, "request_id": "r-1"},
+            "_meta": {"session": "codex:thread-3"}
+        }});
+        writing
+            .write_all(format!("{call}\n").as_bytes())
+            .await
+            .unwrap();
+        // A notification gets no reply; the next line answers the call.
+        writing
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
+            .await
+            .unwrap();
+        let reply: Value =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        drop(writing);
+        reply
+    };
+    let (served, reply) = tokio::join!(table.serve_socket(server), talking);
+    served.unwrap();
+    assert_eq!(reply["id"], 4);
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with(r#"Mcp {"session":"codex:thread-3"}"#),
+        "{text}"
+    );
+    // Its follow-up is written as the tool call that runs it.
+    assert!(
+        text.contains(r#"next: find more: example_query {"arguments":{"text":"more"},"operation":"find","request_id":"r-2"}"#),
+        "{text}"
+    );
 }

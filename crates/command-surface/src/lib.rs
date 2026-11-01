@@ -15,7 +15,7 @@ mod failure;
 pub mod laws;
 mod operation;
 mod pack;
-mod seen;
+pub mod seen;
 mod status;
 mod tools;
 mod transport;

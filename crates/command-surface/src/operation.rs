@@ -1,7 +1,7 @@
 //! Typed operations and one dispatch boundary shared by every adapter.
 use crate::{
-    Answer, Authorship, Budget, Deadline, Failure, FailureKind, Fitted, LatencyClass, LeftOut,
-    Outcome, RunnableRequest, Section, bad_request,
+    Answer, Authorship, Budget, Deadline, Envelope, Failure, FailureKind, Fitted, LatencyClass,
+    LeftOut, Outcome, RunnableRequest, Section, Via, approximate_tokens, bad_request,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -101,6 +101,11 @@ pub struct ArgumentSpec {
     /// and kept out of the request.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub calling_process: bool,
+    /// Named in the MCP tool list. An unlisted field is still accepted and
+    /// checked by its row at dispatch; a product's explain answer lists it
+    /// (`OperationTable::family_schemas`).
+    #[serde(default = "listed", skip_serializing_if = "is_listed")]
+    pub listed: bool,
 }
 impl ArgumentSpec {
     pub fn new(name: impl Into<String>, form: ArgumentForm, help: impl Into<String>) -> Self {
@@ -110,7 +115,13 @@ impl ArgumentSpec {
             help: help.into(),
             short: None,
             calling_process: false,
+            listed: true,
         }
+    }
+    /// Leave the field out of the MCP tool list; it stays accepted.
+    pub fn unlisted(mut self) -> Self {
+        self.listed = false;
+        self
     }
     pub fn short(mut self, short: char) -> Self {
         self.short = Some(short);
@@ -153,6 +164,9 @@ pub struct OperationSpec {
 }
 fn listed() -> bool {
     true
+}
+fn is_listed(listed: &bool) -> bool {
+    *listed
 }
 impl OperationSpec {
     /// A request row of `tool`, readable by anyone, with no declared arguments.
@@ -263,8 +277,10 @@ impl<T: Serialize + Send + 'static> ErasedEvents for tokio::sync::mpsc::Receiver
 
 #[derive(Clone)]
 pub struct RequestContext {
-    /// Computed at the transport boundary; a caller cannot set this in JSON.
-    pub origin: Origin,
+    /// How the request arrived, set by the transport that accepted it; a
+    /// caller cannot set this in JSON. Follow-ups are written for it: an MCP
+    /// tool call for `mcp`, a command line otherwise.
+    pub via: Via,
     pub request_id: String,
     pub cancellation: CancellationToken,
     caller: Caller,
@@ -293,7 +309,7 @@ impl Default for Caller {
             scope: String::new(),
             identity: None,
             authorship: None,
-            access: Access::Permanent,
+            access: Access::Read,
         }
     }
 }
@@ -310,7 +326,8 @@ impl Caller {
         self.authorship = Some(authorship);
         self
     }
-    /// The highest access the caller's credential grants (all, by default).
+    /// The highest access the caller's credential grants. A caller grants
+    /// read access until the server says more.
     pub fn with_access(mut self, access: Access) -> Self {
         self.access = access;
         self
@@ -329,13 +346,6 @@ impl Caller {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Origin {
-    Cli,
-    Socket,
-    Http,
-    Mcp,
-}
 #[derive(Clone, Debug, Default)]
 struct Progress {
     stage: String,
@@ -372,19 +382,32 @@ impl RequestContext {
     /// How this request's surface writes a follow-up: a command line, or an
     /// MCP tool call.
     pub fn follow_up(&self, request: &RunnableRequest) -> String {
-        self.forms.follow_up(self.origin, request)
+        self.forms.follow_up(self.via, request)
     }
-    /// Fit `sections` to `budget`, counting left-out lines as this request's
-    /// surface prints them. The answer's envelope should carry the result's
-    /// `left_out` and `used_tokens`, and the budget's clamp note.
-    pub fn fit(
-        &self,
-        sections: Vec<Section>,
-        budget: Budget,
-        tokens: &dyn Fn(&str) -> u32,
-    ) -> Fitted {
-        crate::fit(sections, budget, tokens, &|item: &LeftOut| {
-            self.forms.left_out_line(self.origin, item)
+    /// Fit `sections` to `budget` for this request's surface. `envelope` is
+    /// the answer's envelope without its left-out items (its notes, next
+    /// steps, coverage and facets): its lines are held back from the budget,
+    /// and left-out lines are counted as the surface prints them, so the
+    /// answer's whole text fits. Tokens are counted as the transports
+    /// measure them (`approximate_tokens`). The answer carries the result's
+    /// `text` as its value's rendering and its `left_out` in the envelope.
+    pub fn fit(&self, sections: Vec<Section>, budget: Budget, envelope: &Envelope) -> Fitted {
+        let mut rest = envelope.clone();
+        rest.left_out.clear();
+        let footer = self.forms.footer(
+            self.via,
+            &Answer {
+                outcome: Outcome::Ok(Value::Null),
+                envelope: rest,
+            },
+        );
+        let held = approximate_tokens(&footer);
+        let budget = Budget {
+            tokens: budget.tokens.saturating_sub(held),
+            clamped_from: budget.clamped_from,
+        };
+        crate::fit(sections, budget, &approximate_tokens, &|item: &LeftOut| {
+            self.forms.left_out_line(self.via, item)
         })
     }
     /// Called between bounded work units. Also supplies the timeout diagnostic.
@@ -751,8 +774,8 @@ impl OperationTable {
         let mut forms = (*self.forms).clone();
         forms.descriptions.push(description);
         if let Some(tool) = forms.descriptions.last().and_then(|d| d.spec.tool()) {
-            // Rows of one tool share one set of schema definitions.
-            crate::tools::tool_schemas(&forms, tool)?;
+            // A family's schema must merge.
+            crate::tools::tool_input(&forms, tool)?;
         }
         self.forms = Arc::new(forms);
         self.rows.push(row);
@@ -787,33 +810,33 @@ impl OperationTable {
     pub async fn call(
         &self,
         request: RunnableRequest,
-        origin: Origin,
+        via: Via,
         cancellation: CancellationToken,
     ) -> Answer<Value> {
-        self.call_as(request, origin, Caller::default(), cancellation)
+        self.call_as(request, via, Caller::default(), cancellation)
             .await
     }
     pub async fn call_as(
         &self,
         request: RunnableRequest,
-        origin: Origin,
+        via: Via,
         caller: Caller,
         cancellation: CancellationToken,
     ) -> Answer<Value> {
-        self.call_with(request, origin, caller, None, cancellation)
+        self.call_with(request, via, caller, None, cancellation)
             .await
     }
     pub(crate) async fn call_with(
         &self,
         request: RunnableRequest,
-        origin: Origin,
+        via: Via,
         caller: Caller,
         metadata: Option<Value>,
         cancellation: CancellationToken,
     ) -> Answer<Value> {
         let authorship = caller.authorship.clone();
         let mut answer = self
-            .dispatch(request, origin, caller, metadata, cancellation)
+            .dispatch(request, via, caller, metadata, cancellation)
             .await;
         if answer.envelope.caller.is_none() {
             answer.envelope.caller = authorship;
@@ -866,13 +889,13 @@ impl OperationTable {
         &self,
         request: &RunnableRequest,
         description: &OperationDescription,
-        origin: Origin,
+        via: Via,
         caller: Caller,
         metadata: Option<Value>,
         cancellation: CancellationToken,
     ) -> RequestContext {
         RequestContext {
-            origin,
+            via,
             request_id: request.request_id.clone(),
             cancellation,
             caller,
@@ -889,7 +912,7 @@ impl OperationTable {
     async fn dispatch(
         &self,
         request: RunnableRequest,
-        origin: Origin,
+        via: Via,
         caller: Caller,
         metadata: Option<Value>,
         cancellation: CancellationToken,
@@ -906,7 +929,7 @@ impl OperationTable {
         };
         let token = cancellation.child_token();
         let guard = token.clone().drop_guard();
-        let context = self.context(&request, description, origin, caller, metadata, token);
+        let context = self.context(&request, description, via, caller, metadata, token);
         let progress = context.progress.clone();
         let wait_deadline = async {
             match request
@@ -932,7 +955,7 @@ impl OperationTable {
     pub async fn open_stream(
         &self,
         request: RunnableRequest,
-        origin: Origin,
+        via: Via,
         caller: Caller,
         cancellation: CancellationToken,
     ) -> Result<Events, Failure> {
@@ -943,7 +966,7 @@ impl OperationTable {
                 request.operation
             )));
         };
-        let context = self.context(&request, description, origin, caller, None, cancellation);
+        let context = self.context(&request, description, via, caller, None, cancellation);
         stream.open(request.arguments.clone(), context).await
     }
     pub fn render_event(&self, operation: &str, event: Value) -> Result<String, Failure> {
@@ -970,7 +993,8 @@ impl OperationTable {
             }
             other => other,
         };
-        envelope.mark_lower_bounds();
+        let degraded = matches!(outcome, Outcome::Degraded { .. });
+        envelope.mark_lower_bounds(degraded);
         Answer { outcome, envelope }
     }
     fn checked_failure(&self, error: Failure, spec: &OperationSpec) -> Failure {

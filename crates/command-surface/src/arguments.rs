@@ -101,6 +101,18 @@ fn is_positional(form: ArgumentForm) -> bool {
 pub(crate) fn check(description: &OperationDescription) -> Result<(), Failure> {
     let spec = &description.spec;
     let refuse = |message: String| Err(bad_request(format!("{}: {message}", spec.name)));
+    // Every request field is written `--name` unless declared otherwise, so
+    // no field may take a flag every row already has.
+    if let Some(properties) = description.input_schema["properties"].as_object()
+        && let Some(name) = properties
+            .keys()
+            .find(|name| GLOBAL_FLAGS.contains(&name.replace('_', "-").as_str()))
+    {
+        return refuse(format!(
+            "request field {name} would be written as --{}, a flag of every row",
+            name.replace('_', "-")
+        ));
+    }
     let mut seen_optional_positional = false;
     let mut seen_words = false;
     for (index, argument) in spec.arguments.iter().enumerate() {

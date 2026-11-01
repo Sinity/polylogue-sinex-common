@@ -113,7 +113,8 @@ are renames the operator may still change (default; open operator question).
 | candidates | what a failing input could have meant, each runnable |
 | latency class | the group an operation belongs to for its default deadline: local, status, completion, read, search, aggregate |
 | deadline | how long a request may run; a default any caller can lift |
-| position | where a product's stream of changes stands; an event's ID |
+| position | where a product's stream of changes stands: its index generation and commit counter, `generation:counter`; an event's ID, what a read stood at, a seen mark's place |
+| not built, not yet available | a request needing an index or derived product that does not exist until built; a request the product cannot answer yet because it is still opening |
 | envelope | the fields every answer carries besides its outcome: count, shown, left out, next, notes, reading, positions, coverage, facets, caller, collapsed, used tokens |
 | lower bound | a count over a source whose coverage was not complete |
 | follow-up | a ready request in `next`, written as the surface runs it: a command line or an MCP tool call |
@@ -129,11 +130,12 @@ are renames the operator may still change (default; open operator question).
 | harness ancestor | a harness process above the caller; the nearest one launched it |
 | shared server | an MCP server process serving several sessions, whose start-up variables name none of them |
 | hook identity | the session (and subagent) a harness process or tool call belongs to, from a product's hook spool |
-| via | how a request reached the product: cli, mcp, web, extension, desktop, hook, markup, import, daemon |
+| via | the channel a request reached the product by: cli, mcp, web, extension, desktop, hook, markup, import, daemon; follow-ups are written for it |
 | tool family | operation rows grouped into one MCP tool because their arguments share a shape and their hint |
 | seen mark | per consumer and target, the latest position displayed to that consumer |
 | consumer | who a seen mark belongs to: the operator or one agent session |
-| showing | how a target came before a consumer; only a display or a `since: seen` read moves a seen mark |
+| showing | how a target came before a consumer; only a display (visible for the display time, one second) or a `since: seen` read moves a seen mark |
+| value in text | an MCP answer in text format whose value its text part holds, left out of the structured part |
 | measurement | one value in status, with its state, reason and age |
 | measurement state | `measured`, `none_found`, `not_measured`, `unavailable`, `gap` |
 | verdict | the one-word health of a product: `healthy`, `degraded`, `unknown` |

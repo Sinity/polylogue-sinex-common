@@ -6,9 +6,10 @@
 //! page, a hidden tab, a poll or a preview never moves it. Each product
 //! stores marks with its authored state, so they survive a rebuild; only the
 //! latest mark is kept, never a history.
-use crate::{AgentSession, Author};
+use crate::{AgentSession, Author, Position};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 /// Who a mark belongs to: the operator, or one agent session.
 #[derive(
@@ -32,23 +33,25 @@ impl Consumer {
 }
 
 /// The latest place a consumer was shown in a target: the product's position
-/// at that read, and for a session the anchor of the last item shown.
+/// at that showing, and for a session the anchor of the last item shown.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SeenMark {
     pub consumer: Consumer,
     /// The target's reference.
     pub target: String,
-    pub position: u64,
+    pub position: Position,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<String>,
 }
 impl SeenMark {
-    /// Record a later showing. A mark only moves forward: a showing at an
-    /// earlier position (an old page reread) leaves it as it is. Returns
-    /// whether the mark moved.
-    pub fn advance(&mut self, position: u64, anchor: Option<String>) -> bool {
-        if position <= self.position {
+    /// Record that the target was put before the consumer at `position`.
+    /// Only a showing moves the mark, and only forward within the mark's
+    /// generation. A position from another generation of the product's
+    /// index does not compare, so the later showing replaces the mark.
+    /// Returns whether the mark moved.
+    pub fn show(&mut self, showing: Showing, position: Position, anchor: Option<String>) -> bool {
+        if !showing.moves_seen_mark() || position.is_after(&self.position) == Some(false) {
             return false;
         }
         self.position = position;
@@ -62,8 +65,10 @@ impl SeenMark {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Showing {
-    /// Displayed in a visible view for its display time.
+    /// Visible to a person for at least `Showing::DISPLAY_TIME`.
     Displayed,
+    /// Visible for less than the display time, as when scrolling past.
+    Glimpsed,
     /// Read by an agent that asked for `since: seen`.
     ReadSinceSeen,
     /// Rendered ahead of being looked at.
@@ -78,31 +83,43 @@ pub enum Showing {
     Read,
 }
 impl Showing {
+    /// How long a view stays visible before it counts as displayed: long
+    /// enough to read a line, so scrolling past or a flicker never counts.
+    pub const DISPLAY_TIME: Duration = Duration::from_secs(1);
+    /// What a visible view amounts to after `visible_for`: displayed once it
+    /// reaches the display time, a glimpse before.
+    pub fn of_visible_view(visible_for: Duration) -> Self {
+        if visible_for >= Self::DISPLAY_TIME {
+            Self::Displayed
+        } else {
+            Self::Glimpsed
+        }
+    }
     pub const fn moves_seen_mark(self) -> bool {
         matches!(self, Self::Displayed | Self::ReadSinceSeen)
     }
 }
 
 /// Where a read starts: after the consumer's seen mark, or after an explicit
-/// position. Written `seen` or a number on every surface.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// position. Written `seen` or `generation:counter` on every surface.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Since {
     Seen,
-    Position(u64),
+    Position(Position),
 }
 impl Since {
     pub fn parse(text: &str) -> Option<Self> {
         match text {
             "seen" => Some(Self::Seen),
-            number => number.parse().ok().map(Self::Position),
+            position => Position::parse(position).ok().map(Self::Position),
         }
     }
-    /// The position to read after, given the consumer's mark if any. With no
-    /// mark, `seen` reads from the start.
-    pub fn after(self, mark: Option<&SeenMark>) -> u64 {
+    /// The position to read after, given the consumer's mark if any; `None`
+    /// reads from the start (`seen` with no mark yet).
+    pub fn after<'a>(&'a self, mark: Option<&'a SeenMark>) -> Option<&'a Position> {
         match self {
-            Self::Seen => mark.map_or(0, |mark| mark.position),
-            Self::Position(position) => position,
+            Self::Seen => mark.map(|mark| &mark.position),
+            Self::Position(position) => Some(position),
         }
     }
 }
@@ -122,7 +139,9 @@ impl Serialize for Since {
 impl<'de> Deserialize<'de> for Since {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let text = String::deserialize(deserializer)?;
-        Self::parse(&text).ok_or_else(|| serde::de::Error::custom("since is `seen` or a position"))
+        Self::parse(&text).ok_or_else(|| {
+            serde::de::Error::custom("since is `seen` or a position, generation:counter")
+        })
     }
 }
 impl JsonSchema for Since {
@@ -132,8 +151,8 @@ impl JsonSchema for Since {
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "pattern": "^(seen|[0-9]+)$",
-            "description": "`seen` (after the caller's seen mark) or a position"
+            "pattern": "^(seen|.+:[0-9]+)$",
+            "description": "`seen` (after the caller's seen mark) or a position, generation:counter"
         })
     }
 }

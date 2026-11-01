@@ -209,20 +209,10 @@ impl Failure {
         self.code = Some(code.into());
         self
     }
-    /// A query-language refusal with the query it refers to, so the failure
-    /// also carries the caret diagnostic.
+    /// The one conversion of a query-language refusal: the same kind, its
+    /// message, hint, suggestion, candidates and retryability, and its place
+    /// in `query` as a span (to the end of the word there) with its caret.
     pub fn from_query_error(error: query_language::Error, query: &str) -> Self {
-        let span = InputSpan {
-            offset: error.position,
-            length: token_length(query, error.position),
-        };
-        Self::from(error).at(query, span)
-    }
-}
-
-/// The query-language refusal becomes a failure once, here.
-impl From<query_language::Error> for Failure {
-    fn from(error: query_language::Error) -> Self {
         use query_language::ErrorKind as Q;
         let kind = match error.kind {
             Q::InvalidQuery => FailureKind::InvalidQuery,
@@ -232,15 +222,17 @@ impl From<query_language::Error> for Failure {
             Q::Ambiguous => FailureKind::Ambiguous,
             Q::StaleCursor => FailureKind::StaleCursor,
         };
-        let mut failure = Self::new(kind, error.message);
-        failure.position = Some(InputSpan {
+        let span = InputSpan {
             offset: error.position,
-            length: 0,
-        });
+            length: token_length(query, error.position),
+        };
+        let mut failure = Self::new(kind, error.message)
+            .at(query, span)
+            .with_candidates(error.candidates);
         failure.hint = error.hint;
         failure.retryable = error.retryable;
         match error.suggestion {
-            Some(query) => failure.with_suggestion(Suggestion::Query(query)),
+            Some(corrected) => failure.with_suggestion(Suggestion::Query(corrected)),
             None => failure,
         }
     }

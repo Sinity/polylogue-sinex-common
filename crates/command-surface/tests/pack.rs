@@ -156,9 +156,16 @@ proptest! {
             .map(|(n, (pending, entries))| section(&format!("section{n}"), *pending, *entries))
             .collect();
         let total: usize = shape.iter().map(|(_, entries)| entries).sum();
+        let whole_of = |s: &Section| {
+            words(&format!("## {}\n", s.title))
+                + s.entries.iter().map(|e| words(&format!("{}\n", e.lines().join("\n")))).sum::<u32>()
+        };
         let reserve: u32 = sections
             .iter()
-            .map(|s| words(&left_out_line(&LeftOut { what: s.title.clone(), count: s.entries.len() as u64, expand: None })))
+            .map(|s| {
+                words(&left_out_line(&LeftOut { what: s.title.clone(), count: s.entries.len() as u64, expand: None }))
+                    .min(whole_of(s))
+            })
             .sum();
         let fitted = fit(sections.clone(), Budget::new(Some(budget), 0, None), &words, &left_out_line);
         // What was kept and what was left out add up to everything.
@@ -176,5 +183,12 @@ proptest! {
         let measured = words(&fitted.text)
             + fitted.left_out.iter().map(|l| words(&left_out_line(l))).sum::<u32>();
         prop_assert_eq!(fitted.used_tokens, measured);
+        // Whatever fits whole is kept whole: a fitter that left things out
+        // with room to spare fails here.
+        let whole: u32 = sections.iter().map(whole_of).sum();
+        if whole <= budget {
+            prop_assert!(fitted.left_out.is_empty(), "left out {:?} within {}", fitted.left_out, budget);
+            prop_assert_eq!(kept, total);
+        }
     }
 }

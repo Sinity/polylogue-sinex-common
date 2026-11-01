@@ -226,7 +226,8 @@ pub struct HookIdentity {
 /// - The operator's own surfaces (web, extension, desktop) are the operator.
 /// - A hook identity refines the caller only when it names the caller's
 ///   harness process and, if it is per call, the caller's tool call; a
-///   subagent's hook identity names the subagent.
+///   subagent's hook identity names the subagent. For a shared MCP server
+///   only a per-call hook identity counts.
 /// - An MCP call that names its own session is that session. A shared MCP
 ///   server never lends its start-up session to a call: without the call's
 ///   own identity the author is the harness (`agent:<harness>`).
@@ -241,12 +242,15 @@ pub fn author_of(caller: &CallerEvidence, via: Via, hook: Option<&HookIdentity>)
             via,
         };
     }
+    // A shared MCP server's process belongs to no one session, so only a
+    // hook identity for the call's own tool call can name it.
+    let shared = via == Via::Mcp && caller.shared_server;
     let hook = hook.filter(|hook| {
         caller.harness_pid == Some(hook.harness_pid)
-            && hook
-                .tool_call_id
-                .as_ref()
-                .is_none_or(|id| caller.tool_call_id.as_ref() == Some(id))
+            && match &hook.tool_call_id {
+                Some(id) => caller.tool_call_id.as_ref() == Some(id),
+                None => !shared,
+            }
     });
     let hook_session = hook.map(|hook| match hook.agent_id.as_deref() {
         Some(agent) if !agent.is_empty() => AgentSession {

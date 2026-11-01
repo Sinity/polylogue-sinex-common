@@ -1,121 +1,180 @@
 //! MCP tools grouped from the operation table, and the text an agent reads.
 //!
-//! Each declared tool family holds the request rows that name it. Its input schema
-//! is generated: the common envelope fields, the row as `operation` (when
-//! the tool has several), and `arguments` as one choice per row. Its hints
-//! come from its rows' access, which registration keeps uniform. Stream and
-//! local rows are not tools.
+//! Each declared tool family holds the request rows that name it. Its input
+//! schema is generated small: `operation` names the row, `arguments` is the
+//! rows' fields merged into one flat object, and the request options follow.
+//! Its hints come from its rows' access, which registration keeps uniform.
+//! Tools carry no output schema; `answer_schema` serves the answer's once.
+//! Stream and local rows are not tools.
 use crate::operation::{Forms, terminal_text};
 use crate::{
-    Access, Answer, Caller, CancellationToken, Deadline, Failure, Format, LeftOut, OperationTable,
-    Origin, Outcome, RunnableRequest, Suggestion, bad_request,
+    Access, Answer, Caller, CancellationToken, Deadline, Failure, FailureKind, Format, LeftOut,
+    OperationTable, Outcome, RunnableRequest, Suggestion, Via, approximate_tokens, bad_request,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-/// Move `schema`'s `$defs` into `definitions`; a name defined twice with
-/// different content is refused.
-fn take_definitions(
-    schema: &mut Value,
-    definitions: &mut Map<String, Value>,
-    tool: &str,
-) -> Result<(), Failure> {
-    let Some(own) = schema.as_object_mut().and_then(|o| o.remove("$defs")) else {
-        return Ok(());
+/// The type of one request field as a tool list states it: a scalar keeps
+/// its type and its enum values; an object, a list or a choice among
+/// them is only its bare type. The full schema of each row is
+/// `OperationTable::family_schemas`, for a product's explain answer.
+fn shallow(schema: &Value, definitions: &Map<String, Value>) -> Value {
+    let schema = match schema
+        .get("$ref")
+        .and_then(Value::as_str)
+        .and_then(|reference| reference.strip_prefix("#/$defs/"))
+    {
+        Some(name) => definitions.get(name).unwrap_or(&Value::Null),
+        None => schema,
     };
-    for (name, definition) in own.as_object().into_iter().flatten() {
-        match definitions.get(name) {
-            Some(existing) if existing != definition => {
-                return Err(bad_request(format!(
-                    "tool {tool}: rows define {name} differently"
-                )));
+    if let Some(values) = schema.get("enum") {
+        return json!({ "enum": values });
+    }
+    if let Some(value) = schema.get("const") {
+        return json!({ "enum": [value] });
+    }
+    for key in ["anyOf", "oneOf"] {
+        if let Some(choices) = schema.get(key).and_then(Value::as_array) {
+            let mut kinds: Vec<Value> = vec![];
+            for choice in choices {
+                let kind = shallow(choice, definitions);
+                if kind != json!({"type": "null"}) && !kinds.contains(&kind) {
+                    kinds.push(kind);
+                }
             }
-            _ => {
-                definitions.insert(name.clone(), definition.clone());
-            }
+            return match kinds.len() {
+                1 => kinds.pop().expect("one kind"),
+                // Choices of plain values are one enum.
+                _ if kinds.iter().all(|k| k.get("enum").is_some()) => json!({
+                    "enum": kinds
+                        .iter()
+                        .flat_map(|k| k["enum"].as_array().cloned().unwrap_or_default())
+                        .collect::<Vec<_>>()
+                }),
+                _ => json!({}),
+            };
         }
     }
-    Ok(())
+    let types: Vec<&str> = match &schema["type"] {
+        Value::String(name) => vec![name.as_str()],
+        Value::Array(names) => names
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|name| *name != "null")
+            .collect(),
+        _ if schema.get("properties").is_some() => vec!["object"],
+        _ => vec![],
+    };
+    match types.as_slice() {
+        [one] => json!({ "type": one }),
+        _ => json!({}),
+    }
 }
 
-/// The input and output schemas of `tool`.
-pub(crate) fn tool_schemas(forms: &Forms, tool: &str) -> Result<(Value, Value), Failure> {
+/// One merged field of a family's arguments: each distinct type it has, with
+/// the rows that give it that type.
+struct MergedField {
+    name: String,
+    kinds: Vec<(Value, Vec<String>)>,
+}
+
+/// The input schema of `tool`: the family's rows' listed request fields
+/// merged into one flat `arguments` object, deduplicated by name, each field
+/// reduced to its shallow type (`arguments` stays open, so unlisted fields
+/// are accepted and each row checks its own at dispatch); `operation` naming the row (required when the family
+/// has several); and the request options. A field two rows type differently
+/// is a choice of its types, described by the rows that use each. Each row
+/// checks its own arguments at dispatch.
+pub(crate) fn tool_input(forms: &Forms, tool: &str) -> Result<Value, Failure> {
     let rows: Vec<_> = forms
         .descriptions
         .iter()
         .filter(|d| d.spec.tool() == Some(tool))
         .collect();
-    let mut definitions = Map::new();
-    let mut choices = vec![];
-    let mut values = vec![];
-    let mut output = None;
+    let mut fields: Vec<MergedField> = vec![];
     for row in &rows {
-        let mut input = match &row.input_schema {
-            // `true` accepts any value; as an object it can carry a title.
-            Value::Bool(true) => json!({}),
-            schema => schema.clone(),
-        };
-        take_definitions(&mut input, &mut definitions, tool)?;
-        if let Some(object) = input.as_object_mut() {
-            object.remove("$schema");
-            object.insert("title".into(), row.spec.name.clone().into());
-            object.insert("description".into(), row.spec.summary.clone().into());
+        let definitions = row.input_schema["$defs"]
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        for (name, property) in row.input_schema["properties"]
+            .as_object()
+            .into_iter()
+            .flatten()
+        {
+            if row
+                .spec
+                .argument(name)
+                .is_some_and(|argument| !argument.listed)
+            {
+                continue;
+            }
+            let kind = shallow(property, &definitions);
+            let index = match fields.iter().position(|field| field.name == *name) {
+                Some(index) => index,
+                None => {
+                    fields.push(MergedField {
+                        name: name.clone(),
+                        kinds: vec![],
+                    });
+                    fields.len() - 1
+                }
+            };
+            let kinds = &mut fields[index].kinds;
+            match kinds.iter_mut().find(|(existing, _)| *existing == kind) {
+                Some((_, users)) => users.push(row.spec.name.clone()),
+                None => kinds.push((kind, vec![row.spec.name.clone()])),
+            }
         }
-        choices.push(input);
-        let mut answer = row.output_schema.clone();
-        take_definitions(&mut answer, &mut definitions, tool)?;
-        values.push(answer["properties"]["value"].clone());
-        output.get_or_insert(answer);
     }
+    let arguments: Map<String, Value> = fields
+        .into_iter()
+        .map(|mut field| {
+            let schema = if field.kinds.len() == 1 {
+                field.kinds.pop().expect("one kind").0
+            } else {
+                let used_by = field
+                    .kinds
+                    .iter()
+                    .map(|(_, users)| users.join(", "))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                json!({
+                    "anyOf": field.kinds.into_iter().map(|(kind, _)| kind).collect::<Vec<_>>(),
+                    "description": format!("typed per operation: {used_by}"),
+                })
+            };
+            (field.name, schema)
+        })
+        .collect();
     let mut properties = Map::new();
     let mut required = vec![json!("arguments"), json!("request_id")];
+    properties.insert(
+        "operation".into(),
+        json!({ "enum": rows.iter().map(|r| r.spec.name.clone()).collect::<Vec<_>>() }),
+    );
     if rows.len() > 1 {
-        properties.insert(
-            "operation".into(),
-            json!({
-                "type": "string",
-                "enum": rows.iter().map(|r| r.spec.name.clone()).collect::<Vec<_>>(),
-                "description": "Which of the tool's operations to run; `arguments` follows its schema."
-            }),
-        );
         required.insert(0, json!("operation"));
     }
-    let arguments = if choices.len() == 1 {
-        choices.pop().expect("one row")
-    } else {
-        json!({ "anyOf": choices })
-    };
-    properties.insert("arguments".into(), arguments);
-    properties.insert("request_id".into(), json!({"type": "string", "minLength": 1, "description": "Reused when retrying the same call, so a write is applied once."}));
-    properties.insert("deadline".into(), json!({"type": ["integer", "null"], "minimum": 0, "description": "Milliseconds; null lifts the deadline."}));
-    properties.insert("budget_tokens".into(), json!({"type": "integer", "minimum": 0, "description": "How many tokens the answer's text may use."}));
-    properties.insert("cursor".into(), json!({"type": "string", "description": "Continues an earlier answer from where its page ended."}));
     properties.insert(
-        "fresh".into(),
-        json!({"type": "boolean", "description": "Render in full what you already hold."}),
+        "arguments".into(),
+        json!({ "type": "object", "properties": arguments }),
     );
-    properties.insert("format".into(), json!({"type": "string", "enum": ["text", "json"], "description": "json adds the rows to the structured answer."}));
-    let mut input = json!({
+    properties.insert("request_id".into(), json!({"type": "string"}));
+    properties.insert(
+        "deadline".into(),
+        json!({"type": ["integer", "null"], "description": "ms; null: none"}),
+    );
+    properties.insert("budget_tokens".into(), json!({"type": "integer"}));
+    properties.insert("cursor".into(), json!({"type": "string"}));
+    properties.insert("fresh".into(), json!({"type": "boolean"}));
+    properties.insert("format".into(), json!({"enum": ["text", "json"]}));
+    Ok(json!({
         "type": "object",
         "properties": properties,
         "required": required,
         "additionalProperties": false,
-    });
-    let mut output = output.unwrap_or_else(|| json!({"type": "object"}));
-    if let Some(object) = output.as_object_mut() {
-        object.remove("$schema");
-        object.remove("title");
-        if values.len() > 1
-            && let Some(properties) = object.get_mut("properties").and_then(Value::as_object_mut)
-        {
-            properties.insert("value".into(), json!({ "anyOf": values }));
-        }
-    }
-    if !definitions.is_empty() {
-        input["$defs"] = Value::Object(definitions.clone());
-        output["$defs"] = Value::Object(definitions);
-    }
-    Ok((input, output))
+    }))
 }
 
 #[derive(Deserialize)]
@@ -152,10 +211,10 @@ impl Forms {
             .count()
             > 1;
         let mut call = Map::new();
+        call.insert("arguments".into(), request.arguments.clone());
         if several {
             call.insert("operation".into(), request.operation.clone().into());
         }
-        call.insert("arguments".into(), request.arguments.clone());
         call.insert("request_id".into(), request.request_id.clone().into());
         match request.deadline {
             Deadline::Default => {}
@@ -182,8 +241,8 @@ impl Forms {
     }
     /// A follow-up as the surface writes it: an MCP tool call, or a command
     /// line everywhere else (and for a row no tool holds).
-    pub(crate) fn follow_up(&self, origin: Origin, request: &RunnableRequest) -> String {
-        if origin == Origin::Mcp
+    pub(crate) fn follow_up(&self, via: Via, request: &RunnableRequest) -> String {
+        if via == Via::Mcp
             && let Some(call) = self.tool_call(request)
         {
             return call;
@@ -192,14 +251,14 @@ impl Forms {
             .unwrap_or_else(|_| format!("{} (unknown operation)", request.operation))
     }
     /// The one line an answer prints for something it left out.
-    pub(crate) fn left_out_line(&self, origin: Origin, item: &LeftOut) -> String {
+    pub(crate) fn left_out_line(&self, via: Via, item: &LeftOut) -> String {
         let unit = if item.count == 1 { "entry" } else { "entries" };
         match &item.expand {
             Some(expand) => format!(
                 "left out: {} {unit} of {}; read them: {}\n",
                 item.count,
                 terminal_text(&item.what),
-                self.follow_up(origin, expand)
+                self.follow_up(via, expand)
             ),
             None => format!(
                 "left out: {} {unit} of {}\n",
@@ -211,7 +270,7 @@ impl Forms {
     /// The lines after an answer's value: how much was shown, facets,
     /// coverage that is not complete, what was left out, notes and next
     /// steps. Each fact appears once; rows are never repeated here.
-    pub(crate) fn footer(&self, origin: Origin, answer: &Answer<Value>) -> String {
+    pub(crate) fn footer(&self, via: Via, answer: &Answer<Value>) -> String {
         let envelope = &answer.envelope;
         let mut text = String::new();
         if let Outcome::Error(error) = &answer.outcome {
@@ -236,7 +295,7 @@ impl Forms {
                     text.push_str(&format!("did you mean: {}\n", terminal_text(query)));
                 }
                 Some(Suggestion::Request(request)) => {
-                    text.push_str(&format!("try: {}\n", self.follow_up(origin, request)));
+                    text.push_str(&format!("try: {}\n", self.follow_up(via, request)));
                 }
                 None => {}
             }
@@ -297,7 +356,7 @@ impl Forms {
             ));
         }
         for item in &envelope.left_out {
-            text.push_str(&self.left_out_line(origin, item));
+            text.push_str(&self.left_out_line(via, item));
         }
         for note in &envelope.notes {
             text.push_str(&format!("note: {}\n", terminal_text(note)));
@@ -306,7 +365,7 @@ impl Forms {
             text.push_str(&format!(
                 "next: {}: {}\n",
                 terminal_text(&next.label),
-                self.follow_up(origin, &next.request)
+                self.follow_up(via, &next.request)
             ));
         }
         text
@@ -314,14 +373,32 @@ impl Forms {
 }
 
 impl OperationTable {
+    /// Every row of a tool family with its full request schema, for a
+    /// product's explain or capabilities answer: the tool list states only
+    /// each field's shallow type.
+    pub fn family_schemas(&self, family: &str) -> Value {
+        Value::Object(
+            self.descriptions()
+                .iter()
+                .filter(|d| d.spec.tool() == Some(family))
+                .map(|d| (d.spec.name.clone(), d.input_schema.clone()))
+                .collect(),
+        )
+    }
+    /// The schema of an answer (`Answer<Value>`): the envelope every
+    /// operation's answer carries. MCP tools carry no output schema; a
+    /// product serves this once, from its explain or capabilities answer.
+    pub fn answer_schema() -> Value {
+        schemars::schema_for!(Answer<Value>).to_value()
+    }
     /// The command line that runs `request`, in its row's own argument forms
     /// when they can hold every field, else with `--request JSON`.
     pub fn cli_command(&self, request: &RunnableRequest) -> Result<String, Failure> {
         self.forms().cli_command(request)
     }
-    /// A follow-up as the surface of `origin` writes it.
-    pub fn follow_up(&self, origin: Origin, request: &RunnableRequest) -> String {
-        self.forms().follow_up(origin, request)
+    /// A follow-up as the surface of `via` writes it.
+    pub fn follow_up(&self, via: Via, request: &RunnableRequest) -> String {
+        self.forms().follow_up(via, request)
     }
     /// The MCP `tools/list` entries: one per declared tool that holds a row.
     pub fn mcp_tools(&self) -> Vec<Value> {
@@ -334,13 +411,12 @@ impl OperationTable {
                     .find(|d| d.spec.tool() == Some(tool.name.as_str()))?
                     .spec
                     .access;
-                let (input, output) = tool_schemas(self.forms(), &tool.name)
-                    .expect("registration checked every tool's schemas");
+                let input = tool_input(self.forms(), &tool.name)
+                    .expect("registration checked every tool's schema");
                 Some(json!({
                     "name": self.forms().tool_name(&tool.name),
                     "description": tool.description,
                     "inputSchema": input,
-                    "outputSchema": output,
                     "annotations": {
                         "readOnlyHint": access == Access::Read,
                         "destructiveHint": access == Access::Permanent,
@@ -408,65 +484,121 @@ impl OperationTable {
             .filter(|d| d.spec.tool() == Some(tool))
             .map(|d| d.spec.name.as_str())
             .collect();
-        let (operation, answer, format) = match serde_json::from_value::<ToolCall>(arguments) {
-            Err(error) => (
-                None,
-                Answer::error(bad_request(error.to_string())),
-                Format::Text,
-            ),
-            Ok(call) => {
-                let operation = match (call.operation, rows.as_slice()) {
-                    (Some(operation), _) if rows.contains(&operation.as_str()) => Ok(operation),
-                    (Some(operation), _) => Err(bad_request(format!(
-                        "{operation} is not an operation of this tool ({})",
-                        rows.join(", ")
-                    ))),
-                    (None, [only]) => Ok((*only).to_owned()),
-                    (None, _) => Err(bad_request(format!(
-                        "name the operation: one of {}",
-                        rows.join(", ")
-                    ))),
-                };
-                match operation {
-                    Err(failure) => (None, Answer::error(failure), call.format),
-                    Ok(operation) => {
-                        let request = RunnableRequest {
-                            operation: operation.clone(),
-                            arguments: call.arguments,
-                            request_id: call.request_id,
-                            deadline: call.deadline,
-                            budget_tokens: call.budget_tokens,
-                            cursor: call.cursor,
-                            fresh: call.fresh,
-                            format: call.format,
-                        };
-                        let answer = self
-                            .call_with(request, Origin::Mcp, caller, metadata, cancellation)
-                            .await;
-                        (Some(operation), answer, call.format)
-                    }
-                }
+        let call = serde_json::from_value::<ToolCall>(arguments)
+            .map_err(|error| bad_request(error.to_string()));
+        let format = call.as_ref().map_or(Format::Text, |call| call.format);
+        let (operation, budget, answer) = match call.and_then(|call| self.tool_request(&rows, call))
+        {
+            Err(failure) => (String::new(), None, Answer::error(failure)),
+            Ok(request) => {
+                let operation = request.operation.clone();
+                let budget = self.request_budget(&request);
+                let answer = self
+                    .call_with(request, Via::Mcp, caller, metadata, cancellation)
+                    .await;
+                (operation, budget, answer)
             }
         };
-        let mut text = match (&operation, &answer.outcome) {
-            (Some(operation), Outcome::Ok(_) | Outcome::Empty(_) | Outcome::Degraded { .. }) => {
-                self.render_text(operation, &answer)
-                    .unwrap_or_else(|failure| format!("error (io): {}\n", failure.message))
-            }
-            _ => self.render_text("", &answer).unwrap_or_default(),
-        };
-        text.push_str(&self.forms().footer(Origin::Mcp, &answer));
+        let (mut answer, value_text, footer) =
+            self.rendered(Via::Mcp, &operation, budget, answer, format);
+        if format == Format::Text && !answer.is_error() {
+            // The rows are in the text part; the structured part says so
+            // instead of sending them twice.
+            answer.envelope.value_in_text = true;
+        }
         let mut structured = serde_json::to_value(&answer).expect("answers serialize");
-        if format == Format::Text
+        if answer.envelope.value_in_text
             && let Some(object) = structured.as_object_mut()
         {
-            // The rows are in the text part; JSON repeats them only on request.
             object.remove("value");
         }
         json!({
             "isError": answer.is_error(),
             "structuredContent": structured,
-            "content": [{"type": "text", "text": text}],
+            "content": [{"type": "text", "text": format!("{value_text}{footer}")}],
         })
+    }
+    /// The request a tool call makes: its row (named by `operation` when the
+    /// tool has several) and the call's options. The row's own schema checks
+    /// the arguments at dispatch.
+    fn tool_request(&self, rows: &[&str], call: ToolCall) -> Result<RunnableRequest, Failure> {
+        let operation = match (call.operation, rows) {
+            (Some(operation), _) if rows.contains(&operation.as_str()) => operation,
+            (Some(operation), _) => {
+                return Err(bad_request(format!(
+                    "{operation} is not an operation of this tool ({})",
+                    rows.join(", ")
+                )));
+            }
+            (None, [only]) => (*only).to_owned(),
+            (None, _) => {
+                return Err(bad_request(format!(
+                    "name the operation: one of {}",
+                    rows.join(", ")
+                )));
+            }
+        };
+        let arguments = call.arguments;
+        Ok(RunnableRequest {
+            operation,
+            arguments,
+            request_id: call.request_id,
+            deadline: call.deadline,
+            budget_tokens: call.budget_tokens,
+            cursor: call.cursor,
+            fresh: call.fresh,
+            format: call.format,
+        })
+    }
+    /// The token budget a request's answer text is held to: its own, else its
+    /// row's default; none when neither says.
+    pub(crate) fn request_budget(&self, request: &RunnableRequest) -> Option<u32> {
+        request.budget_tokens.or_else(|| {
+            self.spec_named(&request.operation)
+                .and_then(|spec| spec.default_budget_tokens)
+        })
+    }
+    /// An answer as a person or model reads it: the value's text (nothing
+    /// with `format: json`, whose rows travel as data) and the envelope's
+    /// lines. `used_tokens` becomes what that text measures. An answer whose
+    /// text exceeds its budget is the operation's bug, and becomes an `io`
+    /// failure saying so rather than a cut or an oversized answer.
+    pub(crate) fn rendered(
+        &self,
+        via: Via,
+        operation: &str,
+        budget: Option<u32>,
+        mut answer: Answer<Value>,
+        format: Format,
+    ) -> (Answer<Value>, String, String) {
+        let value_text = |answer: &Answer<Value>| -> String {
+            match &answer.outcome {
+                Outcome::Error(_) => self.render_text("", answer).unwrap_or_default(),
+                _ if format == Format::Json || operation.is_empty() => String::new(),
+                _ => self
+                    .render_text(operation, answer)
+                    .unwrap_or_else(|failure| format!("error (io): {}\n", failure.message)),
+            }
+        };
+        let mut text = value_text(&answer);
+        let mut footer = self.forms().footer(via, &answer);
+        let used = approximate_tokens(&text) + approximate_tokens(&footer);
+        if let Some(budget) = budget
+            && used > budget
+            && !answer.is_error()
+        {
+            let caller = answer.envelope.caller.take();
+            answer = Answer::error(Failure::new(
+                FailureKind::Io,
+                format!(
+                    "{operation} answered with {used} tokens of text, over its budget of {budget}"
+                ),
+            ));
+            answer.envelope.caller = caller;
+            text = value_text(&answer);
+            footer = self.forms().footer(via, &answer);
+        }
+        answer.envelope.used_tokens = Some(approximate_tokens(&text) + approximate_tokens(&footer));
+        (answer, text, footer)
     }
 }

@@ -232,6 +232,10 @@ fn request(id: &str, value: &str) -> RunnableRequest {
         format: crate::Format::Text,
     }
 }
+/// A caller allowed to write, as a product's server grants one.
+fn writer() -> Caller {
+    Caller::default().with_access(Access::Write)
+}
 fn kind(answer: &Answer<Value>) -> FailureKind {
     answer
         .failure()
@@ -254,16 +258,18 @@ async fn retry_applies_once_through_the_durable_log_across_restart() {
     let store = Store::open(&path);
     let table = make_table(&store, None);
     let first = table
-        .call(
+        .call_as(
             request("same", "one"),
-            Origin::Http,
+            Via::Web,
+            writer(),
             CancellationToken::new(),
         )
         .await;
     let replay = table
-        .call(
+        .call_as(
             request("same", "one"),
-            Origin::Socket,
+            Via::Cli,
+            writer(),
             CancellationToken::new(),
         )
         .await;
@@ -274,9 +280,10 @@ async fn retry_applies_once_through_the_durable_log_across_restart() {
     assert_eq!(replay.value().unwrap()["replayed"], true);
     assert_eq!(store.attempts.load(Ordering::SeqCst), 2);
     let conflict = table
-        .call(
+        .call_as(
             request("same", "other"),
-            Origin::Mcp,
+            Via::Mcp,
+            writer(),
             CancellationToken::new(),
         )
         .await;
@@ -287,9 +294,10 @@ async fn retry_applies_once_through_the_durable_log_across_restart() {
     let reopened = Store::open(&path);
     let restarted = make_table(&reopened, None);
     let answer = restarted
-        .call(
+        .call_as(
             request("same", "one"),
-            Origin::Cli,
+            Via::Cli,
+            writer(),
             CancellationToken::new(),
         )
         .await;
@@ -310,15 +318,17 @@ async fn retry_applies_once_when_duplicates_arrive_together() {
     let store = Store::open(&dir.path().join("product.sqlite"));
     let gate = Gate::before();
     let table = make_table(&store, Some(gate.clone()));
-    let mut first = Box::pin(table.call(
+    let mut first = Box::pin(table.call_as(
         request("together", "one"),
-        Origin::Http,
+        Via::Web,
+        writer(),
         CancellationToken::new(),
     ));
     pending(first.as_mut()).await;
-    let mut second = Box::pin(table.call(
+    let mut second = Box::pin(table.call_as(
         request("together", "one"),
-        Origin::Mcp,
+        Via::Mcp,
+        writer(),
         CancellationToken::new(),
     ));
     pending(second.as_mut()).await;
@@ -339,9 +349,10 @@ async fn sequential_retry_reads_current_confirmed_availability_instead_of_stale_
     let store = Store::open(&dir.path().join("product.sqlite"));
     let table = make_table(&store, None);
     let first = table
-        .call(
+        .call_as(
             request("publication", "one"),
-            Origin::Http,
+            Via::Web,
+            writer(),
             CancellationToken::new(),
         )
         .await;
@@ -349,9 +360,10 @@ async fn sequential_retry_reads_current_confirmed_availability_instead_of_stale_
     let row = first.value().unwrap()["row"].as_i64().unwrap();
     store.confirm(row);
     let next = table
-        .call(
+        .call_as(
             request("publication", "one"),
-            Origin::Http,
+            Via::Web,
+            writer(),
             CancellationToken::new(),
         )
         .await;
@@ -368,7 +380,7 @@ async fn timeout_after_commit_replays_the_atomic_result_without_applying_twice()
     let table = make_table(&store, Some(gate.clone()));
     let mut timed = request("committed", "one");
     timed.deadline = Deadline::Milliseconds(1);
-    let mut owner = Box::pin(table.call(timed, Origin::Http, CancellationToken::new()));
+    let mut owner = Box::pin(table.call_as(timed, Via::Web, writer(), CancellationToken::new()));
     pending(owner.as_mut()).await;
     assert_eq!(store.count(), 1);
     tokio::time::advance(Duration::from_millis(2)).await;
@@ -380,9 +392,10 @@ async fn timeout_after_commit_replays_the_atomic_result_without_applying_twice()
     assert_eq!(store.active.load(Ordering::SeqCst), 0);
     gate.open();
     let retry = table
-        .call(
+        .call_as(
             request("committed", "one"),
-            Origin::Mcp,
+            Via::Mcp,
+            writer(),
             CancellationToken::new(),
         )
         .await;
@@ -400,8 +413,8 @@ async fn authenticated_scopes_namespace_the_atomic_product_request_log() {
         let answer = table
             .call_as(
                 request("scoped", "one"),
-                Origin::Mcp,
-                Caller::authenticated(scope, ()),
+                Via::Mcp,
+                Caller::authenticated(scope, ()).with_access(Access::Write),
                 CancellationToken::new(),
             )
             .await;
@@ -420,7 +433,7 @@ async fn access_checked_before_the_writer_runs() {
     let refused = table
         .call_as(
             request("limited", "one"),
-            Origin::Http,
+            Via::Web,
             Caller::authenticated("reader", ()).with_access(Access::Read),
             CancellationToken::new(),
         )
@@ -428,10 +441,29 @@ async fn access_checked_before_the_writer_runs() {
     assert_eq!(kind(&refused), FailureKind::Refused);
     assert!(refused.failure().unwrap().message.contains("write access"));
     assert_eq!(store.attempts.load(Ordering::SeqCst), 0);
+    // A caller the server granted nothing more reads only.
+    let ungranted = table
+        .call(
+            request("limited", "one"),
+            Via::Cli,
+            CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(kind(&ungranted), FailureKind::Refused);
+    let authenticated = table
+        .call_as(
+            request("limited", "one"),
+            Via::Web,
+            Caller::authenticated("someone", ()),
+            CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(kind(&authenticated), FailureKind::Refused);
+    assert_eq!(store.attempts.load(Ordering::SeqCst), 0);
     let allowed = table
         .call_as(
             request("limited", "one"),
-            Origin::Http,
+            Via::Web,
             Caller::authenticated("writer", ()).with_access(Access::Write),
             CancellationToken::new(),
         )
@@ -445,9 +477,10 @@ async fn misclassified_failure_codes_are_reported_as_product_bugs() {
     let store = Store::open(&dir.path().join("product.sqlite"));
     let table = make_table(&store, None);
     let answer = table
-        .call(
+        .call_as(
             request("code", "misclassified"),
-            Origin::Cli,
+            Via::Cli,
+            writer(),
             CancellationToken::new(),
         )
         .await;
@@ -466,7 +499,8 @@ async fn timeout_distinguishes_unmeasured_work_from_measured_zero_and_keeps_foll
         let table = make_table(&store, Some(gate));
         let mut input = request("progress", value);
         input.deadline = Deadline::Milliseconds(1);
-        let mut owner = Box::pin(table.call(input, Origin::Http, CancellationToken::new()));
+        let mut owner =
+            Box::pin(table.call_as(input, Via::Web, writer(), CancellationToken::new()));
         pending(owner.as_mut()).await;
         tokio::time::advance(Duration::from_millis(2)).await;
         let answer = owner.await;

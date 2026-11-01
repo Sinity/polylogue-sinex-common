@@ -171,7 +171,13 @@ async fn mcp(table: &OperationTable, request: &RunnableRequest) -> Value {
     let mut arguments = serde_json::to_value(request).unwrap();
     arguments.as_object_mut().unwrap().remove("operation");
     arguments["format"] = json!("json");
-    table.mcp(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"example_rows","arguments":arguments}}),CancellationToken::new()).await
+    let mut reply = table.mcp(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"example_rows","arguments":arguments}}),CancellationToken::new()).await;
+    // Only MCP measures the text it shows a model; the rest of the answer
+    // is the same on every surface.
+    if let Some(structured) = reply["result"]["structuredContent"].as_object_mut() {
+        assert!(structured.remove("used_tokens").is_some());
+    }
+    reply
 }
 
 #[tokio::test]
@@ -180,7 +186,7 @@ async fn surface_parity_and_typed_output_schema() {
     for text in ["hello", "invalid", "001", "empty", "degraded"] {
         let request = request(text);
         let expected = table
-            .call(request.clone(), Origin::Socket, CancellationToken::new())
+            .call(request.clone(), Via::Cli, CancellationToken::new())
             .await;
         let cli = table
             .cli(
@@ -211,11 +217,7 @@ async fn surface_parity_and_typed_output_schema() {
     }
     let tool = &table.mcp_tools()[0];
     assert_eq!(tool["name"], "example_rows");
-    assert!(
-        tool["outputSchema"]["$defs"]["Rows"]["properties"]
-            .get("committed")
-            .is_some()
-    );
+    assert!(tool.get("outputSchema").is_none());
     assert!(
         tool["inputSchema"]["properties"]["arguments"]["properties"]
             .get("text")
@@ -230,7 +232,7 @@ async fn timeout_never_partial_and_any_caller_lifts_deadline() {
     let mut request = request("waiting");
     request.arguments["wait"] = json!(true);
     request.deadline = Deadline::Default;
-    for origin in [Origin::Cli, Origin::Socket, Origin::Http, Origin::Mcp] {
+    for origin in [Via::Cli, Via::Hook, Via::Web, Via::Mcp] {
         let answer = table
             .call(request.clone(), origin, CancellationToken::new())
             .await;
@@ -245,7 +247,7 @@ async fn timeout_never_partial_and_any_caller_lifts_deadline() {
     }
     request.deadline = Deadline::None;
     let cancellation = CancellationToken::new();
-    let call = table.call(request.clone(), Origin::Mcp, cancellation.clone());
+    let call = table.call(request.clone(), Via::Mcp, cancellation.clone());
     tokio::pin!(call);
     tokio::select! {biased;_= &mut call=>panic!("lifted request ended"),_=tokio::time::sleep(Duration::from_secs(1000))=>{}}
     cancellation.cancel();
@@ -289,7 +291,7 @@ async fn malformed_envelopes_have_one_failure_and_no_authorship() {
     let mut request = request("hello");
     request.arguments["unknown"] = json!(true);
     let expected = table
-        .call(request.clone(), Origin::Cli, CancellationToken::new())
+        .call(request.clone(), Via::Cli, CancellationToken::new())
         .await;
     assert_eq!(expected.exit_code(), 2);
     assert_eq!(socket(&table, &request).await, expected);
@@ -425,7 +427,7 @@ async fn ordinary_form_posts_use_the_same_request() {
     assert_eq!(
         serde_json::from_slice::<Answer<Value>>(response.body()).unwrap(),
         table
-            .call(request, Origin::Cli, CancellationToken::new())
+            .call(request, Via::Cli, CancellationToken::new())
             .await
     );
     for invalid in [
@@ -454,7 +456,7 @@ async fn trusted_identity_is_typed() {
     let answer = table
         .call_as(
             request("identity"),
-            Origin::Http,
+            Via::Web,
             Caller::authenticated("person-a", "trusted author".to_string()),
             CancellationToken::new(),
         )
@@ -467,7 +469,7 @@ async fn product_failure_codes_have_one_registered_classification() {
     let (mut table, _, _) = table();
     let request = request("product-error");
     let unregistered = table
-        .call(request.clone(), Origin::Cli, CancellationToken::new())
+        .call(request.clone(), Via::Cli, CancellationToken::new())
         .await;
     assert_eq!(unregistered.failure().unwrap().kind, FailureKind::Io);
     table
@@ -479,7 +481,7 @@ async fn product_failure_codes_have_one_registered_classification() {
             .is_err()
     );
     let registered = table
-        .call(request, Origin::Cli, CancellationToken::new())
+        .call(request, Via::Cli, CancellationToken::new())
         .await;
     let registered = registered.failure().unwrap();
     assert_eq!(registered.kind, FailureKind::BadValue);

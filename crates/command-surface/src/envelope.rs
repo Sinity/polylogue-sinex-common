@@ -5,7 +5,7 @@
 //! out and how to read it, the follow-ups, how the query was read, the
 //! positions it read at, the coverage of the sources behind it, who asked,
 //! and the tokens its text used.
-use crate::{Authorship, Failure, FailureKind};
+use crate::{Authorship, Failure, FailureKind, Position};
 use query_language::coverage::CoverageState;
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -208,13 +208,13 @@ pub struct LeftOut {
     pub expand: Option<RunnableRequest>,
 }
 
-/// Where one product's read stood when the answer was read, and how far it
-/// was behind the product's latest position.
+/// The position one product's read stood at when the answer was read, and
+/// how many commits it was behind the product's latest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ReadPosition {
+pub struct ReadAt {
     pub product: String,
-    pub position: u64,
+    pub position: Position,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lag: Option<u64>,
 }
@@ -253,6 +253,10 @@ pub struct CoverageInterval {
 pub struct Facet {
     pub field: String,
     pub counts: Vec<FacetCount>,
+    /// The counts are lower bounds: the answer is degraded or a source
+    /// behind it was not complete.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lower_bound: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -279,7 +283,7 @@ pub struct Envelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_as: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub positions: Vec<ReadPosition>,
+    pub positions: Vec<ReadAt>,
     /// Present only when a source's state affects the answer.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub coverage: Vec<SourceCoverage>,
@@ -293,16 +297,25 @@ pub struct Envelope {
     pub collapsed: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub used_tokens: Option<u32>,
+    /// The value is left out because the answer's text part holds it (an
+    /// MCP answer in text format). Read such an answer as `Answer<Option<T>>`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub value_in_text: bool,
 }
 
 impl Envelope {
-    /// A count over sources that were not complete is a lower bound. Dispatch
-    /// applies this to every answer, so no surface can report it as exact.
-    pub fn mark_lower_bounds(&mut self) {
-        if self.coverage.iter().any(|source| !source.is_complete())
-            && let Some(count) = &mut self.count
-        {
+    /// Counts over sources that were not complete, or in an answer that is
+    /// degraded, are lower bounds: the count and every facet. Dispatch
+    /// applies this to every answer, so no surface can report them as exact.
+    pub fn mark_lower_bounds(&mut self, degraded: bool) {
+        if !degraded && self.coverage.iter().all(SourceCoverage::is_complete) {
+            return;
+        }
+        if let Some(count) = &mut self.count {
             count.lower_bound = true;
+        }
+        for facet in &mut self.facets {
+            facet.lower_bound = true;
         }
     }
 }
@@ -465,7 +478,15 @@ impl<'de, T: DeserializeOwned> Deserialize<'de> for Answer<T> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::Error;
         let wire = AnswerWire::<T>::deserialize(deserializer)?;
-        let outcome = match (wire.outcome, wire.value, wire.error) {
+        // A value the text part holds is read as `None` by an
+        // `Answer<Option<T>>`; any other value type refuses it.
+        let value = match wire.value {
+            None if wire.envelope.value_in_text => {
+                Some(T::deserialize(ValueInText).map_err(D::Error::custom)?)
+            }
+            value => value,
+        };
+        let outcome = match (wire.outcome, value, wire.error) {
             (OutcomeName::Error, None, Some(error)) if wire.missing.is_empty() => {
                 Outcome::Error(error)
             }
@@ -501,6 +522,29 @@ impl<'de, T: DeserializeOwned> Deserialize<'de> for Answer<T> {
         })
     }
 }
+/// Stands for a value an answer's text part holds: an `Option` reads it as
+/// `None`, and every other type refuses it.
+struct ValueInText;
+impl<'de> serde::Deserializer<'de> for ValueInText {
+    type Error = serde::de::value::Error;
+    fn deserialize_any<V: serde::de::Visitor<'de>>(self, _: V) -> Result<V::Value, Self::Error> {
+        Err(serde::de::Error::custom(
+            "the value is in the answer's text part; read it as Answer<Option<T>>",
+        ))
+    }
+    fn deserialize_option<V: serde::de::Visitor<'de>>(
+        self,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        visitor.visit_none()
+    }
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+        bytes byte_buf unit unit_struct newtype_struct seq tuple
+        tuple_struct map struct enum identifier ignored_any
+    }
+}
+
 impl<T: JsonSchema> JsonSchema for Answer<T> {
     fn schema_name() -> Cow<'static, str> {
         format!("Answer_for_{}", T::schema_name()).into()

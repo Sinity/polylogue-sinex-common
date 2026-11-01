@@ -19,22 +19,16 @@ pub fn tools_generated(table: &OperationTable) -> Result<(), String> {
             .ok_or("a tool has no name")?
             .to_owned();
         let input = &tool["inputSchema"];
-        let rows: Vec<String> = match input["properties"]["operation"]["enum"].as_array() {
-            Some(rows) => rows
-                .iter()
-                .map(|row| {
-                    row.as_str()
-                        .map(str::to_owned)
-                        .ok_or("a row name is not text")
-                })
-                .collect::<Result<_, _>>()?,
-            None => vec![
-                input["properties"]["arguments"]["title"]
-                    .as_str()
-                    .ok_or_else(|| format!("{name} names no row"))?
-                    .to_owned(),
-            ],
-        };
+        let rows: Vec<String> = input["properties"]["operation"]["enum"]
+            .as_array()
+            .ok_or_else(|| format!("{name} names no operations"))?
+            .iter()
+            .map(|row| {
+                row.as_str()
+                    .map(str::to_owned)
+                    .ok_or("a row name is not text")
+            })
+            .collect::<Result<_, _>>()?;
         if rows.is_empty() {
             return Err(format!("{name} holds no row"));
         }
@@ -130,8 +124,16 @@ pub fn author_cases() -> Vec<AuthorCase> {
     let shared = CallerEvidence {
         harness: Some(harness("codex")),
         session: Some(session("codex", "server-start")),
+        harness_pid: Some(7),
+        tool_call_id: Some("call-9".into()),
         shared_server: true,
         ..blank.clone()
+    };
+    let server_hook = HookIdentity {
+        harness_pid: 7,
+        tool_call_id: None,
+        session: session("codex", "server-start"),
+        agent_id: None,
     };
     let case =
         |name, evidence: &CallerEvidence, via, hook: Option<&HookIdentity>, author| AuthorCase {
@@ -277,6 +279,24 @@ pub fn author_cases() -> Vec<AuthorCase> {
             Author::AgentOfHarness(harness("codex")),
         ),
         case(
+            "a shared server's session-wide hook does not name its calls",
+            &shared,
+            Via::Mcp,
+            Some(&server_hook),
+            Author::AgentOfHarness(harness("codex")),
+        ),
+        case(
+            "a shared server's per-call hook names that call's session",
+            &shared,
+            Via::Mcp,
+            Some(&HookIdentity {
+                tool_call_id: Some("call-9".into()),
+                session: session("codex", "thread-9"),
+                ..server_hook.clone()
+            }),
+            Author::Agent(session("codex", "thread-9")),
+        ),
+        case(
             "a shared server's call names its own session",
             &CallerEvidence {
                 call_session: Some(session("codex", "thread-7")),
@@ -313,6 +333,19 @@ pub fn id_one(
                 case.name, computed.author, computed.via, case.author
             ));
         }
+    }
+    Ok(())
+}
+
+/// `tools-list-within`: the MCP `tools/list` result of `table`, as compact
+/// JSON, is at most `max_bytes`. A product passes the budget its harnesses
+/// can afford in every session.
+pub fn tools_list_within(table: &OperationTable, max_bytes: usize) -> Result<(), String> {
+    let bytes = serde_json::to_vec(&serde_json::json!({ "tools": table.mcp_tools() }))
+        .expect("tool lists serialize")
+        .len();
+    if bytes > max_bytes {
+        return Err(format!("tools/list is {bytes} bytes, over {max_bytes}"));
     }
     Ok(())
 }
