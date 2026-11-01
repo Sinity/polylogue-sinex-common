@@ -24,7 +24,6 @@ fn catalog() -> Catalog {
 }
 fn saved(name: &str, fields: Vec<Field>) -> SourceOutput {
     SourceOutput {
-        relation_scope: None,
         source: OutputSource::Saved {
             name: name.into(),
             arguments: vec![],
@@ -33,13 +32,11 @@ fn saved(name: &str, fields: Vec<Field>) -> SourceOutput {
             unit: Some("sessions".into()),
             fields,
             main_time: None,
-            match_patterns: Vec::new(),
         },
     }
 }
 fn result(reference: &str, part: ResultPart, fields: Vec<Field>) -> SourceOutput {
     SourceOutput {
-        relation_scope: None,
         source: OutputSource::Result {
             reference: reference.into(),
             part,
@@ -48,7 +45,6 @@ fn result(reference: &str, part: ResultPart, fields: Vec<Field>) -> SourceOutput
             unit: Some("sessions".into()),
             fields,
             main_time: None,
-            match_patterns: Vec::new(),
         },
     }
 }
@@ -238,7 +234,7 @@ fn inline_saved_conditions_remain_distinct_from_piped_filters() {
             ..
         }
     ));
-    assert!(inline.stages.is_empty());
+    assert!(inline.transforms.is_empty());
     assert!(matches!(
         piped.source,
         Source::Saved {
@@ -246,7 +242,7 @@ fn inline_saved_conditions_remain_distinct_from_piped_filters() {
             ..
         }
     ));
-    assert_eq!(piped.stages.len(), 1);
+    assert_eq!(piped.transforms.len(), 1);
     assert_ne!(
         question_id(&inline, &catalog, &BTreeMap::new()).unwrap(),
         question_id(&piped, &catalog, &BTreeMap::new()).unwrap()
@@ -269,7 +265,6 @@ fn saved_argument_snapshot_matching_ignores_quoted_spelling_and_parameter_order(
     )
     .unwrap();
     catalog.source_outputs.push(SourceOutput {
-        relation_scope: None,
         source: OutputSource::Saved {
             name: "named".into(),
             arguments: vec![
@@ -287,7 +282,6 @@ fn saved_argument_snapshot_matching_ignores_quoted_spelling_and_parameter_order(
             unit: Some("sessions".into()),
             fields: vec![field("count", FieldKind::Integer)],
             main_time: None,
-            match_patterns: Vec::new(),
         },
     });
     assert!(bind(&parsed, &catalog).is_ok());
@@ -310,7 +304,7 @@ fn nested_implicit_units_inherit_the_row_domain_and_explicit_units_keep_their_ow
         &catalog,
     )
     .unwrap();
-    let StageKind::Where { condition } = &query.stages[1].kind else {
+    let TransformKind::Where { condition } = &query.transforms[1].kind else {
         panic!("where")
     };
     let ConditionKind::In { query: inner, .. } = &condition.kind else {
@@ -345,7 +339,6 @@ fn nested_implicit_units_inherit_the_row_domain_and_explicit_units_keep_their_ow
     let deferred = parse("result:kept | where id in (outcome:error)", &catalog).unwrap();
     assert!(bind(&deferred, &catalog).is_err());
     catalog.source_outputs.push(SourceOutput {
-        relation_scope: None,
         source: OutputSource::Result {
             reference: "result:kept".into(),
             part: ResultPart::Rows,
@@ -354,11 +347,10 @@ fn nested_implicit_units_inherit_the_row_domain_and_explicit_units_keep_their_ow
             unit: Some("commands".into()),
             fields: vec![field("id", FieldKind::Reference)],
             main_time: None,
-            match_patterns: Vec::new(),
         },
     });
     let bound = bind(&deferred, &catalog).unwrap();
-    let StageKind::Where { condition } = &bound.query().stages[0].kind else {
+    let TransformKind::Where { condition } = &bound.query().transforms[0].kind else {
         panic!("where")
     };
     let ConditionKind::In { query: inner, .. } = &condition.kind else {

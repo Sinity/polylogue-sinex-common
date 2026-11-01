@@ -1,6 +1,6 @@
 //! Pure grammar-position completion against a product catalog.
 use crate::ast::Span;
-use crate::catalog::{Catalog, Field, FieldKind, MatchSource, OutputSource};
+use crate::catalog::{Catalog, Field, FieldKind, OutputSource};
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Completion {
@@ -15,10 +15,9 @@ pub enum CompletionKind {
     Unit,
     Field,
     Value,
-    Stage,
+    Transform,
     Operator,
     Keyword,
-    Command,
 }
 /// Pure catalog sections needed at one completion cursor. Products load the
 /// active source schemas first, repeat this call with that snapshot, then load
@@ -26,8 +25,6 @@ pub enum CompletionKind {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Requirements {
     pub sources: Vec<OutputSource>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub match_outputs: Vec<MatchSource>,
     pub value: Option<ValueRequirement>,
     pub reference: Option<ReferenceRequirement>,
 }
@@ -69,7 +66,6 @@ pub fn requirements(text: &str, position: usize, catalog: &Catalog) -> Requireme
             });
         return Requirements {
             sources: scope.sources,
-            match_outputs: scope.match_outputs,
             value,
             reference: None,
         };
@@ -106,7 +102,6 @@ pub fn requirements(text: &str, position: usize, catalog: &Catalog) -> Requireme
     });
     Requirements {
         sources: scope.sources,
-        match_outputs: scope.match_outputs,
         value,
         reference,
     }
@@ -170,7 +165,7 @@ pub fn complete(text: &str, position: usize, catalog: &Catalog) -> Vec<Completio
                 }
             }
             if target.unknown {
-                for value in ["unknown", "*"] {
+                for value in ["known", "unknown", "*"] {
                     add(
                         value,
                         CompletionKind::Value,
@@ -186,17 +181,29 @@ pub fn complete(text: &str, position: usize, catalog: &Catalog) -> Vec<Completio
         let last = words.last().copied().unwrap_or("");
         if scope.field(last).is_some() {
             for op in [
-                ":", "=", "!=", ">", ">=", "<", "<=", "~", "^", "between", "in", "exists",
+                ":", "=", "!=", ">", ">=", "<", "<=", "~", "^", "between", "in",
             ] {
                 add(op, CompletionKind::Operator, "", span, fragment);
             }
         } else if before.trim_end().ends_with('|') {
-            for stage in crate::catalog::STAGES {
-                add(stage.completion, CompletionKind::Stage, "", span, fragment);
+            for transform in crate::catalog::TRANSFORMS {
+                add(
+                    transform.completion,
+                    CompletionKind::Transform,
+                    "",
+                    span,
+                    fragment,
+                );
             }
             for ext in &catalog.extensions {
-                if ext.position == crate::catalog::ExtensionPosition::Stage {
-                    add(&ext.name, CompletionKind::Stage, &ext.help, span, fragment);
+                if ext.position == crate::catalog::ExtensionPosition::Transform {
+                    add(
+                        &ext.name,
+                        CompletionKind::Transform,
+                        &ext.help,
+                        span,
+                        fragment,
+                    );
                 }
             }
             for u in &catalog.units {
@@ -207,37 +214,26 @@ pub fn complete(text: &str, position: usize, catalog: &Catalog) -> Vec<Completio
                 add(&u.name, CompletionKind::Unit, &u.help, span, fragment);
             }
             if before.trim().is_empty() {
-                for command in &catalog.commands {
-                    add(command, CompletionKind::Command, "", span, fragment);
-                }
                 for (name, help) in &fields {
                     add(name, CompletionKind::Field, help, span, fragment);
                 }
             }
         } else if matches!(last, "sort" | "group") {
             add("by", CompletionKind::Keyword, "", span, fragment);
-            if last == "sort" && catalog.unpiped_stages {
-                for (name, help) in &fields {
-                    add(name, CompletionKind::Field, help, span, fragment);
-                }
-            }
         } else if last == "as" {
             add("of", CompletionKind::Keyword, "", span, fragment);
         } else {
             for (name, help) in &fields {
                 add(name, CompletionKind::Field, help, span, fragment);
             }
-            if catalog.unpiped_stages {
-                for stage in crate::catalog::STAGES {
-                    add(stage.completion, CompletionKind::Stage, "", span, fragment);
-                }
-            }
             if matches!(last, "asc" | "desc") || before.contains("sort ") {
                 for direction in ["asc", "desc"] {
                     add(direction, CompletionKind::Keyword, "", span, fragment);
                 }
             }
-            for keyword in ["AND", "OR", "NOT", "exists", "similar:", "query:"] {
+            for keyword in [
+                "AND", "OR", "NOT", "exists", "similar:", "related:", "around:", "query:",
+            ] {
                 add(keyword, CompletionKind::Keyword, "", span, fragment);
             }
         }
@@ -436,7 +432,6 @@ struct CompletionScope {
     fields: Vec<Field>,
     unit: Option<String>,
     sources: Vec<OutputSource>,
-    match_outputs: Vec<MatchSource>,
     reference_allowed: bool,
 }
 impl CompletionScope {
@@ -447,7 +442,6 @@ impl CompletionScope {
         Self {
             unit: catalog.unit(name).map(|unit| unit.name.clone()),
             sources: Vec::new(),
-            match_outputs: Vec::new(),
             reference_allowed: true,
             fields: catalog
                 .unit(name)
@@ -457,7 +451,7 @@ impl CompletionScope {
     }
 }
 fn context(text: &str, catalog: &Catalog) -> CompletionScope {
-    use crate::ast::{Source, StageKind};
+    use crate::ast::{Source, TransformKind};
     // Pick the innermost query/exists scope from delimiter tokens, while quoted data
     // contributes no grammar. Function and set parentheses retain the outer scope.
     #[derive(Default)]
@@ -466,7 +460,6 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
         unit: String,
         inherited: bool,
         sources: Vec<OutputSource>,
-        matches: Vec<MatchSource>,
     }
     let mut stack: Vec<CompletionFrame> = Vec::new();
     let mut quote = false;
@@ -509,26 +502,18 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
                 if relation && catalog.unit(&preceding).is_some() {
                     stack.last_mut().unwrap().unit = preceding;
                     start = at + 1;
-                } else if matches!(
-                    preceding.as_str(),
-                    "near"
-                        | "before"
-                        | "after"
-                        | "during"
-                        | "containing"
-                        | "union"
-                        | "intersect"
-                        | "except"
-                        | "fuse"
-                        | "in"
-                ) {
-                    let (unit, sources, matches) = row_scope(&text[start..at], catalog);
+                } else if crate::ast::OrderRelation::parse(&preceding).is_some()
+                    || matches!(
+                        preceding.as_str(),
+                        "union" | "intersect" | "except" | "fuse" | "diff" | "join" | "in"
+                    )
+                {
+                    let (unit, sources) = row_scope(&text[start..at], catalog);
                     let unit = unit.unwrap_or_else(|| "$deferred_completion".into());
                     let entry = stack.last_mut().unwrap();
                     entry.unit = unit;
                     entry.inherited = true;
                     entry.sources = sources;
-                    entry.matches = matches;
                     start = at + 1;
                 }
             } else if c == ')'
@@ -573,8 +558,6 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
     let mut group_input = None;
     let mut condition_scope = true;
     if let Some(q) = parsed {
-        let (mut match_unit, mut match_patterns) =
-            crate::matches::source_context(&q.source, catalog);
         match &q.source {
             Source::Unit {
                 unit: source,
@@ -593,12 +576,11 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
                 scope = CompletionScope::unit(&unit, catalog);
             }
             Source::Saved { .. } | Source::Result { .. } => {
-                scope.fields = catalog
-                    .source_scope(&q.source)
+                let output = catalog.source_output(&q.source);
+                scope.fields = output
                     .map(|output| output.fields.clone())
                     .unwrap_or_default();
-                scope.unit = catalog
-                    .source_scope(&q.source)
+                scope.unit = output
                     .and_then(|output| output.unit.as_deref())
                     .and_then(|unit| catalog.unit(unit))
                     .map(|unit| unit.name.clone());
@@ -608,62 +590,38 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
             }
             _ => {}
         }
-        for stage in q.stages {
-            if crate::matches::invalidates(&stage.kind) {
-                match_patterns = Some(Vec::new());
-            }
+        for transform in q.transforms {
             condition_scope = matches!(
-                &stage.kind,
-                StageKind::Where { .. }
-                    | StageKind::Scope {
+                &transform.kind,
+                TransformKind::Where { .. }
+                    | TransformKind::Scope {
                         condition: Some(_),
                         ..
                     }
             );
-            match stage.kind {
-                StageKind::Scope {
-                    unit: source,
-                    condition,
-                } => {
-                    match_patterns = Some(crate::matches::patterns(condition.as_ref()));
-                    match_unit = Some(source.clone());
+            match transform.kind {
+                TransformKind::Scope { unit: source, .. } => {
                     unit = source;
                     scope = CompletionScope::unit(&unit, catalog);
                     group_input = None;
                 }
-                StageKind::Matches => {
-                    let source = crate::matches::request(
-                        match_unit.as_deref(),
-                        match_patterns.as_deref(),
-                        stage.span.start,
-                    )
-                    .ok()
-                    .flatten();
-                    let output = source
-                        .as_ref()
-                        .and_then(|source| catalog.match_output(source));
-                    if let Some(source) = source
-                        && !scope.match_outputs.contains(&source)
-                    {
-                        scope.match_outputs.push(source);
-                    }
-                    scope.fields = output
-                        .map(|output| output.fields.clone())
-                        .unwrap_or_default();
-                    scope.unit = output
-                        .and_then(|output| output.unit.as_deref())
-                        .and_then(|unit| catalog.unit(unit))
-                        .map(|unit| unit.name.clone());
-                    match_unit = scope.unit.clone();
-                    match_patterns = output.map(|_| Vec::new());
+                TransformKind::Matches => {
+                    scope.fields = ["parent", "match", "position", "step"]
+                        .into_iter()
+                        .map(|name| Field {
+                            name: name.into(),
+                            ..Field::default()
+                        })
+                        .collect();
+                    scope.unit = None;
                     group_input = None;
                 }
-                StageKind::Group { keys } => {
+                TransformKind::Group { keys } => {
                     let fields = keys
                         .iter()
                         .map(|key| {
-                            let mut field = match key {
-                                crate::ast::Operand::Field { name } => {
+                            let mut field = match &key.expression {
+                                crate::ast::Expression::Field { name } => {
                                     scope.field(name).cloned().unwrap_or_default()
                                 }
                                 _ => Field::default(),
@@ -679,7 +637,7 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
                         .collect();
                     group_input = Some(std::mem::replace(&mut scope.fields, fields));
                 }
-                StageKind::Aggregate { aggregates } => {
+                TransformKind::Aggregate { aggregates } => {
                     let grouped = group_input.is_some();
                     let input = group_input.take().unwrap_or_else(|| scope.fields.clone());
                     if !grouped {
@@ -690,9 +648,14 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
                             crate::ast::AggregateFunction::Count
                             | crate::ast::AggregateFunction::CountDistinct => FieldKind::Integer,
                             _ => aggregate
-                                .fields
+                                .arguments
                                 .first()
-                                .and_then(|name| input.iter().find(|field| &field.name == name))
+                                .and_then(|argument| match argument {
+                                    crate::ast::Expression::Field { name } => {
+                                        input.iter().find(|field| &field.name == name)
+                                    }
+                                    _ => None,
+                                })
                                 .map(|field| field.kind.clone())
                                 .unwrap_or(FieldKind::Number),
                         };
@@ -705,12 +668,29 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
                         });
                     }
                 }
-                StageKind::Fill => scope.fields.push(Field {
-                    name: "coverage".into(),
-                    ..Field::default()
-                }),
-                StageKind::Fields { fields } => {
-                    scope.fields.retain(|field| fields.contains(&field.name))
+                TransformKind::Fill => {
+                    for name in [crate::coverage::STATE_FIELD, crate::coverage::DETAIL_FIELD] {
+                        scope.fields.push(Field {
+                            name: name.into(),
+                            ..Field::default()
+                        })
+                    }
+                }
+                TransformKind::Fields { columns } => {
+                    let fields = columns
+                        .iter()
+                        .map(|column| {
+                            let mut field = match &column.expression {
+                                crate::ast::Expression::Field { name } => {
+                                    scope.field(name).cloned().unwrap_or_default()
+                                }
+                                _ => Field::default(),
+                            };
+                            field.name = column.column();
+                            field
+                        })
+                        .collect();
+                    scope.fields = fields;
                 }
                 _ => {}
             }
@@ -725,25 +705,20 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
                 scope.sources.push(source.clone());
             }
         }
-        for source in &frame.matches {
-            if !scope.match_outputs.contains(source) {
-                scope.match_outputs.push(source.clone());
-            }
-        }
     }
-    let stage = pipes
+    let transform = pipes
         .iter()
         .rev()
         .find(|(at, _)| *at >= start)
         .and_then(|(_, index)| words.get(index + 1));
     let last = words.last().map(String::as_str).unwrap_or("");
-    let non_condition_stage =
-        stage.is_some_and(|stage| stage != "where" && catalog.unit(stage).is_none());
+    let non_condition_transform =
+        transform.is_some_and(|word| word != "where" && catalog.unit(word).is_none());
     let operator_expected = scope.field(last).is_some();
     let explicit_unit_only = words.len() == 1 && catalog.unit(last).is_some();
     scope.reference_allowed =
-        (condition_scope || stage.is_some_and(|stage| stage == "where") || last == "where")
-            && !non_condition_stage
+        (condition_scope || transform.is_some_and(|word| word == "where") || last == "where")
+            && !non_condition_transform
             && !operator_expected
             && !explicit_unit_only
             && !matches!(
@@ -765,7 +740,7 @@ fn parse_prefix(text: &str, catalog: &Catalog) -> Option<crate::ast::Query> {
     loop {
         if let Some(left) = candidate.strip_suffix(" OR")
             && let Ok(mut query) = crate::parse::parse(left, catalog)
-            && query.stages.is_empty()
+            && query.transforms.is_empty()
             && query.attach.is_empty()
             && let Source::Saved {
                 name,
@@ -794,64 +769,29 @@ fn parse_prefix(text: &str, catalog: &Catalog) -> Option<crate::ast::Query> {
         candidate = candidate[..at].trim_end();
     }
 }
-fn row_scope(
-    text: &str,
-    catalog: &Catalog,
-) -> (Option<String>, Vec<OutputSource>, Vec<MatchSource>) {
-    use crate::ast::{Source, StageKind};
+fn row_scope(text: &str, catalog: &Catalog) -> (Option<String>, Vec<OutputSource>) {
+    use crate::ast::{Source, TransformKind};
     let Some(query) = parse_prefix(text, catalog) else {
-        return (None, Vec::new(), Vec::new());
+        return (None, Vec::new());
     };
-    let mut matches = Vec::new();
     let mut sources = output_source(&query.source).into_iter().collect::<Vec<_>>();
     let mut unit = match &query.source {
         Source::Unit { unit, .. } => Some(unit.clone()),
         Source::Saved { .. } | Source::Result { .. } => catalog
-            .source_scope(&query.source)
+            .source_output(&query.source)
             .and_then(|output| output.unit.clone()),
-        _ => None,
     };
-    let (_, mut available) = crate::matches::source_context(&query.source, catalog);
-    for stage in query.stages {
-        if crate::matches::invalidates(&stage.kind) {
-            available = Some(Vec::new());
-        }
-        match stage.kind {
-            StageKind::Scope {
-                unit: next,
-                condition,
-            } => {
+    for transform in query.transforms {
+        match transform.kind {
+            TransformKind::Scope { unit: next, .. } => {
                 unit = Some(next);
-                available = Some(crate::matches::patterns(condition.as_ref()));
                 sources.clear();
-                matches.clear();
             }
-            StageKind::Matches => {
-                let request = crate::matches::request(
-                    unit.as_deref(),
-                    available.as_deref(),
-                    stage.span.start,
-                )
-                .ok()
-                .flatten();
-                let output = request
-                    .as_ref()
-                    .and_then(|request| catalog.match_output(request));
-                if let Some(request) = request
-                    && !matches.contains(&request)
-                {
-                    matches.push(request);
-                }
-                unit = output
-                    .and_then(|output| output.unit.as_deref())
-                    .and_then(|unit| catalog.unit(unit))
-                    .map(|unit| unit.name.clone());
-                available = output.map(|_| Vec::new());
-            }
+            TransformKind::Matches => unit = None,
             _ => {}
         }
     }
-    (unit, sources, matches)
+    (unit, sources)
 }
 fn output_source(source: &crate::ast::Source) -> Option<OutputSource> {
     match source {

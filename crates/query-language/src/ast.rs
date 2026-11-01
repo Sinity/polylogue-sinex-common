@@ -9,11 +9,12 @@ pub struct Span {
     pub start: usize,
     pub end: usize,
 }
+/// A relation, its attached child lists and the transforms after each `|`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Query {
     pub source: Source,
     pub attach: Vec<Attachment>,
-    pub stages: Vec<Stage>,
+    pub transforms: Vec<Transform>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -36,22 +37,6 @@ pub enum Source {
         condition: Option<Condition>,
         output: OutputBinding,
     },
-    Walk {
-        direction: WalkDirection,
-        reference: String,
-    },
-    Recall {
-        time: Option<Value>,
-        window: Option<Value>,
-    },
-    RecallLast {
-        unit: String,
-        condition: Option<Condition>,
-    },
-    RecallMark {
-        number: u64,
-        window: Option<Value>,
-    },
 }
 /// Deferred output scopes are syntax only and must pass shared binding before execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -65,13 +50,6 @@ pub enum OutputBinding {
 pub enum ResultPart {
     Rows,
     Matches,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum WalkDirection {
-    Trace,
-    Descendants,
-    Parents,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Condition {
@@ -90,30 +68,42 @@ pub enum ConditionKind {
     Not {
         condition: Box<Condition>,
     },
+    /// `field:value`, the field's natural match (see `catalog::NaturalMatch`).
     Match {
         field: String,
         value: Value,
     },
+    /// `left OP right`: exact comparison, `~` contains, `^` starts with or lies under.
     Compare {
-        operand: Operand,
+        left: Expression,
         op: Op,
-        value: Value,
+        right: Expression,
     },
     /// Main-time lower bound; span-valued rows are selected by overlap.
     Since {
-        operand: Operand,
+        field: String,
         value: Value,
     },
     /// Main-time exclusive upper bound. A date resolves to its logical-day
     /// end, while an instant remains that instant.
     Until {
-        operand: Operand,
+        field: String,
         value: Value,
     },
     Between {
-        operand: Operand,
+        left: Expression,
         from: Value,
         to: Value,
+    },
+    /// `field in RANGE`: a time inside a named range (`when in last week`).
+    TimeRange {
+        left: Expression,
+        value: Value,
+    },
+    /// `field in (QUERY)`: membership in the inner query's value set.
+    In {
+        left: Expression,
+        query: Box<Query>,
     },
     Text {
         text: String,
@@ -122,39 +112,20 @@ pub enum ConditionKind {
     Reference {
         reference: String,
     },
-    Similar {
+    /// A ranking atom. It orders rows and never changes which rows are selected.
+    Rank {
+        list: RankList,
         value: Value,
     },
     Exists {
         unit: String,
         condition: Option<Box<Condition>>,
     },
-    FieldExists {
-        operand: Operand,
-    },
     Count {
         unit: String,
         condition: Option<Box<Condition>>,
         op: Op,
         count: u64,
-    },
-    In {
-        operand: Operand,
-        query: Box<Query>,
-    },
-    TimeRange {
-        operand: Operand,
-        value: Value,
-    },
-    Overlaps {
-        from: Value,
-        to: Option<Value>,
-    },
-    TimeDifference {
-        left: Operand,
-        right: Operand,
-        op: Op,
-        value: Value,
     },
     Saved {
         name: String,
@@ -165,6 +136,15 @@ pub enum ConditionKind {
         all: bool,
         steps: Vec<Condition>,
         gaps: Vec<Gap>,
+    },
+    /// An order relation used as a condition: a semijoin that keeps an outer
+    /// row when at least one inner row stands in the relation.
+    Order {
+        relation: OrderRelation,
+        query: Box<Query>,
+        within: Option<Distance>,
+        at: TimePoint,
+        scope: Option<String>,
     },
     Extension {
         name: String,
@@ -179,14 +159,45 @@ pub enum TextMode {
     Prefix,
     Approximate,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RankList {
+    /// `similar:` ranks by vector similarity to a text, a reference or rows.
+    Similar,
+    /// `related:` ranks by the product's derived relatedness to a reference.
+    Related,
+    /// `around:` ranks by closeness in time to an instant or period.
+    Around,
+}
+impl RankList {
+    pub const ALL: [Self; 3] = [Self::Similar, Self::Related, Self::Around];
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Similar => "similar",
+            Self::Related => "related",
+            Self::Around => "around",
+        }
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Value {
-    Scalar { text: String, quoted: bool },
-    Set { values: Vec<Value> },
+    Scalar {
+        text: String,
+        quoted: bool,
+    },
+    Set {
+        values: Vec<Value>,
+    },
+    /// `*`: names the field without restricting it and drops its default.
     Any,
+    /// `unknown`: true when the value is unknown.
     Unknown,
-    Parameter { name: String },
+    /// `known`: true when the value is known.
+    Known,
+    Parameter {
+        name: String,
+    },
 }
 impl Value {
     pub fn text(&self) -> Option<&str> {
@@ -208,26 +219,90 @@ pub struct Argument {
     pub parameter: String,
     pub value: Value,
 }
+/// A typed value computed from a row: a field, a literal, a function call or
+/// arithmetic. Dimensions are checked when the query is parsed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Operand {
+pub enum Expression {
     Field {
         name: String,
     },
+    Value {
+        value: Value,
+    },
     Function {
         name: String,
-        arguments: Vec<Operand>,
+        arguments: Vec<Expression>,
+    },
+    Arithmetic {
+        operator: Arithmetic,
+        left: Box<Expression>,
+        right: Box<Expression>,
     },
 }
-impl Operand {
+impl Expression {
     pub fn field(name: impl Into<String>) -> Self {
         Self::Field { name: name.into() }
     }
+    pub fn value(value: Value) -> Self {
+        Self::Value { value }
+    }
+    /// The column name this expression produces when no `as` name is given.
     pub fn column(&self) -> String {
         match self {
             Self::Field { name } => name.replace(['.', '-'], "_"),
+            Self::Value { value } => value
+                .text()
+                .unwrap_or("value")
+                .chars()
+                .map(|c| if c.is_alphanumeric() { c } else { '_' })
+                .collect(),
             Self::Function { name, .. } => name.clone(),
+            Self::Arithmetic {
+                operator,
+                left,
+                right,
+            } => format!("{}_{}_{}", left.column(), operator.word(), right.column()),
         }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Arithmetic {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+}
+impl Arithmetic {
+    pub const fn symbol(self) -> &'static str {
+        match self {
+            Self::Add => "+",
+            Self::Subtract => "-",
+            Self::Multiply => "*",
+            Self::Divide => "/",
+        }
+    }
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Add => "plus",
+            Self::Subtract => "minus",
+            Self::Multiply => "times",
+            Self::Divide => "over",
+        }
+    }
+    pub fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "+" => Self::Add,
+            "-" => Self::Subtract,
+            "*" => Self::Multiply,
+            "/" => Self::Divide,
+            _ => return None,
+        })
+    }
+    /// Multiplication and division bind tighter than addition and subtraction.
+    pub const fn binds_tightly(self) -> bool {
+        matches!(self, Self::Multiply | Self::Divide)
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -270,11 +345,19 @@ impl Op {
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Gap {
     Later,
     Next,
-    Within { duration: Value },
+    Within { distance: Distance },
+}
+/// How far apart two rows may be: a duration, or a number of positions in
+/// the order scope (`1 step` is adjacent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Distance {
+    Time { duration: Value },
+    Steps { count: u64 },
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Attachment {
@@ -290,14 +373,15 @@ pub enum Window {
     Last(u64),
     Where(Condition),
 }
+/// One step after `|`: a relation in, a relation out.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct Stage {
+pub struct Transform {
     pub span: Span,
-    pub kind: StageKind,
+    pub kind: TransformKind,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum StageKind {
+pub enum TransformKind {
     Where {
         condition: Condition,
     },
@@ -305,7 +389,7 @@ pub enum StageKind {
         keys: Vec<SortKey>,
     },
     Group {
-        keys: Vec<Operand>,
+        keys: Vec<Column>,
     },
     Aggregate {
         aggregates: Vec<Aggregate>,
@@ -320,10 +404,12 @@ pub enum StageKind {
         count: u64,
     },
     Distinct,
+    /// One row per step of each `exists` or `seq` match (see the README).
     Matches,
+    /// Every bucket of a time-bucketed group, each with its coverage state.
     Fill,
     Fields {
-        fields: Vec<String>,
+        columns: Vec<Column>,
     },
     Scope {
         unit: String,
@@ -333,20 +419,19 @@ pub enum StageKind {
         how: Combination,
         query: Box<Query>,
     },
-    Temporal {
-        relation: TemporalRelation,
+    /// The pair relation: one row per matching (outer, inner) pair.
+    Join {
         query: Box<Query>,
-        at: TimePoint,
-        within: Option<Value>,
-        all: bool,
+        on: JoinOn,
+    },
+    /// Rows that joined, left or moved in rank between the inner relation
+    /// (before) and this one (after).
+    Diff {
+        query: Box<Query>,
     },
     AsOf {
         value: Value,
         sequence: bool,
-    },
-    Measure {
-        name: String,
-        by: Vec<Operand>,
     },
     Extension {
         name: String,
@@ -355,8 +440,30 @@ pub enum StageKind {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SortKey {
-    pub operand: Operand,
+    pub expression: Expression,
     pub descending: bool,
+}
+/// A projected or grouped column: an expression and an optional `as` name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Column {
+    pub expression: Expression,
+    pub name: Option<String>,
+}
+impl Column {
+    pub fn field(name: impl Into<String>) -> Self {
+        Self {
+            expression: Expression::field(name),
+            name: None,
+        }
+    }
+    /// The `as` name, else a field's own name, else the expression's column.
+    pub fn column(&self) -> String {
+        match (&self.name, &self.expression) {
+            (Some(name), _) => name.clone(),
+            (None, Expression::Field { name }) => name.clone(),
+            (None, expression) => expression.column(),
+        }
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -366,14 +473,54 @@ pub enum Combination {
     Except,
     Fuse,
 }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum JoinOn {
+    /// `join REL (Q) [within D] [at P]`: pairs standing in an order relation.
+    Order {
+        relation: OrderRelation,
+        within: Option<Distance>,
+        at: TimePoint,
+        scope: Option<String>,
+    },
+    /// `join (Q) on F = G`: pairs with equal exact keys.
+    Key { left: String, right: String },
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum TemporalRelation {
+pub enum OrderRelation {
     Near,
     Before,
     After,
     During,
     Containing,
+}
+impl OrderRelation {
+    pub const ALL: [Self; 5] = [
+        Self::Near,
+        Self::Before,
+        Self::After,
+        Self::During,
+        Self::Containing,
+    ];
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Near => "near",
+            Self::Before => "before",
+            Self::After => "after",
+            Self::During => "during",
+            Self::Containing => "containing",
+        }
+    }
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|relation| relation.name().eq_ignore_ascii_case(text))
+    }
+    /// During and containing compare spans in time; positions have no extent.
+    pub const fn measures_steps(self) -> bool {
+        matches!(self, Self::Near | Self::Before | Self::After)
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -385,7 +532,8 @@ pub enum TimePoint {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Aggregate {
     pub function: AggregateFunction,
-    pub fields: Vec<String>,
+    pub arguments: Vec<Expression>,
+    pub name: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -399,24 +547,70 @@ pub enum AggregateFunction {
     CountDistinct,
     Histogram,
     Correlation,
+    /// `covered(start, end)`: the length of the union of the intervals.
+    Covered,
+}
+impl AggregateFunction {
+    pub fn name(&self) -> String {
+        match self {
+            Self::Count => "count".into(),
+            Self::Sum => "sum".into(),
+            Self::Avg => "avg".into(),
+            Self::Min => "min".into(),
+            Self::Max => "max".into(),
+            Self::Percentile(p) => format!("p{p}"),
+            Self::CountDistinct => "count_distinct".into(),
+            Self::Histogram => "histogram".into(),
+            Self::Correlation => "corr".into(),
+            Self::Covered => "covered".into(),
+        }
+    }
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name.to_ascii_lowercase().as_str() {
+            "count" => Self::Count,
+            "sum" => Self::Sum,
+            "avg" => Self::Avg,
+            "min" => Self::Min,
+            "max" => Self::Max,
+            "count_distinct" => Self::CountDistinct,
+            "histogram" => Self::Histogram,
+            "corr" => Self::Correlation,
+            "covered" => Self::Covered,
+            other => {
+                let digits = other.strip_prefix('p')?;
+                if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+                    return None;
+                }
+                Self::Percentile(digits.parse().ok().filter(|p| *p <= 100)?)
+            }
+        })
+    }
+    /// The number of arguments the function takes; `count` takes zero or one.
+    pub fn arguments(&self) -> std::ops::RangeInclusive<usize> {
+        match self {
+            Self::Count => 0..=1,
+            Self::Correlation | Self::Covered => 2..=2,
+            _ => 1..=1,
+        }
+    }
 }
 impl Aggregate {
     pub fn column(&self) -> String {
-        let name = match self.function {
-            AggregateFunction::Count => "count".into(),
-            AggregateFunction::Sum => "sum".into(),
-            AggregateFunction::Avg => "avg".into(),
-            AggregateFunction::Min => "min".into(),
-            AggregateFunction::Max => "max".into(),
-            AggregateFunction::Percentile(p) => format!("p{p}"),
-            AggregateFunction::CountDistinct => "count_distinct".into(),
-            AggregateFunction::Histogram => "histogram".into(),
-            AggregateFunction::Correlation => "corr".into(),
-        };
-        if self.fields.is_empty() {
+        if let Some(name) = &self.name {
+            return name.clone();
+        }
+        let name = self.function.name();
+        if self.arguments.is_empty() {
             name
         } else {
-            format!("{name}_{}", self.fields.join("_").replace(['.', '-'], "_"))
+            format!(
+                "{name}_{}",
+                self.arguments
+                    .iter()
+                    .map(Expression::column)
+                    .collect::<Vec<_>>()
+                    .join("_")
+            )
         }
     }
 }
@@ -431,9 +625,12 @@ pub enum ExtensionArgument {
     Condition(Box<Condition>),
     Query(Box<Query>),
     Keyword(String),
+    Expression(Expression),
+    /// A comma-separated repetition of one slot.
+    List(Vec<ExtensionArgument>),
 }
 impl Query {
-    /// Namespaces come exclusively from unit/operator nodes, never literals.
+    /// Namespaces come exclusively from unit nodes, never literals.
     pub fn namespaces(&self) -> BTreeSet<String> {
         let mut out = BTreeSet::new();
         self.visit_units(&mut |unit| {
@@ -458,13 +655,6 @@ impl Query {
                     condition.visit_units(visitor);
                 }
             }
-            Source::RecallLast { unit, condition } => {
-                visitor(unit);
-                if let Some(c) = condition {
-                    c.visit_units(visitor);
-                }
-            }
-            _ => {}
         }
         for a in &self.attach {
             visitor(&a.unit);
@@ -474,19 +664,19 @@ impl Query {
                 }
             }
         }
-        for s in &self.stages {
-            match &s.kind {
-                StageKind::Where { condition } => condition.visit_units(visitor),
-                StageKind::Scope { unit, condition } => {
+        for t in &self.transforms {
+            match &t.kind {
+                TransformKind::Where { condition } => condition.visit_units(visitor),
+                TransformKind::Scope { unit, condition } => {
                     visitor(unit);
                     if let Some(c) = condition {
                         c.visit_units(visitor);
                     }
                 }
-                StageKind::Combine { query, .. } | StageKind::Temporal { query, .. } => {
-                    query.visit_units(visitor)
-                }
-                StageKind::Extension { arguments, .. } => visit_arguments(arguments, visitor),
+                TransformKind::Combine { query, .. }
+                | TransformKind::Join { query, .. }
+                | TransformKind::Diff { query } => query.visit_units(visitor),
+                TransformKind::Extension { arguments, .. } => visit_arguments(arguments, visitor),
                 _ => {}
             }
         }
@@ -510,7 +700,9 @@ impl Condition {
                     c.visit_units(visitor);
                 }
             }
-            ConditionKind::In { query, .. } => query.visit_units(visitor),
+            ConditionKind::In { query, .. } | ConditionKind::Order { query, .. } => {
+                query.visit_units(visitor)
+            }
             ConditionKind::Sequence { unit, steps, .. } => {
                 visitor(unit);
                 for c in steps {
@@ -519,7 +711,6 @@ impl Condition {
             }
             ConditionKind::Extension { arguments, .. } => visit_arguments(arguments, visitor),
             // Bounds contain values and an already-bound field, never units.
-            ConditionKind::Since { .. } | ConditionKind::Until { .. } => {}
             _ => {}
         }
     }
@@ -530,7 +721,9 @@ fn visit_arguments(arguments: &[ExtensionArgument], visitor: &mut impl FnMut(&st
             ExtensionArgument::Unit(u) => visitor(u),
             ExtensionArgument::Query(q) => q.visit_units(visitor),
             ExtensionArgument::Condition(c) => c.visit_units(visitor),
-            ExtensionArgument::Optional(arguments) => visit_arguments(arguments, visitor),
+            ExtensionArgument::Optional(arguments) | ExtensionArgument::List(arguments) => {
+                visit_arguments(arguments, visitor)
+            }
             _ => {}
         }
     }

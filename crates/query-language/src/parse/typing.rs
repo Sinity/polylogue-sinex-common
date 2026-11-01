@@ -2,25 +2,25 @@
 //! it never reconstructs group, projection, or aggregate transitions.
 use super::*;
 use crate::scope::{
-    FieldInfo, NodePath, Origin, QueryScope, StageScope, TypeRule, TypedOperand, Typing,
+    FieldInfo, NodePath, Origin, QueryScope, TransformScope, TypeRule, TypedOperand, Typing,
 };
 
 pub(super) struct Capture {
     pub source: Scope,
-    pub stages: Vec<(Scope, Scope)>,
+    pub transforms: Vec<(Scope, Scope)>,
 }
 impl Parser<'_> {
-    pub(super) fn stage_path(&self) -> NodePath {
-        let (query, stage) = self
+    pub(super) fn transform_path(&self) -> NodePath {
+        let (query, transform) = self
             .query_stack
             .last()
             .copied()
-            .expect("stage belongs to query");
+            .expect("transform belongs to query");
         NodePath::default()
             .field("$query")
             .index(query)
-            .field("stages")
-            .index(stage)
+            .field("transforms")
+            .index(transform)
             .field("kind")
     }
     pub(super) fn field_info(&self, scope: &Scope, name: &str) -> FieldInfo {
@@ -46,22 +46,38 @@ impl Parser<'_> {
         });
         FieldInfo { field, origin }
     }
-    pub(super) fn operand_info(&self, scope: &Scope, operand: &Operand) -> FieldInfo {
-        match operand {
-            Operand::Field { name } => self.field_info(scope, name),
-            Operand::Function { name, arguments } => {
+    pub(super) fn expression_info(&self, scope: &Scope, expression: &Expression) -> FieldInfo {
+        match expression {
+            Expression::Field { name } => self.field_info(scope, name),
+            Expression::Value { value } => FieldInfo {
+                field: Field {
+                    name: expression.column(),
+                    kind: literal_kind(value),
+                    ..Field::default()
+                },
+                origin: Origin::Generated,
+            },
+            Expression::Function { name, arguments } => {
+                let kind = if name == "random" {
+                    FieldKind::Number
+                } else {
+                    self.catalog
+                        .function(name)
+                        .ok()
+                        .flatten()
+                        .map_or(FieldKind::Json, |function| function.result)
+                };
                 let arguments = if name == "random" {
                     Vec::new()
                 } else {
                     arguments
                         .iter()
-                        .map(|arg| self.operand_info(scope, arg))
+                        .map(|argument| self.expression_info(scope, argument))
                         .collect()
                 };
-                let kind = crate::scope::function_kind(name);
                 FieldInfo {
                     field: Field {
-                        name: operand.column(),
+                        name: expression.column(),
                         kind,
                         ..Field::default()
                     },
@@ -72,22 +88,30 @@ impl Parser<'_> {
                     },
                 }
             }
+            Expression::Arithmetic {
+                operator,
+                left,
+                right,
+            } => {
+                let left = self.expression_info(scope, left);
+                let right = self.expression_info(scope, right);
+                let kind =
+                    crate::scope::arithmetic_kind(*operator, &left.field.kind, &right.field.kind)
+                        .unwrap_or(FieldKind::Json);
+                FieldInfo {
+                    field: Field {
+                        name: expression.column(),
+                        kind,
+                        ..Field::default()
+                    },
+                    origin: Origin::Function {
+                        name: operator.symbol().into(),
+                        arguments: vec![left, right],
+                        rule: TypeRule::Fixed,
+                    },
+                }
+            }
         }
-    }
-    pub(super) fn generated_field(
-        &self,
-        scope: &mut Scope,
-        name: &str,
-        kind: FieldKind,
-        origin: Origin,
-    ) {
-        Arc::make_mut(&mut scope.typed_extra).retain(|field| field.name != name);
-        Arc::make_mut(&mut scope.typed_extra).push(Field {
-            name: name.into(),
-            kind,
-            ..Field::default()
-        });
-        Arc::make_mut(&mut scope.origins).insert(name.into(), origin);
     }
     pub(super) fn aggregate_info(
         &self,
@@ -126,7 +150,8 @@ impl Parser<'_> {
             },
         }
     }
-    fn snapshot(&self, scope: &Scope) -> crate::scope::Scope {
+    /// The fields a scope shows, each with its declaration and origin.
+    pub(super) fn visible(&self, scope: &Scope) -> Vec<FieldInfo> {
         let mut names: BTreeSet<_> = if let Some(columns) = &scope.columns {
             columns.clone()
         } else if let Some(output) = &scope.output {
@@ -148,14 +173,38 @@ impl Parser<'_> {
         if scope.columns.is_none() {
             names.extend(scope.typed_extra.iter().map(|field| field.name.clone()));
         }
+        names
+            .iter()
+            .map(|name| self.field_info(scope, name))
+            .collect()
+    }
+    fn snapshot(&self, scope: &Scope) -> crate::scope::Scope {
         crate::scope::Scope {
             unit: self.catalog.unit(&scope.unit).map(|unit| unit.name.clone()),
-            fields: names
-                .iter()
-                .map(|name| self.field_info(scope, name))
-                .collect::<Vec<_>>()
-                .into(),
+            fields: self.visible(scope).into(),
         }
+    }
+}
+/// The kind of an unquoted or quoted literal in an expression.
+pub(super) fn literal_kind(value: &Value) -> FieldKind {
+    match value {
+        Value::Scalar {
+            text,
+            quoted: false,
+        } => {
+            if crate::number::is_integer(text) {
+                FieldKind::Integer
+            } else if crate::number::is_decimal(text) {
+                FieldKind::Number
+            } else if is_duration(text) {
+                FieldKind::Duration
+            } else if is_money(text) {
+                FieldKind::Money
+            } else {
+                FieldKind::Text
+            }
+        }
+        _ => FieldKind::Text,
     }
 }
 
@@ -176,9 +225,9 @@ pub(super) fn project(parser: &Parser<'_>, query: &Query) -> Typing {
     let mut shapes = BTreeMap::new();
     for query in &mut walker.typing.queries {
         rewrite_scope(&mut query.source, &paths, &mut shapes);
-        for stage in &mut query.stages {
-            rewrite_scope(&mut stage.before, &paths, &mut shapes);
-            rewrite_scope(&mut stage.after, &paths, &mut shapes);
+        for transform in &mut query.transforms {
+            rewrite_scope(&mut transform.before, &paths, &mut shapes);
+            rewrite_scope(&mut transform.after, &paths, &mut shapes);
         }
     }
     for operand in &mut walker.typing.operands {
@@ -193,9 +242,12 @@ struct Walker<'a, 'b> {
 }
 impl Walker<'_, '_> {
     fn field(&mut self, name: &str, scope: &Scope, path: NodePath) {
-        self.operand(&Operand::field(name), scope, path);
+        self.expression(&Expression::field(name), scope, path);
     }
-    fn operand(&mut self, operand: &Operand, scope: &Scope, path: NodePath) {
+    fn expression(&mut self, expression: &Expression, scope: &Scope, path: NodePath) {
+        if matches!(expression, Expression::Value { .. }) {
+            return;
+        }
         self.typing.operands.push(TypedOperand {
             path: path.clone(),
             unit: self
@@ -203,14 +255,19 @@ impl Walker<'_, '_> {
                 .catalog
                 .unit(&scope.unit)
                 .map(|unit| unit.name.clone()),
-            result: self.parser.operand_info(scope, operand),
+            result: self.parser.expression_info(scope, expression),
         });
-        if let Operand::Function { name, arguments } = operand
-            && name != "random"
-        {
-            for (index, argument) in arguments.iter().enumerate() {
-                self.operand(argument, scope, path.field("arguments").index(index));
+        match expression {
+            Expression::Function { name, arguments } if name != "random" => {
+                for (index, argument) in arguments.iter().enumerate() {
+                    self.expression(argument, scope, path.field("arguments").index(index));
+                }
             }
+            Expression::Arithmetic { left, right, .. } => {
+                self.expression(left, scope, path.field("left"));
+                self.expression(right, scope, path.field("right"));
+            }
+            _ => {}
         }
     }
     fn query(&mut self, query: &Query, path: NodePath) {
@@ -222,8 +279,8 @@ impl Walker<'_, '_> {
             .expect("successful parser filled each scope capture");
         let source = self.parser.snapshot(&capture.source);
         let mut previous = source.clone();
-        let stages = capture
-            .stages
+        let transforms = capture
+            .transforms
             .iter()
             .map(|(before, after)| {
                 let next = if before == after {
@@ -231,25 +288,21 @@ impl Walker<'_, '_> {
                 } else {
                     self.parser.snapshot(after)
                 };
-                let stage = StageScope {
+                let transform = TransformScope {
                     before: previous.clone(),
                     after: next.clone(),
                 };
                 previous = next;
-                stage
+                transform
             })
             .collect();
         self.typing.queries.push(QueryScope {
             path: path.clone(),
             source,
-            stages,
+            transforms,
         });
         match &query.source {
             Source::Unit {
-                condition: Some(condition),
-                ..
-            }
-            | Source::RecallLast {
                 condition: Some(condition),
                 ..
             }
@@ -283,17 +336,19 @@ impl Walker<'_, '_> {
                 }
             }
         }
-        for (index, stage) in query.stages.iter().enumerate() {
-            let (scope, after) = &capture.stages[index];
-            let at = path.field("stages").index(index).field("kind");
-            match &stage.kind {
-                StageKind::Where { condition } => {
+        for (index, transform) in query.transforms.iter().enumerate() {
+            let (scope, after) = &capture.transforms[index];
+            let at = path.field("transforms").index(index).field("kind");
+            match &transform.kind {
+                TransformKind::Where { condition } => {
                     self.condition(condition, scope, at.field("condition"))
                 }
-                StageKind::Sort { keys } => {
+                TransformKind::Sort { keys } => {
                     for (index, key) in keys.iter().enumerate() {
-                        let path = at.field("keys").index(index).field("operand");
-                        if matches!(&key.operand, Operand::Field { name } if name == "rank") {
+                        let path = at.field("keys").index(index).field("expression");
+                        if matches!(&key.expression, Expression::Field { name } if name == "rank")
+                            && !self.parser.field_known(scope, "rank")
+                        {
                             self.typing.operands.push(TypedOperand {
                                 path,
                                 unit: self
@@ -311,48 +366,51 @@ impl Walker<'_, '_> {
                                 },
                             });
                         } else {
-                            self.operand(&key.operand, scope, path);
+                            self.expression(&key.expression, scope, path);
                         }
                     }
                 }
-                StageKind::Group { keys } => {
+                TransformKind::Group { keys } => {
                     for (index, key) in keys.iter().enumerate() {
-                        self.operand(key, scope, at.field("keys").index(index));
+                        self.expression(
+                            &key.expression,
+                            scope,
+                            at.field("keys").index(index).field("expression"),
+                        );
                     }
                 }
-                StageKind::Measure { by, .. } => {
-                    for (index, key) in by.iter().enumerate() {
-                        self.operand(key, scope, at.field("by").index(index));
-                    }
-                }
-                StageKind::Aggregate { aggregates } => {
+                TransformKind::Aggregate { aggregates } => {
                     let rows = scope.group_input.as_deref().unwrap_or(scope);
                     for (index, aggregate) in aggregates.iter().enumerate() {
-                        for (field_index, field) in aggregate.fields.iter().enumerate() {
-                            self.field(
-                                field,
+                        for (argument_index, argument) in aggregate.arguments.iter().enumerate() {
+                            self.expression(
+                                argument,
                                 rows,
                                 at.field("aggregates")
                                     .index(index)
-                                    .field("fields")
-                                    .index(field_index),
+                                    .field("arguments")
+                                    .index(argument_index),
                             );
                         }
                     }
                 }
-                StageKind::Fields { fields } => {
-                    for (index, field) in fields.iter().enumerate() {
-                        self.field(field, scope, at.field("fields").index(index));
+                TransformKind::Fields { columns } => {
+                    for (index, column) in columns.iter().enumerate() {
+                        self.expression(
+                            &column.expression,
+                            scope,
+                            at.field("columns").index(index).field("expression"),
+                        );
                     }
                 }
-                StageKind::Scope {
+                TransformKind::Scope {
                     condition: Some(condition),
                     ..
                 } => self.condition(condition, after, at.field("condition")),
-                StageKind::Combine { query, .. } | StageKind::Temporal { query, .. } => {
-                    self.query(query, at.field("query"))
-                }
-                StageKind::Extension { arguments, .. } => {
+                TransformKind::Combine { query, .. }
+                | TransformKind::Join { query, .. }
+                | TransformKind::Diff { query } => self.query(query, at.field("query")),
+                TransformKind::Extension { arguments, .. } => {
                     self.arguments(arguments, scope, at.field("arguments"))
                 }
                 _ => {}
@@ -370,23 +428,21 @@ impl Walker<'_, '_> {
             ConditionKind::Not { condition } => {
                 self.condition(condition, scope, at.field("condition"))
             }
-            ConditionKind::Match { field, .. } => self.field(field, scope, at.field("field")),
-            ConditionKind::Compare { operand, .. }
-            | ConditionKind::Since { operand, .. }
-            | ConditionKind::Until { operand, .. }
-            | ConditionKind::Between { operand, .. }
-            | ConditionKind::FieldExists { operand }
-            | ConditionKind::TimeRange { operand, .. } => {
-                self.operand(operand, scope, at.field("operand"))
+            ConditionKind::Match { field, .. }
+            | ConditionKind::Since { field, .. }
+            | ConditionKind::Until { field, .. } => self.field(field, scope, at.field("field")),
+            ConditionKind::Compare { left, right, .. } => {
+                self.expression(left, scope, at.field("left"));
+                self.expression(right, scope, at.field("right"));
             }
-            ConditionKind::In { operand, query } => {
-                self.operand(operand, scope, at.field("operand"));
+            ConditionKind::Between { left, .. } | ConditionKind::TimeRange { left, .. } => {
+                self.expression(left, scope, at.field("left"))
+            }
+            ConditionKind::In { left, query } => {
+                self.expression(left, scope, at.field("left"));
                 self.query(query, at.field("query"));
             }
-            ConditionKind::TimeDifference { left, right, .. } => {
-                self.operand(left, scope, at.field("left"));
-                self.operand(right, scope, at.field("right"));
-            }
+            ConditionKind::Order { query, .. } => self.query(query, at.field("query")),
             ConditionKind::Exists {
                 unit,
                 condition: Some(condition),
@@ -416,12 +472,18 @@ impl Walker<'_, '_> {
             let at = path.index(index);
             match argument {
                 ExtensionArgument::Field(name) => self.field(name, scope, at.field("field")),
+                ExtensionArgument::Expression(expression) => {
+                    self.expression(expression, scope, at.field("expression"))
+                }
                 ExtensionArgument::Condition(condition) => {
                     self.condition(condition, scope, at.field("condition"))
                 }
                 ExtensionArgument::Query(query) => self.query(query, at.field("query")),
                 ExtensionArgument::Optional(arguments) => {
                     self.arguments(arguments, scope, at.field("optional"))
+                }
+                ExtensionArgument::List(arguments) => {
+                    self.arguments(arguments, scope, at.field("list"))
                 }
                 _ => {}
             }
@@ -459,7 +521,7 @@ fn rewrite_info(info: &mut FieldInfo, queries: &[NodePath]) {
                 rewrite_info(input, queries);
             }
         }
-        Origin::Temporal { query, .. } => rewrite_path(query, queries),
+        Origin::Matched { input } => rewrite_info(input, queries),
         _ => {}
     }
 }

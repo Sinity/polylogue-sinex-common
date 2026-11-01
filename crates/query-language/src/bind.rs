@@ -42,82 +42,15 @@ pub fn bind(query: &Query, catalog: &Catalog) -> Result<BoundQuery, Error> {
             ));
         }
         check_schema(&output.schema, catalog)?;
-        if let Some(scope) = &output.relation_scope {
-            check_schema(scope, catalog)?;
-            if scope.unit != output.schema.unit {
-                return Err(Error::new(
-                    ErrorKind::BadValue,
-                    "source relation scope and produced schema have different row domains",
-                    0,
-                ));
-            }
-        }
-    }
-    for (index, output) in catalog.match_outputs.iter().enumerate() {
-        if catalog.match_outputs[..index]
-            .iter()
-            .any(|other| other.source == output.source)
-        {
-            return Err(Error::new(
-                ErrorKind::Ambiguous,
-                "duplicate Matches output schema",
-                0,
-            ));
-        }
-        check_match_unit(&output.source.parent_unit, catalog)?;
-        check_pattern(&output.source.pattern, catalog)?;
-        check_schema(&output.schema, catalog)?;
-        if !output.schema.match_patterns.is_empty() {
-            return Err(Error::new(
-                ErrorKind::BadValue,
-                "Matches output cannot retain consumed qualifiers",
-                0,
-            ));
-        }
     }
     let text = crate::format::render_query(query, catalog)?;
     let parsed = crate::parse::parse_typed(&text, catalog)
         .map_err(|error| crate::parse::parse(&text, catalog).err().unwrap_or(error))?;
     check_query(&parsed.query, catalog)?;
-    for source in parsed.required_matches {
-        if catalog.match_output(&source).is_none() {
-            return Err(unbound(format!("Matches projection {source:?}")));
-        }
-    }
     Ok(BoundQuery {
         query: parsed.query,
         typing: parsed.typing,
     })
-}
-fn check_match_unit(name: &str, catalog: &Catalog) -> Result<(), Error> {
-    let unit = catalog
-        .unit(name)
-        .ok_or_else(|| unbound(format!("Matches row domain {name:?}")))?;
-    if unit.name != name {
-        return Err(Error::new(
-            ErrorKind::BadValue,
-            "Matches metadata needs canonical row-domain names",
-            0,
-        ));
-    }
-    Ok(())
-}
-fn check_pattern(pattern: &crate::catalog::MatchPattern, catalog: &Catalog) -> Result<(), Error> {
-    use crate::catalog::MatchPattern;
-    let unit = match pattern {
-        MatchPattern::Exists { unit } => unit,
-        MatchPattern::Sequence { unit, steps } => {
-            if *steps == 0 {
-                return Err(Error::new(
-                    ErrorKind::BadValue,
-                    "a sequence projection needs at least one step",
-                    0,
-                ));
-            }
-            unit
-        }
-    };
-    check_match_unit(unit, catalog)
 }
 fn check_schema(output: &crate::catalog::OutputSchema, catalog: &Catalog) -> Result<(), Error> {
     if let Some(unit) = &output.unit
@@ -146,9 +79,6 @@ fn check_schema(output: &crate::catalog::OutputSchema, catalog: &Catalog) -> Res
             0,
         ));
     }
-    for pattern in &output.match_patterns {
-        check_pattern(pattern, catalog)?;
-    }
     Ok(())
 }
 
@@ -173,10 +103,6 @@ fn check_query(query: &Query, catalog: &Catalog) -> Result<(), Error> {
             condition: Some(condition),
             ..
         }
-        | Source::RecallLast {
-            condition: Some(condition),
-            ..
-        }
         | Source::Saved {
             condition: Some(condition),
             ..
@@ -194,17 +120,17 @@ fn check_query(query: &Query, catalog: &Catalog) -> Result<(), Error> {
             }
         }
     }
-    for stage in &query.stages {
-        match &stage.kind {
-            StageKind::Where { condition }
-            | StageKind::Scope {
+    for transform in &query.transforms {
+        match &transform.kind {
+            TransformKind::Where { condition }
+            | TransformKind::Scope {
                 condition: Some(condition),
                 ..
             } => check_condition(condition, catalog)?,
-            StageKind::Combine { query, .. } | StageKind::Temporal { query, .. } => {
-                check_query(query, catalog)?
-            }
-            StageKind::Extension { arguments, .. } => check_arguments(arguments, catalog)?,
+            TransformKind::Combine { query, .. }
+            | TransformKind::Join { query, .. }
+            | TransformKind::Diff { query } => check_query(query, catalog)?,
+            TransformKind::Extension { arguments, .. } => check_arguments(arguments, catalog)?,
             _ => {}
         }
     }
@@ -234,7 +160,9 @@ fn check_condition(condition: &Condition, catalog: &Catalog) -> Result<(), Error
             condition: Some(condition),
             ..
         } => check_condition(condition, catalog)?,
-        ConditionKind::In { query, .. } => check_query(query, catalog)?,
+        ConditionKind::In { query, .. } | ConditionKind::Order { query, .. } => {
+            check_query(query, catalog)?
+        }
         ConditionKind::Sequence { steps, .. } => {
             for condition in steps {
                 check_condition(condition, catalog)?;
@@ -250,7 +178,9 @@ fn check_arguments(arguments: &[ExtensionArgument], catalog: &Catalog) -> Result
         match argument {
             ExtensionArgument::Query(query) => check_query(query, catalog)?,
             ExtensionArgument::Condition(condition) => check_condition(condition, catalog)?,
-            ExtensionArgument::Optional(arguments) => check_arguments(arguments, catalog)?,
+            ExtensionArgument::Optional(arguments) | ExtensionArgument::List(arguments) => {
+                check_arguments(arguments, catalog)?
+            }
             _ => {}
         }
     }

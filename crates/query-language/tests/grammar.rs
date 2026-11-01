@@ -14,19 +14,24 @@ fn language_atoms_keep_their_meaning() {
     for text in [
         "origin:(a|b|c)",
         "cost:unknown",
+        "cost:known",
         "kind:*",
         "cost >= 2.90usd",
         "started between 2026-10-02 and 2026-10-03",
         "title ~ \"two words\"",
+        "cwd ^ \"/src/demo\"",
         "refactor*",
         "refactor~",
-        "exists tool_call(outcome:error)",
-        "count(tool_call where outcome:error) >= 3",
+        "exists tool_calls(outcome:error)",
+        "count(tool_calls where outcome:error) >= 3",
         "id in (messages where role:user | group by session)",
         "query:failing(repo=demo,phrase=\"two words\")",
-        "seq all(tool:Bash -> [next] tool:Edit -> [within:5m] tool:Bash)",
+        "seq all(tool:Bash -> [next] tool:Edit -> [within 5m] tool:Bash)",
         "similar:\"semantic question\"",
-        "@3.2",
+        "around:2026-10-01",
+        "@3",
+        "@last",
+        "answer:01J0000000000000000000000",
         "https://example.invalid/query",
     ] {
         parse(text, &c).unwrap_or_else(|e| panic!("{text}: {e}"));
@@ -47,7 +52,21 @@ fn language_atoms_keep_their_meaning() {
     ));
     assert!(matches!(
         condition("similar:\"sx.events\"", &c).kind,
-        ConditionKind::Similar { .. }
+        ConditionKind::Rank {
+            list: RankList::Similar,
+            ..
+        }
+    ));
+    assert!(matches!(
+        condition("cost:known", &c).kind,
+        ConditionKind::Match {
+            value: Value::Known,
+            ..
+        }
+    ));
+    assert!(matches!(
+        condition("cwd ^ \"/src/demo\"", &c).kind,
+        ConditionKind::Compare { op: Op::Prefix, .. }
     ));
     let q = parse(
         "origin:demo with messages(id,role)[role:assistant,last:2] | fields id,title",
@@ -57,26 +76,27 @@ fn language_atoms_keep_their_meaning() {
     assert_eq!(q.attach.len(), 1);
 }
 #[test]
-fn both_surfaces_preserve_grouped_relations() {
-    for (catalog, text) in [
-        (
-            support::polylogue(),
-            "tool_calls | group by tool | agg count, sum:duration | where count >= 2 | sort by sum_duration desc | limit 5",
-        ),
-        (
-            support::sinex(),
-            "commands group by cwd count, sum(duration) where count >= 2 sort sum_duration desc limit 5",
-        ),
+fn both_catalogs_spell_grouped_relations_alike() {
+    for (catalog, unit, key) in [
+        (support::polylogue(), "tool_calls", "tool"),
+        (support::sinex(), "commands", "cwd"),
     ] {
-        let q = parse(text, &catalog).unwrap();
+        let text = format!(
+            "{unit} | group by {key} | agg count, sum(duration) | where count >= 2 | sort by sum_duration desc | limit 5"
+        );
+        let q = parse(&text, &catalog).unwrap_or_else(|e| panic!("{text}: {e}"));
         assert!(matches!(
-            q.stages.last().unwrap().kind,
-            StageKind::Limit { count: 5 }
+            q.transforms.last().unwrap().kind,
+            TransformKind::Limit { count: 5 }
         ));
+        let TransformKind::Aggregate { aggregates } = &q.transforms[1].kind else {
+            panic!()
+        };
+        assert_eq!(aggregates[1].column(), "sum_duration");
     }
     assert!(
         parse(
-            "commands group by cwd count where exit_code = 0",
+            "commands | group by cwd | count | where exit_code = 0",
             &support::sinex()
         )
         .unwrap_err()
@@ -87,26 +107,27 @@ fn both_surfaces_preserve_grouped_relations() {
 #[test]
 fn namespace_binding_ignores_literal_text() {
     let c = support::mixed();
-    let q=parse("pl.messages where text ~ \"sx.events\" | near (sx.events where text ~ \"pl.sessions\") within 5m",&c).unwrap();
+    let q = parse(
+        "pl.messages where text ~ \"sx.events\" | join near (sx.events where text ~ \"pl.sessions\") within 5m",
+        &c,
+    )
+    .unwrap();
     assert_eq!(q.namespaces().into_iter().collect::<Vec<_>>(), ["pl", "sx"]);
     let q = parse("pl.messages where similar:\"sx.events\"", &c).unwrap();
     assert_eq!(q.namespaces().into_iter().collect::<Vec<_>>(), ["pl"]);
 }
 #[test]
-fn command_words_and_closed_sets_refuse() {
+fn first_words_are_never_guessed_as_commands_and_closed_sets_refuse() {
     let c = support::sinex();
-    assert_eq!(
-        parse("related reference", &c).unwrap_err().kind,
-        ErrorKind::NotAQuery
-    );
-    assert!(
-        parse("comands", &c)
-            .unwrap_err()
-            .suggestion
-            .unwrap()
-            .contains("commands")
-    );
-    assert!(parse("\"related\"", &c).is_ok());
+    // No command words: a bare word is a search, and a near-miss of a unit
+    // name standing alone is a search too.
+    for text in ["related reference", "comands", "\"related\""] {
+        parse(text, &c).unwrap_or_else(|e| panic!("{text}: {e}"));
+    }
+    assert!(matches!(
+        condition("comands", &c).kind,
+        ConditionKind::Text { .. }
+    ));
     assert!(parse("source", &c).unwrap_err().message.contains("field"));
     let e = parse("runs where status = hide", &c).unwrap_err();
     assert_eq!(e.kind, ErrorKind::BadValue);
@@ -117,6 +138,15 @@ fn command_words_and_closed_sets_refuse() {
         Some("commands where exit_code >= 2")
     );
     assert!(parse(e.suggestion.as_deref().unwrap(), &c).is_ok());
+}
+#[test]
+fn unit_names_have_no_aliases() {
+    let c = support::polylogue();
+    let e = parse("tool_call where outcome:error", &c).unwrap_err();
+    assert_eq!(
+        e.suggestion.as_deref(),
+        Some("tool_calls where outcome:error")
+    );
 }
 #[test]
 fn positional_keywords_and_escaping() {
@@ -139,7 +169,7 @@ fn positional_keywords_and_escaping() {
         ]);
     assert!(parse("count words", &c).is_err()); // count is a declared field in this synthetic catalog.
     assert!(
-        matches!(condition("cats and dogs",&c).kind,ConditionKind::And{conditions} if conditions.len()==3)
+        matches!(condition("cats \"and\" dogs",&c).kind,ConditionKind::And{conditions} if conditions.len()==3)
     );
     assert!(matches!(
         condition("where:yes count >= 1", &c).kind,
@@ -147,36 +177,34 @@ fn positional_keywords_and_escaping() {
     ));
     let quoted = condition(r#""a\"b\\c\nline""#, &c);
     assert!(matches!(quoted.kind,ConditionKind::Text{text,..} if text=="a\"b\\c\nline"));
-    let e = parse("origin:demo and title:demo", &c).unwrap_err();
-    assert!(e.suggestion.unwrap().contains("AND"));
 }
 #[test]
-fn temporal_relations_preserve_inner_context() {
+fn order_relations_and_as_of_preserve_inner_context() {
     let c = support::sinex();
     let q = parse(
-        "events near (commands as of seq 42) at end within 5m fields near,offset",
+        "events | join near (commands | as of seq 42) within 5m at end | fields offset",
         &c,
     )
     .unwrap();
-    let StageKind::Temporal {
+    let TransformKind::Join {
         query,
-        at: TimePoint::End,
-        ..
-    } = &q.stages[0].kind
+        on: JoinOn::Order {
+            at: TimePoint::End, ..
+        },
+    } = &q.transforms[0].kind
     else {
         panic!()
     };
     assert!(matches!(
-        query.stages[0].kind,
-        StageKind::AsOf { sequence: true, .. }
+        query.transforms[0].kind,
+        TransformKind::AsOf { sequence: true, .. }
     ));
     for text in [
-        "events where when in last 7d group by day(when) count fill",
-        "events where material exists",
+        "events where when in last 7d | group by day(when) | count | fill",
+        "events where material:known",
         "events where seen - when > 1d",
-        "events where event_type = [command.executed, command.imported]",
-        "recall yesterday",
-        "trace sinex:ev/0190a0b0-0000-7000-8000-000000000001",
+        "events where event_type:(command.executed|command.imported)",
+        "events where near(commands where exit_code != 0) within 5m",
     ] {
         parse(text, &c).unwrap_or_else(|e| panic!("{text}: {e}"));
     }
@@ -186,7 +214,7 @@ fn typed_extensions_are_walked_not_hidden() {
     let mut c = support::mixed();
     c.extensions.push(Extension {
         name: "correlate".into(),
-        position: ExtensionPosition::Stage,
+        position: ExtensionPosition::Transform,
         arguments: vec![ExtensionSlot::Keyword("with".into()), ExtensionSlot::Query],
         help: String::new(),
     });
@@ -203,9 +231,27 @@ fn valid_size_is_not_a_refusal() {
     );
 }
 
+/// Polylogue's `measure` is a catalog extension, not a shared transform.
+pub fn measure() -> Extension {
+    Extension {
+        name: "measure".into(),
+        position: ExtensionPosition::Transform,
+        arguments: vec![
+            ExtensionSlot::List(Box::new(ExtensionSlot::Value)),
+            ExtensionSlot::Optional(vec![
+                ExtensionSlot::Keyword("by".into()),
+                ExtensionSlot::List(Box::new(ExtensionSlot::Expression)),
+            ]),
+        ],
+        help: String::new(),
+    }
+}
+
 #[test]
 fn product_extension_forms_are_structurally_declared() {
     let mut c = support::polylogue();
+    assert!(parse("sessions | measure usage", &c).is_err());
+    c.extensions.push(measure());
     for (name, arguments) in [
         ("series", vec![]),
         (
@@ -241,7 +287,7 @@ fn product_extension_forms_are_structurally_declared() {
     ] {
         c.extensions.push(Extension {
             name: name.into(),
-            position: ExtensionPosition::Stage,
+            position: ExtensionPosition::Transform,
             arguments,
             help: String::new(),
         });
@@ -252,9 +298,44 @@ fn product_extension_forms_are_structurally_declared() {
         "sessions | cluster by similar",
         "sessions | cluster by similar [k:20]",
         "sessions | let failures = (tool_calls where outcome:error)",
+        "sessions | measure usage",
+        "sessions | measure compare:origin, words by day(started), origin",
     ] {
         parse(text, &c).unwrap_or_else(|e| panic!("{text}: {e}"));
     }
+    let q = parse(
+        "sessions | measure compare:origin, words by day(started)",
+        &c,
+    )
+    .unwrap();
+    let TransformKind::Extension { arguments, .. } = &q.transforms[0].kind else {
+        panic!()
+    };
+    assert!(matches!(&arguments[0], ExtensionArgument::List(items) if items.len() == 2));
+    let rendered = query_language::format::format_query(&q, &c).unwrap();
+    assert_eq!(
+        query_language::identity::normal_form(&parse(&rendered, &c).unwrap(), &c).unwrap(),
+        query_language::identity::normal_form(&q, &c).unwrap()
+    );
+}
+
+#[test]
+fn product_functions_are_declared_by_the_catalog() {
+    let mut c = support::polylogue();
+    assert!(parse("tool_calls | group by program(command)", &c).is_err());
+    c.functions.push(Function {
+        name: "program".into(),
+        arguments: 1,
+        result: FieldKind::Text,
+        help: String::new(),
+    });
+    let q = parse("tool_calls | group by program(command) | count", &c).unwrap();
+    let TransformKind::Group { keys } = &q.transforms[0].kind else {
+        panic!()
+    };
+    assert!(matches!(&keys[0].expression, Expression::Function { name, .. } if name == "program"));
+    let e = parse("tool_calls | group by program(command, tool)", &c).unwrap_err();
+    assert_eq!(e.kind, ErrorKind::BadValue);
 }
 
 #[test]
@@ -266,7 +347,13 @@ fn product_reference_forms_stay_literal_nodes() {
         "tool:session#call",
         "span:message#c=1-2",
         "https://example.invalid/?x=y",
-        "sx:sinex:ev/synthetic-id",
+        "sinex:ev/synthetic-id",
+        "polylogue:session/synthetic-id",
+        "self",
+        "last",
+        "7f3a2c10-4b5e-4c1d",
+        "@3",
+        "answer:01J0000000000000000000000",
     ] {
         assert!(
             matches!(condition(text, &c).kind, ConditionKind::Reference { .. }),
@@ -276,6 +363,17 @@ fn product_reference_forms_stay_literal_nodes() {
     assert!(matches!(
         condition("tool:Bash", &c).kind,
         ConditionKind::Match { .. }
+    ));
+    // Without a declaration, a product prefix is not a reference.
+    let mut bare = support::polylogue();
+    bare.references.clear();
+    assert!(!matches!(
+        condition("self", &bare).kind,
+        ConditionKind::Reference { .. }
+    ));
+    assert!(matches!(
+        condition("@3", &bare).kind,
+        ConditionKind::Reference { .. }
     ));
 }
 
@@ -299,7 +397,9 @@ fn custom_unknown_words_are_unknown_unless_quoted() {
                 value: Value::Unknown,
                 ..
             } | ConditionKind::Compare {
-                value: Value::Unknown,
+                right: Expression::Value {
+                    value: Value::Unknown
+                },
                 ..
             }
         ));
@@ -311,29 +411,6 @@ fn custom_unknown_words_are_unknown_unless_quoted() {
             ..
         }
     ));
-}
-#[test]
-fn command_suggestions_survive_command_dispatch() {
-    let catalog = support::sinex();
-    let error = parse("reltaed reference", &catalog).unwrap_err();
-    assert_eq!(error.suggestion.as_deref(), Some("related reference"));
-    assert_eq!(
-        parse(error.suggestion.as_deref().unwrap(), &catalog)
-            .unwrap_err()
-            .kind,
-        ErrorKind::NotAQuery
-    );
-}
-#[test]
-fn recall_last_binds_its_own_unit() {
-    let c = support::sinex();
-    let q = parse("recall last where cwds ^ \"/src/demo (notes)\"", &c).unwrap();
-    assert!(
-        matches!(q.source,Source::RecallLast{unit,condition:Some(_)} if unit=="shell-sessions")
-    );
-    let c = support::mixed();
-    let q = parse("recall last where cwds ^ /src/demo", &c).unwrap();
-    assert_eq!(q.namespaces().into_iter().collect::<Vec<_>>(), ["sx"]);
 }
 
 #[test]

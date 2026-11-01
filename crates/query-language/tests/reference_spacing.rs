@@ -93,7 +93,7 @@ fn reference_colon_spacing_preserves_identity_and_canonical_format() {
 #[test]
 fn declared_builtin_names_are_case_insensitive_but_fields_and_text_are_exact() {
     let catalog = catalog();
-    for name in KEY_FUNCTIONS {
+    for name in FUNCTIONS {
         let lower = parse(&format!("events | group by {name}(when)"), &catalog).unwrap();
         let upper = parse(
             &format!("events | group by {}(when)", name.to_uppercase()),

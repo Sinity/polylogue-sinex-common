@@ -54,7 +54,7 @@ fn query(conditions: Vec<Condition>) -> Query {
             }),
         },
         attach: vec![],
-        stages: vec![],
+        transforms: vec![],
     }
 }
 #[test]
@@ -82,9 +82,9 @@ fn normal_form_ignores_spans_and_commutative_order() {
 fn selection_and_parameter_types_change_identity() {
     let a = query(vec![condition("source", "alpha", 0)]);
     let mut b = a.clone();
-    b.stages.push(Stage {
+    b.transforms.push(Transform {
         span: Span::default(),
-        kind: StageKind::Limit { count: 2 },
+        kind: TransformKind::Limit { count: 2 },
     });
     assert_ne!(
         question_id(&a, &catalog(), &BTreeMap::new()).unwrap(),
@@ -150,31 +150,32 @@ fn scalar_spelling_is_canonical_only_for_declared_numeric_types() {
 #[test]
 fn numeric_group_columns_canonicalize_in_the_result_relation() {
     let mut a = query(vec![]);
-    a.stages = vec![
-        Stage {
+    a.transforms = vec![
+        Transform {
             span: Span::default(),
-            kind: StageKind::Group {
-                keys: vec![Operand::field("source")],
+            kind: TransformKind::Group {
+                keys: vec![Column::field("source")],
             },
         },
-        Stage {
+        Transform {
             span: Span::default(),
-            kind: StageKind::Aggregate {
+            kind: TransformKind::Aggregate {
                 aggregates: vec![Aggregate {
                     function: AggregateFunction::Sum,
-                    fields: vec!["cost".into()],
+                    arguments: vec![Expression::field("cost")],
+                    name: None,
                 }],
             },
         },
-        Stage {
+        Transform {
             span: Span::default(),
-            kind: StageKind::Where {
+            kind: TransformKind::Where {
                 condition: condition("sum_cost", "2.90", 0),
             },
         },
     ];
     let mut b = a.clone();
-    if let StageKind::Where { condition: c } = &mut b.stages[2].kind {
+    if let TransformKind::Where { condition: c } = &mut b.transforms[2].kind {
         c.kind = ConditionKind::Match {
             field: "sum_cost".into(),
             value: Value::scalar("2.9usd"),
@@ -202,13 +203,15 @@ fn duration_gap_spellings_and_catalog_unknown_words_share_identity() {
                         condition("source", "beta", 1),
                     ],
                     gaps: vec![Gap::Within {
-                        duration: Value::scalar(duration),
+                        distance: Distance::Time {
+                            duration: Value::scalar(duration),
+                        },
                     }],
                 },
             }),
         },
         attach: vec![],
-        stages: vec![],
+        transforms: vec![],
     };
     assert_eq!(
         normal_form(&sequence("1.5s"), &catalog()).unwrap(),
@@ -231,7 +234,7 @@ fn duration_gap_spellings_and_catalog_unknown_words_share_identity() {
 fn stored_normal_form_has_feature_independent_canonical_bytes() {
     let q = query(vec![condition("source", "alpha", 42)]);
     let form = normal_form(&q, &catalog()).unwrap();
-    let expected = r#"{"attach":[],"source":{"condition":{"kind":{"field":"source","kind":"match","value":{"kind":"scalar","text":"alpha"}}},"kind":"unit","unit":"events"},"stages":[]}"#;
+    let expected = r#"{"attach":[],"source":{"condition":{"kind":{"field":"source","kind":"match","value":{"kind":"scalar","text":"alpha"}}},"kind":"unit","unit":"events"},"transforms":[]}"#;
     assert_eq!(serde_json::to_string(&form).unwrap(), expected);
     // This exact independent byte oracle is also exercised with preserve_order
     // enabled, as it is in product feature unions.

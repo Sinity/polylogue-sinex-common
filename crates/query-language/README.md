@@ -189,7 +189,7 @@ Four operators, each with one meaning in both products:
 | `fill` | after a time-bucketed group: every bucket of a finite range, each with the product's coverage state for it (below) |
 | `fields F [as N], E as N, …` | projection and computed columns |
 | `with CHILD(fields)[cond, first:k\|last:k]` | attached child lists; never changes the parents |
-| `matches` | one row per `exists` or `seq` match, with `match`, `step` and a reference to the matched row, whose fields are reached through `step.` |
+| `matches` | one row per step of each match of the relation's one top-level `exists` or `seq`: `parent` (the row that matched), `match` (its number within the parent), `position` (the step's place in the match), `step` (a reference to the matched row) and the step row's fields as `step.F`. Zero qualifiers are refused and two are ambiguous; a saved or kept source hides its own, so `matches` follows the `exists` or `seq` it expands |
 | `UNIT [where C]` | switch to the related rows of another unit (`messages … \| sessions` lifts to the containing sessions) |
 | `union (Q)`, `intersect (Q)`, `except (Q)` | set algebra over one unit, or over identical projected schemas |
 | `fuse (Q)` | adds Q's order as one more ranked list without adding rows |
@@ -226,9 +226,13 @@ DISTANCE := DURATION | N steps
   matching pair; the change of grain shows in the query and in its reading.
 - **Steps** count positions in a unit's declared **order scope**: the
   sequence its rows have steps in (Polylogue's session timeline of messages
-  and tool calls; a Sinex shell session's commands). `before(Q) within 1 step`
-  is "immediately preceded by", and `next.` and `previous.` are the one-step
-  relations as fields. Steps never cross a scope instance.
+  and tool calls; a Sinex shell session's commands), set in
+  `Unit.order_scope`; units naming one scope interleave. `before(Q)` keeps
+  the rows earlier than a Q row and `after(Q)` the rows later than one, so
+  `before(Q) within 1 step` is "immediately followed by a Q row", and `next.`
+  and `previous.` are the one-step relations as fields. Steps never cross a
+  scope instance or an order scope; steps with `during`, `containing` or `at`
+  are refused, as is a unit without an order scope. `near` needs a distance.
 - **Time** distance crosses scopes, units and products. Spans are
   half-open; a point inside a span is distinct from two spans overlapping.
 - `seq` stays for an ordered pattern of three or more steps; its steps may be
@@ -250,7 +254,8 @@ scoring criteria, to rank order items"
   `invalid_query` with the reason.
 - **Fusion.** One n-ary reciprocal-rank fusion: a row's score is the sum,
   over the lists that rank it, of 1/(60 + rank) (Cormack, Clarke and
-  Büttcher 2009). Ties go to the more recent row, then to identity. k = 60 is
+  Büttcher 2009), computed in `f64` with the largest contribution first, so
+  two rows with the same ranks in different lists tie exactly. Ties go to the more recent row, then to identity. k = 60 is
   a declared constant shown in the row explanation, not a setting.
 - **Exact early stop.** Fusion reads the lists one depth at a time. After
   depth d an unseen row's best possible score is the sum over lists of
@@ -306,6 +311,24 @@ so a compiler never reconstructs types from names. Binding, formatting,
 identity and completion all read one catalog snapshot, and no provider call
 or I/O runs inside parsing, binding or deserialisation.
 
+## References and catalog declarations
+
+A reference is one literal node and, as a condition, means "this row". The
+language's own forms need no declaration: `query:`, `result:`, `answer:<id>`,
+`@last` and `@N`. Every other form is declared in the catalog's
+`references`: a prefix with an optional marker that tells a reference from a
+field with the same prefix (`tool:Bash` is a field, `tool:s#c` a call), a
+whole word (`self`, `last`, `here`) or a bare hexadecimal identifier of a
+minimum length. `sinex:` and `polylogue:` are global prefixes each product
+declares.
+
+A product's functions are declared in `functions` (name, arity, result kind)
+beside the built-in ones. Its transforms and atoms are extensions declared
+with typed slots (`Keyword`, `Value`, `Name`, `Field`, `Unit`, `Condition`,
+`Query`, `Expression`, `Optional`, `List`); Polylogue's `measure` is a
+`List(Value)` of selectors and an optional `by` with a `List(Expression)` of
+keys. A unit has one name and no aliases.
+
 ## Errors
 
 Every error carries `kind`, `message`, `position` (a byte offset, printed
@@ -314,11 +337,18 @@ runs as given, whenever one can be formed), `candidates`, `hint` and
 `retryable`. The language's kinds are `invalid_query`, `unknown_field`,
 `bad_value`, `not_a_query`, `ambiguous`, `stale_cursor`, `not_yet_available`
 and `not_configured`; a compiler may add its own. A language error becomes a
-command-surface failure in one conversion, here, with one exit code and HTTP
-status per kind
+command-surface failure in one conversion, `Failure::from(query_language::Error)`
+in command-surface (this crate stays pure and depends on neither), with one
+exit code and HTTP status per kind
 ([failure table](../command-surface/README.md#failures-and-exit-codes)).
 
-- An unknown field's `candidates` are the unit's nearest field names.
+- An unknown field's, unit's or transform's `candidates` are the nearest
+  known names (Damerau–Levenshtein distance 1 for names of four to six
+  letters, 2 for longer ones), the nearest first; a closed-set refusal's are
+  the set's values. `parse` offers a suggestion only once it parses.
+- Former spellings are refused with the one spelling as the suggestion:
+  a clause without `|`, `F = [a, b]`, `F exists`, `sum:F`, a lowercase
+  boolean, `[within:D]`, a ranking atom under a top-level `OR`.
 - At the end of an otherwise complete parenthesised condition, a missing
   closing parenthesis offers the balanced query. Quoted parentheses remain
   data; incomplete operands and random seeds never receive invented values.
@@ -492,6 +522,10 @@ compiler; each product also runs its own laws. The reference evaluator, a
 synthetic-row oracle, is the independent answer for relational mechanics,
 order relations, ranking and federation; it refuses storage, time-bucket and
 extension mechanics that need a product.
+
+Stored keys carry the scope `ql.` with dots for the area: `order-semijoin`
+is stored as `ql.order.semijoin`, `three-valued-filters` as
+`ql.filter.three-valued`.
 
 Language:
 

@@ -2,10 +2,10 @@
 //!
 //! These owned facts describe the language's declared types. Products retain
 //! physical types (for example filesystem paths and refined JSON schemas) and
-//! propagate them through the declared origins; they do not infer stages again.
+//! propagate them through the declared origins; they do not infer transforms again.
 use crate::{
-    ast::{AggregateFunction, TemporalRelation},
-    catalog::{Field, OutputSource},
+    ast::{AggregateFunction, Arithmetic},
+    catalog::{Field, FieldKind, OutputSource},
 };
 use std::sync::Arc;
 
@@ -38,11 +38,6 @@ pub enum TypeRule {
     Fixed,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TemporalOutput {
-    Match,
-    Offset,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Origin {
     Catalog {
         unit: String,
@@ -51,10 +46,6 @@ pub enum Origin {
     Output {
         source: OutputSource,
         field: String,
-    },
-    /// The exact product-declared projection selected by shared binding.
-    Matches {
-        source: crate::catalog::MatchSource,
     },
     Group {
         operand: NodePath,
@@ -71,11 +62,9 @@ pub enum Origin {
         inputs: Vec<FieldInfo>,
         rule: TypeRule,
     },
-    Temporal {
-        query: NodePath,
-        relation: TemporalRelation,
-        output: TemporalOutput,
-        all: bool,
+    /// A field of an order relation's or join's inner row, reached as `match.F`.
+    Matched {
+        input: Box<FieldInfo>,
     },
     Generated,
 }
@@ -96,7 +85,7 @@ impl Scope {
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StageScope {
+pub struct TransformScope {
     pub before: Scope,
     pub after: Scope,
 }
@@ -104,7 +93,7 @@ pub struct StageScope {
 pub struct QueryScope {
     pub path: NodePath,
     pub source: Scope,
-    pub stages: Vec<StageScope>,
+    pub transforms: Vec<TransformScope>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypedOperand {
@@ -132,9 +121,8 @@ impl Typing {
 /// One aggregate type rule shared by parsing and identity normalization.
 pub(crate) fn aggregate_kind(
     function: &AggregateFunction,
-    input: Option<&crate::catalog::FieldKind>,
-) -> (crate::catalog::FieldKind, TypeRule) {
-    use crate::catalog::FieldKind;
+    input: Option<&FieldKind>,
+) -> (FieldKind, TypeRule) {
     match function {
         AggregateFunction::Count | AggregateFunction::CountDistinct => {
             (FieldKind::Integer, TypeRule::Fixed)
@@ -147,18 +135,50 @@ pub(crate) fn aggregate_kind(
             },
             TypeRule::Fixed,
         ),
+        AggregateFunction::Covered => (
+            match input {
+                Some(FieldKind::Time) => FieldKind::Duration,
+                Some(kind) => kind.clone(),
+                None => FieldKind::Number,
+            },
+            TypeRule::Fixed,
+        ),
         AggregateFunction::Correlation => (FieldKind::Number, TypeRule::Fixed),
         AggregateFunction::Histogram => (FieldKind::Json, TypeRule::Fixed),
         _ => (input.cloned().unwrap_or(FieldKind::Number), TypeRule::Input),
     }
 }
-pub(crate) fn function_kind(name: &str) -> crate::catalog::FieldKind {
-    use crate::catalog::FieldKind;
-    match name {
-        "day" | "week" | "month" => FieldKind::Time,
-        "hour" => FieldKind::Integer,
-        "weekday" | "month_day" | "program" | "fingerprint" => FieldKind::Text,
-        "random" => FieldKind::Number,
-        _ => FieldKind::Json,
+/// The dimension of arithmetic over two kinds, or None when the dimensions do
+/// not combine (money plus a duration, text times anything). A time minus a
+/// time is a duration; money divided by a count is money. An undeclared
+/// document value (`Json`) takes part and stays undeclared, for the product
+/// to check against its physical type.
+pub fn arithmetic_kind(
+    operator: Arithmetic,
+    left: &FieldKind,
+    right: &FieldKind,
+) -> Option<FieldKind> {
+    use FieldKind::*;
+    let number = |k: &FieldKind| matches!(k, Integer | Number);
+    if matches!(left, Json) || matches!(right, Json) {
+        let usable = |k: &FieldKind| matches!(k, Json | Integer | Number | Money | Time | Duration);
+        return (usable(left) && usable(right)).then_some(Json);
     }
+    Some(match (operator, left, right) {
+        (_, Integer, Integer) if operator != Arithmetic::Divide => Integer,
+        (_, l, r) if number(l) && number(r) => Number,
+        (Arithmetic::Add, Time, Duration) | (Arithmetic::Add, Duration, Time) => Time,
+        (Arithmetic::Subtract, Time, Duration) => Time,
+        (Arithmetic::Subtract, Time, Time) => Duration,
+        (Arithmetic::Add | Arithmetic::Subtract, Duration, Duration) => Duration,
+        (Arithmetic::Add | Arithmetic::Subtract, Money, Money) => Money,
+        (Arithmetic::Multiply, Money, n) | (Arithmetic::Multiply, n, Money) if number(n) => Money,
+        (Arithmetic::Multiply, Duration, n) | (Arithmetic::Multiply, n, Duration) if number(n) => {
+            Duration
+        }
+        (Arithmetic::Divide, Money, n) if number(n) => Money,
+        (Arithmetic::Divide, Duration, n) if number(n) => Duration,
+        (Arithmetic::Divide, Money, Money) | (Arithmetic::Divide, Duration, Duration) => Number,
+        _ => return None,
+    })
 }

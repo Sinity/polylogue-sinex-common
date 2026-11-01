@@ -1,7 +1,7 @@
 mod support;
 use jiff::{Timestamp, civil::Time as CivilTime, tz::TimeZone};
 use query_language::{
-    ast::{ConditionKind, Operand, Query, Source, Value},
+    ast::{ConditionKind, Query, Source, Value},
     format::format_query,
     identity::{normal_form, question_id},
     parse::parse,
@@ -37,12 +37,12 @@ fn both_catalogs_preserve_keyword_and_colon_bounds_as_typed_nodes() {
                     normal_form(&keyword_query, &catalog).unwrap(),
                     normal_form(&colon_query, &catalog).unwrap()
                 );
-                let (operand, parsed_value) = match (until, condition(&keyword_query)) {
-                    (false, ConditionKind::Since { operand, value })
-                    | (true, ConditionKind::Until { operand, value }) => (operand, value),
+                let (field, parsed_value) = match (until, condition(&keyword_query)) {
+                    (false, ConditionKind::Since { field, value })
+                    | (true, ConditionKind::Until { field, value }) => (field, value),
                     (_, other) => panic!("bound lost its operation: {other:?}"),
                 };
-                assert_eq!(operand, &Operand::field(main_time));
+                assert_eq!(field, main_time);
                 assert!(matches!(parsed_value, Value::Scalar { .. }));
                 let rendered = format_query(&colon_query, &catalog).unwrap();
                 assert!(rendered.contains(&format!("{keyword} ")));
@@ -76,8 +76,8 @@ fn bound_identity_is_distinct_from_explicit_comparison_and_survives_serde() {
         let decoded: Query = serde_json::from_value(serde_json::to_value(&bound).unwrap()).unwrap();
         assert_eq!(decoded, bound);
     }
-    let a = parse("events until 2026-10-05T12:00Z", &catalog).unwrap();
-    let b = parse("events until 2026-10-05T14:00+02:00", &catalog).unwrap();
+    let a = parse("events where until 2026-10-05T12:00Z", &catalog).unwrap();
+    let b = parse("events where until 2026-10-05T14:00+02:00", &catalog).unwrap();
     assert_eq!(
         question_id(&a, &catalog, &BTreeMap::new()).unwrap(),
         question_id(&b, &catalog, &BTreeMap::new()).unwrap()
@@ -129,10 +129,10 @@ fn bounds_keep_unit_visitors_and_formatter_field_bindings() {
         ..
     } = &mut invalid.source
     {
-        let ConditionKind::Since { operand, .. } = &mut condition.kind else {
+        let ConditionKind::Since { field, .. } = &mut condition.kind else {
             panic!("expected since")
         };
-        *operand = Operand::field("id");
+        *field = "id".into();
     }
     assert!(format_query(&invalid, &catalog).is_err());
     let sinex = support::sinex();

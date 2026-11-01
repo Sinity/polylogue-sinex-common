@@ -1,4 +1,6 @@
 use query_language::ast::*;
+use query_language::catalog::NaturalMatch;
+use query_language::coverage::Coverage;
 use query_language::cursor::{PageRequest, SealedCursor};
 use query_language::laws::{self, Compiler, Executor, Page, Vocabulary};
 use query_language::semantics::*;
@@ -15,12 +17,12 @@ fn condition(kind: ConditionKind) -> Condition {
 }
 fn comparison(field: &str, op: Op, value: &str) -> Condition {
     condition(ConditionKind::Compare {
-        operand: Operand::field(field),
+        left: Expression::field(field),
         op,
-        value: Value::scalar(value),
+        right: Expression::value(Value::scalar(value)),
     })
 }
-fn query(unit: &str, stages: Vec<StageKind>) -> Query {
+fn query(unit: &str, transforms: Vec<TransformKind>) -> Query {
     Query {
         source: Source::Unit {
             unit: unit.into(),
@@ -28,14 +30,26 @@ fn query(unit: &str, stages: Vec<StageKind>) -> Query {
             condition: None,
         },
         attach: vec![],
-        stages: stages
+        transforms: transforms
             .into_iter()
-            .map(|kind| Stage {
+            .map(|kind| Transform {
                 span: Span::default(),
                 kind,
             })
             .collect(),
     }
+}
+fn filtered(unit: &str, c: Condition, transforms: Vec<TransformKind>) -> Query {
+    let mut q = query(unit, transforms);
+    q.source = Source::Unit {
+        unit: unit.into(),
+        implicit: false,
+        condition: Some(c),
+    };
+    q
+}
+fn ids(answer: &Answer) -> Vec<&str> {
+    answer.rows.iter().map(|row| row.id.as_str()).collect()
 }
 
 #[test]
@@ -141,7 +155,7 @@ impl Executor<Query> for Reference {
         data: &Dataset,
         request: &PageRequest,
     ) -> Result<Page, Error> {
-        let answer = ReferenceEvaluator { data }.execute(query)?;
+        let answer = ReferenceEvaluator::new(data).execute(query)?;
         let sliced = page(
             &answer,
             request.cursor.as_ref().map(SealedCursor::as_str),
@@ -169,6 +183,7 @@ fn compiler_laws_run_against_both_product_vocabularies() {
                 outer: "sessions".into(),
                 children: "tool_calls".into(),
                 number: "cost".into(),
+                end: "tree_cost".into(),
                 category: "origin".into(),
             },
         ),
@@ -178,6 +193,7 @@ fn compiler_laws_run_against_both_product_vocabularies() {
                 outer: "events".into(),
                 children: "commands".into(),
                 number: "commit_seq".into(),
+                end: "offset".into(),
                 category: "source".into(),
             },
         ),
@@ -191,11 +207,9 @@ fn compiler_laws_run_against_both_product_vocabularies() {
         let parsed = query_language::parse::parse(&text, &catalog).unwrap();
         let cases = laws::cases(&vocabulary);
         assert_eq!(
-            ReferenceEvaluator {
-                data: &cases[0].fixture
-            }
-            .execute(&parsed)
-            .unwrap(),
+            ReferenceEvaluator::new(&cases[0].fixture)
+                .execute(&parsed)
+                .unwrap(),
             cases[0].expected
         );
         let failures = laws::check(&Reference, &mut Reference, &laws::cases(&vocabulary));
@@ -223,13 +237,15 @@ fn law_harness_detects_a_backend_that_ignores_filters_and_paging() {
         &laws::cases(&Vocabulary::default()),
     );
     for expected in [
-        "filter-composition",
-        "three-valued-filters",
-        "grouped-rows-are-a-relation",
-        "nearest-rank",
-        "page-is-not-the-answer",
-        "sequence-match-order-independent",
-        "join-match-order-independent",
+        "ql.filter.composition",
+        "ql.filter.three-valued",
+        "ql.group.relation",
+        "ql.aggregate.nearest-rank",
+        "ql.page-not-answer",
+        "ql.match-order",
+        "ql.order.join-grain",
+        "ql.diff.watch",
+        "ql.covered",
     ] {
         assert!(failures.iter().any(|v| v.law == expected), "{expected}");
     }
@@ -251,11 +267,15 @@ fn unknown_only_aggregate_stays_unknown_with_known_count_zero() {
     .into_iter()
     .map(|function| Aggregate {
         function,
-        fields: vec!["value".into()],
+        arguments: vec![Expression::field("value")],
+        name: None,
     })
     .collect();
-    let answer = ReferenceEvaluator { data: &data }
-        .execute(&query("rows", vec![StageKind::Aggregate { aggregates }]))
+    let answer = ReferenceEvaluator::new(&data)
+        .execute(&query(
+            "rows",
+            vec![TransformKind::Aggregate { aggregates }],
+        ))
         .unwrap();
     for column in [
         "sum_value",
@@ -275,7 +295,7 @@ fn exists_has_three_values_while_count_is_always_known() {
     let mut unknown = Row::new("u");
     unknown.parent = Some("p".into());
     let data = BTreeMap::from([("children".into(), vec![unknown])]);
-    let evaluator = ReferenceEvaluator { data: &data };
+    let evaluator = ReferenceEvaluator::new(&data);
     let test = comparison("n", Op::Eq, "0");
     let exists = condition(ConditionKind::Exists {
         unit: "children".into(),
@@ -317,7 +337,7 @@ fn sequence_all_and_next_use_occurrence_order_not_provider_time() {
             children.reverse();
         }
         let data = BTreeMap::from([("children".into(), children.clone())]);
-        let evaluator = ReferenceEvaluator { data: &data };
+        let evaluator = ReferenceEvaluator::new(&data);
         let steps = [comparison("n", Op::Eq, "1"), comparison("n", Op::Eq, "2")];
         assert_eq!(
             evaluator
@@ -342,7 +362,9 @@ fn sequence_all_and_next_use_occurrence_order_not_provider_time() {
                     true,
                     &steps,
                     &[Gap::Within {
-                        duration: Value::scalar("100")
+                        distance: Distance::Time {
+                            duration: Value::scalar("100")
+                        }
                     }]
                 )
                 .unwrap()
@@ -353,20 +375,20 @@ fn sequence_all_and_next_use_occurrence_order_not_provider_time() {
 #[test]
 fn unsupported_product_mechanics_are_positioned_refusals() {
     let data = BTreeMap::from([("rows".into(), vec![Row::new("a")])]);
-    let evaluator = ReferenceEvaluator { data: &data };
-    for stage in [
-        StageKind::Fill,
-        StageKind::AsOf {
+    let evaluator = ReferenceEvaluator::new(&data);
+    for transform in [
+        TransformKind::Fill,
+        TransformKind::AsOf {
             value: Value::scalar("1"),
             sequence: false,
         },
-        StageKind::Extension {
+        TransformKind::Extension {
             name: "extension".into(),
             arguments: vec![],
         },
     ] {
-        let mut q = query("rows", vec![stage]);
-        q.stages[0].span.start = 17;
+        let mut q = query("rows", vec![transform]);
+        q.transforms[0].span.start = 17;
         let error = evaluator.execute(&q).unwrap_err();
         assert_eq!(error.kind, ErrorKind::InvalidQuery);
         assert_eq!(error.position, 17);
@@ -379,15 +401,15 @@ fn membership_ignores_unknown_right_and_keeps_unknown_left_unknown() {
         "rows".into(),
         vec![Row::new("u").with("key", Scalar::Unknown)],
     )]);
-    let evaluator = ReferenceEvaluator { data: &data };
+    let evaluator = ReferenceEvaluator::new(&data);
     let q = query(
         "rows",
-        vec![StageKind::Group {
-            keys: vec![Operand::field("key")],
+        vec![TransformKind::Group {
+            keys: vec![Column::field("key")],
         }],
     );
     let c = condition(ConditionKind::In {
-        operand: Operand::field("key"),
+        left: Expression::field("key"),
         query: Box::new(q),
     });
     assert_eq!(
@@ -431,7 +453,7 @@ fn execution_mode_parity_checks_each_supplied_adapter() {
     assert!(
         failures
             .iter()
-            .all(|v| v.law == "execution-mode-parity" && v.detail.starts_with("fixture-http:"))
+            .all(|v| v.law == "ql.mode-parity" && v.detail.starts_with("fixture-http:"))
     );
 }
 
@@ -453,16 +475,20 @@ fn coarse_near_requires_the_whole_period_inside_the_window() {
     let temporal = |window: &str| {
         query(
             "outer",
-            vec![StageKind::Temporal {
-                relation: TemporalRelation::Near,
+            vec![TransformKind::Join {
                 query: Box::new(query("inner", vec![])),
-                at: TimePoint::When,
-                within: Some(Value::scalar(window)),
-                all: false,
+                on: JoinOn::Order {
+                    relation: OrderRelation::Near,
+                    within: Some(Distance::Time {
+                        duration: Value::scalar(window),
+                    }),
+                    at: TimePoint::When,
+                    scope: None,
+                },
             }],
         )
     };
-    let evaluator = ReferenceEvaluator { data: &data };
+    let evaluator = ReferenceEvaluator::new(&data);
     assert_eq!(evaluator.execute(&temporal("24")).unwrap().total, 0);
     assert_eq!(
         evaluator.execute(&temporal("46")).unwrap().rows[0].matches,
@@ -471,21 +497,19 @@ fn coarse_near_requires_the_whole_period_inside_the_window() {
 }
 #[test]
 fn empty_outer_relation_does_not_hide_unsupported_nested_membership() {
-    let mut inner = query("inner", vec![StageKind::Fill]);
-    inner.stages[0].span.start = 23;
+    let mut inner = query("inner", vec![TransformKind::Fill]);
+    inner.transforms[0].span.start = 23;
     let mut outer = query("outer", vec![]);
     outer.source = Source::Unit {
         unit: "outer".into(),
         implicit: false,
         condition: Some(condition(ConditionKind::In {
-            operand: Operand::field("key"),
+            left: Expression::field("key"),
             query: Box::new(inner),
         })),
     };
     let data = BTreeMap::from([("outer".into(), vec![]), ("inner".into(), vec![])]);
-    let error = ReferenceEvaluator { data: &data }
-        .execute(&outer)
-        .unwrap_err();
+    let error = ReferenceEvaluator::new(&data).execute(&outer).unwrap_err();
     assert_eq!(error.position, 23);
     assert!(error.message.contains("product adapter"));
 }
@@ -495,23 +519,24 @@ fn nonfinite_singletons_refuse_in_sort_and_aggregate() {
         "rows".into(),
         vec![Row::new("a").with("value", f64::INFINITY)],
     )]);
-    for stage in [
-        StageKind::Sort {
+    for transform in [
+        TransformKind::Sort {
             keys: vec![SortKey {
-                operand: Operand::field("value"),
+                expression: Expression::field("value"),
                 descending: false,
             }],
         },
-        StageKind::Aggregate {
+        TransformKind::Aggregate {
             aggregates: vec![Aggregate {
                 function: AggregateFunction::Sum,
-                fields: vec!["value".into()],
+                arguments: vec![Expression::field("value")],
+                name: None,
             }],
         },
     ] {
         assert_eq!(
-            ReferenceEvaluator { data: &data }
-                .execute(&query("rows", vec![stage]))
+            ReferenceEvaluator::new(&data)
+                .execute(&query("rows", vec![transform]))
                 .unwrap_err()
                 .kind,
             ErrorKind::BadValue
@@ -533,11 +558,19 @@ macro_rules! compiler_law {
         }
     };
 }
-compiler_law!(filter_composition, "filter-composition");
-compiler_law!(three_valued_filters, "three-valued-filters");
-compiler_law!(grouped_rows_are_a_relation, "grouped-rows-are-a-relation");
-compiler_law!(match_order_independent, "join-match-order-independent");
-compiler_law!(page_is_not_the_answer, "page-is-not-the-answer");
+compiler_law!(filter_composition, "ql.filter.composition");
+compiler_law!(filter_three_valued, "ql.filter.three-valued");
+compiler_law!(group_relation, "ql.group.relation");
+compiler_law!(match_order, "ql.match-order");
+compiler_law!(page_not_answer, "ql.page-not-answer");
+compiler_law!(order_semijoin, "ql.order.semijoin");
+compiler_law!(order_join_grain, "ql.order.join-grain");
+compiler_law!(order_steps, "ql.order.steps");
+compiler_law!(diff_watch, "ql.diff.watch");
+compiler_law!(covered, "ql.covered");
+compiler_law!(rank_unranked_kept, "ql.rank.unranked-kept");
+compiler_law!(expr_unknown, "ql.expr.unknown");
+compiler_law!(match_natural, "ql.match.natural");
 
 #[test]
 fn parsed_grouped_implicit_count_can_filter_and_sort_in_both_catalogs() {
@@ -558,7 +591,7 @@ fn parsed_grouped_implicit_count_can_filter_and_sort_in_both_catalogs() {
             &catalog,
         )
         .unwrap();
-        let answer = ReferenceEvaluator { data: &data }.execute(&parsed).unwrap();
+        let answer = ReferenceEvaluator::new(&data).execute(&parsed).unwrap();
         assert_eq!(answer.rows.len(), 1);
         assert_eq!(answer.rows[0].value(field), Scalar::Text("same".into()));
         assert_eq!(answer.rows[0].value("count"), Scalar::Number(2.));
@@ -570,4 +603,332 @@ fn parsed_grouped_implicit_count_can_filter_and_sort_in_both_catalogs() {
             .is_err()
         );
     }
+}
+
+#[test]
+fn natural_matches_follow_the_declared_kind() {
+    let row = Row::new("r")
+        .with("title", "Fix the Parser")
+        .with("cwd", "/src/demo/crate")
+        .with("text", "the tests pass now");
+    let data = Dataset::new();
+    let evaluator = ReferenceEvaluator::new(&data)
+        .with_natural("title", NaturalMatch::Contains)
+        .with_natural("cwd", NaturalMatch::Subtree)
+        .with_natural("text", NaturalMatch::Words);
+    let natural = |field: &str, value: &str| {
+        evaluator
+            .condition(
+                &row,
+                &condition(ConditionKind::Match {
+                    field: field.into(),
+                    value: Value::scalar(value),
+                }),
+            )
+            .unwrap()
+    };
+    assert_eq!(natural("title", "parser"), Truth::True);
+    assert_eq!(natural("cwd", "/src/demo"), Truth::True);
+    assert_eq!(natural("cwd", "/src/dem"), Truth::False, "whole components");
+    assert_eq!(natural("text", "pass"), Truth::True);
+    assert_eq!(natural("text", "pas"), Truth::False, "whole words");
+    // `^` on a path field means "is or lies under".
+    let under = condition(ConditionKind::Compare {
+        left: Expression::field("cwd"),
+        op: Op::Prefix,
+        right: Expression::value(Value::scalar("/src/dem")),
+    });
+    assert_eq!(evaluator.condition(&row, &under).unwrap(), Truth::False);
+    // `~` is a case-insensitive substring on any text.
+    let contains = condition(ConditionKind::Compare {
+        left: Expression::field("title"),
+        op: Op::Contains,
+        right: Expression::value(Value::scalar("PARSER")),
+    });
+    assert_eq!(evaluator.condition(&row, &contains).unwrap(), Truth::True);
+}
+
+#[test]
+fn key_joins_pair_equal_exact_keys_and_skip_unknown_keys() {
+    let data = BTreeMap::from([
+        (
+            "calls".to_string(),
+            vec![
+                Row::new("c1").with("commit", "abc"),
+                Row::new("c2").with("commit", Scalar::Unknown),
+                Row::new("c3").with("commit", "zzz"),
+            ],
+        ),
+        (
+            "commits".to_string(),
+            vec![
+                Row::new("k2").with("hash", "abc").with("repo", "two"),
+                Row::new("k1").with("hash", "abc").with("repo", "one"),
+            ],
+        ),
+    ]);
+    let joined = ReferenceEvaluator::new(&data)
+        .execute(&query(
+            "calls",
+            vec![TransformKind::Join {
+                query: Box::new(query("commits", vec![])),
+                on: JoinOn::Key {
+                    left: "commit".into(),
+                    right: "hash".into(),
+                },
+            }],
+        ))
+        .unwrap();
+    assert_eq!(ids(&joined), ["c1:k1", "c1:k2"]);
+    assert_eq!(joined.rows[0].value("match.repo"), Scalar::from("one"));
+    assert_eq!(joined.rows[0].value("offset"), Scalar::Unknown);
+}
+
+#[test]
+fn matches_expand_exists_into_one_row_per_matched_child() {
+    let mut children = vec![];
+    for (id, n) in [("x", 1.), ("y", 2.), ("z", 1.)] {
+        let mut row = Row::new(id).with("n", n);
+        row.parent = Some("p".into());
+        children.push(row);
+    }
+    let data = BTreeMap::from([
+        ("rows".to_string(), vec![Row::new("p"), Row::new("q")]),
+        ("children".to_string(), children),
+    ]);
+    let exists = condition(ConditionKind::Exists {
+        unit: "children".into(),
+        condition: Some(Box::new(comparison("n", Op::Eq, "1"))),
+    });
+    let answer = ReferenceEvaluator::new(&data)
+        .execute(&filtered("rows", exists, vec![TransformKind::Matches]))
+        .unwrap();
+    assert_eq!(ids(&answer), ["p:match:1:1", "p:match:2:1"]);
+    assert_eq!(answer.rows[1].value("step"), Scalar::from("z"));
+    assert_eq!(answer.rows[1].value("match"), Scalar::Number(2.));
+    assert_eq!(answer.rows[1].value("position"), Scalar::Number(1.));
+    assert_eq!(answer.rows[1].value("step.n"), Scalar::Number(1.));
+    assert_eq!(answer.rows[1].value("parent"), Scalar::from("p"));
+    // A relation with two qualifiers has no single expansion.
+    let two = condition(ConditionKind::And {
+        conditions: vec![
+            condition(ConditionKind::Exists {
+                unit: "children".into(),
+                condition: None,
+            }),
+            condition(ConditionKind::Exists {
+                unit: "children".into(),
+                condition: None,
+            }),
+        ],
+    });
+    assert!(
+        ReferenceEvaluator::new(&data)
+            .execute(&filtered("rows", two, vec![TransformKind::Matches]))
+            .is_err()
+    );
+}
+
+/// Law `ql.order.steps`: steps never cross a scope instance, and `within 1
+/// step` before a row is the row whose next row matched.
+#[test]
+fn steps_stay_inside_one_scope_instance() {
+    let mut rows = vec![];
+    for (id, parent, order, kind) in [
+        ("a1", "s1", 0, "edit"),
+        ("a2", "s1", 1, "test"),
+        ("a3", "s1", 2, "edit"),
+        ("b1", "s2", 0, "test"),
+        ("b2", "s2", 1, "edit"),
+    ] {
+        let mut row = Row::new(id).with("kind", kind);
+        row.parent = Some(parent.into());
+        row.order = order;
+        rows.push(row);
+    }
+    let data = BTreeMap::from([("calls".to_string(), rows)]);
+    let evaluator = ReferenceEvaluator::new(&data);
+    let before = |count: u64| {
+        filtered(
+            "calls",
+            condition(ConditionKind::Order {
+                relation: OrderRelation::Before,
+                query: Box::new(filtered(
+                    "calls",
+                    comparison("kind", Op::Eq, "test"),
+                    vec![],
+                )),
+                within: Some(Distance::Steps { count }),
+                at: TimePoint::When,
+                scope: None,
+            }),
+            vec![],
+        )
+    };
+    assert_eq!(ids(&evaluator.execute(&before(1)).unwrap()), ["a1"]);
+    let next = filtered("calls", comparison("next.kind", Op::Eq, "test"), vec![]);
+    assert_eq!(ids(&evaluator.execute(&next).unwrap()), ["a1"]);
+    // b1 is a test, but in another session: a3 is never "before" it.
+    assert_eq!(ids(&evaluator.execute(&before(5)).unwrap()), ["a1"]);
+    let joined = evaluator
+        .execute(&query(
+            "calls",
+            vec![TransformKind::Join {
+                query: Box::new(filtered(
+                    "calls",
+                    comparison("kind", Op::Eq, "test"),
+                    vec![],
+                )),
+                on: JoinOn::Order {
+                    relation: OrderRelation::Near,
+                    within: Some(Distance::Steps { count: 1 }),
+                    at: TimePoint::When,
+                    scope: None,
+                },
+            }],
+        ))
+        .unwrap();
+    assert_eq!(ids(&joined), ["a1:a2", "a3:a2", "b2:b1"]);
+    assert_eq!(joined.rows[0].value("offset"), Scalar::Number(1.));
+    assert_eq!(joined.rows[1].value("offset"), Scalar::Number(-1.));
+}
+
+#[test]
+fn arithmetic_keeps_unknown_and_a_zero_divisor_is_unknown() {
+    let data = BTreeMap::from([(
+        "rows".to_string(),
+        vec![
+            Row::new("a").with("n", 6.).with("d", 2.),
+            Row::new("b").with("n", 6.).with("d", 0.),
+            Row::new("c").with("n", Scalar::Unknown).with("d", 1.),
+        ],
+    )]);
+    let quotient = Expression::Arithmetic {
+        operator: Arithmetic::Divide,
+        left: Box::new(Expression::field("n")),
+        right: Box::new(Expression::field("d")),
+    };
+    let answer = ReferenceEvaluator::new(&data)
+        .execute(&query(
+            "rows",
+            vec![TransformKind::Fields {
+                columns: vec![Column {
+                    expression: quotient,
+                    name: Some("q".into()),
+                }],
+            }],
+        ))
+        .unwrap();
+    let values: Vec<_> = answer.rows.iter().map(|row| row.value("q")).collect();
+    assert_eq!(
+        values,
+        [Scalar::Number(3.), Scalar::Unknown, Scalar::Unknown]
+    );
+}
+
+#[test]
+fn fill_labels_every_bucket_and_never_reads_missing_as_zero() {
+    let count = Aggregate {
+        function: AggregateFunction::Count,
+        arguments: vec![],
+        name: None,
+    };
+    let average = Aggregate {
+        function: AggregateFunction::Avg,
+        arguments: vec![Expression::field("n")],
+        name: None,
+    };
+    let groups = vec![
+        Row::new("g2")
+            .with("day", "d2")
+            .with("count", 4.)
+            .with("avg_n", 1.5),
+    ];
+    let buckets: Vec<Scalar> = ["d1", "d2", "d3"].into_iter().map(Scalar::from).collect();
+    let filled = fill(
+        &groups,
+        "day",
+        &[count, average],
+        &buckets,
+        |bucket| match bucket {
+            Scalar::Text(day) if day == "d1" => Coverage::Complete,
+            Scalar::Text(day) if day == "d2" => Coverage::Complete,
+            _ => Coverage::Gap {
+                reason: "collector not running".into(),
+            },
+        },
+    );
+    let days: Vec<_> = filled.iter().map(|row| row.value("day")).collect();
+    assert_eq!(days, buckets);
+    assert_eq!(filled[0].value("count"), Scalar::Number(0.));
+    assert_eq!(filled[0].value("avg_n"), Scalar::Unknown);
+    assert_eq!(filled[0].value("coverage"), Scalar::from("complete"));
+    assert_eq!(filled[1].value("count"), Scalar::Number(4.));
+    assert_eq!(filled[2].value("count"), Scalar::Unknown);
+    assert_eq!(filled[2].value("coverage"), Scalar::from("gap"));
+    assert_eq!(
+        filled[2].value("coverage_detail"),
+        Scalar::from("collector not running")
+    );
+    for state in [
+        Coverage::Complete,
+        Coverage::Gap { reason: "r".into() },
+        Coverage::Unknown,
+        Coverage::OutsideSpan,
+        Coverage::NotYet,
+        Coverage::Excluded,
+        Coverage::Unavailable { cause: "c".into() },
+    ] {
+        assert!(Coverage::STATES.contains(&state.state()));
+        let wire = serde_json::to_value(&state).unwrap();
+        assert_eq!(wire["state"], state.state());
+        assert_eq!(serde_json::from_value::<Coverage>(wire).unwrap(), state);
+    }
+}
+
+/// Law `ql.union.fuses-once`: a chain of fuse and union at one level is one
+/// fusion of every list, not a fusion of fusions.
+#[test]
+fn union_fuses_once() {
+    let rows: Vec<_> = ["a", "b", "c", "d", "e"]
+        .into_iter()
+        .map(|id| Row::new(id).with("n", (id.as_bytes()[0] - b'a') as f64))
+        .collect();
+    let data = BTreeMap::from([("rows".to_string(), rows)]);
+    let ranked = |op: Op, value: &str, descending: bool| {
+        Box::new(filtered(
+            "rows",
+            comparison("n", op, value),
+            vec![TransformKind::Sort {
+                keys: vec![SortKey {
+                    expression: Expression::field("n"),
+                    descending,
+                }],
+            }],
+        ))
+    };
+    let chain = filtered(
+        "rows",
+        comparison("n", Op::Lt, "2"),
+        vec![
+            TransformKind::Combine {
+                how: Combination::Fuse,
+                query: ranked(Op::Ge, "0", true),
+            },
+            TransformKind::Combine {
+                how: Combination::Union,
+                query: Box::new(filtered("rows", comparison("n", Op::Eq, "4"), vec![])),
+            },
+            TransformKind::Combine {
+                how: Combination::Fuse,
+                query: ranked(Op::Ge, "0", false),
+            },
+        ],
+    );
+    let answer = ReferenceEvaluator::new(&data).execute(&chain).unwrap();
+    // One fusion of [e d c b a] and [a b c d e] over the rows {a, b, e}:
+    // a and e tie on score (1/61 + 1/65), and the smaller identity wins;
+    // b scores 1/62 + 1/64, which is less.
+    assert_eq!(ids(&answer), ["a", "e", "b"]);
+    assert_eq!(answer.total, 3);
 }
