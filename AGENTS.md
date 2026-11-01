@@ -26,6 +26,10 @@ in both products before changing a shared interface.
   segments; one sync per group; extents committed with the rows that cite
   them; a segment opens at its last committed extent, so a crash never needs a
   repair step.
+- [`authored`](crates/authored/README.md): one header and one set of rules
+  for every record a person or agent writes: currency by the descendant
+  rule, requests placed together or not at all, one uniqueness function for
+  every cardinality, order keys with no precision limit.
 - [`query-language`](crates/query-language/README.md): one surface language, two
   catalogs and two compilers; the language owns the laws that are properties
   of the language and runs them against both catalogs.
