@@ -1000,3 +1000,150 @@ fn rate_limit_counts_actual_handoffs_when_a_revision_lengthens_its_window() {
     let got = host.advance(at(13), &CalendarUtc).deliveries;
     assert_eq!(got[0].decision, passive(PassiveReason::RateLimit));
 }
+#[test]
+fn retracted_current_state_firing_fires_again_on_the_next_tick_while_true() {
+    let mut r = rule();
+    r.live = true;
+    let mut e = evaluator(r.clone(), vec![row("a", at(10), at(10), None)], at(9));
+    let first = advance(&mut e, at(10));
+    assert_eq!(first.len(), 1);
+    let id = first[0].id().to_string();
+    assert!(advance(&mut e, minute(10, 1)).is_empty());
+
+    assert_eq!(
+        e.evaluator.retract(&id, at(10)),
+        Err(EvaluationError("retraction precedes checkpoint".into()))
+    );
+
+    // The retraction applies at its own instant, not at the checkpoint's.
+    e.evaluator.retract(&id, minute(10, 2)).unwrap();
+    let again = advance(&mut e, minute(10, 3));
+    assert_eq!(again.len(), 1);
+    assert_eq!(again[0].id(), id);
+    assert_eq!(again[0].fired.at, minute(10, 2));
+    assert_eq!(again[0].at, minute(10, 2));
+    assert!(advance(&mut e, minute(10, 4)).is_empty());
+
+    // Once the condition has ended, a retraction fires nothing.
+    e.observe(evaluation(
+        &r,
+        minute(10, 5),
+        vec![row("a", at(10), minute(10, 5), Some(minute(10, 5)))],
+    ))
+    .unwrap();
+    advance(&mut e, minute(10, 5));
+    e.evaluator.retract(&id, minute(10, 6)).unwrap();
+    assert!(advance(&mut e, minute(10, 7)).is_empty());
+    assert_eq!(e.pending_count(), 0);
+}
+
+#[test]
+fn retracting_a_held_firing_drops_the_host_copy_and_it_is_held_again() {
+    let mut r = rule();
+    r.live = true;
+    r.rule.interrupt = true;
+    r.rule.quiet_hours = Some(quiet());
+    let mut e = evaluator(r, vec![row("a", at(23), at(23), None)], at(22));
+    assert!(advance(&mut e, at(23)).is_empty());
+    let held = e.host.held().next().unwrap().fired.id.clone();
+
+    e.evaluator.retract(&held, minute(23, 1)).unwrap();
+    assert!(advance(&mut e, minute(23, 2)).is_empty());
+    let again: Vec<_> = e.host.held().map(|held| held.fired.clone()).collect();
+    assert_eq!(again.len(), 1);
+    assert_eq!(again[0].id, held);
+    assert_eq!(again[0].at, minute(23, 1));
+    let got = advance(&mut e, at(32));
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].id(), held);
+    assert_eq!(got[0].at, at(32));
+}
+
+#[test]
+fn retracted_edge_firing_fires_again_only_on_a_new_edge() {
+    // A threshold firing is keyed by its crossing: still true is no new edge.
+    let mut r = rule();
+    r.rule.fires = Fires::OnThreshold {
+        value: 10.,
+        compare: Compare::Less,
+    };
+    let sample = |e: &mut TestEvaluator, time: i64, value: f64| {
+        let mut input = evaluation(&r, time, vec![]);
+        input.value = Some(value);
+        e.observe(input).unwrap();
+    };
+    let mut e = evaluator(r.clone(), vec![], at(9));
+    sample(&mut e, at(9), 20.);
+    sample(&mut e, at(10), 5.);
+    let crossing = advance(&mut e, at(10));
+    assert_eq!(crossing.len(), 1);
+    e.evaluator.retract(crossing[0].id(), at(10)).unwrap();
+    sample(&mut e, at(11), 4.);
+    assert!(advance(&mut e, at(11)).is_empty());
+    sample(&mut e, at(12), 20.);
+    sample(&mut e, at(13), 3.);
+    let next = advance(&mut e, at(13));
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0].at, at(13));
+    assert_ne!(next[0].id(), crossing[0].id());
+
+    // A new-row firing is keyed by its occurrence, which is its edge: while
+    // the occurrence stays in the result it fires again.
+    let mut e = evaluator(rule(), vec![row("a", at(10), at(10), None)], at(9));
+    let first = advance(&mut e, at(10));
+    e.evaluator.retract(first[0].id(), at(10)).unwrap();
+    let again = advance(&mut e, at(11));
+    assert_eq!(again.len(), 1);
+    assert_eq!(again[0].id(), first[0].id());
+}
+
+#[test]
+fn retraction_leaves_the_rules_other_deliveries_alone() {
+    let mut r = rule();
+    r.live = true;
+    let mut e = evaluator(
+        r.clone(),
+        vec![
+            row("a", at(10), at(10), None),
+            row("b", at(10), at(10), None),
+        ],
+        at(9),
+    );
+    let first = advance(&mut e, at(10));
+    assert_eq!(first.len(), 2);
+    let id = |name: &str| {
+        first
+            .iter()
+            .find(|d| d.fired.trigger.occurrence.id == name)
+            .unwrap()
+            .id()
+            .to_string()
+    };
+    e.evaluator.retract(&id("a"), at(10)).unwrap();
+    let again = advance(&mut e, at(11));
+    assert_eq!(again.len(), 1);
+    assert_eq!(again[0].id(), id("a"));
+
+    // b is still open: its end is reported as cleared, once.
+    e.observe(evaluation(
+        &r,
+        at(12),
+        vec![
+            row("a", at(10), at(10), None),
+            row("b", at(10), at(12), Some(at(12))),
+        ],
+    ))
+    .unwrap();
+    let ended = e
+        .evaluator
+        .advance(at(12), &CalendarUtc, &mut e.host)
+        .unwrap();
+    assert!(ended.deliveries.is_empty());
+    let cleared: Vec<_> = ended
+        .outcomes
+        .iter()
+        .filter(|outcome| outcome.outcome == Outcome::Cleared)
+        .map(|outcome| outcome.delivery.clone())
+        .collect();
+    assert_eq!(cleared, [id("b")]);
+}

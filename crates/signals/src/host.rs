@@ -366,6 +366,7 @@ impl HostPolicy {
             match report {
                 Report::Fired(fired) => self.submit_fired(*fired),
                 Report::Cleared { delivery, at } => self.clear(&delivery, at),
+                Report::Retracted { delivery, at } => self.retract(&delivery, at),
                 Report::Rule { version, enabled } => {
                     self.rules.insert(
                         rule_id(&version),
@@ -465,6 +466,23 @@ impl HostPolicy {
             });
         }
         self.away_state(delivery, AwayState::Cleared, false);
+        self.release_consequences(delivery, at);
+    }
+    /// The writer refused a delivery: forget it as if it never fired, so its
+    /// trigger can fire again under the same identity. Consequences folded
+    /// under it are routed again at once. Budget and rate-limit charges of an
+    /// earlier handoff stand.
+    fn retract(&mut self, delivery: &str, at: Instant) {
+        self.pending.remove(delivery);
+        self.open.remove(delivery);
+        self.consumed.remove(delivery);
+        self.away.retain(|entry| entry.delivery != delivery);
+        self.keys.retain(|_, latest| latest != delivery);
+        self.release_consequences(delivery, at);
+    }
+    /// Drop `delivery` from every root's consequences and route the
+    /// consequences folded under it again, at once.
+    fn release_consequences(&mut self, delivery: &str, at: Instant) {
         for consequences in self.caused.values_mut() {
             consequences.remove(delivery);
         }
@@ -620,10 +638,12 @@ impl HostPolicy {
                 self.pending.remove(&id);
                 continue;
             }
+            // A current-state notice waits until its producer has evaluated
+            // through the instant it fired; later changes arrive as `Cleared`.
             let behind = match self.progress.get(&held.fired.trigger.rule.product) {
                 Some(progress) => {
                     progress.incomplete.contains(&held.fired.trigger.rule.id)
-                        || (held.fired.current && progress.at < at)
+                        || (held.fired.current && progress.at < held.fired.at)
                 }
                 // A forwarded current-state notice waits for its producer.
                 None => held.fired.current,

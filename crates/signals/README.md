@@ -134,8 +134,22 @@ each product runs against its own catalog and occurrence keys.
 The evaluator never shows anything. Each advance produces **reports**: a rule
 fired (`Fired`, with its basis fixed at match time), a current-state
 condition cleared (`Cleared`), a rule's active revision (`Rule`) or
-withdrawal (`Withdrawn`), and the product's **progress** (`Progress`: up to
-date as of an instant, except the rules whose data is behind).
+withdrawal (`Withdrawn`), a delivery retracted (`Retracted`), and the
+product's **progress** (`Progress`: up to date as of an instant, except the
+rules whose data is behind).
+
+A product whose writer refuses a delivery because its cited basis changed (a
+privacy policy epoch, a cited reading archived by a replay) calls
+`Evaluator::retract(delivery, at)`. At `at`, after the observations up to
+then, the evaluator forgets that one firing and reports `Retracted`; the host
+policy drops its held or routed copy and routes again any consequences folded
+under it. The same evaluation fires the trigger again, under the same
+identity and from the current rows, if the rule still finds it: an
+occurrence still in a new-row rule's result, including a current-state
+condition still true. A threshold, change or daily firing is keyed by its
+crossing, change or day, so it fires again only on a new one. The rule's
+other deliveries are untouched, and budget and rate-limit charges of an
+earlier handoff stand.
 
 The **host policy** (`HostPolicy`) is the one deliverer on a host. It takes in
 reports from every product's evaluator and notices from other producers,
@@ -148,8 +162,9 @@ interrupt budget, and routes each notice:
 - **Primary mode,** Polylogue advances without a host (`Evaluator::reports`)
   and sends its reports to Sinex as ordinary facts; Sinex's host policy takes
   them in with its own. A forwarded current-state notice whose producer has
-  not confirmed being up to date since then is held as `incomplete`, never
-  shown. Polylogue shows one notice itself: Sinex being unreachable or
+  not confirmed being up to date through the instant it fired is held as
+  `incomplete`, never shown; once the producer has, the notice is routed at
+  any later handoff, since an ended condition arrives as `Cleared`. Polylogue shows one notice itself: Sinex being unreachable or
   refusing its writes, because that path is what is broken.
 - **Other producers** (`sinexctl notify`) submit a `ProducerNotice`: a
   delivery of the implicit rule `producer:<name>` with author class
@@ -466,8 +481,9 @@ Routing, attention, inhibition and outcomes:
   charged to the budget and never exceeds it; a notice with an existing key
   replaces its notification in place.
 - **forwarded-stale-holds**: a forwarded current-state notice whose
-  producer has not confirmed being up to date since is held as `incomplete`,
-  never shown.
+  producer has not confirmed being up to date through the instant it fired
+  is held as `incomplete`, never shown; progress at the firing instant
+  releases it at a later handoff.
 - **trigger-never-starts-agent**: no delivery starts or resumes an agent;
   a configured action command that is an agent launcher is refused.
 - **late-is-passive**: a triggering fact older than its rule's

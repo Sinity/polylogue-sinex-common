@@ -476,15 +476,91 @@ fn sig_forwarded_stale_holds() {
         host.held().next().unwrap().holds[0].reason,
         HoldReason::Incomplete
     );
+    // Progress through the firing instant releases it at the later handoff.
     host.absorb(reports);
-    assert!(host.advance(at(10, 20), &Utc).deliveries.is_empty());
+    let shown = host.advance(at(10, 20), &Utc).deliveries;
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].fired.trigger.occurrence.id, "b");
+    assert_eq!(shown[0].at, at(10, 20));
+}
+
+/// A current-state notice forwarded from a producer that fired it at
+/// `fired_at` and reported progress at that same instant.
+fn forwarded_current(fired_at: i64) -> Fired {
+    let forwarded = rule("polylogue", "waiting", Author::Operator, true);
+    let mut source = Evaluator::new(at(10, 0), vec![forwarded.clone()], &Utc).unwrap();
+    observe(&mut source, &forwarded, at(10, 0), vec![]);
+    observe(
+        &mut source,
+        &forwarded,
+        fired_at,
+        vec![row("a", fired_at, None)],
+    );
+    let reports = source.reports(fired_at, &Utc).unwrap();
+    let fired = reports
+        .iter()
+        .find_map(|report| match report {
+            Report::Fired(fired) => Some((**fired).clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(fired.current);
+    assert_eq!(fired.at, fired_at);
+    assert!(reports.iter().any(|report| matches!(
+        report,
+        Report::Progress { at, .. } if *at == fired_at
+    )));
+    fired
+}
+
+#[test]
+fn sig_forwarded_progress_at_firing_releases_at_later_handoff() {
+    // Real clocks: the producer reports progress at the firing instant T and
+    // the host hands off at its own later time T + δ.
+    let fired_at = at(10, 5);
+    for delta in [1, MINUTE, 10 * MINUTE] {
+        let fired = forwarded_current(fired_at);
+        let mut host = HostPolicy::default();
+        host.absorb([Report::Progress {
+            product: "polylogue".into(),
+            at: fired_at,
+            incomplete: Default::default(),
+        }]);
+        host.absorb([Report::Fired(Box::new(fired.clone()))]);
+        let shown = host.advance(fired_at + delta, &Utc).deliveries;
+        assert_eq!(shown.len(), 1, "delta {delta}");
+        assert_eq!(shown[0].id(), fired.id);
+        assert_eq!(shown[0].at, fired_at + delta);
+        assert_eq!(host.pending_count(), 0);
+    }
+}
+
+#[test]
+fn sig_forwarded_progress_behind_firing_holds() {
+    let fired_at = at(10, 5);
+    let fired = forwarded_current(fired_at);
+    let mut host = HostPolicy::default();
     host.absorb([Report::Progress {
         product: "polylogue".into(),
-        at: at(10, 21),
+        at: fired_at - 1,
         incomplete: Default::default(),
     }]);
-    let shown = host.advance(at(10, 21), &Utc).deliveries;
-    assert_eq!(shown[0].fired.trigger.occurrence.id, "b");
+    host.absorb([Report::Fired(Box::new(fired.clone()))]);
+    for handoff in [fired_at, fired_at + MINUTE, fired_at + 10 * MINUTE] {
+        assert!(host.advance(handoff, &Utc).deliveries.is_empty());
+    }
+    let held = host.held().next().unwrap();
+    assert_eq!(held.fired.id, fired.id);
+    assert_eq!(held.holds[0].reason, HoldReason::Incomplete);
+    // Progress reaching the firing instant releases it.
+    host.absorb([Report::Progress {
+        product: "polylogue".into(),
+        at: fired_at,
+        incomplete: Default::default(),
+    }]);
+    let shown = host.advance(fired_at + 11 * MINUTE, &Utc).deliveries;
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].id(), fired.id);
 }
 
 #[test]
