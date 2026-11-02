@@ -11,7 +11,7 @@ inherit = ["HOME", "USER", "PATH", "LANG", "XDG_RUNTIME_DIR", "CARGO_TARGET_DIR"
 unset = ["DATABASE_URL", "PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "SQLX_OFFLINE"]
 
 [environment.values]
-# Two builds run at once under the host cargo cap; -j8 each keeps them
+# Builds run several at once; -j8 each keeps them
 # inside their memory ceilings instead of each spawning one rustc per thread.
 CARGO_BUILD_JOBS = "8"
 # Incremental state is half of each target directory and the drive is write-bound;
@@ -26,7 +26,6 @@ result = "exit"
 timeout_seconds = 1800
 scratch = "tmpfs"
 cache = "none"
-cap = "cargo"
 
 [operations.fmt]
 description = "Format the workspace"
@@ -46,7 +45,6 @@ result = "exit"
 timeout_seconds = 1800
 scratch = "nvme"
 cache = "none"
-cap = "cargo"
 unit_properties = ["MemoryHigh=8G"]
 
 [operations.focused]
@@ -58,7 +56,6 @@ result = "exit"
 timeout_seconds = 1800
 scratch = "tmpfs"
 cache = "none"
-cap = "cargo"
 
 [operations.compile]
 description = "Selected package or target compilation"
