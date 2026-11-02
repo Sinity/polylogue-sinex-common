@@ -149,9 +149,10 @@ are renames the operator may still change (default; open operator question).
 | signal rule | a watched query with a delivery rule |
 | watch | a signal rule that reports changes as notices |
 | occurrence, condition period | the thing a row is about, keyed by the product, and one stretch during which its condition holds (`period` in code) |
-| trigger | a rule revision paired with an occurrence and condition period; fires at most once |
+| trigger | a rule revision paired with an occurrence and condition period; fires at most once unless its delivery is retracted |
+| retraction | dropping one delivery its product's writer refused, so its trigger can fire again |
 | baseline | the matches a rule starts from, which never fire |
-| report | what an evaluator tells the deliverer: fired, cleared, a rule's revision, progress |
+| report | what an evaluator tells the deliverer: fired, cleared, retracted, a rule's revision, progress |
 | progress | a product's evaluation is up to date as of an instant, except the rules whose data is behind |
 | host policy | the one deliverer's holds, rechecks, rate limits, budget and routing on a host |
 | handoff | the moment a notice leaves the host policy with its decision |

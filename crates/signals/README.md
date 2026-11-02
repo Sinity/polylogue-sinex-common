@@ -134,8 +134,22 @@ each product runs against its own catalog and occurrence keys.
 The evaluator never shows anything. Each advance produces **reports**: a rule
 fired (`Fired`, with its basis fixed at match time), a current-state
 condition cleared (`Cleared`), a rule's active revision (`Rule`) or
-withdrawal (`Withdrawn`), and the product's **progress** (`Progress`: up to
-date as of an instant, except the rules whose data is behind).
+withdrawal (`Withdrawn`), a delivery retracted (`Retracted`), and the
+product's **progress** (`Progress`: up to date as of an instant, except the
+rules whose data is behind).
+
+A product whose writer refuses a delivery because its cited basis changed (a
+privacy policy epoch, a cited reading archived by a replay) calls
+`Evaluator::retract(delivery, at)`. At `at`, after the observations up to
+then, the evaluator forgets that one firing and reports `Retracted`; the host
+policy drops its held or routed copy and routes again any consequences folded
+under it. The same evaluation fires the trigger again, under the same
+identity and from the current rows, if the rule still finds it: an
+occurrence still in a new-row rule's result, including a current-state
+condition still true. A threshold, change or daily firing is keyed by its
+crossing, change or day, so it fires again only on a new one. The rule's
+other deliveries are untouched, and budget and rate-limit charges of an
+earlier handoff stand.
 
 The **host policy** (`HostPolicy`) is the one deliverer on a host. It takes in
 reports from every product's evaluator and notices from other producers,
