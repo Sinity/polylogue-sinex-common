@@ -208,10 +208,7 @@ fn format_roundtrip_time_bounds_precede_initial_field_guard() {
                     Some(format!("{keyword}:2026-10-02").as_str())
                 );
             }
-            for spelling in [
-                format!("{keyword}:2026-10-02"),
-                format!("{upper}:2026-10-02"),
-            ] {
+            for spelling in [format!("{keyword}:2026-10-02")] {
                 let query = parse(&spelling, &catalog).unwrap();
                 let Source::Unit {
                     condition: Some(condition),

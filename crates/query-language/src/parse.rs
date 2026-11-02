@@ -777,6 +777,15 @@ impl Parser<'_> {
         }
         Ok(join_conditions(conditions, true))
     }
+    /// Attach a corrected query only when it parses as given; a refusal
+    /// without a runnable correction carries none.
+    fn suggest(&self, error: Error, corrected: String) -> Error {
+        if parse(&corrected, self.catalog).is_ok() {
+            error.suggestion(corrected)
+        } else {
+            error
+        }
+    }
     /// A lowercase `and`, `or` or `not` between two conditions would silently
     /// become a search word; the capitalised operator is the suggestion.
     fn refuse_lowercase_boolean(&self) -> Result<(), Error> {
@@ -803,12 +812,7 @@ impl Parser<'_> {
         .length(t.text.len())
         .hint("quote the word to search for it");
         // Suggest the capitalised query only when it is itself a query.
-        let capitalised = self.replace(t.span, &t.text.to_uppercase());
-        Err(if parse(&capitalised, self.catalog).is_ok() {
-            error.suggestion(capitalised)
-        } else {
-            error
-        })
+        Err(self.suggest(error, self.replace(t.span, &t.text.to_uppercase())))
     }
     fn atom(&mut self, scope: &Scope) -> Result<Condition, Error> {
         let start = self.pos();
@@ -953,29 +957,23 @@ impl Parser<'_> {
             let resume = self.at;
             if let Some(next) = self.peek().cloned()
                 && (next.quoted || !is_symbol(&next.text))
-                && reads_as_time(&next.text)
+                && crate::time::is_time_expression(&next.text)
                 && self.main_time(scope).is_some()
             {
                 self.at += 1;
                 let end = self.end();
-                return Err(Error::new(
+                let joined = format!(
+                    "{}:{}",
+                    token.text.to_ascii_lowercase(),
+                    &self.text[next.span.start..end]
+                );
+                let error = Error::new(
                     ErrorKind::InvalidQuery,
-                    format!(
-                        "a time bound is written `{}:{}`",
-                        token.text.to_ascii_lowercase(),
-                        &self.text[next.span.start..end]
-                    ),
+                    format!("a time bound is written `{joined}`"),
                     start,
                 )
-                .length(end - start)
-                .suggestion(self.replace(
-                    Span { start, end },
-                    &format!(
-                        "{}:{}",
-                        token.text.to_ascii_lowercase(),
-                        &self.text[next.span.start..end]
-                    ),
-                )));
+                .length(end - start);
+                return Err(self.suggest(error, self.replace(Span { start, end }, &joined)));
             }
             self.at = resume;
         }
@@ -1230,15 +1228,18 @@ impl Parser<'_> {
             // `F = [a, b]` is the set match `F:(a|b)`.
             let (open, set) = self.bracket_list()?;
             let end = self.end();
-            return Err(Error::new(
+            let error = Error::new(
                 ErrorKind::InvalidQuery,
                 "a set is written (a|b) and matched with `:`",
                 open.span.start,
-            )
-            .suggestion(self.replace(
-                Span { start, end },
-                &format!("{name}:{}", value_surface(&set)),
-            )));
+            );
+            return Err(self.suggest(
+                error,
+                self.replace(
+                    Span { start, end },
+                    &format!("{name}:{}", value_surface(&set)),
+                ),
+            ));
         }
         let right = if let Some(t) = self.peek()
             && !t.quoted
@@ -2096,7 +2097,8 @@ impl Parser<'_> {
                 // Suggest the joined bound only for a value that reads as a time.
                 return Err(
                     match self.peek().filter(|next| {
-                        (next.quoted || !is_symbol(&next.text)) && reads_as_time(&next.text)
+                        (next.quoted || !is_symbol(&next.text))
+                            && crate::time::is_time_expression(&next.text)
                     }) {
                         Some(next) => {
                             let bound = Span {
@@ -2104,7 +2106,10 @@ impl Parser<'_> {
                                 end: next.span.end,
                             };
                             let value = &self.text[next.span.start..next.span.end];
-                            error.suggestion(self.replace(bound, &format!("where {word}:{value}")))
+                            self.suggest(
+                                error,
+                                self.replace(bound, &format!("where {word}:{value}")),
+                            )
                         }
                         None => error,
                     },
@@ -3021,20 +3026,6 @@ fn is_clock(text: &str) -> bool {
 /// duration or an amount of money.
 pub(crate) fn is_literal(text: &str) -> bool {
     crate::number::is_decimal(text) || is_duration(text) || is_money(text)
-}
-/// Whether a value reads as a time expression (`7d`, `yesterday`, a date).
-/// Only the spelling is checked; the clock is fixed and its answer unused.
-fn reads_as_time(text: &str) -> bool {
-    let Ok(day) =
-        crate::time::DaySetting::new(jiff::tz::TimeZone::UTC, jiff::civil::Time::midnight())
-    else {
-        return false;
-    };
-    crate::time::resolve(
-        text,
-        &crate::time::Clock::new(jiff::Timestamp::UNIX_EPOCH, day),
-    )
-    .is_ok()
 }
 pub(crate) fn is_money(text: &str) -> bool {
     let digits = text
