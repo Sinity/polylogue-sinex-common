@@ -134,7 +134,7 @@ fn product_checkpoint_schema_contains_complete_typed_private_state() {
 fn typed_checkpoint_and_receipt_keep_existing_wire_values() {
     let evaluator: Evaluator = serde_json::from_value(json!({
         "now": 42, "rules":{}, "products":[],
-        "inputs":[], "consumed":[], "pending":{}, "open":{}, "retractions":[], "reports":[]
+        "inputs":[], "consumed":[], "pending":{}, "open":{}, "reports":[]
     }))
     .unwrap();
     let notice = Notice {

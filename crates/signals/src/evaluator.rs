@@ -266,7 +266,9 @@ pub struct Evaluator {
     consumed: BTreeSet<Trigger>,
     pending: BTreeMap<String, Pending>,
     open: BTreeMap<String, Open>,
-    /// Refused deliveries, each dropped at its instant, in time order.
+    /// Refused deliveries, each dropped at its instant, in time order. An
+    /// absent field means none are queued.
+    #[serde(default)]
     retractions: Vec<(Instant, String)>,
     /// Reports not yet handed to a host policy or returned to the caller.
     reports: Vec<Report>,
