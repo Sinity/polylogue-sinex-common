@@ -620,10 +620,12 @@ impl HostPolicy {
                 self.pending.remove(&id);
                 continue;
             }
+            // A current-state notice waits until its producer has evaluated
+            // through the instant it fired; later changes arrive as `Cleared`.
             let behind = match self.progress.get(&held.fired.trigger.rule.product) {
                 Some(progress) => {
                     progress.incomplete.contains(&held.fired.trigger.rule.id)
-                        || (held.fired.current && progress.at < at)
+                        || (held.fired.current && progress.at < held.fired.at)
                 }
                 // A forwarded current-state notice waits for its producer.
                 None => held.fired.current,

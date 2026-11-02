@@ -148,8 +148,9 @@ interrupt budget, and routes each notice:
 - **Primary mode,** Polylogue advances without a host (`Evaluator::reports`)
   and sends its reports to Sinex as ordinary facts; Sinex's host policy takes
   them in with its own. A forwarded current-state notice whose producer has
-  not confirmed being up to date since then is held as `incomplete`, never
-  shown. Polylogue shows one notice itself: Sinex being unreachable or
+  not confirmed being up to date through the instant it fired is held as
+  `incomplete`, never shown; once the producer has, the notice is routed at
+  any later handoff, since an ended condition arrives as `Cleared`. Polylogue shows one notice itself: Sinex being unreachable or
   refusing its writes, because that path is what is broken.
 - **Other producers** (`sinexctl notify`) submit a `ProducerNotice`: a
   delivery of the implicit rule `producer:<name>` with author class
@@ -466,8 +467,9 @@ Routing, attention, inhibition and outcomes:
   charged to the budget and never exceeds it; a notice with an existing key
   replaces its notification in place.
 - **forwarded-stale-holds**: a forwarded current-state notice whose
-  producer has not confirmed being up to date since is held as `incomplete`,
-  never shown.
+  producer has not confirmed being up to date through the instant it fired
+  is held as `incomplete`, never shown; progress at the firing instant
+  releases it at a later handoff.
 - **trigger-never-starts-agent**: no delivery starts or resumes an agent;
   a configured action command that is an agent launcher is refused.
 - **late-is-passive**: a triggering fact older than its rule's
