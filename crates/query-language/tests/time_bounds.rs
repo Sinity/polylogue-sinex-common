@@ -50,7 +50,9 @@ fn both_catalogs_preserve_keyword_and_colon_bounds_as_typed_nodes() {
                 assert_eq!(field, main_time);
                 assert!(matches!(parsed_value, Value::Scalar { .. }));
                 let rendered = format_query(&colon_query, &catalog).unwrap();
-                assert!(rendered.contains(&format!("{keyword} ")));
+                // The formatter writes the one spelling, `since:T` (README
+                // grammar, `"since:" time`).
+                assert!(rendered.contains(&format!("{keyword}:")));
                 let reparsed = parse(&rendered, &catalog).unwrap();
                 assert_eq!(
                     normal_form(&keyword_query, &catalog).unwrap(),

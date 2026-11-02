@@ -777,10 +777,13 @@ impl Parser<'_> {
         }
         Ok(join_conditions(conditions, true))
     }
-    /// Attach a corrected query only when it parses as given; a refusal
-    /// without a runnable correction carries none.
+    /// Attach a corrected query only when it parses and binds as given; a
+    /// refusal without a runnable correction carries none.
     fn suggest(&self, error: Error, corrected: String) -> Error {
-        if parse(&corrected, self.catalog).is_ok() {
+        if parse(&corrected, self.catalog)
+            .and_then(|query| crate::bind::bind(&query, self.catalog))
+            .is_ok()
+        {
             error.suggestion(corrected)
         } else {
             error
@@ -957,7 +960,7 @@ impl Parser<'_> {
             let resume = self.at;
             if let Some(next) = self.peek().cloned()
                 && (next.quoted || !is_symbol(&next.text))
-                && crate::time::is_time_expression(&next.text)
+                && (next.text.starts_with('$') || crate::time::is_time_expression(&next.text))
                 && self.main_time(scope).is_some()
             {
                 self.at += 1;
@@ -2098,7 +2101,8 @@ impl Parser<'_> {
                 return Err(
                     match self.peek().filter(|next| {
                         (next.quoted || !is_symbol(&next.text))
-                            && crate::time::is_time_expression(&next.text)
+                            && (next.text.starts_with('$')
+                                || crate::time::is_time_expression(&next.text))
                     }) {
                         Some(next) => {
                             let bound = Span {

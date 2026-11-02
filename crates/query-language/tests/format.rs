@@ -237,10 +237,19 @@ fn format_roundtrip_time_bounds_precede_initial_field_guard() {
                 assert!(matches!(value, Value::Scalar { text, .. } if text == "2026-10-02"));
                 roundtrip(&spelling, &catalog);
             }
-            // Values keep their spelling even when the positional keyword is folded.
-            let query = parse(&format!("{upper} $ExactCase"), &catalog).unwrap();
+            // Values keep their spelling even when the positional keyword is
+            // folded; the formatter writes the one spelling, `since:T` (README
+            // grammar, `"since:" time`), and the spaced form is refused.
+            let query = parse(&format!("{upper}:$ExactCase"), &catalog).unwrap();
             let rendered = format_query(&query, &catalog).unwrap();
-            assert_eq!(rendered, format!("{keyword} $ExactCase"));
+            assert_eq!(rendered, format!("{keyword}:$ExactCase"));
+            assert_eq!(
+                parse(&format!("{upper} $ExactCase"), &catalog)
+                    .unwrap_err()
+                    .suggestion
+                    .as_deref(),
+                Some(format!("{keyword}:$ExactCase").as_str())
+            );
         }
     }
     let catalog = support::polylogue();
