@@ -208,7 +208,17 @@ fn format_roundtrip_time_bounds_precede_initial_field_guard() {
                     Some(format!("{keyword}:2026-10-02").as_str())
                 );
             }
-            for spelling in [format!("{keyword}:2026-10-02")] {
+            // Positional keywords are case-insensitive (the parser compares
+            // `since`, `until` and `in` with `eq_ignore_ascii_case`), so the
+            // capitalised colon form is the same bound and formats to the
+            // lowercase one.
+            let lower = format!("{keyword}:2026-10-02");
+            let capitalised = format!("{upper}:2026-10-02");
+            assert_eq!(
+                format_query(&parse(&capitalised, &catalog).unwrap(), &catalog).unwrap(),
+                format_query(&parse(&lower, &catalog).unwrap(), &catalog).unwrap()
+            );
+            for spelling in [lower, capitalised] {
                 let query = parse(&spelling, &catalog).unwrap();
                 let Source::Unit {
                     condition: Some(condition),
