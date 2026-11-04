@@ -23,7 +23,15 @@ fn product_checkpoint_schema_contains_complete_typed_private_state() {
         (
             "Evaluator",
             vec![
-                "now", "rules", "products", "inputs", "consumed", "pending", "open", "reports",
+                "now",
+                "rules",
+                "products",
+                "inputs",
+                "consumed",
+                "pending",
+                "open",
+                "retractions",
+                "reports",
             ],
         ),
         (

@@ -135,6 +135,12 @@ pub enum Report {
         delivery: String,
         at: Instant,
     },
+    /// A delivery the product's writer refused because its cited basis
+    /// changed. Every record of it is dropped, so the trigger can fire afresh.
+    Retracted {
+        delivery: String,
+        at: Instant,
+    },
     /// The active revision of a rule, and whether it runs.
     Rule {
         version: RuleVersion,
@@ -260,6 +266,10 @@ pub struct Evaluator {
     consumed: BTreeSet<Trigger>,
     pending: BTreeMap<String, Pending>,
     open: BTreeMap<String, Open>,
+    /// Refused deliveries, each dropped at its instant, in time order. An
+    /// absent field means none are queued.
+    #[serde(default)]
+    retractions: Vec<(Instant, String)>,
     /// Reports not yet handed to a host policy or returned to the caller.
     reports: Vec<Report>,
 }
@@ -292,6 +302,7 @@ impl Evaluator {
             consumed: BTreeSet::new(),
             pending: BTreeMap::new(),
             open: BTreeMap::new(),
+            retractions: Vec::new(),
             reports: Vec::new(),
         };
         for active in rules {
@@ -496,6 +507,26 @@ impl Evaluator {
         self.forget(&key, self.now);
         self.inputs.retain(|input| rule_id(&input.rule) != key);
     }
+    /// Queue the retraction of a delivery the writer refused because its
+    /// cited basis changed. At `at`, after the observations up to `at`, its
+    /// pending work, open condition and consumed trigger are dropped and a
+    /// `Retracted` report tells the host policy to drop its held or routed
+    /// copy. The same evaluation fires the trigger afresh, under the same
+    /// identity and from the current rows, if the rule still finds it: an
+    /// occurrence still in a new-row rule's result fires again; a threshold,
+    /// change or daily firing is keyed by its crossing, change or day and
+    /// fires again only on a new one. The rule's other deliveries are
+    /// untouched.
+    pub fn retract(&mut self, delivery: &str, at: Instant) -> Result<(), EvaluationError> {
+        if at < self.now {
+            return Err(EvaluationError("retraction precedes checkpoint".into()));
+        }
+        let index = self
+            .retractions
+            .partition_point(|(queued, _)| *queued <= at);
+        self.retractions.insert(index, (at, delivery.to_string()));
+        Ok(())
+    }
     /// Cancel a rule's pending work and clear its open deliveries.
     fn forget(&mut self, key: &str, at: Instant) {
         self.pending
@@ -611,6 +642,9 @@ impl Evaluator {
         };
         for input in &self.inputs {
             consider(input.at);
+        }
+        for (at, _) in &self.retractions {
+            consider(*at);
         }
         for pending in self.pending.values() {
             consider(pending.due);
@@ -736,6 +770,16 @@ impl Evaluator {
                 }
             }
             state.revision_baseline = false;
+        }
+        let count = self
+            .retractions
+            .partition_point(|(queued, _)| *queued <= at);
+        for (_, delivery) in self.retractions.drain(..count).collect::<Vec<_>>() {
+            self.pending.remove(&delivery);
+            self.open.remove(&delivery);
+            self.consumed
+                .retain(|trigger| trigger.delivery_id() != delivery);
+            self.reports.push(Report::Retracted { delivery, at });
         }
         for state in self.rules.values_mut() {
             let active = &state.active;
