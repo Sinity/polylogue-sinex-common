@@ -954,15 +954,6 @@ impl Parser<'_> {
             return self.comparison(scope, start);
         }
         self.at += 1;
-        if matches!(token.text.as_str(), "AND" | "OR") {
-            return Err(Error::new(
-                ErrorKind::InvalidQuery,
-                "a boolean operator needs a condition before it; quote it to search for the word",
-                token.span.start,
-            )
-            .length(token.text.len())
-            .suggestion(self.replace(token.span, &crate::format::quote(&token.text))));
-        }
         // `since 7d` is the spelling `since:7d` written apart: refuse it with
         // the joined form, so the word does not silently become a search term.
         if token.text.eq_ignore_ascii_case("since") || token.text.eq_ignore_ascii_case("until") {
@@ -1031,6 +1022,17 @@ impl Parser<'_> {
         } else {
             TextMode::Word
         };
+        // Construct only text nodes that retain their meaning when rendered.
+        // This also excludes a prefix or approximate match with no word.
+        if let Err(mut error) = crate::format::word(&text) {
+            let end = self.end();
+            error.position = start;
+            error.length = end - start;
+            return Err(error.suggestion(self.replace(
+                Span { start, end },
+                &crate::format::quote(&self.text[start..end]),
+            )));
+        }
         Ok(self.cond(start, ConditionKind::Text { text, mode }))
     }
     /// A field name standing alone is never a search word; quoting it searches.

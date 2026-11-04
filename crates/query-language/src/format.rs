@@ -652,7 +652,7 @@ fn literal(text: &str) -> Result<String, Error> {
     }
     Ok(text.to_string())
 }
-fn word(text: &str) -> Result<String, Error> {
+pub(crate) fn word(text: &str) -> Result<String, Error> {
     if text.is_empty()
         || text
             .chars()
