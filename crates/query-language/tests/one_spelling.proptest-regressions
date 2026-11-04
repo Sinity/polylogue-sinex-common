@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc abee994a6e660dcafb6ce804e261ae187547755ba8bc8f8fe7c91de0f3ff1b83 # shrinks to sinex = false, words = ["OR", "and", "origin:demo"]
+cc b2f520ca8f54e47ccf6de2ee89442aca0d3c31ca25021e00d98b39d5b978a3e8 # shrinks to sinex = false, words = ["OR", "(", "1"]

@@ -954,6 +954,15 @@ impl Parser<'_> {
             return self.comparison(scope, start);
         }
         self.at += 1;
+        if matches!(token.text.as_str(), "AND" | "OR") {
+            return Err(Error::new(
+                ErrorKind::InvalidQuery,
+                "a boolean operator needs a condition before it; quote it to search for the word",
+                token.span.start,
+            )
+            .length(token.text.len())
+            .suggestion(self.replace(token.span, &crate::format::quote(&token.text))));
+        }
         // `since 7d` is the spelling `since:7d` written apart: refuse it with
         // the joined form, so the word does not silently become a search term.
         if token.text.eq_ignore_ascii_case("since") || token.text.eq_ignore_ascii_case("until") {
