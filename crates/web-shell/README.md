@@ -16,27 +16,30 @@ shows which product it belongs to.
   write is a POST of an operation-table request (see
   [command-surface](../command-surface/README.md)). There is no web-only endpoint.
 - **One TypeScript shell** carries the behaviour the server cannot: the key
-  table and palette, the copy menu, the event-stream client and fragment
-  swaps, follow-at-end, windowed lists, aborting superseded requests, the
-  pointer handling of timelines and boards, and drawing the timeline. It is
-  checked by `tsc --strict` and bundled by `esbuild`. The built `shell.js` is
-  committed, and a check rebuilds it and fails on any difference, so neither
-  product needs a TypeScript step to build. There is no npm, no framework and
-  no third-party script at run time.
-- **The shell is a set of custom elements.** Each behaviour is an
-  autonomous custom element wrapping server-rendered markup (windowed list,
-  feed subscription, composer, copy target, timeline, board, preview,
-  decision card), plus global controllers for keys, the palette and
-  navigation. An element's connect and disconnect give each behaviour its
-  lifecycle across fragment swaps, without a framework.
-- **Every view works without script.** Rows, links and forms render with
-  JavaScript disabled; every write is a form that works without the shell,
-  which turns it into a JSON POST of the same request. The shell only
-  enhances, so it never accumulates view logic.
+  table and palette, the copy menu, live fragments over one connection per
+  browser, follow-at-end, windowed lists, aborting superseded requests, the
+  client-drawn timeline, decision cards, previews and seen marks. Each
+  behaviour is an autonomous custom element wrapping server-rendered markup
+  (see [Elements](#elements)); keys, the palette and navigation are global
+  controllers. Custom elements give each behaviour a lifecycle (connect,
+  disconnect) that fragment swaps and lanes need, without a framework.
+  The shell is checked by `tsc --strict` and bundled by `esbuild`. The built
+  `shell.js` and `feed-worker.js` are committed, and a check rebuilds them
+  and fails on any difference, so neither product needs a TypeScript step to
+  build. There is no npm, no framework and no third-party script at run
+  time.
+- **Every view works without script.** The markup inside each element is the
+  working document: rows, links, tables and forms. Every write is a form that
+  works without the shell, which turns it into a JSON POST of the same
+  request. The shell only enhances, so it never accumulates view logic, and
+  the share file, `curl`, an agent reading HTML and a broken shell all keep
+  working.
 - **One content security policy** on every route:
   `default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`.
   No inline script or style attribute, no `eval`, no WebAssembly. Fonts are
-  served by the daemon; nothing is fetched from another origin.
+  served by the daemon; nothing is fetched from another origin. The feed
+  worker is allowed by `script-src 'self'` (the `worker-src` fallback), and
+  its own response carries the same policy.
 - The TypeScript types for the few JSON values the shell reads are generated
   from the Rust types.
 
@@ -119,30 +122,41 @@ in both products and in each product's terminal picker. The shell owns these
 keys; a product adds keys for its own acts and never gives a shared key
 another meaning.
 
-| Key | Act |
-|---|---|
-| `/` | focus the query field |
-| `:` or `Ctrl-K` | palette |
-| `?` | key help |
-| `g` then a letter | go to a section (the letters are the product's navigation) |
-| `g n` | the notices inbox, in both products |
-| `g o` | the same place in the other product (its counterpart view) |
-| `j` / `k`, `↓` / `↑` | next / previous row, hit or item |
-| `gg` / `G` | top / bottom |
-| `Enter` | open the focused row |
-| `x` | toggle selection |
-| `*` | select all visible |
-| `y` / `Y` | copy menu / copy the default form; `y c` copies the page's CLI command |
-| `n` / `N` | next / previous match of the active find |
-| `Esc` | close a disclosure, palette or editor; clear the selection |
+| Key | Act | Where |
+|---|---|---|
+| `/` | focus the query field | everywhere |
+| `:` or `Ctrl-K` | palette | everywhere |
+| `?` | key help | everywhere |
+| `g` then a letter | go to a section (the letters are the product's navigation) | everywhere |
+| `g n` | go to the notices list | everywhere, reserved in both products |
+| `g o` | go to this view in the other product, or say why there is none | everywhere, reserved in both products |
+| `j` / `k`, `↓` / `↑` | next / previous row, hit, item or timeline shape | lists, timelines |
+| `gg` / `G` | top / bottom | lists, timelines |
+| `Enter` | open the focused row or shape; on a row holding a card, enter the card | everywhere |
+| `x` | toggle selection | lists |
+| `*` | select all visible | lists |
+| `y` / `Y` | copy menu / copy the default form; `y c` copies the page's CLI command | everywhere |
+| `n` / `N` | next / previous match of the active find | lists, readers |
+| `←` / `→` | pan earlier / later | timelines |
+| `-` / `=` | zoom out / in | timelines |
+| `Esc` | leave a card; close a disclosure, palette or editor; clear the selection | everywhere |
 
-**Cards rebind visibly.** A focused decision card (a permission request, a
-judging pair, a chat turn awaiting approval) is entered with `Enter` and left
-with `Esc`; while it is open it rebinds a few letters and shows them on its
-buttons. No single keystroke made while moving through a list approves or
-denies anything. Keys belong to layers, not modes: shared keys work
-everywhere, and a product's letter that means something in one place means
-nothing elsewhere.
+`keys::KEYS` declares the table, each binding with its place. Timeline keys act
+only while focus is inside a timeline; elsewhere the browser keeps them.
+
+**Layers, not modes.** Global keys work everywhere. A focused decision card
+(see [Cards](#cards)) is a layer: `Enter` enters it and `Esc` leaves it, and
+while it is entered the keys shown on its buttons come before the shared
+table. No keystroke made while moving through a list reaches a card's
+actions.
+
+**A product's own keys** are declared as `keys::ProductKey` values (key,
+prefix, act, picker form). `keys::check_product` refuses a product key that
+takes a shared key (`g n` and `g o` included), a key bound to two acts, and a
+picker form that is not the key's `Ctrl` form. `keys::check_between` compares
+the two products' tables: an act both products have takes the same keys, and
+a key both bind means the same act. Navigation letters name each product's
+own sections and are compared only against the shared table.
 
 Single-character keys can be switched off by a setting. Keys are ignored
 inside inputs and while text is selected. Focus is real DOM focus, and a live
@@ -172,62 +186,126 @@ clipboard service.
 
 ## Live updates
 
-- **One event connection per browser.** The shell runs the event stream in
-  a SharedWorker: one connection per browser profile, carrying the union of
-  every tab's subscriptions, with each tab's resume position kept per
-  subscription; tabs receive their fragments over the worker's ports. A
-  browser holds only a few connections per host, and per-tab streams across
-  several windows, panes and previews would exhaust them. Where SharedWorker
-  is unavailable, the shell falls back to one stream per visible tab. The
-  stream is framed as in
+- **One event connection per browser.** Browsers allow about six HTTP/1.1
+  connections per host and an event stream holds one for its whole life, so
+  streams per tab, lane and preview would exhaust the pool. The shell runs a
+  feed hub in a SharedWorker: one connection per product per browser
+  profile, carrying the union of every tab's subscriptions. Where
+  SharedWorker is unavailable, each tab runs the same hub itself and holds one
+  stream.
+- Events are framed as in
   [command-surface](../command-surface/README.md#server-sent-events). Payloads are
   `append` (a fragment for an open list that asked for it), `replace` (a
   fragment for a target) or `ref` (a changed reference whose fragments the
   shell refetches).
-- A page declares what it follows (`data-feed`); the server filters by
-  reference and refuses by name a subscription it cannot evaluate.
+- A page declares what it follows with `<shell-feed>` elements (a
+  reference, a saved query or a product stream such as `waiting`); a lane or
+  fragment that brings its own feed subscribes on insertion and unsubscribes
+  on removal. The server filters by reference and refuses by name a
+  subscription it cannot evaluate.
 - **Updates never move the reader.** A reader appends only while following
   and scrolled to the end, and otherwise shows "N new ↓"; a list holds
   reordering while a row has focus and shows "N updates · apply"; selection
   and focus are never removed by an update.
-- A hidden tab drops its subscriptions and refreshes on return.
+- Hidden tabs unsubscribe and refresh on return.
 - A newer request aborts the older one, and a stale reply never overwrites a
   newer selection.
 - Long lists are windowed: the shell keeps a window of rows in the DOM and
   fetches by anchor when scrolling past it, keeping focus and position.
 
+## Elements
+
+Each element wraps server-rendered markup that works on its own.
+
+| Element | Without script | With the shell |
+|---|---|---|
+| `<shell-window data-size>` | a list with ordinary pagination links (`data-window-before`, `data-window-after`) | keeps about `data-size` rows in the DOM and fetches by anchor while scrolling |
+| `<shell-feed>` | nothing | follows one subscription through the feed hub ([Live protocol](#live-protocol)) |
+| `<shell-copy data-copy>` | the target's text | the copy menu and feedback |
+| `<shell-timeline>` | a table of the series and links that pan and zoom | the client-drawn timeline ([Timeline](#timeline)) |
+| `<shell-board data-start data-end>` | the board's markup | drag scroll and pinch or Control-wheel zoom, as `shell:pointer` events |
+| `<shell-card>` | forms | a key layer ([Cards](#cards)) |
+| `<shell-seen>` | a "mark as seen" form | the seen-mark write, sent once when shown ([Seen marks](#seen-marks)) |
+| `<shell-preview data-route>` | a link | a preview popover of the same view's preview part, fetched on hover or focus |
+| `<shell-editor>` | a form | `Esc` closes it keeping its text; `Ctrl-Enter` submits it |
+
 ## Timeline
 
 One timeline element serves both products. It is drawn in the client from a
-typed **series**, so pan and zoom stay continuous over many marks; a
-server-rendered image per zoom step would not.
+typed series, because server-rendered images per zoom step cannot pan and zoom
+continuously; it holds geometry and references, never record text. The rows,
+previews and tables under a selection stay server-rendered.
 
-- A **lane** is a timeline row defined by a query, with a render and a
-  grouping key. A **series row** is `(lane, start, end?, render, label?,
-  agency?, ref)`, with `render` one of `interval`, `point` or `count` (a state
-  is an interval with a label).
-- Each product serves the series for its lanes, binned on the server to at
-  most one mark per pixel at the requested zoom. Series hold geometry and
-  references, never record text: rows, previews and tables under a
-  selection stay server-rendered HTML.
-- The table under each timeline is its no-script equivalent.
+- A **lane** is a named query whose rows carry a time or an interval, with a
+  render and an optional grouping field (`timeline::Lane`). It is a timeline
+  row; a grouped lane draws one row per group value.
+- A **series row** is `(lane, group, start, shape)`, where the shape is an
+  `interval` (end, label, agency, reference, URL), a `point` (label, agency,
+  reference, URL) or a `count` (end, number of rows). Times are milliseconds
+  since the epoch; agency is operator, agent or unknown. A state is an
+  interval with a label.
+- **Fitting.** `Series::fit` fits rows to a window and a drawn width. An
+  interval or count at least `minimum_pixels` wide is kept; narrower rows of
+  one lane and group that start in the same bin become one count row, and a
+  narrow row alone in its bin is kept. Bins are the smallest power of two
+  milliseconds at least `minimum_pixels` wide, aligned to the epoch, so a bin
+  lies inside one bin of every coarser zoom level and panning never moves a
+  bin boundary. The product serves its series from its own read model
+  (Polylogue from its session buckets and item index, Sinex from its tiles)
+  and fits them here.
+- **Drawing.** The element fetches `data-series?start=&end=&width=` and draws
+  lane labels, a time axis in `data-time-zone`, and the shapes on a canvas.
+  Agency is never colour alone: operator spans are filled, agent spans
+  outlined, unknown ones hatched. While a pan or zoom waits for its series,
+  the previous series is drawn at the new scale, and the newer request
+  supersedes the older one.
+- **Use.** A drag selects a window (`shell:select`), and when
+  `data-rows`/`data-rows-route` are set the rows under the timeline are
+  refetched for it; Control-wheel or a pinch zooms about the pointer;
+  horizontal or Shift-wheel pans. Keys follow the shared table. `Enter`
+  opens a shape's URL; on a count row it zooms into the count's span, so
+  semantic zoom needs no other control. Each window change dispatches
+  `shell:window`.
+- **Without script**, `Timeline::render` writes the series as a table whose
+  rows link to their objects (a count links to this view over its span), and
+  links that pan and zoom by half the window.
 - Charts that do not zoom continuously stay server-rendered SVG, so each
   chart kind has one renderer.
 
+## Cards
+
+`Card::new(label, body, actions)` renders a `<shell-card>` holding a decision:
+a permission, a judgment, a drafted turn to approve. Each `CardAction` pairs
+one character with a write `Action`, and the character is shown on its
+button. `Enter` on a row holding a card, or on the card, enters it; `Esc`, or
+focus leaving the card, leaves it. Inside an entered card its keys come
+before the shared table, so a card may rebind any letter visibly. Card keys
+are unique within a card, and a card action is always a write without a list
+key of its own.
+
 ## Seen marks
 
-The shell reports that a view was displayed when it becomes visible to a
-person; the product then writes the consumer's
-[seen mark](../command-surface/README.md#seen-marks). Prerendering, hidden
-tabs, polling and previews never count, and an agent reading the HTML writes
-none. "N new since you last looked" is read from that mark.
+A [seen mark](../command-surface/README.md#seen-marks) records, per consumer
+and target, the latest position displayed to that consumer; the products
+store it with their authored state, and "N new since you last looked" is read
+from it. The
+product renders `Seen::new(action)` where the displayed content ends, holding
+its seen-mark write for this target and position. The shell sends the write
+once, the first time the element is displayed: the document is visible and
+not prerendering, the element is in the viewport and rendered, and it is not
+inside a preview. Prerendering, hidden tabs, previews, polling and agent reads
+of the HTML never send it. A fragment that replaces the element with a newer
+position sends again when shown. A failed write shows the form again. Without
+script, the element is a "mark as seen" form.
 
 ## What a product supplies
 
 Its views and routes, its navigation and `g` letters, keys for its own acts
-and card layers, its accent, its copy forms per target, its status-strip
-measurements, the series for its lanes, its counterpart view for `g o`, and
-what each page follows.
+(checked with `keys::check_product` and against the other product with
+`keys::check_between`), its accent, its copy forms per target, its
+status-strip measurements, its notices route and counterpart link, its union
+stream route and what each page follows, its timeline series and its
+seen-mark write.
 
 ## Integration
 
@@ -235,8 +313,11 @@ what each page follows.
 document frame whose CLI footer is generated by the operation table from that
 request. `Frame::new` accepts an already generated command for aggregate pages.
 Set navigation, optional rails, completion route, typed actions, status markup,
-result handle, preferences, and live routes before calling `render(&answer,
-&view)`. A `View<A>` is a function from the product's typed answer to maud
+result handle, preferences, the page's `feeds`, the `notices` route and the
+`counterpart` before calling `render(&answer, &view)`. `Counterpart::View`
+links the other product's view of the same thing (`g o`); `Counterpart::Absent`
+gives the reason there is none; a product running alone sets neither and
+renders nothing of the other product. A `View<A>` is a function from the product's typed answer to maud
 `Markup`. Reuse that function in `FragmentUpdate::append` or `replace`.
 A replacement replaces the target element's **contents**; keep its stable ID
 on the containing element, outside the view function. Captured text enters
@@ -287,17 +368,13 @@ The shell enhances these ordinary server-rendered controls:
 |---|---|
 | `data-row`, `data-anchor` | keyboard item and stable window anchor; real DOM focus stays on the row |
 | `aria-selected` | selection state; selection and focused descendants protect live rows |
-| `data-copy` | `CopyTarget` JSON, emitted by `CopyTarget::render`; first form is the default |
 | `data-follow="true"` | scroll container following at its end; `false` holds appends |
 | `data-toggle-follow="ID"` | button controlling follow for that container |
 | `data-find-match` | server-marked active query matches visited by `n` and `N` |
-| `data-window="200"` | nominal number of rows retained in a scroll container; protected and visible rows are retained even above it |
-| `data-window-before`, `data-window-after` | ordinary pagination links returning rows and the next link in that direction |
+| `data-window-before`, `data-window-after` | pagination links inside a `<shell-window>`, returning rows and the next link in that direction |
 | `data-window-sentinel` | optional styling for a pagination link |
-| `data-pointer="timeline"` | pan and pinch/Control-wheel zoom over `data-start` and `data-end` |
-| `data-pointer="board"` | drag scroll over the board; the same range events support domain-specific zoom |
-| `data-pointer-route` | optional existing GET view route returning HTML for the selected range |
-| `data-editor` | editor closed by Escape without clearing its fields |
+| `data-route` on `<shell-board>` | optional existing GET view route returning HTML for the committed range |
+| `data-notices`, `data-counterpart` | written by the frame; followed by `g n` and `g o` |
 
 A window fetch adds `anchor` and `direction` to the existing pagination
 route. Its response is HTML rows with stable anchors and a new directional
@@ -307,48 +384,70 @@ offscreen rows compensates the surviving anchor's offset, and never removes
 a visible, selected or focused row. Pagination links remain usable without
 JavaScript.
 
-Pointer events dispatch `shell:pointer` with `{kind, start, end, deltaY,
-phase}` (`preview` or `commit`). Products use the domain values for timeline
-selection or board zoom. Each pointer uses its own movement delta; pinch
-scaling compares the active touches before and after each move. The shell
-handles capture, touch pinch and wheel
-coordinates; products render domain geometry. An optional pointer route is
-refetched only at commit, through the same superseding request controller.
+A board dispatches `shell:pointer` with `{kind, start, end, deltaY, phase}`
+(`preview` or `commit`). Products use the domain values for board zoom. Each
+pointer uses its own movement delta; pinch scaling compares the active
+touches before and after each move. An optional route is refetched only at
+commit, through the same superseding request controller.
 
 ### Live protocol
 
-The frame's `feed` is an existing filtered subscription route. It emits SSE
-`event: fragment` whose data is generated `FragmentUpdate` JSON, and whose ID
-is the product's committed position. `append` and `replace` contain rendered
-HTML; `ref` contains the same-origin URL of that rendered fragment. A `ref`
-URL identifies the read position of its event,
-so its HTML excludes later appends. The shell buffers appends behind an
-unresolved reference and advances its resume cursor only after preceding
-events have been applied or retained for explicit apply. A newer full
-replacement or reference supersedes an older snapshot and its preceding
-appends. Failed reference reads close the feed with a reload instruction and
-leave the failed position unacknowledged. The shell never constructs a view
-from a JSON answer. The shared `reload` event closes the
-subscription and leaves a visible instruction to reload. Visibility changes
-keep that feed closed until the page is reloaded. Its event name is
-generated from command-surface alongside the shell types. Native EventSource
-reconnect sends `Last-Event-ID`. A connection reopened after visibility
-changes sends its position in the `since` query parameter; the product maps
-both to the same shared resume mechanism.
+The product serves one **union stream** route. Its `subscriptions` query
+parameter is JSON, a list of `feed::Subscription { id, reference, since }`
+read with `feed::subscriptions`; `since` is the event ID the subscription
+resumes strictly after. IDs are assigned by the hub and unique in the
+stream. `feed::catch_up(log, subscriptions, updates)` writes the opening of
+the stream: for each subscription, the retained events after its own position
+that concern it, in commit order, or a `reload` naming it when its position
+is no longer retained. `feed::live(event, subscriptions, updates)` writes one
+newly committed event for every subscription. `updates` is the product's
+filter, the fragments one committed value gives one subscription. A
+subscription the product cannot evaluate is answered with
+`FeedReload::refuse(subscription, reason)`. The product subscribes to its
+commit broadcast before reading the log, so nothing falls between the two.
 
-Set `refresh` to the existing current-view operation returning `Refresh`:
-`{position, fragments}` read under one snapshot. On return from a hidden tab,
-that snapshot is applied before subscribing strictly after its position.
-Hidden tabs abort all requests. A late response to a superseded target is ignored even when its
-transport ignores cancellation. A live update protects focus and selection;
-held changes appear as an adjacent apply control. Replacement events
-coalesce while held. An explicit apply still waits for protected rows to be
-released. New appends require follow-at-end, or an explicit apply.
+Each SSE `event: fragment` carries generated `FeedEvent { subscription,
+update }` JSON, and its ID is the product's committed position. `append` and
+`replace` contain rendered HTML; `ref` contains the same-origin URL of that
+rendered fragment. A `ref` URL identifies the read position of its event, so
+its HTML excludes later appends. The shared `reload` event carries
+`FeedReload { subscription?, reason }`: without a subscription it ends the
+whole stream. The shell never constructs a view from a JSON answer.
+
+`<shell-feed>` elements are rendered by `Feed { route, reference, since,
+refresh }`, with `since` the position the page was rendered at. The hub
+(`feed-worker.js` in a SharedWorker, or in the tab where SharedWorker is
+unavailable) keeps one stream per route open for every subscription of every
+tab. Subscription changes within a few milliseconds share one reopening of
+the stream, and each subscription resumes from the last position the hub
+delivered to its tab, so a reopening neither repeats nor skips an event. A
+failed connection reopens the same way after a growing delay (one second,
+doubling to thirty), instead of the browser's own reconnection, which would
+resend the positions the stream was opened with. Tabs leave the hub on
+`pagehide`.
+
+In the tab, the shell buffers appends behind an unresolved reference and
+advances a subscription's position only after preceding events have been
+applied or retained for explicit apply. A newer full replacement or reference
+supersedes an older snapshot and its preceding appends. A failed reference
+read stops that subscription with a reload instruction and leaves the failed
+position unacknowledged. A reload stops only the subscription it names.
+
+`refresh` on a feed is the existing current-view operation returning
+`Refresh`: `{position, fragments}` read under one snapshot. When a hidden tab
+is shown again, that snapshot is applied before the feed subscribes strictly
+after its position; a feed without `refresh` resumes from its last applied
+position. Hidden tabs unsubscribe and abort all requests. A late response to
+a superseded target is ignored even when its transport ignores cancellation.
+A live update protects focus and selection; held changes appear as an
+adjacent apply control. Replacement events coalesce while held. An explicit
+apply still waits for protected rows to be released. New appends require
+follow-at-end, or an explicit apply.
 
 ### Development
 
-Products consume the committed `assets/shell.js` and need no JavaScript build
-step. Maintainers need `node`, `tsc` and `esbuild` on PATH (the tools can also
+Products consume the committed `assets/shell.js` and `assets/feed-worker.js`
+and need no JavaScript build step. Maintainers need `node`, `tsc` and `esbuild` on PATH (the tools can also
 be supplied through `TSC` and `ESBUILD`). No npm installation is used.
 
 ```sh
@@ -356,6 +455,7 @@ node crates/web-shell/build.mjs --test
 node crates/web-shell/build.mjs --write --test
 cargo run -p web-shell --bin web-shell-types -- --write crates/web-shell/typescript/types.ts
 cargo xtask test -p web-shell
+WEB_SHELL_WRITE_FIXTURE=1 cargo xtask test -p web-shell -E 'test(timeline_zoom_fixture)'
 ```
 
 `keys::KEYS` is the one key declaration: Rust help and terminal
@@ -366,8 +466,10 @@ the pinned tools: TypeScript 7.0.2 and esbuild 0.27.2 in the current flake
 lock. Another esbuild version can emit different bytes from the same source.
 
 The default build checks strict TypeScript, rebuilds with esbuild, and compares
-bytes with the committed artifact. `--write` updates it. `--test` executes the
-request, clipboard, pointer, matching and fragment DOM tests under Node.
+bytes with the committed artifacts. `--write` updates them. `--test` executes
+every `tests/*.test.mjs` under Node: requests, clipboard, pointers, matching,
+fragment DOM handling, keys and cards, the feed hub, the display rule and the
+timeline geometry over the Rust-fitted zoom fixture `tests/timeline-zoom.json`.
 Rust tests compare generated TypeScript with its committed file, render a
 shared typed answer through the full-page and live paths, exercise operation
 forms, validate palettes, decode SSE with command-surface, and probe asset
@@ -377,11 +479,30 @@ layouts in a real browser against their daemon and visual baseline.
 ## Laws
 
 - **same-key-same-act**: for every act in both the web key table and a
-  terminal picker, the letter is the same, modulo the picker's `Ctrl` prefix.
+  terminal picker, the letter is the same, modulo the picker's `Ctrl` prefix;
+  a product key never takes a shared key or `g n`/`g o`, a key means one act
+  in a product, and an act both products have takes the same keys in both.
+- **card-keys-need-an-entered-card**: no keystroke made while moving through a
+  list reaches a card's action; a card's keys act only between `Enter` and
+  `Esc`.
+- **one-connection-per-browser**: any number of tabs of one browser profile,
+  with any number of subscriptions, hold one event connection per product
+  route.
+- **display-acknowledges-only-when-shown**: a seen-mark write is sent only
+  when its element is displayed; prerendered, hidden, offscreen, unrendered
+  and previewed views send none, and one showing sends one write.
+- **timeline-fit-conserves-rows**: the counts of a fitted series add up to the
+  rows that touch its window, and at most one shape narrower than the minimum
+  is drawn per bin, lane and group.
+- **timeline-zoom-refines**: a row drawn as itself at one zoom level is drawn
+  as itself at every finer level whose window holds it, and panning by whole
+  bins leaves the shapes of the shared span unchanged.
+- **works-without-script**: every element wraps markup whose rows, links,
+  tables and forms work with JavaScript disabled.
 - **csp-on-every-route**: every response carries the policy above, and no
   page contains an inline script or style attribute.
-- **built-shell-matches-source**: rebuilding `shell.js` from its sources gives
-  the committed file byte for byte.
+- **built-shell-matches-source**: rebuilding `shell.js` and `feed-worker.js`
+  from their sources gives the committed files byte for byte.
 - **live-fragment-equals-reload**: a fragment received live equals the same
   fragment in a reloaded page.
 - **update-never-moves-reader**: no live update changes the scroll position,
@@ -392,9 +513,3 @@ layouts in a real browser against their daemon and visual baseline.
   shows the text to copy and never reports success.
 - **narrow-width-usable**: at 390 px no view scrolls horizontally.
 - **unknown-never-zero**: no value state renders an unknown value as zero.
-- **one-connection-per-browser**: with SharedWorker available, any number of
-  visible tabs of one product in one browser profile hold one event
-  connection to its daemon.
-- **display-acknowledges-only-when-shown**: a seen mark is written only when a
-  view becomes visible to a person; prerendered, hidden, polled, previewed
-  and agent-read pages write none.

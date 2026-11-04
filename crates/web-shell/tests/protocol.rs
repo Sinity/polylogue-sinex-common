@@ -1,4 +1,4 @@
-use command_surface::{Availability, Deadline, LatencyClass, OperationSpec, Request, SseDecoder};
+use command_surface::{Access, Availability, Deadline, OperationSpec, Request, SseDecoder};
 use http::{Method, Request as HttpRequest, Response, StatusCode};
 use serde_json::json;
 use web_shell::protocol::{Action, CopyForm, CopyTarget};
@@ -30,35 +30,38 @@ fn live_fragment_equals_reload() {
 #[test]
 fn unknown_never_zero() {
     let states: Vec<ValueState<u64>> = vec![
-        ValueState::Unknown { reason: None },
+        ValueState::Unknown {
+            reason: "timed out".into(),
+        },
         ValueState::NotRecorded,
         ValueState::NotApplicable,
         ValueState::Pending,
-        ValueState::Error {
-            reason: "source offline".into(),
-        },
     ];
     for state in states {
         let cell = value_cell(&state).into_string();
         assert!(!cell.contains('0'), "{cell}");
     }
     assert!(
-        value_cell(&ValueState::Measured(0))
+        value_cell(&ValueState::Complete { value: 0 })
             .into_string()
             .contains(">0<")
     );
     assert!(
         value_cell(&ValueState::Partial {
             value: 3,
-            unknown: 2
+            unknown_count: 2,
+            reason: None,
         })
         .into_string()
         .contains("≥ 3 (2 unknown)")
     );
     assert!(
-        value_cell(&ValueState::Inferred(4))
-            .into_string()
-            .contains("≈ 4 (inferred)")
+        value_cell(&ValueState::Inferred {
+            value: 4,
+            basis: "sampled".into(),
+        })
+        .into_string()
+        .contains("≈ 4 (inferred)")
     );
 }
 
@@ -68,6 +71,7 @@ fn csp_on_every_route() {
         for path in [
             "/assets/tokens.css",
             "/assets/shell.js",
+            "/assets/feed-worker.js",
             "/assets/shell.css",
             "/assets/fonts/IBMPlexSans-Regular.woff2",
             "/assets/fonts/IBMPlexMono-Regular.woff2",
@@ -118,6 +122,18 @@ fn assets_validate_cache_and_font_identity() {
     let response = web_shell::assets::serve(&conditional);
     assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
     assert!(response.body().is_empty());
+    let worker = web_shell::assets::serve(
+        &HttpRequest::builder()
+            .uri("/assets/feed-worker.js")
+            .body(())
+            .unwrap(),
+    );
+    assert_eq!(worker.status(), StatusCode::OK);
+    assert_eq!(
+        worker.headers()["content-type"],
+        "text/javascript; charset=utf-8"
+    );
+    assert!(!worker.body().is_empty());
     for family in ["Sans", "Mono"] {
         let request = HttpRequest::builder()
             .uri(format!("/assets/fonts/IBMPlex{family}-Regular.woff2"))
@@ -150,14 +166,14 @@ fn fragment_event_round_trips_through_shared_sse_decoder() {
 
 fn operation(write: bool) -> OperationSpec {
     OperationSpec {
-        name: "read".into(),
-        command: vec!["read".into()],
-        summary: "Read selected row".into(),
-        reason: "read one row".into(),
-        http_route: "/v1/read".into(),
-        latency: LatencyClass::Read,
-        failures: vec![],
-        write,
+        access: if write { Access::Write } else { Access::Read },
+        ..OperationSpec::request(
+            "read",
+            &["read"],
+            "read",
+            "Read selected row",
+            "read one row",
+        )
     }
 }
 #[test]
@@ -167,6 +183,10 @@ fn actions_are_operation_requests_and_keep_unavailable_reasons() {
         arguments: json!({"ref": "row & <one>"}),
         request_id: "request-1".into(),
         deadline: Deadline::Default,
+        budget_tokens: None,
+        cursor: None,
+        fresh: false,
+        format: command_surface::Format::Text,
     };
     let action = Action::from_operation(
         &operation(true),
@@ -245,28 +265,6 @@ fn generated_types_match_rust() {
 }
 
 #[test]
-fn same_key_same_act() {
-    use web_shell::keys::KeyAction;
-    for (letter, terminal, expected_action) in [
-        ("j", "Ctrl-j", KeyAction::Next),
-        ("k", "Ctrl-k", KeyAction::Previous),
-        ("y", "Ctrl-y", KeyAction::CopyMenu),
-        ("x", "Ctrl-x", KeyAction::ToggleSelection),
-        ("n", "Ctrl-n", KeyAction::NextMatch),
-    ] {
-        let binding = web_shell::keys::KEYS
-            .iter()
-            .find(|binding| binding.key == letter && !binding.ctrl)
-            .unwrap();
-        assert_eq!(binding.action, expected_action);
-        assert!(
-            web_shell::keys::picker_bindings()
-                .any(|(key, action)| key == terminal && action == expected_action)
-        );
-    }
-}
-
-#[test]
 fn palette_contrast_and_css_injection() {
     use web_shell::theme::Palette;
     assert!(Palette::new("#ffffff", "#ffffff", "#eeeeee", "#777777").is_err());
@@ -312,12 +310,24 @@ fn page_and_palette_cli_derive_from_registered_request() {
     }
     let mut table =
         command_surface::OperationTable::new("app", command_surface::Deadlines::default());
+    table
+        .declare_tool(command_surface::ToolFamily {
+            name: "read".into(),
+            description: "Read rows".into(),
+            open_world: false,
+            idempotent: true,
+        })
+        .unwrap();
     table.register(Read).unwrap();
     let request = Request {
         operation: "read".into(),
         arguments: json!({"ref":"row' & λ"}),
         request_id: "r-1".into(),
         deadline: Deadline::None,
+        budget_tokens: None,
+        cursor: None,
+        fresh: false,
+        format: command_surface::Format::Text,
     };
     let action = Action::from_table(&table, &Availability::Enabled, &request, None).unwrap();
     assert_eq!(action.cli, table.cli_command(&request).unwrap());

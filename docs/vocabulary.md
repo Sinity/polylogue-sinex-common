@@ -102,26 +102,46 @@ are renames the operator may still change (default; open operator question).
 
 | Name | Meaning |
 |---|---|
-| operation | one row of a product's operation table, reachable from every surface |
+| operation | one row of a product's operation table, reachable from every surface it belongs on |
+| request row, stream row, local row | an operation the daemon answers once; one whose events the daemon sends until it ends; one the calling process runs without the daemon |
+| access level | what a row needs from its caller: `read`, `write` (attributed, undoable) or `permanent` (cannot be undone) |
+| argument form | how a request field is written on the command line: positional, words, rest, named, repeated, flag |
+| default operation | the row a command line runs when its first words name no command |
 | operation table | the typed list of a product's operations from which the CLI, socket, HTTP and MCP are generated |
-| request, answer | what a caller sends, and the typed value it gets back |
-| outcome | what kind of answer came back (rows, empty, incomplete …), or a failure |
+| request, answer | what a caller sends, and what it gets back: an outcome and an envelope |
+| outcome | what kind of answer came back: `ok`, `empty`, `degraded` (with what is missing) or `error` (a failure and no value) |
 | failure, failure kind | a typed error, and its stable name on the wire |
 | failure code | a product's precise failure name, registered once against a shared failure kind |
 | caller scope | the server's authenticated identity namespace for request retries; never supplied in request JSON |
-| in-flight coalescing | concurrent matching requests share one active execution and its final answer; sequential retries reach the product request log |
-| exit code | the CLI's process status for an answer, one per failure kind |
+| exit code | the CLI's process status for an answer, one per outcome and failure kind |
+| caret | the failing input line with a marker under the failing span |
+| suggestion | a corrected query, or a whole request, that runs as given |
+| candidates | what a failing input could have meant, each runnable |
 | latency class | the group an operation belongs to for its default deadline: local, status, completion, read, search, aggregate |
 | deadline | how long a request may run; a default any caller can lift |
-| position | where a product's stream of changes stands; an event's ID |
-| envelope | the fields every answer carries: outcome, count, shown, left out, next, reading, positions, coverage, caller |
+| position | where a product's stream of changes stands: its index generation and commit counter, `generation:counter`; an event's ID, what a read stood at, a seen mark's place |
+| not built, not yet available | a request needing an index or derived product that does not exist until built; a request the product cannot answer yet because it is still opening |
+| envelope | the fields every answer carries besides its outcome: count, shown, left out, next, notes, reading, positions, coverage, facets, caller, collapsed, used tokens |
+| lower bound | a count over a source whose coverage was not complete |
+| follow-up | a ready request in `next`, written as the surface runs it: a command line or an MCP tool call |
+| section, entry | one part of an assembled answer; one whole item of a section, a line or several, citing at least one reference |
 | section status | how complete one section of an assembled answer is: `complete`, `partial`, `not_estimable`, `not_observed`, `empty` |
 | expand handle | a token in an answer that reads more of what was left out, at the answer's read context |
 | value state | how complete a number is: `complete`, `partial`, `inferred`, `unknown`, `not_recorded`, `not_applicable`, `pending` |
+| denominator | the population a number is out of: its count, unit and query |
 | budget | how many tokens an answer may hold (`budget_tokens`); answers are fitted in whole lines |
 | caller, author | who sent a request, gathered from what it carries, and the author computed from it |
+| caller evidence | what a transport observed about a caller: harness, session, tool call, harness process, terminal, cgroup unit, whether its MCP server is shared, the session a call names |
+| harness, agent session | an agent program that runs sessions (`claude-code`, `codex` …), and one of its sessions, `harness:native` |
+| harness ancestor | a harness process above the caller; the nearest one launched it |
+| shared server | an MCP server process serving several sessions, whose start-up variables name none of them |
+| hook identity | the session (and subagent) a harness process or tool call belongs to, from a product's hook spool |
+| via | the channel a request reached the product by: cli, mcp, web, extension, desktop, hook, markup, import, daemon; follow-ups are written for it |
 | tool family | operation rows grouped into one MCP tool because their arguments share a shape and their hint |
 | seen mark | per consumer and target, the latest position displayed to that consumer |
+| consumer | who a seen mark belongs to: the operator or one agent session |
+| showing | how a target came before a consumer; only a display (visible for the display time, one second) or a `since: seen` read moves a seen mark |
+| value in text | an MCP answer in text format whose value its text part holds, left out of the structured part |
 | measurement | one value in status, with its state, reason and age |
 | measurement state | `measured`, `none_found`, `not_measured`, `unavailable`, `gap` |
 | verdict | the one-word health of a product: `healthy`, `degraded`, `unknown` |
@@ -188,16 +208,24 @@ are renames the operator may still change (default; open operator question).
 | Name | Meaning |
 |---|---|
 | token | a named value of the shared visual language (`--surface`, `--failure-ink` …) |
-| shell | the shared TypeScript that carries keys, palette, copy, live updates and windowed lists |
+| shell | the shared TypeScript that carries keys, palette, copy, live updates, windowed lists and the timeline |
+| element | one shell behaviour as a custom element (`<shell-window>`, `<shell-timeline>` …) wrapping markup that works without script |
 | fragment | server-rendered HTML for part of a page, sent live or fetched |
+| subscription | one followed reference, saved query or product stream, resumed after its own position |
+| union stream | a product's one event stream per browser, carrying every tab's subscriptions |
+| feed hub | the shell's holder of the union streams, in a SharedWorker or, where there is none, in the tab |
+| lane | a timeline row defined by a query, with a render (interval, point, count) and an optional grouping field |
+| series row | one drawable timeline row: lane, group, start and its shape |
+| shape | what a series row draws: an interval, a point, or a count of rows in one bin |
+| bin | the power-of-two span of time, aligned to the epoch, whose narrow rows one count row stands for |
+| card | a boxed decision in a view whose keys act only while it is entered |
+| card layer | the keys an entered card rebinds, shown on its buttons |
+| preview | a fragment of the same view shown on hover or focus; it never follows a feed or writes a seen mark |
 | page frame | the page layout: header, rails, main column, status strip, footer |
 | inspector | the right rail showing the facts of the page or the focused target |
 | palette | the list of every action available for the current selection |
 | copy menu | the forms a target can be copied as |
 | value display | how each value state is shown (`≥ X (N unknown)`, `≈ X`, `—` …) |
-| lane | a timeline row defined by a query, with a render and a grouping |
-| series row | one mark of a lane: `(lane, start, end?, render, label?, agency?, ref)` |
-| card layer | the keys a focused decision card rebinds, shown on its buttons |
 | counterpart | the same place in the other product, reached with `g o` |
 | mark | the symbol that, with its word, carries a meaning that colour alone never does |
 

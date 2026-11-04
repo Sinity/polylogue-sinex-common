@@ -84,6 +84,10 @@ impl Error {
             retryable: false,
         }
     }
+    pub fn candidates(mut self, candidates: Vec<String>) -> Self {
+        self.candidates = candidates;
+        self
+    }
     pub fn suggestion(mut self, query: impl Into<String>) -> Self {
         self.suggestion = Some(query.into());
         self
@@ -94,10 +98,6 @@ impl Error {
     }
     pub fn length(mut self, length: usize) -> Self {
         self.length = length;
-        self
-    }
-    pub fn candidates(mut self, candidates: Vec<String>) -> Self {
-        self.candidates = candidates;
         self
     }
     /// Render the source line and a caret under the refused text, at valid

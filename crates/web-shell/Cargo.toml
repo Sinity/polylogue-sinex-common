@@ -8,7 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-command-surface = { path = "../command-surface" }
+command-surface = { path = "../command-surface", features = ["typescript"] }
 http = "1"
 maud = "0.27"
 serde = { version = "1", features = ["derive"] }

@@ -7,20 +7,43 @@ use std::collections::VecDeque;
 /// Reserved recovery event shared by stream producers and generated clients.
 pub const RELOAD_EVENT: &str = "reload";
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct EventPosition {
+/// Where a product's stream of changes stands: the generation of its index
+/// and the commit counter within it. Counters order positions only within
+/// one generation; a rebuilt index starts a new one. An event's ID, a read's
+/// position and a seen mark all use it, written `generation:counter`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Position {
     pub generation: String,
-    pub cursor: String,
+    pub counter: u64,
 }
-impl EventPosition {
-    pub fn event_id(&self) -> String {
-        // A JSON tuple is unambiguous for arbitrary product positions.
-        serde_json::to_string(&(&self.generation, &self.cursor)).expect("strings serialize")
+impl Position {
+    pub fn new(generation: impl Into<String>, counter: u64) -> Self {
+        Self {
+            generation: generation.into(),
+            counter,
+        }
     }
-    pub fn from_event_id(value: &str) -> Result<Self, Failure> {
-        let (generation, cursor) = serde_json::from_str(value)
-            .map_err(|e| bad_request(format!("invalid Last-Event-ID: {e}")))?;
-        Ok(Self { generation, cursor })
+    /// Whether this position comes after `other`; `None` across generations,
+    /// whose counters do not compare.
+    pub fn is_after(&self, other: &Self) -> Option<bool> {
+        (self.generation == other.generation).then_some(self.counter > other.counter)
+    }
+    pub fn event_id(&self) -> String {
+        self.to_string()
+    }
+    /// Parse `generation:counter`; the generation may itself hold colons.
+    pub fn parse(value: &str) -> Result<Self, Failure> {
+        value
+            .rsplit_once(':')
+            .and_then(|(generation, counter)| Some(Self::new(generation, counter.parse().ok()?)))
+            .filter(|position| !position.generation.is_empty())
+            .ok_or_else(|| bad_request(format!("{value:?} is not a position (generation:counter)")))
+    }
+}
+impl std::fmt::Display for Position {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.generation, self.counter)
     }
 }
 
@@ -188,7 +211,7 @@ impl SseDecoder {
 /// position is opaque to this crate and must uniquely identify each event.
 #[derive(Clone, Debug)]
 pub struct CommittedEvent<T> {
-    pub position: EventPosition,
+    pub position: Position,
     pub event: String,
     pub value: T,
 }
@@ -201,7 +224,7 @@ pub enum Resume<'a, T> {
 pub struct EventLog<T> {
     generation: String,
     events: VecDeque<CommittedEvent<T>>,
-    base: Option<EventPosition>,
+    base: Option<Position>,
 }
 impl<T> EventLog<T> {
     pub fn new(generation: impl Into<String>) -> Self {
@@ -225,7 +248,7 @@ impl<T> EventLog<T> {
     }
     /// Drop committed events through this position, retaining it as the
     /// oldest resumable boundary. An absent position cannot advance retention.
-    pub fn retain_after(&mut self, position: &EventPosition) -> Result<(), Failure> {
+    pub fn retain_after(&mut self, position: &Position) -> Result<(), Failure> {
         let index = self
             .events
             .iter()
@@ -239,7 +262,7 @@ impl<T> EventLog<T> {
         let Some(last) = last_event_id else {
             return Resume::Events(self.events.iter().collect());
         };
-        let Ok(position) = EventPosition::from_event_id(last) else {
+        let Ok(position) = Position::parse(last) else {
             return Resume::Reload {
                 reason: "unrecognized position".into(),
             };

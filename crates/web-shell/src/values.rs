@@ -1,36 +1,10 @@
-//! Value states retain uncertainty; only measured zero renders as zero.
+//! Value cells render command-surface's value states; only a value that is
+//! held renders as a number.
+use command_surface::ValueState;
 use maud::{Markup, html};
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ValueState<T> {
-    Measured(T),
-    Unknown { reason: Option<String> },
-    NotRecorded,
-    NotApplicable,
-    Partial { value: T, unknown: u64 },
-    Inferred(T),
-    Pending,
-    Error { reason: String },
-}
+
 pub fn value_cell<T: std::fmt::Display>(value: &ValueState<T>) -> Markup {
-    let (state, label) = match value {
-        ValueState::Measured(value) => ("measured", value.to_string()),
-        ValueState::Unknown { reason } => (
-            "unknown",
-            reason.as_ref().map_or_else(
-                || "— unknown".into(),
-                |reason| format!("— unknown ({reason})"),
-            ),
-        ),
-        ValueState::NotRecorded => ("not-recorded", "— not recorded".into()),
-        ValueState::NotApplicable => ("not-applicable", "∅ n/a".into()),
-        ValueState::Partial { value, unknown } => {
-            ("partial", format!("≥ {value} ({unknown} unknown)"))
-        }
-        ValueState::Inferred(value) => ("inferred", format!("≈ {value} (inferred)")),
-        ValueState::Pending => ("pending", "◷ pending".into()),
-        ValueState::Error { reason } => ("error", format!("! error ({reason})")),
-    };
-    html! { span class="value-state" data-state=(state) { (label) } }
+    html! { span class="value-state" data-state=(value.name().replace('_', "-")) { (value.text()) } }
 }
 pub fn unavailable(reason: &str, command: &str) -> Markup {
     html! { section class="unavailable" role="status" { p { "Unavailable: " (reason) } p { "Run " code { (command) } } } }
@@ -42,45 +16,53 @@ pub fn stale_banner(reason: &str) -> Markup {
     html! { p class="stale" role="status" { "◷ stale: " (reason) } }
 }
 
-/// Shared status figures retain command-surface's absent-versus-measured states.
-pub fn figure_cell<T: std::fmt::Display>(figure: &command_surface::Figure<T>) -> Markup {
-    use command_surface::FigureState;
-    let (state, shown) = match figure.state() {
-        FigureState::Measured => (
+/// A status measurement keeps command-surface's absent-versus-measured states.
+pub fn measurement_cell<T: std::fmt::Display>(
+    measurement: &command_surface::Measurement<T>,
+) -> Markup {
+    use command_surface::MeasurementState;
+    let (state, shown) = match measurement.state() {
+        MeasurementState::Measured => (
             "measured",
-            figure
+            measurement
                 .value()
-                .expect("measured figure has a value")
+                .expect("measured measurement has a value")
                 .to_string(),
         ),
-        FigureState::NoneFound => (
+        MeasurementState::NoneFound => (
             "measured",
             format!(
                 "{} (none found)",
-                figure.value().expect("none_found figure has a value")
+                measurement
+                    .value()
+                    .expect("none_found measurement has a value")
             ),
         ),
-        FigureState::NotMeasured => (
+        MeasurementState::NotMeasured => (
             "unknown",
             format!(
                 "— not measured ({})",
-                figure.reason().expect("unmeasured figure has a reason")
+                measurement
+                    .reason()
+                    .expect("unmeasured measurement has a reason")
             ),
         ),
-        FigureState::Unavailable => (
+        MeasurementState::Unavailable => (
             "error",
             format!(
                 "! unavailable ({})",
-                figure.reason().expect("unavailable figure has a reason")
+                measurement
+                    .reason()
+                    .expect("unavailable measurement has a reason")
             ),
         ),
-        FigureState::Gap => (
+        MeasurementState::Gap => (
             "partial",
             format!(
                 "≥ gap ({})",
-                figure.reason().expect("gap figure has a reason")
+                measurement.reason().expect("gap measurement has a reason")
             ),
         ),
     };
-    html! { span class="value-state" data-state=(state) data-age=(figure.age()) { (figure.name()) ": " (shown) } }
+    html! { span class="value-state" data-state=(state) data-age=(measurement.age()) { (measurement.name()) ": " (shown) } }
 }

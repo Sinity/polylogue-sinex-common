@@ -1,22 +1,141 @@
 //! Typed operations and one dispatch boundary shared by every adapter.
 use crate::{
-    Answer, Deadline, Failure, FailureKind, LatencyClass, Next, RunnableRequest, bad_request,
+    Answer, Authorship, Budget, Deadline, Envelope, Failure, FailureKind, Fitted, LatencyClass,
+    LeftOut, Outcome, RunnableRequest, Section, Via, approximate_tokens, bad_request,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::{
     any::Any,
-    collections::HashMap,
+    collections::BTreeMap,
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 pub type OperationFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Who may call an operation. Each level includes the ones below it.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum Access {
+    #[default]
+    Read,
+    /// Attributed, reversible writes.
+    Write,
+    /// Changes that cannot be undone (a tombstone).
+    Permanent,
+}
+impl Access {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Permanent => "permanent",
+        }
+    }
+}
+
+/// How an operation runs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OperationKind {
+    /// The daemon answers it once. It is offered on every surface; over MCP
+    /// it is a row of the named tool.
+    Request { tool: String },
+    /// The daemon sends events until the stream ends or the caller leaves
+    /// (a change feed, `follow`). Offered on the CLI, the socket and HTTP
+    /// (as server-sent events); not over MCP, whose calls answer once.
+    Stream,
+    /// Runs in the calling process without the daemon: help, installers,
+    /// the MCP server and hook entry points. Command line only.
+    Local,
+}
+
+/// How one argument is written on the command line. Every surface other
+/// than the command line uses the request's field of the same name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ArgumentForm {
+    /// One word by position. Required when the request type requires it.
+    Positional,
+    /// The remaining words by position, flags between them still read as
+    /// flags: joined by spaces for a string field, a list for an array field.
+    Words,
+    /// Everything after it, flags included, the same way.
+    Rest,
+    /// `--name VALUE`.
+    Named,
+    /// `--name VALUE`, repeatable; the values form a list.
+    Repeated,
+    /// `--name` alone, for a boolean field.
+    Flag,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ArgumentSpec {
+    /// The request field (`request_id` style); `--request-id` on the command line.
+    pub name: String,
+    pub form: ArgumentForm,
+    pub help: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short: Option<char>,
+    /// Acts on the calling machine (`--out FILE`): read by the command line
+    /// and kept out of the request.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub calling_process: bool,
+    /// Named in the MCP tool list. An unlisted field is still accepted and
+    /// checked by its row at dispatch; a product's explain answer lists it
+    /// (`OperationTable::family_schemas`).
+    #[serde(default = "listed", skip_serializing_if = "is_listed")]
+    pub listed: bool,
+}
+impl ArgumentSpec {
+    pub fn new(name: impl Into<String>, form: ArgumentForm, help: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            form,
+            help: help.into(),
+            short: None,
+            calling_process: false,
+            listed: true,
+        }
+    }
+    /// Leave the field out of the MCP tool list; it stays accepted.
+    pub fn unlisted(mut self) -> Self {
+        self.listed = false;
+        self
+    }
+    pub fn short(mut self, short: char) -> Self {
+        self.short = Some(short);
+        self
+    }
+    pub fn calling_process(mut self) -> Self {
+        self.calling_process = true;
+        self
+    }
+    pub(crate) fn flag(&self) -> String {
+        format!("--{}", self.name.replace('_', "-"))
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct OperationSpec {
@@ -25,23 +144,92 @@ pub struct OperationSpec {
     pub summary: String,
     /// Why this operation cannot be a query plus an existing operation.
     pub reason: String,
-    pub http_route: String,
+    #[serde(flatten)]
+    pub kind: OperationKind,
+    /// Its own HTTP route; none for a local operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_route: Option<String>,
     pub latency: LatencyClass,
     pub failures: Vec<FailureKind>,
-    pub write: bool,
+    pub access: Access,
+    /// How each request field is written on the command line. A field with
+    /// no entry is written `--name VALUE`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arguments: Vec<ArgumentSpec>,
+    /// Shown in help; a row that programs run and people do not is not.
+    #[serde(default = "listed")]
+    pub listed: bool,
+    /// The token budget of an answer whose request names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_budget_tokens: Option<u32>,
+}
+fn listed() -> bool {
+    true
+}
+fn is_listed(listed: &bool) -> bool {
+    *listed
 }
 impl OperationSpec {
-    pub fn mcp_name(&self, product: &str) -> String {
-        format!("{}_{}", product, self.command.join("_"))
+    /// A request row of `tool`, readable by anyone, with no declared arguments.
+    pub fn request(
+        name: impl Into<String>,
+        command: &[&str],
+        tool: impl Into<String>,
+        summary: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        let command: Vec<String> = command.iter().map(|word| (*word).to_owned()).collect();
+        Self {
+            http_route: Some(format!("/v1/{}", command.join("/"))),
+            name: name.into(),
+            command,
+            summary: summary.into(),
+            reason: reason.into(),
+            kind: OperationKind::Request { tool: tool.into() },
+            latency: LatencyClass::Read,
+            failures: vec![],
+            access: Access::Read,
+            arguments: vec![],
+            listed: true,
+            default_budget_tokens: None,
+        }
+    }
+    pub fn tool(&self) -> Option<&str> {
+        match &self.kind {
+            OperationKind::Request { tool } => Some(tool),
+            _ => None,
+        }
+    }
+    pub fn argument(&self, name: &str) -> Option<&ArgumentSpec> {
+        self.arguments.iter().find(|argument| argument.name == name)
     }
 }
 
-/// One row. Its response type supplies every surface, including terminal text.
+/// One MCP tool: a family of request rows whose arguments share a shape and
+/// whose access is the same.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ToolFamily {
+    /// `query`; the tool is `<product>_query`.
+    pub name: String,
+    /// Sent to the model verbatim.
+    pub description: String,
+    /// Its rows reach beyond the product (another session, a web chat).
+    #[serde(default)]
+    pub open_world: bool,
+    /// A retried call with the same `request_id` is applied once. A family
+    /// whose rows start a new action on every call says no.
+    pub idempotent: bool,
+}
+
+/// One request row. Its response type supplies every surface, including
+/// terminal text.
 ///
 /// The returned future owns its work. Drop cancels it, and blocking workers
 /// must check the context token at least every 100 ms. Do not spawn unowned
 /// work. A write stores request identity and its result atomically with its
-/// mutation in the product's transaction, so replay also survives restart.
+/// mutation in the product's transaction, so a retry, concurrent or after a
+/// restart, is applied once.
 pub trait Operation: Send + Sync + 'static {
     type Request: Serialize + DeserializeOwned + JsonSchema + Send + 'static;
     type Response: Serialize + DeserializeOwned + JsonSchema + Send + 'static;
@@ -54,28 +242,128 @@ pub trait Operation: Send + Sync + 'static {
     fn render_text(&self, answer: &Self::Response) -> String;
 }
 
+/// One stream row: opening it yields its events until the sender closes.
+pub trait StreamOperation: Send + Sync + 'static {
+    type Request: Serialize + DeserializeOwned + JsonSchema + Send + 'static;
+    type Event: Serialize + DeserializeOwned + JsonSchema + Send + 'static;
+    fn spec(&self) -> OperationSpec;
+    fn open(
+        &self,
+        request: Self::Request,
+        context: RequestContext,
+    ) -> OperationFuture<'_, Result<tokio::sync::mpsc::Receiver<Self::Event>, Failure>>;
+    fn render_event(&self, event: &Self::Event) -> String;
+}
+
+/// A stream's events as JSON, in the order sent.
+pub struct Events {
+    events: Box<dyn ErasedEvents>,
+}
+impl Events {
+    /// The next event; `None` when the stream has ended.
+    pub async fn next(&mut self) -> Option<Result<Value, Failure>> {
+        self.events.receive().await
+    }
+}
+trait ErasedEvents: Send {
+    fn receive(&mut self) -> OperationFuture<'_, Option<Result<Value, Failure>>>;
+}
+impl<T: Serialize + Send + 'static> ErasedEvents for tokio::sync::mpsc::Receiver<T> {
+    fn receive(&mut self) -> OperationFuture<'_, Option<Result<Value, Failure>>> {
+        Box::pin(async move {
+            self.recv().await.map(|event| {
+                serde_json::to_value(event)
+                    .map_err(|e| Failure::new(FailureKind::Io, e.to_string()))
+            })
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct RequestContext {
-    /// Computed at the transport boundary; a caller cannot set this in JSON.
-    pub origin: Origin,
+    /// How the request arrived, set by the transport that accepted it; a
+    /// caller cannot set this in JSON. Follow-ups are written for it: an MCP
+    /// tool call for `mcp`, a command line otherwise.
+    pub via: Via,
     pub request_id: String,
     pub cancellation: CancellationToken,
     caller: Caller,
+    budget_tokens: Option<u32>,
+    default_budget_tokens: Option<u32>,
+    cursor: Option<String>,
+    fresh: bool,
+    format: crate::Format,
+    /// An MCP call's own `_meta`, where a harness puts per-call identity.
+    metadata: Option<Value>,
+    forms: Arc<Forms>,
     progress: Arc<Mutex<Progress>>,
 }
 /// Trusted product identity, supplied after authentication or peer inspection.
 /// It is never deserialized from a request. Scope namespaces retry identities.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Caller {
     scope: String,
     identity: Option<Arc<dyn Any + Send + Sync>>,
+    authorship: Option<Authorship>,
+    evidence: Option<crate::CallerEvidence>,
+    access: Access,
+}
+impl Default for Caller {
+    fn default() -> Self {
+        Self {
+            scope: String::new(),
+            identity: None,
+            authorship: None,
+            evidence: None,
+            access: Access::Read,
+        }
+    }
 }
 impl Caller {
     pub fn authenticated<T: Any + Send + Sync>(scope: impl Into<String>, identity: T) -> Self {
         Self {
             scope: scope.into(),
             identity: Some(Arc::new(identity)),
+            ..Self::default()
         }
+    }
+    /// The computed author, echoed in every answer's envelope.
+    pub fn with_authorship(mut self, authorship: Authorship) -> Self {
+        self.authorship = Some(authorship);
+        self
+    }
+    /// What the transport observed about the caller. An MCP call through
+    /// `mcp_as` (stdio, or an MCP frame on the socket) computes its author
+    /// from this and the call's own `_meta`, the same way on every path.
+    pub fn with_evidence(mut self, evidence: crate::CallerEvidence) -> Self {
+        self.evidence = Some(evidence);
+        self
+    }
+    pub fn evidence(&self) -> Option<&crate::CallerEvidence> {
+        self.evidence.as_ref()
+    }
+    /// The caller of one MCP call: with evidence, its author is computed by
+    /// `author_of` over that evidence and the session the call names in
+    /// `_meta.session` (`harness:native`). Without evidence the server's
+    /// authorship stands.
+    pub(crate) fn for_mcp_call(&self, metadata: Option<&Value>) -> Self {
+        let mut caller = self.clone();
+        if let Some(evidence) = &self.evidence {
+            let mut evidence = evidence.clone();
+            evidence.call_session = metadata
+                .and_then(|meta| meta.get("session"))
+                .and_then(Value::as_str)
+                .and_then(crate::AgentSession::parse);
+            caller.authorship = Some(crate::author_of(&evidence, Via::Mcp, None));
+            caller.evidence = Some(evidence);
+        }
+        caller
+    }
+    /// The highest access the caller's credential grants. A caller grants
+    /// read access until the server says more.
+    pub fn with_access(mut self, access: Access) -> Self {
+        self.access = access;
+        self
     }
     pub fn identity<T: Any>(&self) -> Option<&T> {
         self.identity.as_ref()?.downcast_ref()
@@ -83,21 +371,14 @@ impl Caller {
     pub fn scope(&self) -> &str {
         &self.scope
     }
-}
-/// The answer and the trusted context that actually produced it. Owner context
-/// is process-private; transport serialization applies only to `answer`.
-pub struct DispatchResult {
-    pub answer: Answer<Value>,
-    pub owner: Caller,
+    pub fn authorship(&self) -> Option<&Authorship> {
+        self.authorship.as_ref()
+    }
+    pub fn access(&self) -> Access {
+        self.access
+    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Origin {
-    Cli,
-    Socket,
-    Http,
-    Mcp,
-}
 #[derive(Clone, Debug, Default)]
 struct Progress {
     stage: String,
@@ -107,6 +388,66 @@ struct Progress {
 impl RequestContext {
     pub fn caller(&self) -> &Caller {
         &self.caller
+    }
+    pub fn metadata(&self) -> Option<&Value> {
+        self.metadata.as_ref()
+    }
+    /// The cursor the request continues from.
+    pub fn cursor(&self) -> Option<&str> {
+        self.cursor.as_deref()
+    }
+    /// Whether the caller asked to see in full what it already holds.
+    pub fn fresh(&self) -> bool {
+        self.fresh
+    }
+    pub fn format(&self) -> crate::Format {
+        self.format
+    }
+    /// The answer's budget: the request's, else the operation's default (or
+    /// `fallback` when it declares none), lowered to the caller's `cap`.
+    pub fn budget(&self, fallback: u32, cap: Option<u32>) -> Budget {
+        Budget::new(
+            self.budget_tokens,
+            self.default_budget_tokens.unwrap_or(fallback),
+            cap,
+        )
+    }
+    /// How this request's surface writes a follow-up: a command line, or an
+    /// MCP tool call.
+    pub fn follow_up(&self, request: &RunnableRequest) -> String {
+        self.forms.follow_up(self.via, request)
+    }
+    /// Fit `sections` to `budget` for this request's surface. `envelope` is
+    /// the answer's envelope without its left-out items (its notes, next
+    /// steps, coverage and facets): its lines are held back from the budget,
+    /// and left-out lines are counted as the surface prints them, so the
+    /// answer's whole text fits. Tokens are counted as the transports
+    /// measure them (`approximate_tokens`). The answer carries the result's
+    /// `text` as its value's rendering and its `left_out` in the envelope.
+    pub fn fit(&self, sections: Vec<Section>, budget: Budget, envelope: &Envelope) -> Fitted {
+        let mut rest = envelope.clone();
+        rest.left_out.clear();
+        // Lines the answer will carry once dispatch and the fit are done:
+        // the count's line in its longest form ("shown N of at least N").
+        rest.mark_lower_bounds(true);
+        if let Some(count) = rest.count {
+            rest.shown = Some(count.value);
+        }
+        let footer = self.forms.footer(
+            self.via,
+            &Answer {
+                outcome: Outcome::Ok(Value::Null),
+                envelope: rest,
+            },
+        );
+        let held = approximate_tokens(&footer);
+        let budget = Budget {
+            tokens: budget.tokens.saturating_sub(held),
+            clamped_from: budget.clamped_from,
+        };
+        crate::fit(sections, budget, &approximate_tokens, &|item: &LeftOut| {
+            self.forms.left_out_line(self.via, item)
+        })
     }
     /// Called between bounded work units. Also supplies the timeout diagnostic.
     pub fn progress(
@@ -153,12 +494,33 @@ pub struct OperationDescription {
     pub spec: OperationSpec,
     #[serde(rename = "inputSchema")]
     pub input_schema: Value,
+    /// The answer's schema; for a stream, one event's.
     #[serde(rename = "outputSchema")]
     pub output_schema: Value,
 }
 
+/// What every surface needs to write a request back: the product name, the
+/// rows' descriptions and the tool families. Shared with request contexts.
+#[derive(Clone)]
+pub(crate) struct Forms {
+    pub(crate) product: String,
+    pub(crate) descriptions: Vec<OperationDescription>,
+    pub(crate) tools: Vec<ToolFamily>,
+    pub(crate) options: Vec<crate::RequestOption>,
+}
+impl Forms {
+    pub(crate) fn description(&self, name: &str) -> Option<&OperationDescription> {
+        self.descriptions.iter().find(|d| d.spec.name == name)
+    }
+}
+
+enum Row {
+    Request(Box<dyn ErasedOperation>),
+    Stream(Box<dyn ErasedStream>),
+    Local,
+}
+
 trait ErasedOperation: Send + Sync {
-    fn description(&self) -> &OperationDescription;
     fn execute(
         &self,
         arguments: Value,
@@ -166,27 +528,7 @@ trait ErasedOperation: Send + Sync {
     ) -> OperationFuture<'_, Answer<Value>>;
     fn render_text(&self, value: Value) -> Result<String, Failure>;
 }
-struct TypedOperation<O> {
-    operation: O,
-    description: OperationDescription,
-}
-impl<O: Operation> TypedOperation<O> {
-    fn new(operation: O) -> Self {
-        let description = OperationDescription {
-            spec: operation.spec(),
-            input_schema: schema_for!(O::Request).to_value(),
-            output_schema: schema_for!(Answer<O::Response>).to_value(),
-        };
-        Self {
-            operation,
-            description,
-        }
-    }
-}
-impl<O: Operation> ErasedOperation for TypedOperation<O> {
-    fn description(&self) -> &OperationDescription {
-        &self.description
-    }
+impl<O: Operation> ErasedOperation for O {
     fn execute(
         &self,
         arguments: Value,
@@ -197,35 +539,60 @@ impl<O: Operation> ErasedOperation for TypedOperation<O> {
                 Ok(request) => request,
                 Err(error) => return Answer::error(bad_request(error.to_string())),
             };
-            let answer = self.operation.execute(request, context).await;
-            match answer {
-                Answer::Error { error, notes, next } => Answer::Error { error, notes, next },
-                other => match other.map(serde_json::to_value) {
-                    Answer::Ok { value, notes, next } => match value {
-                        Ok(value) => Answer::Ok { value, notes, next },
-                        Err(e) => serialization_error(e),
-                    },
-                    Answer::Empty { value, notes, next } => match value {
-                        Ok(value) => Answer::Empty { value, notes, next },
-                        Err(e) => serialization_error(e),
-                    },
-                    Answer::Degraded { value, notes, next } => match value {
-                        Ok(value) => Answer::Degraded { value, notes, next },
-                        Err(e) => serialization_error(e),
-                    },
-                    Answer::Error { .. } => unreachable!("handled above"),
-                },
-            }
+            let answer = Operation::execute(self, request, context).await;
+            let Answer { outcome, envelope } = answer;
+            let outcome = match outcome.map(serde_json::to_value) {
+                Outcome::Ok(Ok(value)) => Outcome::Ok(value),
+                Outcome::Empty(Ok(value)) => Outcome::Empty(value),
+                Outcome::Degraded {
+                    value: Ok(value),
+                    missing,
+                } => Outcome::Degraded { value, missing },
+                Outcome::Error(error) => Outcome::Error(error),
+                Outcome::Ok(Err(error))
+                | Outcome::Empty(Err(error))
+                | Outcome::Degraded {
+                    value: Err(error), ..
+                } => Outcome::Error(Failure::new(FailureKind::Io, error.to_string())),
+            };
+            Answer { outcome, envelope }
         })
     }
     fn render_text(&self, value: Value) -> Result<String, Failure> {
         serde_json::from_value(value)
-            .map(|answer| self.operation.render_text(&answer))
+            .map(|answer| Operation::render_text(self, &answer))
             .map_err(|e| Failure::new(FailureKind::Io, e.to_string()))
     }
 }
-fn serialization_error(error: serde_json::Error) -> Answer<Value> {
-    Answer::error(Failure::new(FailureKind::Io, error.to_string()))
+
+trait ErasedStream: Send + Sync {
+    fn open(
+        &self,
+        arguments: Value,
+        context: RequestContext,
+    ) -> OperationFuture<'_, Result<Events, Failure>>;
+    fn render_event(&self, event: Value) -> Result<String, Failure>;
+}
+impl<S: StreamOperation> ErasedStream for S {
+    fn open(
+        &self,
+        arguments: Value,
+        context: RequestContext,
+    ) -> OperationFuture<'_, Result<Events, Failure>> {
+        Box::pin(async move {
+            let request =
+                serde_json::from_value(arguments).map_err(|e| bad_request(e.to_string()))?;
+            let receiver = StreamOperation::open(self, request, context).await?;
+            Ok(Events {
+                events: Box::new(receiver),
+            })
+        })
+    }
+    fn render_event(&self, event: Value) -> Result<String, Failure> {
+        serde_json::from_value(event)
+            .map(|event| StreamOperation::render_event(self, &event))
+            .map_err(|e| Failure::new(FailureKind::Io, e.to_string()))
+    }
 }
 
 /// A product declares its own budgets. No deadline is a universal size limit.
@@ -240,99 +607,89 @@ impl Deadlines {
     }
 }
 
-type RequestKey = (String, String);
-type FlightRegistry = Mutex<HashMap<RequestKey, Arc<InFlight>>>;
-
-struct InFlight {
-    identity: Value,
-    owner: Caller,
-    result: watch::Sender<Option<Arc<Answer<Value>>>>,
-}
-impl InFlight {
-    fn new(identity: Value, owner: Caller) -> Self {
-        let (result, _) = watch::channel(None);
-        Self {
-            identity,
-            owner,
-            result,
-        }
-    }
-    async fn wait(&self) -> Answer<Value> {
-        let mut result = self.result.subscribe();
-        loop {
-            let answer = result.borrow_and_update().clone();
-            if let Some(answer) = answer {
-                return (*answer).clone();
-            }
-            if result.changed().await.is_err() {
-                return cancelled_owner();
-            }
-        }
-    }
-}
-fn cancelled_owner() -> Answer<Value> {
-    Answer::error(Failure::new(
-        FailureKind::Cancelled,
-        "in-flight request owner was dropped",
-    ))
-}
-/// Only the admitted owner retires a flight. Waiters retain their own Arc,
-/// including its final result, after it leaves the registry.
-struct FlightOwner<'a> {
-    registry: &'a FlightRegistry,
-    key: RequestKey,
-    flight: Arc<InFlight>,
-    finished: bool,
-}
-impl FlightOwner<'_> {
-    fn publish(&mut self, answer: Answer<Value>) {
-        let answer = Arc::new(answer);
-        {
-            let mut registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
-            if registry
-                .get(&self.key)
-                .is_some_and(|flight| Arc::ptr_eq(flight, &self.flight))
-            {
-                registry.remove(&self.key);
-            }
-            self.finished = true;
-        }
-        // Retire before waking. Existing waiters own the old flight, while a
-        // new admission reaches the product log. Wakers may reenter dispatch.
-        self.flight.result.send_replace(Some(answer));
-    }
-    fn finish(mut self, answer: Answer<Value>) -> Answer<Value> {
-        self.publish(answer.clone());
-        answer
-    }
-}
-impl Drop for FlightOwner<'_> {
-    fn drop(&mut self) {
-        if !self.finished {
-            self.publish(cancelled_owner());
-        }
-    }
-}
+/// The words the command line keeps for itself on every row.
+pub(crate) const GLOBAL_FLAGS: [&str; 7] = [
+    "json",
+    "deadline",
+    "request-id",
+    "request",
+    "budget",
+    "cursor",
+    "fresh",
+];
 
 /// Heterogeneous typed table. Registration rejects ambiguity once at startup.
-/// Only simultaneous writes coalesce here. Products own authoritative retry
-/// identity and outcomes in the same transaction as their mutation.
+/// Retry identity lives with the product's writer, in the same transaction
+/// as its mutation; the table keeps no request state.
 pub struct OperationTable {
-    pub(crate) product: String,
-    operations: Vec<Arc<dyn ErasedOperation>>,
+    rows: Vec<Row>,
+    forms: Arc<Forms>,
     deadlines: Deadlines,
-    in_flight: FlightRegistry,
-    failure_codes: HashMap<String, FailureKind>,
+    failure_codes: BTreeMap<String, FailureKind>,
+    default_operation: Option<String>,
 }
 impl OperationTable {
     pub fn new(product: impl Into<String>, deadlines: Deadlines) -> Self {
         Self {
-            product: product.into(),
-            operations: vec![],
+            rows: vec![],
+            forms: Arc::new(Forms {
+                product: product.into(),
+                descriptions: vec![],
+                tools: vec![],
+                options: vec![],
+            }),
             deadlines,
-            in_flight: Mutex::new(HashMap::new()),
-            failure_codes: HashMap::new(),
+            failure_codes: BTreeMap::new(),
+            default_operation: None,
         }
+    }
+    pub fn product(&self) -> &str {
+        &self.forms.product
+    }
+    /// Declare an MCP tool before registering its rows.
+    pub fn declare_tool(&mut self, tool: ToolFamily) -> Result<(), Failure> {
+        if !valid_word(&tool.name, '_') || tool.description.is_empty() {
+            return Err(bad_request("a tool needs a name and a description"));
+        }
+        if self.forms.tools.iter().any(|t| t.name == tool.name) {
+            return Err(bad_request(format!("tool {} is declared twice", tool.name)));
+        }
+        Arc::make_mut(&mut self.forms).tools.push(tool);
+        Ok(())
+    }
+    pub fn tools(&self) -> &[ToolFamily] {
+        &self.forms.tools
+    }
+    /// Serve a request option on every row: tools offer it, and dispatch
+    /// takes it. A table serves only `request_id` and `deadline` until it
+    /// names more.
+    pub fn accept(&mut self, option: crate::RequestOption) {
+        let options = &mut Arc::make_mut(&mut self.forms).options;
+        if !options.contains(&option) {
+            options.push(option);
+            options.sort();
+        }
+    }
+    pub fn accepts(&self, option: crate::RequestOption) -> bool {
+        self.forms.options.contains(&option)
+    }
+    /// The row a command line runs when its first words name no command
+    /// (`polylogue QUERY`).
+    pub fn set_default_operation(&mut self, name: impl Into<String>) -> Result<(), Failure> {
+        let name = name.into();
+        let spec = self
+            .spec_named(&name)
+            .ok_or_else(|| bad_request(format!("unknown operation {name}")))?;
+        if matches!(spec.kind, OperationKind::Stream) {
+            return Err(bad_request("a stream cannot be the default operation"));
+        }
+        self.default_operation = Some(name);
+        Ok(())
+    }
+    pub(crate) fn default_operation(&self) -> Option<&OperationDescription> {
+        self.default_operation
+            .as_deref()
+            .and_then(|name| self.forms.description(name))
     }
     /// Register each precise product code once, at table construction.
     pub fn register_failure_code(
@@ -356,35 +713,88 @@ impl OperationTable {
         Ok(())
     }
     pub fn register<O: Operation>(&mut self, operation: O) -> Result<(), Failure> {
-        let description = TypedOperation::new(operation);
-        let spec = description.description().spec.clone();
-        if self.product.is_empty()
-            || !self
-                .product
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        let description = OperationDescription {
+            spec: operation.spec(),
+            input_schema: schema_for!(O::Request).to_value(),
+            output_schema: schema_for!(Answer<O::Response>).to_value(),
+        };
+        if !matches!(description.spec.kind, OperationKind::Request { .. }) {
+            return Err(bad_request(format!(
+                "operation {} implements Operation, so it is a request row",
+                description.spec.name
+            )));
+        }
+        self.add(description, Row::Request(Box::new(operation)))
+    }
+    pub fn register_stream<S: StreamOperation>(&mut self, stream: S) -> Result<(), Failure> {
+        let description = OperationDescription {
+            spec: stream.spec(),
+            input_schema: schema_for!(S::Request).to_value(),
+            output_schema: schema_for!(S::Event).to_value(),
+        };
+        if description.spec.kind != OperationKind::Stream {
+            return Err(bad_request(format!(
+                "operation {} implements StreamOperation, so it is a stream row",
+                description.spec.name
+            )));
+        }
+        self.add(description, Row::Stream(Box::new(stream)))
+    }
+    /// A row the calling process runs itself. The table parses its command
+    /// line into `R` and lists it in help; nothing else reaches it.
+    pub fn register_local<R: JsonSchema>(&mut self, spec: OperationSpec) -> Result<(), Failure> {
+        if spec.kind != OperationKind::Local {
+            return Err(bad_request(format!(
+                "operation {} is registered as local, so its kind is local",
+                spec.name
+            )));
+        }
+        let description = OperationDescription {
+            spec,
+            input_schema: schema_for!(R).to_value(),
+            output_schema: Value::Bool(true),
+        };
+        self.add(description, Row::Local)
+    }
+    fn add(&mut self, description: OperationDescription, row: Row) -> Result<(), Failure> {
+        let spec = &description.spec;
+        let product = &self.forms.product;
+        if !valid_word(&product.replace('_', "-"), '-')
             || spec.name.is_empty()
             || spec.command.is_empty()
-            || spec.command.iter().any(|word| {
-                word.is_empty() || !word.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-            })
-            || !spec.http_route.starts_with('/')
-            || spec.http_route.starts_with("//")
-            || spec.http_route.contains(['?', '#', '\r', '\n'])
-            || matches!(spec.http_route.as_str(), "/v1" | "/v1/commands")
+            || spec.command.iter().any(|word| !valid_word(word, '-'))
             || spec.summary.is_empty()
             || spec.reason.is_empty()
         {
             return Err(bad_request(
-                "operation needs a name, command words, route, summary and reason",
+                "operation needs a name, command words, summary and reason",
             ));
         }
-        for existing in self.descriptions() {
-            let other = existing.spec;
+        match (&spec.kind, &spec.http_route) {
+            (OperationKind::Local, None) => {}
+            (OperationKind::Local, Some(_)) => {
+                return Err(bad_request(format!(
+                    "local operation {} has no HTTP route",
+                    spec.name
+                )));
+            }
+            (_, Some(route))
+                if route.starts_with('/')
+                    && !route.starts_with("//")
+                    && !route.contains(['?', '#', '\r', '\n'])
+                    && !matches!(route.as_str(), "/v1" | "/v1/commands") => {}
+            _ => {
+                return Err(bad_request(format!(
+                    "operation {} needs an origin-relative HTTP route",
+                    spec.name
+                )));
+            }
+        }
+        for existing in &self.forms.descriptions {
+            let other = &existing.spec;
             if other.name == spec.name
                 || other.command == spec.command
-                || other.http_route == spec.http_route
-                || other.mcp_name(&self.product) == spec.mcp_name(&self.product)
+                || (other.http_route.is_some() && other.http_route == spec.http_route)
             {
                 return Err(bad_request(format!(
                     "operation {} collides with {}",
@@ -392,20 +802,53 @@ impl OperationTable {
                 )));
             }
         }
-        self.operations.push(Arc::new(description));
+        if let OperationKind::Request { tool } = &spec.kind {
+            if !self.forms.tools.iter().any(|t| &t.name == tool) {
+                return Err(bad_request(format!(
+                    "operation {} names undeclared tool {tool}",
+                    spec.name
+                )));
+            }
+            if let Some(other) = self
+                .forms
+                .descriptions
+                .iter()
+                .find(|d| d.spec.tool() == Some(tool) && d.spec.access != spec.access)
+            {
+                return Err(bad_request(format!(
+                    "tool {tool} would hold {} with {} access and {} with {}",
+                    other.spec.name,
+                    other.spec.access.name(),
+                    spec.name,
+                    spec.access.name()
+                )));
+            }
+        }
+        crate::arguments::check(&description)?;
+        let mut forms = (*self.forms).clone();
+        forms.descriptions.push(description);
+        if let Some(tool) = forms.descriptions.last().and_then(|d| d.spec.tool()) {
+            // A family's schema must merge.
+            crate::tools::tool_input(&forms, tool)?;
+        }
+        self.forms = Arc::new(forms);
+        self.rows.push(row);
         Ok(())
     }
-    pub fn descriptions(&self) -> Vec<OperationDescription> {
-        self.describe().cloned().collect()
-    }
-    pub fn describe(&self) -> impl Iterator<Item = &OperationDescription> {
-        self.operations.iter().map(|op| op.description())
+    pub fn descriptions(&self) -> &[OperationDescription] {
+        &self.forms.descriptions
     }
     /// The named operation's spec, borrowed from the table without cloning.
     pub fn spec_named(&self, name: &str) -> Option<&OperationSpec> {
-        self.describe()
-            .find(|d| d.spec.name == name)
-            .map(|d| &d.spec)
+        self.forms.description(name).map(|d| &d.spec)
+    }
+    fn row(&self, name: &str) -> Option<(&OperationDescription, &Row)> {
+        let index = self
+            .forms
+            .descriptions
+            .iter()
+            .position(|d| d.spec.name == name)?;
+        Some((&self.forms.descriptions[index], &self.rows[index]))
     }
     pub fn deadline(&self, request: &RunnableRequest) -> Option<Duration> {
         self.spec_named(&request.operation)
@@ -415,41 +858,71 @@ impl OperationTable {
         self.deadline(request)
             .and_then(|d| d.checked_add(Duration::from_millis(50)))
     }
+    pub(crate) fn forms(&self) -> &Arc<Forms> {
+        &self.forms
+    }
     pub async fn call(
         &self,
         request: RunnableRequest,
-        origin: Origin,
+        via: Via,
         cancellation: CancellationToken,
     ) -> Answer<Value> {
-        self.call_as(request, origin, Caller::default(), cancellation)
+        self.call_as(request, via, Caller::default(), cancellation)
             .await
-            .answer
     }
     pub async fn call_as(
         &self,
         request: RunnableRequest,
-        origin: Origin,
+        via: Via,
         caller: Caller,
         cancellation: CancellationToken,
-    ) -> DispatchResult {
-        let local = |answer| DispatchResult {
-            answer,
-            owner: caller.clone(),
-        };
-        let Some(operation) = self
-            .operations
-            .iter()
-            .find(|op| op.description().spec.name == request.operation)
-        else {
-            return local(Answer::error(Failure::new(
+    ) -> Answer<Value> {
+        self.call_with(request, via, caller, None, cancellation)
+            .await
+    }
+    pub(crate) async fn call_with(
+        &self,
+        request: RunnableRequest,
+        via: Via,
+        caller: Caller,
+        metadata: Option<Value>,
+        cancellation: CancellationToken,
+    ) -> Answer<Value> {
+        let authorship = caller.authorship.clone();
+        let mut answer = self
+            .dispatch(request, via, caller, metadata, cancellation)
+            .await;
+        if answer.envelope.caller.is_none() {
+            answer.envelope.caller = authorship;
+        }
+        answer
+    }
+    /// Check a request against its row: it exists, has a request ID, names
+    /// only known arguments, and the caller may run it.
+    fn admit<'a>(
+        &'a self,
+        request: &RunnableRequest,
+        caller: &Caller,
+    ) -> Result<(&'a OperationDescription, &'a Row), Failure> {
+        let (description, row) = self.row(&request.operation).ok_or_else(|| {
+            Failure::new(
                 FailureKind::NotFound,
                 format!("unknown operation {}", request.operation),
-            )));
-        };
+            )
+        })?;
         if request.request_id.is_empty() {
-            return local(Answer::error(bad_request("request_id must not be empty")));
+            return Err(bad_request("request_id must not be empty"));
         }
-        let description = operation.description();
+        if let Some(option) = crate::RequestOption::ALL
+            .into_iter()
+            .find(|option| option.used_by(request) && !self.accepts(*option))
+        {
+            return Err(bad_request(format!(
+                "{} does not take {}",
+                self.forms.product,
+                option.name()
+            )));
+        }
         // Even a Request implementation that omits deny_unknown_fields cannot
         // silently accept an author or misspelled top-level argument.
         if let (Some(object), Some(properties)) = (
@@ -462,56 +935,66 @@ impl OperationTable {
                 .is_none())
             && let Some(key) = object.keys().find(|key| !properties.contains_key(*key))
         {
-            return local(Answer::error(bad_request(format!(
-                "unknown argument {key}"
-            ))));
+            return Err(bad_request(format!("unknown argument {key}")));
         }
-        let progress = Arc::new(Mutex::new(Progress::default()));
+        if description.spec.access > caller.access {
+            return Err(Failure::new(
+                FailureKind::Refused,
+                format!(
+                    "{} needs {} access",
+                    description.spec.name,
+                    description.spec.access.name()
+                ),
+            ));
+        }
+        Ok((description, row))
+    }
+    fn context(
+        &self,
+        request: &RunnableRequest,
+        description: &OperationDescription,
+        via: Via,
+        caller: Caller,
+        metadata: Option<Value>,
+        cancellation: CancellationToken,
+    ) -> RequestContext {
+        RequestContext {
+            via,
+            request_id: request.request_id.clone(),
+            cancellation,
+            caller,
+            budget_tokens: request.budget_tokens,
+            default_budget_tokens: description.spec.default_budget_tokens,
+            cursor: request.cursor.clone(),
+            fresh: request.fresh,
+            format: request.format,
+            metadata,
+            forms: self.forms.clone(),
+            progress: Arc::default(),
+        }
+    }
+    async fn dispatch(
+        &self,
+        request: RunnableRequest,
+        via: Via,
+        caller: Caller,
+        metadata: Option<Value>,
+        cancellation: CancellationToken,
+    ) -> Answer<Value> {
+        let (description, row) = match self.admit(&request, &caller) {
+            Ok(admitted) => admitted,
+            Err(failure) => return Answer::error(failure),
+        };
+        let Row::Request(operation) = row else {
+            return Answer::error(bad_request(match row {
+                Row::Stream(_) => format!("{} is a stream; open it", request.operation),
+                _ => format!("{} runs in the calling process", request.operation),
+            }));
+        };
         let token = cancellation.child_token();
         let guard = token.clone().drop_guard();
-        let context = RequestContext {
-            origin,
-            request_id: request.request_id.clone(),
-            cancellation: token.clone(),
-            caller: caller.clone(),
-            progress: progress.clone(),
-        };
-        let mut owner = None;
-        let flight = if description.spec.write {
-            let key = (caller.scope.clone(), request.request_id.clone());
-            let identity =
-                serde_json::json!({"operation":request.operation,"arguments":request.arguments});
-            let mut registry = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(flight) = registry.get(&key) {
-                if flight.identity != identity {
-                    return local(Answer::error(Failure::new(
-                        FailureKind::Conflict,
-                        "request_id is in flight with different arguments",
-                    )));
-                }
-                Some(flight.clone())
-            } else {
-                let flight = Arc::new(InFlight::new(identity, caller.clone()));
-                registry.insert(key.clone(), flight.clone());
-                owner = Some(FlightOwner {
-                    registry: &self.in_flight,
-                    key,
-                    flight: flight.clone(),
-                    finished: false,
-                });
-                Some(flight)
-            }
-        } else {
-            None
-        };
-        let is_owner = owner.is_some();
-        let execution = async {
-            if !is_owner && let Some(flight) = &flight {
-                flight.wait().await
-            } else {
-                operation.execute(request.arguments.clone(), context).await
-            }
-        };
+        let context = self.context(&request, description, via, caller, metadata, token);
+        let progress = context.progress.clone();
         let wait_deadline = async {
             match request
                 .deadline
@@ -521,94 +1004,144 @@ impl OperationTable {
                 None => std::future::pending::<()>().await,
             }
         };
-        let (answer, shared_result) = tokio::select! {
+        let answer = tokio::select! {
             biased;
-            _ = cancellation.cancelled() => (Answer::error(Failure::new(FailureKind::Cancelled,"request cancelled")), false),
-            _ = wait_deadline => {
-                let progress = progress.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                let scanned = progress.rows_scanned.map_or_else(|| "with rows scanned unknown".into(), |rows| format!("after {rows} rows scanned"));
-                let mut failure = Failure::new(FailureKind::Timeout, format!("deadline passed during {} {scanned}", if progress.stage.is_empty(){"admission"}else{&progress.stage}));
-                failure.hint = Some("narrow the request or lift its deadline".into());
-                let mut answer = Answer::error(failure);
-                if let Some(narrower) = progress.narrower {answer.next_mut().push(Next{label:"narrower request".into(),request:narrower});}
-                let mut lifted=request.clone();lifted.deadline=Deadline::None;
-                answer.next_mut().push(Next{label:"complete without a deadline".into(),request:lifted});(answer, false)
-            },
-            answer = execution => (answer, true),
+            _ = cancellation.cancelled() => Answer::error(Failure::new(FailureKind::Cancelled, "request cancelled")),
+            _ = wait_deadline => timeout_answer(&request, &progress),
+            answer = operation.execute(request.arguments.clone(), context) => answer,
         };
         drop(guard);
-        let answer = self.checked_answer(answer, &description.spec);
-        let publication_owner = if shared_result {
-            flight
-                .as_ref()
-                .map(|flight| flight.owner.clone())
-                .unwrap_or_else(|| caller.clone())
-        } else {
-            // A waiter's own timeout or cancellation carries no owner's data.
-            caller.clone()
+        self.checked_answer(answer, &description.spec)
+    }
+    /// Open a stream row. Its events arrive until the stream ends, the
+    /// caller drops `Events`, or `cancellation` fires; streams have no
+    /// deadline.
+    pub async fn open_stream(
+        &self,
+        request: RunnableRequest,
+        via: Via,
+        caller: Caller,
+        cancellation: CancellationToken,
+    ) -> Result<Events, Failure> {
+        let (description, row) = self.admit(&request, &caller)?;
+        let Row::Stream(stream) = row else {
+            return Err(bad_request(format!(
+                "{} is not a stream",
+                request.operation
+            )));
         };
-        let answer = if let Some(owner) = owner {
-            owner.finish(answer)
-        } else {
-            answer
-        };
-        DispatchResult {
-            answer,
-            owner: publication_owner,
+        let context = self.context(&request, description, via, caller, None, cancellation);
+        stream.open(request.arguments.clone(), context).await
+    }
+    pub fn render_event(&self, operation: &str, event: Value) -> Result<String, Failure> {
+        match self.row(operation) {
+            Some((_, Row::Stream(stream))) => stream.render_event(event),
+            _ => Err(bad_request(format!("{operation} is not a stream"))),
         }
     }
     fn checked_answer(&self, answer: Answer<Value>, spec: &OperationSpec) -> Answer<Value> {
-        if let Answer::Error { error, .. } = &answer {
-            if error
-                .code
-                .as_ref()
-                .is_some_and(|code| self.failure_codes.get(code) != Some(&error.kind))
-            {
-                return Answer::error(Failure::new(
-                    FailureKind::Io,
-                    "operation returned an unregistered or misclassified product failure code",
-                ));
-            }
-            let infrastructure = matches!(
-                error.kind,
-                FailureKind::BadRequest
-                    | FailureKind::Timeout
-                    | FailureKind::Cancelled
-                    | FailureKind::Conflict
-                    | FailureKind::Io
-            );
-            if !infrastructure && !spec.failures.contains(&error.kind) {
-                return Answer::error(Failure::new(
+        let Answer {
+            outcome,
+            mut envelope,
+        } = answer;
+        let outcome = match outcome {
+            Outcome::Error(error) => Outcome::Error(self.checked_failure(error, spec)),
+            Outcome::Degraded { missing, .. } if missing.is_empty() => {
+                Outcome::Error(Failure::new(
                     FailureKind::Io,
                     format!(
-                        "operation {} returned undeclared failure {:?}",
-                        spec.name, error.kind
+                        "operation {} answered degraded without naming what is missing",
+                        spec.name
                     ),
-                ));
-            }
-        }
-        answer
-    }
-    pub fn render_text(&self, operation: &str, answer: &Answer<Value>) -> Result<String, Failure> {
-        match answer {
-            Answer::Error { error, .. } => {
-                let kind = serde_json::to_value(error.kind).expect("failure kind serializes");
-                Ok(format!(
-                    "error ({}): {}\n",
-                    kind.as_str().expect("failure kind is a string"),
-                    terminal_text(&error.message)
                 ))
             }
-            _ => {
-                let operation = self
-                    .operations
-                    .iter()
-                    .find(|op| op.description().spec.name == operation)
-                    .ok_or_else(|| bad_request("unknown operation"))?;
-                operation.render_text(answer.value().expect("non-error has a value").clone())
+            other => other,
+        };
+        let degraded = matches!(outcome, Outcome::Degraded { .. });
+        envelope.mark_lower_bounds(degraded);
+        Answer { outcome, envelope }
+    }
+    fn checked_failure(&self, error: Failure, spec: &OperationSpec) -> Failure {
+        if error
+            .code
+            .as_ref()
+            .is_some_and(|code| self.failure_codes.get(code) != Some(&error.kind))
+        {
+            return Failure::new(
+                FailureKind::Io,
+                "operation returned an unregistered or misclassified product failure code",
+            );
+        }
+        let infrastructure = matches!(
+            error.kind,
+            FailureKind::BadRequest
+                | FailureKind::Timeout
+                | FailureKind::Cancelled
+                | FailureKind::Conflict
+                | FailureKind::Io
+        );
+        if !infrastructure && !spec.failures.contains(&error.kind) {
+            return Failure::new(
+                FailureKind::Io,
+                format!(
+                    "operation {} returned undeclared failure {}",
+                    spec.name,
+                    error.kind.name()
+                ),
+            );
+        }
+        error
+    }
+    /// The answer's value as text, from its operation's renderer; a failure
+    /// as its kind and message.
+    pub fn render_text(&self, operation: &str, answer: &Answer<Value>) -> Result<String, Failure> {
+        match &answer.outcome {
+            Outcome::Error(error) => Ok(format!(
+                "error ({}): {}\n",
+                error.kind.name(),
+                terminal_text(&error.message)
+            )),
+            Outcome::Ok(value) | Outcome::Empty(value) | Outcome::Degraded { value, .. } => {
+                match self.row(operation) {
+                    Some((_, Row::Request(row))) => row.render_text(value.clone()),
+                    _ => Err(bad_request(format!("{operation} has no answer to render"))),
+                }
             }
         }
     }
+}
+
+fn timeout_answer(request: &RunnableRequest, progress: &Mutex<Progress>) -> Answer<Value> {
+    let progress = progress.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let scanned = progress.rows_scanned.map_or_else(
+        || "with rows scanned unknown".into(),
+        |rows| format!("after {rows} rows scanned"),
+    );
+    let stage = if progress.stage.is_empty() {
+        "admission"
+    } else {
+        &progress.stage
+    };
+    let failure = Failure::new(
+        FailureKind::Timeout,
+        format!("deadline passed during {stage} {scanned}"),
+    )
+    .with_hint("narrow the request or lift its deadline");
+    let mut answer = Answer::error(failure);
+    if let Some(narrower) = progress.narrower {
+        answer = answer.with_next("narrower request", narrower);
+    }
+    let mut lifted = request.clone();
+    lifted.deadline = Deadline::None;
+    answer.with_next("complete without a deadline", lifted)
+}
+
+/// Lowercase letters, digits and `separator`, not empty.
+pub(crate) fn valid_word(word: &str, separator: char) -> bool {
+    !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == separator)
 }
 
 pub(crate) fn terminal_text(text: &str) -> String {

@@ -1,4 +1,5 @@
 //! The small JSON boundary read by the browser. HTML stays server-rendered.
+use command_surface::Availability;
 use maud::{Markup, html};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -21,7 +22,7 @@ impl CopyTarget {
     /// First form is the default. Values are escaped as an HTML attribute by maud.
     pub fn render(&self, content: Markup) -> Markup {
         html! {
-            div data-copy=(serde_json::to_string(self).expect("copy strings serialize")) {
+            shell-copy data-copy=(serde_json::to_string(self).expect("copy strings serialize")) {
                 (content)
                 button type="button" data-copy-menu="" { "Copy" }
                 span data-copy-feedback="" role="status" aria-live="polite" {}
@@ -86,17 +87,8 @@ pub struct Action {
     pub key: Option<String>,
     pub route: String,
     pub write: bool,
-    pub availability: ActionAvailability,
+    pub availability: Availability,
     pub request: String,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
-#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ActionAvailability {
-    Enabled,
-    Disabled { reason: String },
-    Partial { reason: String },
-    Loading,
-    Unavailable { reason: String },
 }
 impl Action {
     /// Build directly from the registered row and its request, including the CLI.
@@ -124,10 +116,11 @@ impl Action {
         if spec.name != request.operation {
             return Err("action request names a different operation".into());
         }
-        if !spec.http_route.starts_with('/')
-            || spec.http_route.starts_with("//")
-            || spec.http_route.contains(['\r', '\n'])
-        {
+        let route = spec
+            .http_route
+            .clone()
+            .ok_or("a local operation has no route to act on")?;
+        if !route.starts_with('/') || route.starts_with("//") || route.contains(['\r', '\n']) {
             return Err("operation route must be an origin-relative path".into());
         }
         if key.as_deref().is_some_and(|key| {
@@ -137,51 +130,48 @@ impl Action {
         }) {
             return Err("product action cannot replace a shared key".into());
         }
-        use command_surface::Availability as A;
-        let availability = match availability {
-            A::Enabled => ActionAvailability::Enabled,
-            A::Disabled { reason } => ActionAvailability::Disabled {
-                reason: reason.clone(),
-            },
-            A::Partial { reason } => ActionAvailability::Partial {
-                reason: reason.clone(),
-            },
-            A::Loading => ActionAvailability::Loading,
-            A::Unavailable { reason } => ActionAvailability::Unavailable {
-                reason: reason.clone(),
-            },
-        };
+        let availability = availability.clone();
         Ok(Self {
             operation: spec.name.clone(),
             label: spec.summary.clone(),
             cli,
             key,
-            route: spec.http_route.clone(),
-            write: spec.write,
+            route,
+            write: spec.access != command_surface::Access::Read,
             availability,
             request: serde_json::to_string(request).map_err(|error| error.to_string())?,
         })
     }
     pub fn render(&self) -> Markup {
+        self.render_item(None)
+    }
+    /// A write inside a decision card: the button carries the card's key.
+    pub(crate) fn render_with_key(&self, card_key: char) -> Markup {
+        self.render_item(Some(card_key))
+    }
+    fn render_item(&self, card_key: Option<char>) -> Markup {
         let disabled = !matches!(
             self.availability,
-            ActionAvailability::Enabled | ActionAvailability::Partial { .. }
+            Availability::Enabled | Availability::Partial { .. }
         );
         let reason = match &self.availability {
-            ActionAvailability::Disabled { reason }
-            | ActionAvailability::Partial { reason }
-            | ActionAvailability::Unavailable { reason } => Some(reason.as_str()),
-            ActionAvailability::Loading => Some("loading"),
-            ActionAvailability::Enabled => None,
+            Availability::Disabled { reason }
+            | Availability::Partial { reason }
+            | Availability::Unavailable { reason } => Some(reason.as_str()),
+            Availability::Loading => Some("loading"),
+            Availability::Enabled => None,
         };
         let action = serde_json::to_string(self).expect("action strings serialize");
-        let label = html! { (self.label) @if let Some(reason) = reason { " (" (reason) ")" } };
+        let label = html! {
+            @if let Some(key) = card_key { kbd { (key) } " " }
+            (self.label) @if let Some(reason) = reason { " (" (reason) ")" }
+        };
         if self.write {
             html! {
                 div data-action-item="" {
                     form method="post" action=(self.route) {
                         input type="hidden" name="request" value=(self.request);
-                        button type="submit" data-action=(action) disabled[disabled] { (label) }
+                        button type="submit" data-action=(action) data-card-key=[card_key] disabled[disabled] { (label) }
                         small { code { (self.cli) } @if let Some(key) = &self.key { " · " kbd { (key) } } }
                     }
                 }
@@ -203,17 +193,28 @@ impl Action {
 pub fn typescript() -> String {
     let declarations = [
         crate::keys::KeyAction::decl(),
+        crate::keys::Place::decl(),
         crate::keys::KeyBinding::decl(),
         CopyForm::decl(),
         CopyTarget::decl(),
         FragmentUpdate::decl(),
         Completion::decl(),
         Refresh::decl(),
-        ActionAvailability::decl(),
+        Availability::decl(),
         Action::decl(),
+        crate::feed::Subscription::decl(),
+        crate::feed::FeedEvent::decl(),
+        crate::feed::FeedReload::decl(),
+        crate::timeline::Render::decl(),
+        crate::timeline::Agency::decl(),
+        crate::timeline::Lane::decl(),
+        crate::timeline::Shape::decl(),
+        crate::timeline::SeriesRow::decl(),
+        crate::timeline::Window::decl(),
+        crate::timeline::Series::decl(),
     ];
     format!(
-        "// Generated by web-shell-types. Do not edit.\n{}\nexport const SHARED_KEYS: Array<KeyBinding> = {};\nexport const RELOAD_EVENT = {};\n",
+        "// Generated by web-shell-types. Do not edit.\n{}\nexport const SHARED_KEYS: Array<KeyBinding> = {};\nexport const RELOAD_EVENT = {};\nexport const FRAGMENT_EVENT = {};\nexport const SUBSCRIPTIONS_PARAMETER = {};\n",
         declarations
             .map(|decl| format!("export {decl}")
                 .lines()
@@ -222,7 +223,10 @@ pub fn typescript() -> String {
                 .join("\n"))
             .join("\n"),
         serde_json::to_string(crate::keys::KEYS).expect("key declarations serialize"),
-        serde_json::to_string(command_surface::RELOAD_EVENT).expect("event name serializes")
+        serde_json::to_string(command_surface::RELOAD_EVENT).expect("event name serializes"),
+        serde_json::to_string(crate::feed::FRAGMENT_EVENT).expect("event name serializes"),
+        serde_json::to_string(crate::feed::SUBSCRIPTIONS_PARAMETER)
+            .expect("parameter name serializes")
     )
 }
 

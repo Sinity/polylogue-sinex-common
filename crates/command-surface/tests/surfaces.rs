@@ -35,15 +35,25 @@ impl Operation for Sample {
     type Request = Read;
     type Response = Rows;
     fn spec(&self) -> OperationSpec {
+        let (name, tool) = if self.write {
+            ("record", "write")
+        } else {
+            ("read", "rows")
+        };
         OperationSpec {
-            name: if self.write { "record" } else { "read" }.into(),
-            command: vec![if self.write { "record" } else { "read" }.into()],
-            summary: "Read synthetic rows".into(),
-            reason: "Read a reference's typed rows".into(),
-            http_route: if self.write { "/v1/record" } else { "/v1/read" }.into(),
-            latency: LatencyClass::Read,
             failures: vec![FailureKind::BadValue],
-            write: self.write,
+            access: if self.write {
+                Access::Write
+            } else {
+                Access::Read
+            },
+            ..OperationSpec::request(
+                name,
+                &[name],
+                tool,
+                "Read synthetic rows",
+                "Read a reference's typed rows",
+            )
         }
     }
     fn execute(&self, request: Read, context: RequestContext) -> OperationFuture<'_, Answer<Rows>> {
@@ -88,16 +98,8 @@ impl Operation for Sample {
                 committed,
             };
             match request.text.as_str() {
-                "empty" => Answer::Empty {
-                    value: rows,
-                    notes: vec![],
-                    next: vec![],
-                },
-                "degraded" => Answer::Degraded {
-                    value: rows,
-                    notes: vec!["one synthetic source unavailable".into()],
-                    next: vec![],
-                },
+                "empty" => Answer::empty(rows),
+                "degraded" => Answer::degraded(rows, vec!["one synthetic source".into()]),
                 _ => Answer::ok(rows),
             }
         })
@@ -112,6 +114,19 @@ fn table() -> (OperationTable, Arc<AtomicU64>, Arc<AtomicU64>) {
     let mut deadlines = Deadlines::default();
     deadlines.set(LatencyClass::Read, Some(Duration::from_millis(10)));
     let mut table = OperationTable::new("example", deadlines);
+    for option in RequestOption::ALL {
+        table.accept(option);
+    }
+    for (name, description) in [("rows", "Read synthetic rows"), ("write", "Record rows")] {
+        table
+            .declare_tool(ToolFamily {
+                name: name.into(),
+                description: description.into(),
+                open_world: false,
+                idempotent: true,
+            })
+            .unwrap();
+    }
     for write in [false, true] {
         table
             .register(Sample {
@@ -129,6 +144,10 @@ fn request(text: &str) -> RunnableRequest {
         arguments: json!({"text":text}),
         request_id: "r-1".into(),
         deadline: Deadline::None,
+        budget_tokens: None,
+        cursor: None,
+        fresh: false,
+        format: Format::Text,
     }
 }
 async fn http(table: &OperationTable, request: &RunnableRequest) -> http::Response<Vec<u8>> {
@@ -150,10 +169,19 @@ async fn socket(table: &OperationTable, request: &RunnableRequest) -> Answer<Val
     result.unwrap();
     answer
 }
+/// The MCP call of `request` asking for rows as JSON, so its structured
+/// content is the whole answer.
 async fn mcp(table: &OperationTable, request: &RunnableRequest) -> Value {
     let mut arguments = serde_json::to_value(request).unwrap();
     arguments.as_object_mut().unwrap().remove("operation");
-    table.mcp(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"example_read","arguments":arguments}}),CancellationToken::new()).await
+    arguments["format"] = json!("json");
+    let mut reply = table.mcp(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"example_rows","arguments":arguments}}),CancellationToken::new()).await;
+    // Only MCP measures the text it shows a model; the rest of the answer
+    // is the same on every surface.
+    if let Some(structured) = reply["result"]["structuredContent"].as_object_mut() {
+        assert!(structured.remove("used_tokens").is_some());
+    }
+    reply
 }
 
 #[tokio::test]
@@ -162,7 +190,7 @@ async fn surface_parity_and_typed_output_schema() {
     for text in ["hello", "invalid", "001", "empty", "degraded"] {
         let request = request(text);
         let expected = table
-            .call(request.clone(), Origin::Socket, CancellationToken::new())
+            .call(request.clone(), Via::Cli, CancellationToken::new())
             .await;
         let cli = table
             .cli(
@@ -189,18 +217,11 @@ async fn surface_parity_and_typed_output_schema() {
             mcp["result"]["structuredContent"],
             serde_json::to_value(&expected).unwrap()
         );
-        assert_eq!(
-            mcp["result"]["isError"],
-            matches!(expected, Answer::Error { .. })
-        );
+        assert_eq!(mcp["result"]["isError"], expected.is_error());
     }
     let tool = &table.mcp_tools()[0];
-    assert_eq!(tool["name"], "example_read");
-    assert!(
-        tool["outputSchema"]["$defs"]["Rows"]["properties"]
-            .get("committed")
-            .is_some()
-    );
+    assert_eq!(tool["name"], "example_rows");
+    assert!(tool.get("outputSchema").is_none());
     assert!(
         tool["inputSchema"]["properties"]["arguments"]["properties"]
             .get("text")
@@ -215,21 +236,22 @@ async fn timeout_never_partial_and_any_caller_lifts_deadline() {
     let mut request = request("waiting");
     request.arguments["wait"] = json!(true);
     request.deadline = Deadline::Default;
-    for origin in [Origin::Cli, Origin::Socket, Origin::Http, Origin::Mcp] {
+    for origin in [Via::Cli, Via::Hook, Via::Web, Via::Mcp] {
         let answer = table
             .call(request.clone(), origin, CancellationToken::new())
             .await;
-        let Answer::Error { error, next, .. } = answer else {
-            panic!("deadline returned rows")
-        };
+        let error = answer.failure().expect("deadline returned rows");
         assert_eq!(error.kind, FailureKind::Timeout);
         assert!(error.message.contains("42 rows"));
-        assert_eq!(next.last().unwrap().request.deadline, Deadline::None);
+        assert_eq!(
+            answer.envelope.next.last().unwrap().request.deadline,
+            Deadline::None
+        );
         assert_eq!(active.load(Ordering::SeqCst), 0);
     }
     request.deadline = Deadline::None;
     let cancellation = CancellationToken::new();
-    let call = table.call(request.clone(), Origin::Mcp, cancellation.clone());
+    let call = table.call(request.clone(), Via::Mcp, cancellation.clone());
     tokio::pin!(call);
     tokio::select! {biased;_= &mut call=>panic!("lifted request ended"),_=tokio::time::sleep(Duration::from_secs(1000))=>{}}
     cancellation.cancel();
@@ -273,7 +295,7 @@ async fn malformed_envelopes_have_one_failure_and_no_authorship() {
     let mut request = request("hello");
     request.arguments["unknown"] = json!(true);
     let expected = table
-        .call(request.clone(), Origin::Cli, CancellationToken::new())
+        .call(request.clone(), Via::Cli, CancellationToken::new())
         .await;
     assert_eq!(expected.exit_code(), 2);
     assert_eq!(socket(&table, &request).await, expected);
@@ -297,28 +319,39 @@ async fn malformed_envelopes_have_one_failure_and_no_authorship() {
 #[test]
 fn one_kind_one_exit_independent_table() {
     let expected = [
-        (1, Some(200)),
-        (2, Some(400)),
-        (2, Some(400)),
-        (2, Some(400)),
-        (2, Some(400)),
-        (2, Some(400)),
-        (2, Some(400)),
-        (2, Some(400)),
-        (2, Some(501)),
-        (3, Some(403)),
-        (4, Some(404)),
-        (4, Some(409)),
-        (4, Some(500)),
-        (5, Some(200)),
-        (5, Some(500)),
-        (6, None),
-        (7, Some(504)),
-        (7, None),
+        ("invalid_query", 2, Some(400)),
+        ("unknown_field", 2, Some(400)),
+        ("bad_value", 2, Some(400)),
+        ("not_a_query", 2, Some(400)),
+        ("bad_request", 2, Some(400)),
+        ("ambiguous", 2, Some(400)),
+        ("stale_cursor", 2, Some(400)),
+        ("not_built", 2, Some(501)),
+        ("not_configured", 2, Some(501)),
+        ("not_yet_available", 2, Some(501)),
+        ("refused", 3, Some(403)),
+        ("not_found", 4, Some(404)),
+        ("conflict", 4, Some(409)),
+        ("io", 4, Some(500)),
+        ("stopped_early", 5, Some(500)),
+        ("not_running", 6, None),
+        ("timeout", 7, Some(504)),
+        ("cancelled", 7, None),
     ];
     assert_eq!(FailureKind::ALL.len(), expected.len());
-    for (kind, expected) in FailureKind::ALL.into_iter().zip(expected) {
-        assert_eq!(kind.mapping(), expected);
+    for (kind, (name, exit, http)) in FailureKind::ALL.into_iter().zip(expected) {
+        assert_eq!(kind.name(), name);
+        assert_eq!(serde_json::to_value(kind).unwrap(), name);
+        assert_eq!(kind.mapping(), (exit, http));
+    }
+    // Outcomes are not failures: empty and degraded answers carry a value.
+    assert_eq!(Answer::empty(json!([])).exit_code(), 1);
+    assert_eq!(
+        Answer::degraded(json!([1]), vec!["one source".into()]).exit_code(),
+        5
+    );
+    for outcome in ["empty", "degraded"] {
+        assert!(serde_json::from_value::<FailureKind>(json!(outcome)).is_err());
     }
 }
 
@@ -328,6 +361,8 @@ async fn every_surface_times_out_without_partial_rows() {
     let mut request = request("wait");
     request.arguments["wait"] = json!(true);
     request.deadline = Deadline::Default;
+    // The command line asks with `--json`, and a follow-up keeps the format.
+    request.format = Format::Json;
     let cli = table
         .cli(
             &["read", "--text", "wait", "--wait", "true", "--json"].map(str::to_string),
@@ -396,7 +431,7 @@ async fn ordinary_form_posts_use_the_same_request() {
     assert_eq!(
         serde_json::from_slice::<Answer<Value>>(response.body()).unwrap(),
         table
-            .call(request, Origin::Cli, CancellationToken::new())
+            .call(request, Via::Cli, CancellationToken::new())
             .await
     );
     for invalid in [
@@ -425,12 +460,11 @@ async fn trusted_identity_is_typed() {
     let answer = table
         .call_as(
             request("identity"),
-            Origin::Http,
+            Via::Web,
             Caller::authenticated("person-a", "trusted author".to_string()),
             CancellationToken::new(),
         )
-        .await
-        .answer;
+        .await;
     assert_eq!(answer.value().unwrap()["rows"], json!(["trusted author"]));
 }
 
@@ -439,18 +473,9 @@ async fn product_failure_codes_have_one_registered_classification() {
     let (mut table, _, _) = table();
     let request = request("product-error");
     let unregistered = table
-        .call(request.clone(), Origin::Cli, CancellationToken::new())
+        .call(request.clone(), Via::Cli, CancellationToken::new())
         .await;
-    assert!(matches!(
-        unregistered,
-        Answer::Error {
-            error: Failure {
-                kind: FailureKind::Io,
-                ..
-            },
-            ..
-        }
-    ));
+    assert_eq!(unregistered.failure().unwrap().kind, FailureKind::Io);
     table
         .register_failure_code("invalid_sample", FailureKind::BadValue)
         .unwrap();
@@ -460,19 +485,11 @@ async fn product_failure_codes_have_one_registered_classification() {
             .is_err()
     );
     let registered = table
-        .call(request, Origin::Cli, CancellationToken::new())
+        .call(request, Via::Cli, CancellationToken::new())
         .await;
-    assert!(matches!(
-        registered,
-        Answer::Error {
-            error: Failure {
-                kind: FailureKind::BadValue,
-                code: Some(_),
-                ..
-            },
-            ..
-        }
-    ));
+    let registered = registered.failure().unwrap();
+    assert_eq!(registered.kind, FailureKind::BadValue);
+    assert_eq!(registered.code.as_deref(), Some("invalid_sample"));
 }
 
 struct Echo;
@@ -480,16 +497,13 @@ impl Operation for Echo {
     type Request = Value;
     type Response = Value;
     fn spec(&self) -> OperationSpec {
-        OperationSpec {
-            name: "echo".into(),
-            command: vec!["echo".into()],
-            summary: "Echo typed JSON".into(),
-            reason: "Exercise arbitrary JSON arguments".into(),
-            http_route: "/v1/echo".into(),
-            latency: LatencyClass::Local,
-            failures: vec![],
-            write: false,
-        }
+        OperationSpec::request(
+            "echo",
+            &["echo"],
+            "echo",
+            "Echo typed JSON",
+            "Exercise arbitrary JSON arguments",
+        )
     }
     fn execute(&self, value: Value, _: RequestContext) -> OperationFuture<'_, Answer<Value>> {
         Box::pin(async move { Answer::ok(value) })
@@ -501,6 +515,14 @@ impl Operation for Echo {
 #[tokio::test]
 async fn arbitrary_typed_requests_are_reachable_and_string_flags_do_not_change_mode() {
     let (mut table, _, _) = table();
+    table
+        .declare_tool(ToolFamily {
+            name: "echo".into(),
+            description: "Echo".into(),
+            open_world: false,
+            idempotent: true,
+        })
+        .unwrap();
     table.register(Echo).unwrap();
     for value in [
         json!(true),

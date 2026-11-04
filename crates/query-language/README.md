@@ -204,7 +204,9 @@ Four operators, each with one meaning in both products:
 `unavailable(cause)`; the same vocabulary describes a source's coverage of an
 interval in both products. Polylogue answers `complete` inside its import
 span and `outside_span` outside it. A bucket with no rows and a `gap` state
-shows the gap, never `0`.
+shows the gap, never `0`. The states are `coverage::CoverageState`, which
+command-surface's answer envelope uses for its coverage facet; any state but
+`complete` makes a count over the interval a lower bound.
 
 ## Order relations
 
@@ -337,8 +339,9 @@ runs as given, whenever one can be formed), `candidates`, `hint` and
 `retryable`. The language's kinds are `invalid_query`, `unknown_field`,
 `bad_value`, `not_a_query`, `ambiguous` and `stale_cursor`; a compiler adds
 its own (`not_built`, `not_configured`) at its own boundary. A language error becomes a
-command-surface failure in one conversion, `Failure::from(query_language::Error)`
+command-surface failure in one conversion, `Failure::from_query_error(error, query)`
 in command-surface (this crate stays pure and depends on neither), with one
+
 exit code and HTTP status per kind
 ([failure table](../command-surface/README.md#failures-and-exit-codes)).
 

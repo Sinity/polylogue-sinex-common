@@ -141,14 +141,15 @@ impl Operation for DurableWrite {
     type Response = Committed;
     fn spec(&self) -> OperationSpec {
         OperationSpec {
-            name: "write".into(),
-            command: vec!["write".into()],
-            summary: "Synthetic atomic writer".into(),
-            reason: "Exercise the product transaction boundary".into(),
-            http_route: "/v1/write".into(),
-            latency: LatencyClass::Read,
             failures: vec![FailureKind::BadValue],
-            write: true,
+            access: Access::Write,
+            ..OperationSpec::request(
+                "write",
+                &["write"],
+                "write",
+                "Synthetic atomic writer",
+                "Exercise the product transaction boundary",
+            )
         }
     }
     fn execute(
@@ -205,6 +206,14 @@ impl Operation for DurableWrite {
 fn make_table(store: &Arc<Store>, gate: Option<Arc<Gate>>) -> OperationTable {
     let mut table = OperationTable::new("fixture", Deadlines::default());
     table
+        .declare_tool(ToolFamily {
+            name: "write".into(),
+            description: "Write".into(),
+            open_world: false,
+            idempotent: true,
+        })
+        .unwrap();
+    table
         .register(DurableWrite {
             store: store.clone(),
             gate,
@@ -218,16 +227,21 @@ fn request(id: &str, value: &str) -> RunnableRequest {
         arguments: json!({"value":value}),
         request_id: id.into(),
         deadline: Deadline::None,
+        budget_tokens: None,
+        cursor: None,
+        fresh: false,
+        format: crate::Format::Text,
     }
 }
-fn entries(table: &OperationTable) -> usize {
-    table.in_flight.lock().unwrap().len()
+/// A caller allowed to write, as a product's server grants one.
+fn writer() -> Caller {
+    Caller::default().with_access(Access::Write)
 }
 fn kind(answer: &Answer<Value>) -> FailureKind {
-    match answer {
-        Answer::Error { error, .. } => error.kind,
-        _ => panic!("expected error: {answer:?}"),
-    }
+    answer
+        .failure()
+        .unwrap_or_else(|| panic!("expected error: {answer:?}"))
+        .kind
 }
 async fn pending<F: Future>(future: Pin<&mut F>) {
     let mut future = future;
@@ -239,27 +253,24 @@ async fn pending<F: Future>(future: Pin<&mut F>) {
 }
 
 #[tokio::test]
-async fn completed_entries_leave_sequential_retry_and_conflict_to_the_durable_log() {
+async fn retry_applies_once_through_the_durable_log_across_restart() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("product.sqlite");
     let store = Store::open(&path);
     let table = make_table(&store, None);
     let first = table
-        .call(
+        .call_as(
             request("same", "one"),
-            Origin::Http,
+            Via::Web,
+            writer(),
             CancellationToken::new(),
         )
         .await;
-    assert_eq!(
-        entries(&table),
-        0,
-        "completed writes must not be retained by common"
-    );
     let replay = table
-        .call(
+        .call_as(
             request("same", "one"),
-            Origin::Socket,
+            Via::Cli,
+            writer(),
             CancellationToken::new(),
         )
         .await;
@@ -270,23 +281,24 @@ async fn completed_entries_leave_sequential_retry_and_conflict_to_the_durable_lo
     assert_eq!(replay.value().unwrap()["replayed"], true);
     assert_eq!(store.attempts.load(Ordering::SeqCst), 2);
     let conflict = table
-        .call(
+        .call_as(
             request("same", "other"),
-            Origin::Mcp,
+            Via::Mcp,
+            writer(),
             CancellationToken::new(),
         )
         .await;
     assert_eq!(kind(&conflict), FailureKind::Conflict);
-    assert_eq!(entries(&table), 0);
     assert_eq!(store.count(), 1);
     drop(table);
     drop(store);
     let reopened = Store::open(&path);
     let restarted = make_table(&reopened, None);
     let answer = restarted
-        .call(
+        .call_as(
             request("same", "one"),
-            Origin::Cli,
+            Via::Cli,
+            writer(),
             CancellationToken::new(),
         )
         .await;
@@ -299,14 +311,49 @@ async fn completed_entries_leave_sequential_retry_and_conflict_to_the_durable_lo
 }
 
 #[tokio::test]
+async fn retry_applies_once_when_duplicates_arrive_together() {
+    // Without coalescing in the table, concurrent duplicates both reach the
+    // writer, whose transaction admits the first and replays it for the
+    // second.
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("product.sqlite"));
+    let gate = Gate::before();
+    let table = make_table(&store, Some(gate.clone()));
+    let mut first = Box::pin(table.call_as(
+        request("together", "one"),
+        Via::Web,
+        writer(),
+        CancellationToken::new(),
+    ));
+    pending(first.as_mut()).await;
+    let mut second = Box::pin(table.call_as(
+        request("together", "one"),
+        Via::Mcp,
+        writer(),
+        CancellationToken::new(),
+    ));
+    pending(second.as_mut()).await;
+    gate.open();
+    gate.open();
+    let (first, second) = tokio::join!(first, second);
+    assert_eq!(
+        first.value().unwrap()["row"],
+        second.value().unwrap()["row"]
+    );
+    assert_eq!(store.count(), 1);
+    assert_eq!(store.attempts.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn sequential_retry_reads_current_confirmed_availability_instead_of_stale_pending_answer() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("product.sqlite"));
     let table = make_table(&store, None);
     let first = table
-        .call(
+        .call_as(
             request("publication", "one"),
-            Origin::Http,
+            Via::Web,
+            writer(),
             CancellationToken::new(),
         )
         .await;
@@ -314,122 +361,15 @@ async fn sequential_retry_reads_current_confirmed_availability_instead_of_stale_
     let row = first.value().unwrap()["row"].as_i64().unwrap();
     store.confirm(row);
     let next = table
-        .call(
+        .call_as(
             request("publication", "one"),
-            Origin::Http,
+            Via::Web,
+            writer(),
             CancellationToken::new(),
         )
         .await;
     assert_eq!(next.value().unwrap()["availability"], "confirmed");
     assert_eq!(next.value().unwrap()["row"], row);
-    assert_eq!(store.count(), 1);
-}
-
-#[tokio::test]
-async fn existing_waiters_keep_their_result_after_registry_removal_and_new_admission() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("product.sqlite"));
-    let gate = Gate::before();
-    let table = make_table(&store, Some(gate.clone()));
-    let mut owner = Box::pin(table.call(
-        request("overlap", "one"),
-        Origin::Http,
-        CancellationToken::new(),
-    ));
-    pending(owner.as_mut()).await;
-    let mut waiter = Box::pin(table.call(
-        request("overlap", "one"),
-        Origin::Socket,
-        CancellationToken::new(),
-    ));
-    pending(waiter.as_mut()).await;
-    let weak = Arc::downgrade(table.in_flight.lock().unwrap().values().next().unwrap());
-    assert_eq!(store.attempts.load(Ordering::SeqCst), 1);
-    gate.open();
-    let first = owner.await;
-    assert_eq!(entries(&table), 0);
-    assert!(weak.upgrade().is_some(), "admitted waiter owns its flight");
-    let later = table
-        .call(
-            request("overlap", "one"),
-            Origin::Mcp,
-            CancellationToken::new(),
-        )
-        .await;
-    assert_eq!(later.value().unwrap()["replayed"], true);
-    assert_eq!(waiter.await, first);
-    assert!(weak.upgrade().is_none());
-    assert_eq!(store.count(), 1);
-}
-
-#[tokio::test]
-async fn cancelling_or_dropping_waiters_never_cancels_the_owner() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("product.sqlite"));
-    let gate = Gate::before();
-    let table = make_table(&store, Some(gate.clone()));
-    let mut owner = Box::pin(table.call(
-        request("waiters", "one"),
-        Origin::Http,
-        CancellationToken::new(),
-    ));
-    pending(owner.as_mut()).await;
-    let token = CancellationToken::new();
-    let mut cancelled =
-        Box::pin(table.call(request("waiters", "one"), Origin::Socket, token.clone()));
-    pending(cancelled.as_mut()).await;
-    token.cancel();
-    assert_eq!(kind(&cancelled.await), FailureKind::Cancelled);
-    let mut dropped = Box::pin(table.call(
-        request("waiters", "one"),
-        Origin::Mcp,
-        CancellationToken::new(),
-    ));
-    pending(dropped.as_mut()).await;
-    drop(dropped);
-    assert_eq!(entries(&table), 1);
-    assert_eq!(store.active.load(Ordering::SeqCst), 1);
-    gate.open();
-    assert!(owner.await.value().is_some());
-    assert_eq!(entries(&table), 0);
-    assert_eq!(store.count(), 1);
-}
-
-#[tokio::test]
-async fn dropping_owner_releases_registry_work_and_all_waiters() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("product.sqlite"));
-    let gate = Gate::before();
-    let table = make_table(&store, Some(gate.clone()));
-    let mut owner = Box::pin(table.call(
-        request("drop", "one"),
-        Origin::Http,
-        CancellationToken::new(),
-    ));
-    pending(owner.as_mut()).await;
-    let mut waiter = Box::pin(table.call(
-        request("drop", "one"),
-        Origin::Socket,
-        CancellationToken::new(),
-    ));
-    pending(waiter.as_mut()).await;
-    drop(owner);
-    assert_eq!(entries(&table), 0, "a dropped owner must retire its flight");
-    assert_eq!(store.active.load(Ordering::SeqCst), 0);
-    assert_eq!(kind(&waiter.await), FailureKind::Cancelled);
-    assert_eq!(store.count(), 0);
-    gate.open();
-    assert!(
-        table
-            .call(
-                request("drop", "one"),
-                Origin::Mcp,
-                CancellationToken::new()
-            )
-            .await
-            .value()
-            .is_some()
-    );
     assert_eq!(store.count(), 1);
 }
 
@@ -441,130 +381,27 @@ async fn timeout_after_commit_replays_the_atomic_result_without_applying_twice()
     let table = make_table(&store, Some(gate.clone()));
     let mut timed = request("committed", "one");
     timed.deadline = Deadline::Milliseconds(1);
-    let mut owner = Box::pin(table.call(timed, Origin::Http, CancellationToken::new()));
+    let mut owner = Box::pin(table.call_as(timed, Via::Web, writer(), CancellationToken::new()));
     pending(owner.as_mut()).await;
     assert_eq!(store.count(), 1);
     tokio::time::advance(Duration::from_millis(2)).await;
     let timed_out = owner.await;
     assert_eq!(kind(&timed_out), FailureKind::Timeout);
-    let Answer::Error { error, .. } = &timed_out else {
-        unreachable!()
-    };
+    let error = timed_out.failure().unwrap();
     assert!(error.message.contains("rows scanned unknown"));
     assert!(!error.message.contains("after 0 rows"));
-    assert_eq!(entries(&table), 0);
     assert_eq!(store.active.load(Ordering::SeqCst), 0);
     gate.open();
     let retry = table
-        .call(
+        .call_as(
             request("committed", "one"),
-            Origin::Mcp,
+            Via::Mcp,
+            writer(),
             CancellationToken::new(),
         )
         .await;
     assert_eq!(retry.value().unwrap()["replayed"], true);
     assert_eq!(store.count(), 1);
-}
-
-#[tokio::test]
-async fn refusals_are_shared_only_while_in_flight_and_unique_completed_ids_do_not_accumulate() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("product.sqlite"));
-    let table = make_table(&store, None);
-    for index in 0..64 {
-        let answer = table
-            .call(
-                request(
-                    &index.to_string(),
-                    if index % 2 == 0 { "refuse" } else { "one" },
-                ),
-                Origin::Http,
-                CancellationToken::new(),
-            )
-            .await;
-        if index % 2 == 0 {
-            assert_eq!(kind(&answer), FailureKind::BadValue);
-        }
-        assert_eq!(
-            entries(&table),
-            0,
-            "completed/refused identity {index} retained"
-        );
-    }
-    assert_eq!(store.count(), 32);
-}
-
-#[tokio::test]
-async fn owner_cancellation_retires_the_flight_and_releases_existing_waiters() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("product.sqlite"));
-    let gate = Gate::before();
-    let table = make_table(&store, Some(gate.clone()));
-    let token = CancellationToken::new();
-    let mut owner = Box::pin(table.call(request("cancel", "one"), Origin::Http, token.clone()));
-    pending(owner.as_mut()).await;
-    let mut waiter = Box::pin(table.call(
-        request("cancel", "one"),
-        Origin::Socket,
-        CancellationToken::new(),
-    ));
-    pending(waiter.as_mut()).await;
-    token.cancel();
-    let answer = owner.await;
-    assert_eq!(kind(&answer), FailureKind::Cancelled);
-    assert_eq!(entries(&table), 0);
-    assert_eq!(store.active.load(Ordering::SeqCst), 0);
-    assert_eq!(waiter.await, answer);
-    gate.open();
-    assert!(
-        table
-            .call(
-                request("cancel", "one"),
-                Origin::Mcp,
-                CancellationToken::new()
-            )
-            .await
-            .value()
-            .is_some()
-    );
-    assert_eq!(store.count(), 1);
-}
-
-#[tokio::test]
-async fn concurrent_refusals_share_one_final_error_but_sequential_refusals_execute_again() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("product.sqlite"));
-    let gate = Gate::before();
-    let table = make_table(&store, Some(gate.clone()));
-    let mut owner = Box::pin(table.call(
-        request("refusal", "refuse"),
-        Origin::Http,
-        CancellationToken::new(),
-    ));
-    pending(owner.as_mut()).await;
-    let mut waiter = Box::pin(table.call(
-        request("refusal", "refuse"),
-        Origin::Socket,
-        CancellationToken::new(),
-    ));
-    pending(waiter.as_mut()).await;
-    gate.open();
-    let answer = owner.await;
-    assert_eq!(kind(&answer), FailureKind::BadValue);
-    assert_eq!(entries(&table), 0);
-    assert_eq!(waiter.await, answer);
-    assert_eq!(store.attempts.load(Ordering::SeqCst), 1);
-    let again = table
-        .call(
-            request("refusal", "refuse"),
-            Origin::Mcp,
-            CancellationToken::new(),
-        )
-        .await;
-    assert_eq!(kind(&again), FailureKind::BadValue);
-    assert_eq!(store.attempts.load(Ordering::SeqCst), 2);
-    assert_eq!(store.count(), 0);
-    assert_eq!(entries(&table), 0);
 }
 
 #[tokio::test]
@@ -577,14 +414,12 @@ async fn authenticated_scopes_namespace_the_atomic_product_request_log() {
         let answer = table
             .call_as(
                 request("scoped", "one"),
-                Origin::Mcp,
-                Caller::authenticated(scope, ()),
+                Via::Mcp,
+                Caller::authenticated(scope, ()).with_access(Access::Write),
                 CancellationToken::new(),
             )
-            .await
-            .answer;
+            .await;
         ids.push(answer.value().unwrap()["row"].as_i64().unwrap());
-        assert_eq!(entries(&table), 0);
     }
     assert_eq!(ids, [1, 2, 1]);
     assert_eq!(store.count(), 2);
@@ -592,41 +427,65 @@ async fn authenticated_scopes_namespace_the_atomic_product_request_log() {
 }
 
 #[tokio::test]
-async fn normalized_failure_is_published_before_waiters_resume() {
+async fn access_checked_before_the_writer_runs() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("product.sqlite"));
-    let gate = Gate::before();
-    let table = make_table(&store, Some(gate.clone()));
-    let mut owner = Box::pin(table.call(
-        request("bad-code", "misclassified"),
-        Origin::Http,
-        CancellationToken::new(),
-    ));
-    pending(owner.as_mut()).await;
-    let mut waiter = Box::pin(table.call(
-        request("bad-code", "misclassified"),
-        Origin::Mcp,
-        CancellationToken::new(),
-    ));
-    pending(waiter.as_mut()).await;
-    let published = table
-        .in_flight
-        .lock()
-        .unwrap()
-        .values()
-        .next()
-        .unwrap()
-        .result
-        .subscribe();
-    gate.open();
-    let answer = owner.await;
+    let table = make_table(&store, None);
+    let refused = table
+        .call_as(
+            request("limited", "one"),
+            Via::Web,
+            Caller::authenticated("reader", ()).with_access(Access::Read),
+            CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(kind(&refused), FailureKind::Refused);
+    assert!(refused.failure().unwrap().message.contains("write access"));
+    assert_eq!(store.attempts.load(Ordering::SeqCst), 0);
+    // A caller the server granted nothing more reads only.
+    let ungranted = table
+        .call(
+            request("limited", "one"),
+            Via::Cli,
+            CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(kind(&ungranted), FailureKind::Refused);
+    let authenticated = table
+        .call_as(
+            request("limited", "one"),
+            Via::Web,
+            Caller::authenticated("someone", ()),
+            CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(kind(&authenticated), FailureKind::Refused);
+    assert_eq!(store.attempts.load(Ordering::SeqCst), 0);
+    let allowed = table
+        .call_as(
+            request("limited", "one"),
+            Via::Web,
+            Caller::authenticated("writer", ()).with_access(Access::Write),
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(allowed.value().is_some());
+}
+
+#[tokio::test]
+async fn misclassified_failure_codes_are_reported_as_product_bugs() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("product.sqlite"));
+    let table = make_table(&store, None);
+    let answer = table
+        .call_as(
+            request("code", "misclassified"),
+            Via::Cli,
+            writer(),
+            CancellationToken::new(),
+        )
+        .await;
     assert_eq!(kind(&answer), FailureKind::Io);
-    assert_eq!(
-        kind(published.borrow().as_deref().unwrap()),
-        FailureKind::Io
-    );
-    assert_eq!(waiter.await, answer);
-    assert_eq!(entries(&table), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -641,265 +500,16 @@ async fn timeout_distinguishes_unmeasured_work_from_measured_zero_and_keeps_foll
         let table = make_table(&store, Some(gate));
         let mut input = request("progress", value);
         input.deadline = Deadline::Milliseconds(1);
-        let mut owner = Box::pin(table.call(input, Origin::Http, CancellationToken::new()));
+        let mut owner =
+            Box::pin(table.call_as(input, Via::Web, writer(), CancellationToken::new()));
         pending(owner.as_mut()).await;
         tokio::time::advance(Duration::from_millis(2)).await;
-        let Answer::Error { error, next, .. } = owner.await else {
-            panic!("expected timeout")
-        };
+        let answer = owner.await;
+        let error = answer.failure().expect("expected timeout");
         assert!(error.message.contains("writer"));
         assert!(error.message.contains(diagnostic), "{}", error.message);
+        let next = &answer.envelope.next;
         assert_eq!(next[0].request.request_id, "narrower");
         assert_eq!(next[1].request.deadline, Deadline::None);
-        assert_eq!(entries(&table), 0);
     }
-}
-
-#[tokio::test]
-async fn conflicting_in_flight_intent_is_refused_without_starting_a_second_writer() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("product.sqlite"));
-    let gate = Gate::before();
-    let table = make_table(&store, Some(gate.clone()));
-    let mut owner = Box::pin(table.call(
-        request("intent", "one"),
-        Origin::Http,
-        CancellationToken::new(),
-    ));
-    pending(owner.as_mut()).await;
-    let mut other = Box::pin(table.call(
-        request("intent", "other"),
-        Origin::Mcp,
-        CancellationToken::new(),
-    ));
-    let answer = poll_fn(|cx| match other.as_mut().poll(cx) {
-        Poll::Ready(answer) => Poll::Ready(answer),
-        Poll::Pending => panic!("conflict must not wait for the writer"),
-    })
-    .await;
-    assert_eq!(kind(&answer), FailureKind::Conflict);
-    assert_eq!(store.attempts.load(Ordering::SeqCst), 1);
-    assert_eq!(entries(&table), 1);
-    gate.open();
-    assert!(owner.await.value().is_some());
-    let retry = table
-        .call(
-            request("intent", "other"),
-            Origin::Mcp,
-            CancellationToken::new(),
-        )
-        .await;
-    assert_eq!(kind(&retry), FailureKind::Conflict);
-    assert_eq!(store.attempts.load(Ordering::SeqCst), 2);
-    assert_eq!(store.count(), 1);
-    assert_eq!(entries(&table), 0);
-}
-
-#[tokio::test]
-async fn dropped_owner_after_commit_leaves_retry_to_the_durable_result() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("product.sqlite"));
-    let gate = Gate::after();
-    let table = make_table(&store, Some(gate));
-    let mut owner = Box::pin(table.call(
-        request("drop-committed", "one"),
-        Origin::Http,
-        CancellationToken::new(),
-    ));
-    pending(owner.as_mut()).await;
-    assert_eq!(store.count(), 1);
-    let mut waiter = Box::pin(table.call(
-        request("drop-committed", "one"),
-        Origin::Mcp,
-        CancellationToken::new(),
-    ));
-    pending(waiter.as_mut()).await;
-    drop(owner);
-    assert_eq!(entries(&table), 0);
-    assert_eq!(kind(&waiter.await), FailureKind::Cancelled);
-    assert_eq!(store.active.load(Ordering::SeqCst), 0);
-    let retry = table
-        .call(
-            request("drop-committed", "one"),
-            Origin::Socket,
-            CancellationToken::new(),
-        )
-        .await;
-    assert_eq!(retry.value().unwrap()["replayed"], true);
-    assert_eq!(store.count(), 1);
-}
-
-struct ReentrantWake {
-    table: Arc<OperationTable>,
-    gate: Arc<Gate>,
-    attempted: AtomicBool,
-    locked: AtomicBool,
-    unexpected_ready: AtomicBool,
-    next: Mutex<Option<OperationFuture<'static, Answer<Value>>>>,
-}
-impl std::task::Wake for ReentrantWake {
-    fn wake(self: Arc<Self>) {
-        if self.attempted.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        if self.table.in_flight.try_lock().is_err() {
-            self.locked.store(true, Ordering::SeqCst);
-            return;
-        }
-        self.gate.before.store(true, Ordering::SeqCst);
-        let table = self.table.clone();
-        let mut next: OperationFuture<'static, Answer<Value>> = Box::pin(async move {
-            table
-                .call(
-                    request("wake-race", "one"),
-                    Origin::Mcp,
-                    CancellationToken::new(),
-                )
-                .await
-        });
-        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-        if next.as_mut().poll(&mut context).is_ready() {
-            self.unexpected_ready.store(true, Ordering::SeqCst);
-        }
-        *self.next.lock().unwrap() = Some(next);
-    }
-}
-
-#[tokio::test]
-async fn waking_waiters_can_reenter_without_locking_or_removing_the_replacement_flight() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("product.sqlite"));
-    let gate = Gate::before();
-    let table = Arc::new(make_table(&store, Some(gate.clone())));
-    let mut owner = Box::pin(table.call(
-        request("wake-race", "one"),
-        Origin::Http,
-        CancellationToken::new(),
-    ));
-    pending(owner.as_mut()).await;
-    let mut waiter = Box::pin(table.call(
-        request("wake-race", "one"),
-        Origin::Socket,
-        CancellationToken::new(),
-    ));
-    let wake = Arc::new(ReentrantWake {
-        table: table.clone(),
-        gate: gate.clone(),
-        attempted: AtomicBool::new(false),
-        locked: AtomicBool::new(false),
-        unexpected_ready: AtomicBool::new(false),
-        next: Mutex::new(None),
-    });
-    let waker = std::task::Waker::from(wake.clone());
-    let mut context = std::task::Context::from_waker(&waker);
-    assert!(waiter.as_mut().poll(&mut context).is_pending());
-    gate.open();
-    let first = owner.await;
-    assert!(wake.attempted.load(Ordering::SeqCst));
-    assert!(!wake.locked.load(Ordering::SeqCst));
-    assert!(!wake.unexpected_ready.load(Ordering::SeqCst));
-    assert_eq!(
-        entries(&table),
-        1,
-        "old guard must not retire the newly admitted owner"
-    );
-    assert_eq!(waiter.await, first);
-    let next = wake.next.lock().unwrap().take().unwrap();
-    gate.open();
-    let retry = next.await;
-    assert_eq!(retry.value().unwrap()["replayed"], true);
-    assert_eq!(entries(&table), 0);
-    assert_eq!(store.count(), 1);
-}
-
-#[tokio::test]
-async fn coalesced_results_keep_the_actual_owner_and_local_cancellation_keeps_its_waiter() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("product.sqlite"));
-    let gate = Gate::before();
-    let table = make_table(&store, Some(gate.clone()));
-    let caller =
-        |identity: &'static str| Caller::authenticated("same-authenticated-scope", identity);
-    let mut owner = Box::pin(table.call_as(
-        request("owner-context", "one"),
-        Origin::Http,
-        caller("private owner context"),
-        CancellationToken::new(),
-    ));
-    pending(owner.as_mut()).await;
-    let mut waiter = Box::pin(table.call_as(
-        request("owner-context", "one"),
-        Origin::Mcp,
-        caller("waiter context"),
-        CancellationToken::new(),
-    ));
-    pending(waiter.as_mut()).await;
-    let token = CancellationToken::new();
-    let mut cancelled = Box::pin(table.call_as(
-        request("owner-context", "one"),
-        Origin::Cli,
-        caller("cancelled waiter context"),
-        token.clone(),
-    ));
-    pending(cancelled.as_mut()).await;
-    token.cancel();
-    let cancelled = cancelled.await;
-    assert_eq!(kind(&cancelled.answer), FailureKind::Cancelled);
-    assert_eq!(
-        cancelled.owner.identity::<&str>(),
-        Some(&"cancelled waiter context")
-    );
-    gate.open();
-    let owner = owner.await;
-    let waiter = waiter.await;
-    assert_eq!(
-        owner.owner.identity::<&str>(),
-        Some(&"private owner context")
-    );
-    assert_eq!(
-        waiter.owner.identity::<&str>(),
-        Some(&"private owner context")
-    );
-    assert_eq!(owner.answer, waiter.answer);
-    assert!(
-        !serde_json::to_string(&waiter.answer)
-            .unwrap()
-            .contains("private owner context")
-    );
-    assert_eq!(store.attempts.load(Ordering::SeqCst), 1);
-    assert_eq!(entries(&table), 0);
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_waiter_timeout_retains_its_context_without_replacing_the_shared_owner() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("product.sqlite"));
-    let gate = Gate::before();
-    let table = make_table(&store, Some(gate.clone()));
-    let mut owner = Box::pin(table.call_as(
-        request("local-timeout", "one"),
-        Origin::Http,
-        Caller::authenticated("same-scope", 1u64),
-        CancellationToken::new(),
-    ));
-    pending(owner.as_mut()).await;
-    let mut input = request("local-timeout", "one");
-    input.deadline = Deadline::Milliseconds(1);
-    let mut waiter = Box::pin(table.call_as(
-        input,
-        Origin::Mcp,
-        Caller::authenticated("same-scope", 2u64),
-        CancellationToken::new(),
-    ));
-    pending(waiter.as_mut()).await;
-    tokio::time::advance(Duration::from_millis(2)).await;
-    let waiter = waiter.await;
-    assert_eq!(kind(&waiter.answer), FailureKind::Timeout);
-    assert_eq!(waiter.owner.identity::<u64>(), Some(&2));
-    assert_eq!(entries(&table), 1);
-    gate.open();
-    let owner = owner.await;
-    assert_eq!(owner.owner.identity::<u64>(), Some(&1));
-    assert!(owner.answer.value().is_some());
-    assert_eq!(store.attempts.load(Ordering::SeqCst), 1);
 }
