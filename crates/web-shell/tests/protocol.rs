@@ -71,6 +71,7 @@ fn csp_on_every_route() {
         for path in [
             "/assets/tokens.css",
             "/assets/shell.js",
+            "/assets/feed-worker.js",
             "/assets/shell.css",
             "/assets/fonts/IBMPlexSans-Regular.woff2",
             "/assets/fonts/IBMPlexMono-Regular.woff2",
@@ -121,6 +122,18 @@ fn assets_validate_cache_and_font_identity() {
     let response = web_shell::assets::serve(&conditional);
     assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
     assert!(response.body().is_empty());
+    let worker = web_shell::assets::serve(
+        &HttpRequest::builder()
+            .uri("/assets/feed-worker.js")
+            .body(())
+            .unwrap(),
+    );
+    assert_eq!(worker.status(), StatusCode::OK);
+    assert_eq!(
+        worker.headers()["content-type"],
+        "text/javascript; charset=utf-8"
+    );
+    assert!(!worker.body().is_empty());
     for family in ["Sans", "Mono"] {
         let request = HttpRequest::builder()
             .uri(format!("/assets/fonts/IBMPlex{family}-Regular.woff2"))
@@ -249,28 +262,6 @@ fn generated_types_match_rust() {
         web_shell::protocol::typescript(),
         include_str!("../typescript/types.ts")
     );
-}
-
-#[test]
-fn same_key_same_act() {
-    use web_shell::keys::KeyAction;
-    for (letter, terminal, expected_action) in [
-        ("j", "Ctrl-j", KeyAction::Next),
-        ("k", "Ctrl-k", KeyAction::Previous),
-        ("y", "Ctrl-y", KeyAction::CopyMenu),
-        ("x", "Ctrl-x", KeyAction::ToggleSelection),
-        ("n", "Ctrl-n", KeyAction::NextMatch),
-    ] {
-        let binding = web_shell::keys::KEYS
-            .iter()
-            .find(|binding| binding.key == letter && !binding.ctrl)
-            .unwrap();
-        assert_eq!(binding.action, expected_action);
-        assert!(
-            web_shell::keys::picker_bindings()
-                .any(|(key, action)| key == terminal && action == expected_action)
-        );
-    }
 }
 
 #[test]

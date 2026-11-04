@@ -69,10 +69,6 @@ pub struct Error {
     pub candidates: Vec<String>,
     pub hint: Option<String>,
     pub retryable: bool,
-    /// What the input could have meant: an ambiguous reference's matches,
-    /// or the known names nearest an unknown one.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub candidates: Vec<String>,
 }
 
 impl Error {
@@ -86,7 +82,6 @@ impl Error {
             candidates: Vec::new(),
             hint: None,
             retryable: false,
-            candidates: Vec::new(),
         }
     }
     pub fn candidates(mut self, candidates: Vec<String>) -> Self {
@@ -103,10 +98,6 @@ impl Error {
     }
     pub fn length(mut self, length: usize) -> Self {
         self.length = length;
-        self
-    }
-    pub fn candidates(mut self, candidates: Vec<String>) -> Self {
-        self.candidates = candidates;
         self
     }
     /// Render the source line and a caret under the refused text, at valid

@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 const core = await import(pathToFileURL(process.env.CORE_MODULE));
-const { FragmentController, copyTarget, pointers, resolveKey, bindFeed, protectedTarget, pruneWindow, keydown, presentSnapshot } = await import(pathToFileURL(process.env.SHELL_MODULE));
+const { FragmentController, copyTarget, boardPointers, resolveKey, bindFeed, protectedTarget, pruneWindow, keydown, presentSnapshot } = await import(pathToFileURL(process.env.SHELL_MODULE));
 
 test("stale-reply-never-overwrites even when transport ignores cancellation", async () => {
   const requests = new core.LatestRequest();
@@ -62,8 +62,9 @@ test("operation URLs reject foreign origins and active URL schemes", () => {
 
 // Minimal DOM port: the assertions concern mutations, focus and scroll, not source text.
 class Element {
-  constructor(id = "") { this.id = id; this.dataset = {}; this.children = []; this.html = "old"; this.scrollTop = 17; this.clientHeight = 100; this.scrollHeight = 300; this.attributes = new Map(); this.listeners = new Map(); this.events = []; this.scrollLeft = 0; }
+  constructor(id = "", tagName = "div") { this.tagName = tagName.toUpperCase(); this.id = id; this.dataset = {}; this.children = []; this.html = "old"; this.scrollTop = 17; this.clientHeight = 100; this.scrollHeight = 300; this.attributes = new Map(); this.listeners = new Map(); this.events = []; this.scrollLeft = 0; }
   closest(selector) {
+    if (selector === this.tagName.toLowerCase()) return this;
     if (selector === "*" || (selector === "[data-row]" && "row" in this.dataset) || (selector === "[data-follow]" && "follow" in this.dataset)) return this;
     return this.parent?.closest(selector) ?? null;
   }
@@ -75,6 +76,8 @@ class Element {
   }
   querySelectorAll(selector) {
     if (selector === "[data-row]") return this.children.filter(child => "row" in child.dataset);
+    if (selector === "[data-card-key]") return this.children.filter(child => "cardKey" in child.dataset);
+    if (/^[a-z]+-[a-z]+$/.test(selector)) return this.children.filter(child => child.tagName?.toLowerCase() === selector);
     if (selector === "[data-window-before]") return this.children.filter(child => "windowBefore" in child.dataset);
     if (selector === "[data-window-after]") return this.children.filter(child => "windowAfter" in child.dataset);
     return [];
@@ -84,6 +87,7 @@ class Element {
   setPointerCapture(id) { this.capture = id; }
   getBoundingClientRect() { return { left: 0, top: 0, width: 400, bottom: 300 }; }
   setAttribute(name, value) { this.attributes.set(name, value); }
+  removeAttribute(name) { this.attributes.delete(name); }
   getAttribute(name) { return this.attributes.get(name) ?? null; }
   hasAttribute(name) { return this.attributes.has(name); }
   click() { this.clicks = (this.clicks ?? 0) + 1; this.listeners.get("click")?.(); }
@@ -100,7 +104,8 @@ function dom() {
   const reader = new Element("reader"); reader.dataset.follow = "false";
   const doc = {
     notices: [], rows: [], body: new Element("body"), activeElement: null,
-    getElementById(id) { return id === "reader" ? reader : null; },
+    getElementById(id) { return id === "reader" ? reader : id === "shell-status" ? this.status : null; },
+    status: { textContent: "" },
     getSelection() { return { toString: () => "", rangeCount: 0 }; },
     querySelector(selector) { return this.querySelectorAll(selector)[0] ?? null; },
     querySelectorAll(selector) { return selector === "[data-updates]" ? this.notices : selector === "[data-row]" ? this.rows : []; },
@@ -156,7 +161,7 @@ test("clipboard denial exposes selected text beside target and never reports cop
 test("board pointer capture pans the native surface and emits domain range", () => {
   dom();
   const board = new Element("board"); board.dataset = { pointer: "board", start: "0", end: "100" }; board.scrollLeft = 100; board.scrollTop = 100;
-  pointers(board);
+  boardPointers(board);
   board.listeners.get("pointerdown")({ target: board, pointerId: 3, clientX: 100, clientY: 20 });
   board.listeners.get("pointermove")({ pointerId: 3, clientX: 140, clientY: 40 });
   board.listeners.get("pointerup")({ pointerId: 3 });
@@ -263,7 +268,7 @@ test("a failed reference stops the feed without acknowledging it or later buffer
 });
 test("window pruning keeps the selected row itself after focus leaves it", () => {
   const { doc } = dom(); doc.activeElement = doc.body;
-  const list = new Element("list"); list.dataset.window = "1";
+  const list = new Element("list"); list.dataset.size = "1";
   const items = Array.from({ length: 4 }, (_, index) => {
     const row = new Element(`r${index}`); row.dataset.row = ""; row.parent = list;
     row.getBoundingClientRect = () => index === 2 ? { top: 10, bottom: 20 } : { top: -20, bottom: -10 };
@@ -277,7 +282,7 @@ test("window pruning keeps the selected row itself after focus leaves it", () =>
 });
 test("alternating touch moves use each pointer's own delta and pinch the actual distance", () => {
   dom(); const board = new Element("board"); board.dataset = { pointer: "board", start: "0", end: "100" }; board.scrollLeft = 100;
-  pointers(board);
+  boardPointers(board);
   const down = (pointerId, clientX) => board.listeners.get("pointerdown")({ target: board, pointerId, clientX, clientY: 20 });
   const move = (pointerId, clientX) => board.listeners.get("pointermove")({ pointerId, clientX, clientY: 20 });
   down(1, 100); down(2, 300); move(1, 90);
@@ -339,4 +344,51 @@ test("a superseded visibility snapshot cannot commit its position after its refe
   const next = presentSnapshot({ position: "hidden", fragments: [{ kind: "ref", target: "reader", url: "/fragment?at=hidden" }] },
     () => new Promise(resolve => { finishHidden = resolve; }), () => generation === 2 && !hidden, position => positions.push(position));
   hidden = true; finishHidden(); assert.equal(await next, false); assert.deepEqual(positions, ["new"]);
+});
+
+function press(doc, element, key) {
+  doc.activeElement = element;
+  const event = { target: element, key, ctrlKey: false, preventDefault() { this.defaultPrevented = true; } };
+  keydown(event);
+  return event;
+}
+test("card-keys-need-an-entered-card: no keystroke while moving through a list reaches a card's action", () => {
+  const { doc } = dom();
+  const row = new Element("waiting-row"); row.dataset.row = ""; doc.rows = [row];
+  const card = new Element("card", "shell-card"); card.parent = row; row.children.push(card);
+  const approve = new Element("approve", "button"); approve.dataset.cardKey = "a"; approve.parent = card; card.children.push(approve);
+  press(doc, row, "a"); assert.equal(approve.clicks ?? 0, 0);
+  press(doc, row, "Enter");
+  assert.equal(card.hasAttribute("data-entered"), true); assert.equal(doc.activeElement, card);
+  assert.match(doc.status.textContent, /Card keys: a/);
+  assert.equal(press(doc, card, "a").defaultPrevented, true); assert.equal(approve.clicks, 1);
+  press(doc, card, "Escape");
+  assert.equal(card.hasAttribute("data-entered"), false); assert.equal(doc.activeElement, row);
+  press(doc, card, "a"); assert.equal(approve.clicks, 1, "a card left with Esc no longer takes its keys");
+  // A disabled action is visible but never runs.
+  press(doc, row, "Enter"); approve.disabled = true; press(doc, card, "a"); assert.equal(approve.clicks, 1);
+});
+test("g n and g o are shared sequences that come before a product's navigation letters", () => {
+  const { doc } = dom();
+  const notices = new Element("notices", "a"), section = new Element("section", "a"); section.dataset.go = "n";
+  let counterpart = new Element("counterpart", "span"); counterpart.dataset.reason = "no counterpart for a library item";
+  doc.querySelectorAll = selector => selector === "[data-notices]" ? [notices] : selector === "[data-go]" ? [section] : selector === "[data-counterpart]" ? [counterpart] : [];
+  press(doc, doc.body, "g"); press(doc, doc.body, "n");
+  assert.equal(notices.clicks, 1); assert.equal(section.clicks ?? 0, 0);
+  press(doc, doc.body, "g"); press(doc, doc.body, "o");
+  assert.equal(doc.status.textContent, "no counterpart for a library item");
+  counterpart = new Element("counterpart", "a"); counterpart.setAttribute("href", "https://sinex.test/day/2026-10-07");
+  press(doc, doc.body, "g"); press(doc, doc.body, "o");
+  assert.equal(counterpart.clicks, 1);
+  assert.equal(resolveKey("n", false, "g"), "go_notices"); assert.equal(resolveKey("o", false, "g"), "go_counterpart");
+});
+test("timeline keys act only inside a timeline; elsewhere the browser keeps them", () => {
+  const { doc } = dom();
+  assert.equal(resolveKey("ArrowLeft", false), "pan_earlier"); assert.equal(resolveKey("=", false), "zoom_in");
+  for (const key of ["ArrowLeft", "ArrowRight", "-", "="]) assert.equal(press(doc, doc.body, key).defaultPrevented, undefined, key);
+  const calls = [];
+  const element = new Element("timeline", "shell-timeline");
+  Object.assign(element, { stepShape: direction => calls.push(["step", direction]), panBy: fraction => calls.push(["pan", fraction]), zoomBy: factor => calls.push(["zoom", factor]), openShape: () => calls.push(["open"]) });
+  for (const key of ["ArrowLeft", "=", "j", "Enter"]) assert.equal(press(doc, element, key).defaultPrevented, true);
+  assert.deepEqual(calls, [["pan", -.25], ["zoom", 2], ["step", 1], ["open"]]);
 });

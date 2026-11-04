@@ -1,5 +1,7 @@
 //! Product-neutral document frame. All content enters as escaped maud markup.
+use crate::feed::Feed;
 pub use crate::keys::KEYS;
+use crate::keys::Place;
 use crate::protocol::{Action, CopyForm, CopyTarget};
 use maud::{DOCTYPE, Markup, html};
 use std::borrow::Cow;
@@ -28,6 +30,35 @@ impl Product {
         match self {
             Self::Polylogue => "polylogue",
             Self::Sinex => "sinex",
+        }
+    }
+}
+/// The other product's view of what this page shows, reached with `g o`.
+/// A view without one says why; a product running alone has neither.
+pub enum Counterpart<'a> {
+    View {
+        product: Product,
+        href: &'a str,
+        label: &'a str,
+    },
+    Absent {
+        product: Product,
+        reason: &'a str,
+    },
+}
+impl Counterpart<'_> {
+    fn render(&self) -> Markup {
+        match self {
+            Self::View {
+                product,
+                href,
+                label,
+            } => html! {
+                a class="counterpart" data-counterpart="" href=(href) { (product.name()) ": " (label) }
+            },
+            Self::Absent { product, reason } => html! {
+                span class="counterpart" data-counterpart="" data-reason=(reason) { (product.name()) ": " (reason) }
+            },
         }
     }
 }
@@ -96,9 +127,11 @@ pub struct Frame<'a> {
     pub actions_route: Option<&'a str>,
     pub command: Cow<'a, str>,
     pub result_handle: Option<&'a str>,
-    pub feed: Option<&'a str>,
-    /// Existing operation route returning the current document's fragments.
-    pub refresh: Option<&'a str>,
+    /// What the page follows live; lanes and other fragments render their own.
+    pub feeds: &'a [Feed<'a>],
+    /// The notices view (`/notices`), reached with `g n`.
+    pub notices: Option<&'a str>,
+    pub counterpart: Option<Counterpart<'a>>,
     pub status: Markup,
     pub left: Option<Markup>,
     pub inspector: Option<Markup>,
@@ -117,8 +150,9 @@ impl<'a> Frame<'a> {
             actions_route: None,
             command: Cow::Borrowed(command),
             result_handle: None,
-            feed: None,
-            refresh: None,
+            feeds: &[],
+            notices: None,
+            counterpart: None,
             status: html! {},
             left: None,
             inspector: None,
@@ -156,14 +190,16 @@ impl<'a> Frame<'a> {
                     link rel="stylesheet" href="/assets/theme.css";
                     script type="module" src="/assets/shell.js" {}
                 }
-                body data-density=(match self.preferences.density { Density::Comfortable => "comfortable", Density::Compact => "compact", Density::Dense => "dense" }) data-product=(self.product.class()) data-feed=[self.feed] data-refresh=[self.refresh] data-actions-route=[self.actions_route] {
+                body data-density=(match self.preferences.density { Density::Comfortable => "comfortable", Density::Compact => "compact", Density::Dense => "dense" }) data-product=(self.product.class()) data-actions-route=[self.actions_route] {
                     a class="skip" href="#main" { "Skip to content" }
                     header class="header" {
                         a class="wordmark" href="/" { (self.product.name()) }
+                        @if let Some(counterpart) = &self.counterpart { (counterpart.render()) }
                         nav aria-label="Sections" {
                             @for item in self.navigation {
                                 a href=(item.href) data-go=(item.key) aria-current=[item.current.then_some("page")] { (item.label) }
                             }
+                            @if let Some(notices) = self.notices { a href=(notices) data-notices="" { "Notices" } }
                         }
                         form role="search" method="get" action=(self.query_route) {
                             label for="query" class="visually-hidden" { "Query" }
@@ -176,7 +212,8 @@ impl<'a> Frame<'a> {
                     details id="key-help" {
                         summary { "Keyboard help (?)" }
                         label { input type="checkbox" data-shortcuts="" checked[self.preferences.shortcuts]; " Single-character shortcuts" }
-                        dl { @for binding in KEYS { dt { kbd { (binding.web_key()) } } dd { (binding.label) } } }
+                        dl { @for binding in KEYS { dt { kbd { (binding.web_key()) } } dd { (binding.label) @if binding.place == Place::Timeline { " (timeline)" } } } }
+                        p { "Inside an entered card, the keys shown on its buttons come first." }
                     }
                     div class="page-frame" {
                         @if let Some(left) = &self.left { details class="rail left" open { summary { "Outline and filters" } (left) } }
@@ -187,6 +224,7 @@ impl<'a> Frame<'a> {
                         (command.render(html! { code id="page-command" { (self.command.as_ref()) } }))
                         @if let Some(handle) = self.result_handle { p { "Result: " code { (handle) } } }
                     }
+                    @for feed in self.feeds { (feed.render()) }
                     div class="status-strip" role="status" { (self.status) " · " button type="button" data-open-help="" { "? keys" } }
                     dialog id="palette" aria-labelledby="palette-title" {
                         h2 id="palette-title" { "Actions" }
