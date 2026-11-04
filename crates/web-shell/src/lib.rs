@@ -8,7 +8,8 @@ pub mod protocol;
 pub mod theme;
 pub mod values;
 
+pub use command_surface::ValueState;
 pub use frame::{Frame, Navigation, Product, View};
 pub use maud::{Markup, html};
 pub use protocol::{CopyForm, CopyTarget, FragmentUpdate};
-pub use values::{ValueState, value_cell};
+pub use values::value_cell;

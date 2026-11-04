@@ -102,26 +102,46 @@ are renames the operator may still change (default; open operator question).
 
 | Name | Meaning |
 |---|---|
-| operation | one row of a product's operation table, reachable from every surface |
+| operation | one row of a product's operation table, reachable from every surface it belongs on |
+| request row, stream row, local row | an operation the daemon answers once; one whose events the daemon sends until it ends; one the calling process runs without the daemon |
+| access level | what a row needs from its caller: `read`, `write` (attributed, undoable) or `permanent` (cannot be undone) |
+| argument form | how a request field is written on the command line: positional, words, rest, named, repeated, flag |
+| default operation | the row a command line runs when its first words name no command |
 | operation table | the typed list of a product's operations from which the CLI, socket, HTTP and MCP are generated |
-| request, answer | what a caller sends, and the typed value it gets back |
-| outcome | what kind of answer came back (rows, empty, incomplete …), or a failure |
+| request, answer | what a caller sends, and what it gets back: an outcome and an envelope |
+| outcome | what kind of answer came back: `ok`, `empty`, `degraded` (with what is missing) or `error` (a failure and no value) |
 | failure, failure kind | a typed error, and its stable name on the wire |
 | failure code | a product's precise failure name, registered once against a shared failure kind |
 | caller scope | the server's authenticated identity namespace for request retries; never supplied in request JSON |
-| in-flight coalescing | concurrent matching requests share one active execution and its final answer; sequential retries reach the product request log |
-| exit code | the CLI's process status for an answer, one per failure kind |
+| exit code | the CLI's process status for an answer, one per outcome and failure kind |
+| caret | the failing input line with a marker under the failing span |
+| suggestion | a corrected query, or a whole request, that runs as given |
+| candidates | what a failing input could have meant, each runnable |
 | latency class | the group an operation belongs to for its default deadline: local, status, completion, read, search, aggregate |
 | deadline | how long a request may run; a default any caller can lift |
-| position | where a product's stream of changes stands; an event's ID |
-| envelope | the fields every answer carries: outcome, count, shown, left out, next, reading, positions, coverage, caller |
+| position | where a product's stream of changes stands: its index generation and commit counter, `generation:counter`; an event's ID, what a read stood at, a seen mark's place |
+| not built, not yet available | a request needing an index or derived product that does not exist until built; a request the product cannot answer yet because it is still opening |
+| envelope | the fields every answer carries besides its outcome: count, shown, left out, next, notes, reading, positions, coverage, facets, caller, collapsed, used tokens |
+| lower bound | a count over a source whose coverage was not complete |
+| follow-up | a ready request in `next`, written as the surface runs it: a command line or an MCP tool call |
+| section, entry | one part of an assembled answer; one whole item of a section, a line or several, citing at least one reference |
 | section status | how complete one section of an assembled answer is: `complete`, `partial`, `not_estimable`, `not_observed`, `empty` |
 | expand handle | a token in an answer that reads more of what was left out, at the answer's read context |
 | value state | how complete a number is: `complete`, `partial`, `inferred`, `unknown`, `not_recorded`, `not_applicable`, `pending` |
+| denominator | the population a number is out of: its count, unit and query |
 | budget | how many tokens an answer may hold (`budget_tokens`); answers are fitted in whole lines |
 | caller, author | who sent a request, gathered from what it carries, and the author computed from it |
+| caller evidence | what a transport observed about a caller: harness, session, tool call, harness process, terminal, cgroup unit, whether its MCP server is shared, the session a call names |
+| harness, agent session | an agent program that runs sessions (`claude-code`, `codex` …), and one of its sessions, `harness:native` |
+| harness ancestor | a harness process above the caller; the nearest one launched it |
+| shared server | an MCP server process serving several sessions, whose start-up variables name none of them |
+| hook identity | the session (and subagent) a harness process or tool call belongs to, from a product's hook spool |
+| via | the channel a request reached the product by: cli, mcp, web, extension, desktop, hook, markup, import, daemon; follow-ups are written for it |
 | tool family | operation rows grouped into one MCP tool because their arguments share a shape and their hint |
 | seen mark | per consumer and target, the latest position displayed to that consumer |
+| consumer | who a seen mark belongs to: the operator or one agent session |
+| showing | how a target came before a consumer; only a display (visible for the display time, one second) or a `since: seen` read moves a seen mark |
+| value in text | an MCP answer in text format whose value its text part holds, left out of the structured part |
 | measurement | one value in status, with its state, reason and age |
 | measurement state | `measured`, `none_found`, `not_measured`, `unavailable`, `gap` |
 | verdict | the one-word health of a product: `healthy`, `degraded`, `unknown` |

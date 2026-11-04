@@ -1,11 +1,11 @@
 //! A query-language refusal becomes a `Failure` through one conversion.
-use command_surface::{Failure, FailureKind, Position};
+use command_surface::{Failure, FailureKind, InputSpan, Suggestion};
 use query_language::{Error, ErrorKind};
 
 #[test]
 fn every_language_kind_converts_to_the_failure_kind_of_the_same_name() {
     for kind in ErrorKind::ALL {
-        let failure = Failure::from(Error::new(kind, "refused", 3));
+        let failure = Failure::from_query_error(Error::new(kind, "refused", 3), "a query");
         let name = serde_json::to_value(failure.kind).unwrap();
         assert_eq!(name, kind.code(), "{kind:?}");
         assert!(FailureKind::ALL.contains(&failure.kind));
@@ -24,19 +24,19 @@ fn position_suggestion_candidates_and_hint_survive_the_conversion() {
         .suggestion("sessions where repo:sinex")
         .candidates(vec!["repo".into(), "role".into()])
         .hint("fields: repo, role");
-    let failure = Failure::from(error);
+    let failure = Failure::from_query_error(error, "sessions where reop:sinex");
     assert_eq!(failure.kind, FailureKind::UnknownField);
     assert_eq!(failure.message, "unknown field `reop`");
     assert_eq!(
         failure.position,
-        Some(Position {
+        Some(InputSpan {
             offset: 15,
             length: 4
         })
     );
     assert_eq!(
-        failure.suggestion.as_deref(),
-        Some(&serde_json::json!("sessions where repo:sinex"))
+        failure.suggestion(),
+        Some(&Suggestion::Query("sessions where repo:sinex".into()))
     );
     assert_eq!(failure.candidates(), ["repo", "role"]);
     assert_eq!(failure.hint.as_deref(), Some("fields: repo, role"));
@@ -55,9 +55,11 @@ fn a_parser_refusal_arrives_as_a_failure_whose_suggestion_runs() {
         ..Default::default()
     });
     let error = query_language::parse::parse("sessions where reop:sinex", &catalog).unwrap_err();
-    let failure = Failure::from(error);
+    let failure = Failure::from_query_error(error, "sessions where reop:sinex");
     assert_eq!(failure.kind, FailureKind::UnknownField);
-    let suggestion = failure.suggestion.as_deref().unwrap().as_str().unwrap();
+    let Some(Suggestion::Query(suggestion)) = failure.suggestion() else {
+        panic!("a query correction is required");
+    };
     assert_eq!(suggestion, "sessions where repo:sinex");
     query_language::parse::parse(suggestion, &catalog).unwrap();
     assert_eq!(failure.candidates(), ["repo"]);

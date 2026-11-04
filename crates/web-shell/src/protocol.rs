@@ -1,4 +1,5 @@
 //! The small JSON boundary read by the browser. HTML stays server-rendered.
+use command_surface::Availability;
 use maud::{Markup, html};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -86,17 +87,8 @@ pub struct Action {
     pub key: Option<String>,
     pub route: String,
     pub write: bool,
-    pub availability: ActionAvailability,
+    pub availability: Availability,
     pub request: String,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
-#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ActionAvailability {
-    Enabled,
-    Disabled { reason: String },
-    Partial { reason: String },
-    Loading,
-    Unavailable { reason: String },
 }
 impl Action {
     /// Build directly from the registered row and its request, including the CLI.
@@ -124,10 +116,11 @@ impl Action {
         if spec.name != request.operation {
             return Err("action request names a different operation".into());
         }
-        if !spec.http_route.starts_with('/')
-            || spec.http_route.starts_with("//")
-            || spec.http_route.contains(['\r', '\n'])
-        {
+        let route = spec
+            .http_route
+            .clone()
+            .ok_or("a local operation has no route to act on")?;
+        if !route.starts_with('/') || route.starts_with("//") || route.contains(['\r', '\n']) {
             return Err("operation route must be an origin-relative path".into());
         }
         if key.as_deref().is_some_and(|key| {
@@ -137,27 +130,14 @@ impl Action {
         }) {
             return Err("product action cannot replace a shared key".into());
         }
-        use command_surface::Availability as A;
-        let availability = match availability {
-            A::Enabled => ActionAvailability::Enabled,
-            A::Disabled { reason } => ActionAvailability::Disabled {
-                reason: reason.clone(),
-            },
-            A::Partial { reason } => ActionAvailability::Partial {
-                reason: reason.clone(),
-            },
-            A::Loading => ActionAvailability::Loading,
-            A::Unavailable { reason } => ActionAvailability::Unavailable {
-                reason: reason.clone(),
-            },
-        };
+        let availability = availability.clone();
         Ok(Self {
             operation: spec.name.clone(),
             label: spec.summary.clone(),
             cli,
             key,
-            route: spec.http_route.clone(),
-            write: spec.write,
+            route,
+            write: spec.access != command_surface::Access::Read,
             availability,
             request: serde_json::to_string(request).map_err(|error| error.to_string())?,
         })
@@ -165,14 +145,14 @@ impl Action {
     pub fn render(&self) -> Markup {
         let disabled = !matches!(
             self.availability,
-            ActionAvailability::Enabled | ActionAvailability::Partial { .. }
+            Availability::Enabled | Availability::Partial { .. }
         );
         let reason = match &self.availability {
-            ActionAvailability::Disabled { reason }
-            | ActionAvailability::Partial { reason }
-            | ActionAvailability::Unavailable { reason } => Some(reason.as_str()),
-            ActionAvailability::Loading => Some("loading"),
-            ActionAvailability::Enabled => None,
+            Availability::Disabled { reason }
+            | Availability::Partial { reason }
+            | Availability::Unavailable { reason } => Some(reason.as_str()),
+            Availability::Loading => Some("loading"),
+            Availability::Enabled => None,
         };
         let action = serde_json::to_string(self).expect("action strings serialize");
         let label = html! { (self.label) @if let Some(reason) = reason { " (" (reason) ")" } };
@@ -209,7 +189,7 @@ pub fn typescript() -> String {
         FragmentUpdate::decl(),
         Completion::decl(),
         Refresh::decl(),
-        ActionAvailability::decl(),
+        Availability::decl(),
         Action::decl(),
     ];
     format!(
