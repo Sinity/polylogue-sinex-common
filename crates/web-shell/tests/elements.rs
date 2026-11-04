@@ -1,6 +1,6 @@
 //! Cards, seen marks, the frame's notices and counterpart, the key table and
 //! its product checks, and the no-script document under every element.
-use command_surface::{Availability, Deadline, LatencyClass, OperationSpec, Request};
+use command_surface::{Access, Availability, Deadline, OperationSpec, Request};
 use serde_json::json;
 use web_shell::card::CardError;
 use web_shell::keys::{self, KEYS, KeyAction, KeyConflict, Place, ProductKey};
@@ -9,20 +9,18 @@ use web_shell::{Card, CardAction, Counterpart, Feed, Frame, Product, Seen, html}
 
 fn action(name: &str, write: bool) -> Action {
     let spec = OperationSpec {
-        name: name.into(),
-        command: vec![name.into()],
-        summary: format!("Do {name}"),
-        reason: "test".into(),
-        http_route: format!("/v1/{name}"),
-        latency: LatencyClass::Read,
-        failures: vec![],
-        write,
+        access: if write { Access::Write } else { Access::Read },
+        ..OperationSpec::request(name, &[name], name, format!("Do {name}"), "test")
     };
     let request = Request {
         operation: name.into(),
         arguments: json!({"target": "session:a"}),
         request_id: format!("{name}-1"),
         deadline: Deadline::Default,
+        budget_tokens: None,
+        cursor: None,
+        fresh: false,
+        format: command_surface::Format::Text,
     };
     Action::from_operation(
         &spec,

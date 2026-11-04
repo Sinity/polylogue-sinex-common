@@ -56,7 +56,7 @@ fn session(start: i64, minutes: i64, number: usize) -> SeriesRow {
     SeriesRow {
         lane: "sessions".into(),
         group: Some(
-            if number % 3 == 0 {
+            if number.is_multiple_of(3) {
                 "repository-b"
             } else {
                 "repository-a"
@@ -67,7 +67,7 @@ fn session(start: i64, minutes: i64, number: usize) -> SeriesRow {
         shape: Shape::Interval {
             end: start + minutes * 60_000,
             label: Some(format!("session {number}")),
-            agency: Some(if number % 2 == 0 {
+            agency: Some(if number.is_multiple_of(2) {
                 Agency::Agent
             } else {
                 Agency::Operator

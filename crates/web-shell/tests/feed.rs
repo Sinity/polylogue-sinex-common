@@ -1,14 +1,11 @@
 //! The server half of one connection per browser: a union stream of
 //! subscriptions, each resumed from its own position.
-use command_surface::{CommittedEvent, EventLog, EventPosition, SseDecoder};
+use command_surface::{CommittedEvent, EventLog, Position, SseDecoder};
 use web_shell::FragmentUpdate;
 use web_shell::feed::{self, FeedEvent, FeedReload, Subscription};
 
-fn position(cursor: &str) -> EventPosition {
-    EventPosition {
-        generation: "g1".into(),
-        cursor: cursor.into(),
-    }
+fn position(cursor: &str) -> Position {
+    Position::new("g1", cursor.parse().unwrap())
 }
 /// Each committed value names the reference it changes.
 fn log() -> EventLog<String> {
