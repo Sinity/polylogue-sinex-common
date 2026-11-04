@@ -1070,27 +1070,36 @@ pub fn difference(
     what: ChangeKind,
     k: Option<usize>,
 ) -> Option<Change> {
-    let selected_before = if what == ChangeKind::TopK {
-        &before[..before.len().min(k.unwrap_or(0))]
+    // One comparison with the query language's `diff`, so a watch report and
+    // `A | diff (B)` always agree.
+    let (selected_before, selected_after) = if what == ChangeKind::TopK {
+        let k = k.unwrap_or(0);
+        (
+            query_language::diff::top(before, k),
+            query_language::diff::top(after, k),
+        )
     } else {
-        before
+        (before, after)
     };
-    let selected_after = if what == ChangeKind::TopK {
-        &after[..after.len().min(k.unwrap_or(0))]
-    } else {
-        after
-    };
-    let old: BTreeSet<_> = selected_before.iter().cloned().collect();
-    let new: BTreeSet<_> = selected_after.iter().cloned().collect();
+    let changes = query_language::diff::changes(selected_before, selected_after);
     let changed = if what == ChangeKind::Ranking {
-        selected_before != selected_after
+        !changes.is_empty()
     } else {
-        old != new
+        query_language::diff::membership_changed(&changes)
+    };
+    let of = |kind: query_language::diff::ChangeKind| {
+        changes
+            .iter()
+            .filter(|change| change.kind == kind)
+            .map(|change| change.key.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
     };
     changed.then(|| Change {
         what,
-        joined: new.difference(&old).cloned().collect(),
-        left: old.difference(&new).cloned().collect(),
+        joined: of(query_language::diff::ChangeKind::Joined),
+        left: of(query_language::diff::ChangeKind::Left),
         before: selected_before.to_vec(),
         after: selected_after.to_vec(),
     })

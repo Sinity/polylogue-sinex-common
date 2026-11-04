@@ -150,3 +150,30 @@ impl std::fmt::Display for Failure {
     }
 }
 impl std::error::Error for Failure {}
+
+/// The one conversion from a query-language refusal to the shared failure:
+/// the language kind becomes the failure kind of the same name, the byte
+/// span its position, the corrected query its suggestion and the nearest
+/// names or readings its candidates.
+impl From<query_language::Error> for Failure {
+    fn from(error: query_language::Error) -> Self {
+        use query_language::ErrorKind as Language;
+        let kind = match error.kind {
+            Language::InvalidQuery => FailureKind::InvalidQuery,
+            Language::UnknownField => FailureKind::UnknownField,
+            Language::BadValue => FailureKind::BadValue,
+            Language::NotAQuery => FailureKind::NotAQuery,
+            Language::Ambiguous => FailureKind::Ambiguous,
+            Language::StaleCursor => FailureKind::StaleCursor,
+        };
+        let mut failure = Failure::new(kind, error.message).with_candidates(error.candidates);
+        failure.position = Some(Position {
+            offset: error.position,
+            length: error.length,
+        });
+        failure.suggestion = error.suggestion.map(|query| Box::new(Value::String(query)));
+        failure.hint = error.hint;
+        failure.retryable = error.retryable;
+        failure
+    }
+}

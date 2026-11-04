@@ -8,8 +8,9 @@ fn canonical_query_products_have_structural_schemas() {
     for ty in [
         "ConditionKind",
         "Value",
-        "StageKind",
-        "Operand",
+        "TransformKind",
+        "Expression",
+        "Distance",
         "ExtensionArgument",
     ] {
         assert!(query["$defs"][ty].is_object(), "missing typed {ty}");

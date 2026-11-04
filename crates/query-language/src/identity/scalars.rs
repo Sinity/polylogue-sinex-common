@@ -17,14 +17,19 @@ fn fields(catalog: &Catalog, unit: &str) -> Fields {
         })
         .unwrap_or_default()
 }
-fn field(scope: &Fields, operand: &Operand) -> Option<Field> {
-    match operand {
-        Operand::Field { name } => scope.get(name).cloned(),
-        Operand::Function { name, .. } => Some(Field {
-            name: operand.column(),
-            kind: crate::scope::function_kind(name),
+fn field(scope: &Fields, expression: &Expression, catalog: &Catalog) -> Option<Field> {
+    match expression {
+        Expression::Field { name } => scope.get(name).cloned(),
+        Expression::Function { name, .. } => Some(Field {
+            name: expression.column(),
+            kind: catalog
+                .function(name)
+                .ok()
+                .flatten()
+                .map_or(FieldKind::Json, |function| function.result),
             ..Field::default()
         }),
+        _ => None,
     }
 }
 fn value(value: &mut Value, field: &Field) {
@@ -82,6 +87,57 @@ fn value(value: &mut Value, field: &Field) {
         _ => {}
     }
 }
+fn duration_value(v: &mut Value) {
+    value(
+        v,
+        &Field {
+            kind: FieldKind::Duration,
+            ..Field::default()
+        },
+    );
+}
+fn distance(d: &mut Distance) {
+    if let Distance::Time { duration } = d {
+        duration_value(duration);
+    }
+}
+/// Literals inside expressions take the spelling of their own literal kind.
+fn expression(e: &mut Expression) {
+    match e {
+        Expression::Value {
+            value:
+                Value::Scalar {
+                    text,
+                    quoted: false,
+                },
+        } if crate::parse::is_duration(text) => {
+            if let Some(d) = crate::time::duration(text) {
+                *text = format!("{}ns", d.as_nanos());
+            }
+        }
+        Expression::Value {
+            value:
+                Value::Scalar {
+                    text,
+                    quoted: false,
+                },
+        } => {
+            if let Some(canonical) = crate::number::canonical(text) {
+                *text = canonical;
+            }
+        }
+        Expression::Function { arguments, .. } => {
+            for argument in arguments {
+                expression(argument);
+            }
+        }
+        Expression::Arithmetic { left, right, .. } => {
+            expression(left);
+            expression(right);
+        }
+        _ => {}
+    }
+}
 fn condition(c: &mut Condition, scope: &Fields, catalog: &Catalog) {
     match &mut c.kind {
         ConditionKind::And { conditions } | ConditionKind::Or { conditions } => {
@@ -98,21 +154,38 @@ fn condition(c: &mut Condition, scope: &Fields, catalog: &Catalog) {
                 value(v, f);
             }
         }
-        ConditionKind::Compare {
-            operand, value: v, ..
-        }
-        | ConditionKind::Since { operand, value: v }
-        | ConditionKind::Until { operand, value: v } => {
-            if let Some(f) = field(scope, operand) {
-                value(v, &f);
+        ConditionKind::Compare { left, right, .. } => {
+            let declared = field(scope, left, catalog);
+            expression(left);
+            match right {
+                Expression::Value { value: v } => {
+                    if let Some(f) = declared {
+                        value(v, &f);
+                    }
+                }
+                other => expression(other),
             }
         }
-        ConditionKind::Between { operand, from, to } => {
-            if let Some(f) = field(scope, operand) {
+        ConditionKind::Since {
+            field: name,
+            value: v,
+        }
+        | ConditionKind::Until {
+            field: name,
+            value: v,
+        } => {
+            if let Some(f) = scope.get(name) {
+                value(v, f);
+            }
+        }
+        ConditionKind::Between { left, from, to } => {
+            if let Some(f) = field(scope, left, catalog) {
                 value(from, &f);
                 value(to, &f);
             }
+            expression(left);
         }
+        ConditionKind::TimeRange { left, .. } => expression(left),
         ConditionKind::Exists { unit, condition: c }
         | ConditionKind::Count {
             unit, condition: c, ..
@@ -121,7 +194,16 @@ fn condition(c: &mut Condition, scope: &Fields, catalog: &Catalog) {
                 condition(c, &fields(catalog, unit), catalog);
             }
         }
-        ConditionKind::In { query, .. } => canonicalize(query, catalog),
+        ConditionKind::In { left, query } => {
+            expression(left);
+            canonicalize(query, catalog);
+        }
+        ConditionKind::Order { query, within, .. } => {
+            canonicalize(query, catalog);
+            if let Some(within) = within {
+                distance(within);
+            }
+        }
         ConditionKind::Sequence {
             unit, steps, gaps, ..
         } => {
@@ -129,44 +211,33 @@ fn condition(c: &mut Condition, scope: &Fields, catalog: &Catalog) {
                 condition(c, &fields(catalog, unit), catalog);
             }
             for gap in gaps {
-                if let Gap::Within { duration } = gap {
-                    duration_value(duration);
+                if let Gap::Within { distance: d } = gap {
+                    distance(d);
                 }
             }
         }
-        ConditionKind::TimeDifference { value, .. } => duration_value(value),
         ConditionKind::Extension { arguments, .. } => arguments
             .iter_mut()
             .for_each(|a| argument(a, scope, catalog)),
         _ => {}
     }
 }
-fn duration_value(v: &mut Value) {
-    value(
-        v,
-        &Field {
-            kind: FieldKind::Duration,
-            ..Field::default()
-        },
-    );
-}
 fn argument(a: &mut ExtensionArgument, scope: &Fields, catalog: &Catalog) {
     match a {
         ExtensionArgument::Condition(c) => condition(c, scope, catalog),
         ExtensionArgument::Query(q) => canonicalize(q, catalog),
-        ExtensionArgument::Optional(arguments) => arguments
+        ExtensionArgument::Expression(e) => expression(e),
+        ExtensionArgument::Optional(arguments) | ExtensionArgument::List(arguments) => arguments
             .iter_mut()
             .for_each(|a| argument(a, scope, catalog)),
         _ => {}
     }
 }
 pub(super) fn canonicalize(query: &mut Query, catalog: &Catalog) {
-    let (mut match_unit, mut match_patterns) =
-        crate::matches::source_context(&query.source, catalog);
     let mut scope = match &query.source {
-        Source::Unit { unit, .. } | Source::RecallLast { unit, .. } => fields(catalog, unit),
+        Source::Unit { unit, .. } => fields(catalog, unit),
         Source::Saved { .. } | Source::Result { .. } => catalog
-            .source_scope(&query.source)
+            .source_output(&query.source)
             .map(|output| {
                 output
                     .fields
@@ -176,7 +247,6 @@ pub(super) fn canonicalize(query: &mut Query, catalog: &Catalog) {
                     .collect()
             })
             .unwrap_or_default(),
-        _ => fields(catalog, &catalog.default_unit),
     };
     match &mut query.source {
         Source::Unit {
@@ -192,23 +262,12 @@ pub(super) fn canonicalize(query: &mut Query, catalog: &Catalog) {
                 condition(c, &scope, catalog);
             }
         }
-        Source::RecallLast {
-            condition: Some(c), ..
-        }
-        | Source::Saved {
+        Source::Saved {
             condition: Some(c), ..
         }
         | Source::Result {
             condition: Some(c), ..
         } => condition(c, &scope, catalog),
-        Source::Recall {
-            window: Some(window),
-            ..
-        }
-        | Source::RecallMark {
-            window: Some(window),
-            ..
-        } => duration_value(window),
         _ => {}
     }
     for attachment in &mut query.attach {
@@ -219,59 +278,44 @@ pub(super) fn canonicalize(query: &mut Query, catalog: &Catalog) {
         }
     }
     let mut group_input = None;
-    for stage in &mut query.stages {
-        if crate::matches::invalidates(&stage.kind) {
-            match_patterns = Some(Vec::new());
-        }
-        match &mut stage.kind {
-            StageKind::Where { condition: c } => {
+    for transform in &mut query.transforms {
+        match &mut transform.kind {
+            TransformKind::Where { condition: c } => {
                 condition(c, &scope, catalog);
                 group_input = None;
             }
-            StageKind::Scope { unit, condition: c } => {
-                match_unit = catalog.unit(unit).map(|unit| unit.name.clone());
-                match_patterns = Some(crate::matches::patterns(c.as_ref()));
+            TransformKind::Scope { unit, condition: c } => {
                 group_input = None;
                 scope = fields(catalog, unit);
                 if let Some(c) = c {
                     condition(c, &scope, catalog);
                 }
             }
-            StageKind::Matches => {
-                let source = crate::matches::request(
-                    match_unit.as_deref(),
-                    match_patterns.as_deref(),
-                    stage.span.start,
-                )
-                .ok()
-                .flatten();
-                let output = source
-                    .as_ref()
-                    .and_then(|source| catalog.match_output(source));
-                scope = output
-                    .map(|output| {
-                        output
-                            .fields
-                            .iter()
-                            .cloned()
-                            .map(|field| (field.name.clone(), field))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                match_unit = output
-                    .and_then(|output| output.unit.as_deref())
-                    .and_then(|unit| catalog.unit(unit))
-                    .map(|unit| unit.name.clone());
-                match_patterns = output.map(|_| Vec::new());
+            TransformKind::Matches => {
+                scope.clear();
                 group_input = None;
             }
-            StageKind::Group { keys } => {
+            TransformKind::Sort { keys } => {
+                for key in keys {
+                    expression(&mut key.expression);
+                }
+                group_input = None;
+            }
+            TransformKind::Group { keys } => {
                 group_input = Some(scope.clone());
-                scope = keys
+                let mut grouped: Fields = keys
                     .iter()
-                    .filter_map(|k| field(&scope, k).map(|f| (k.column(), f)))
+                    .filter_map(|k| {
+                        field(&scope, &k.expression, catalog).map(|mut f| {
+                            f.name = k.column();
+                            (k.column(), f)
+                        })
+                    })
                     .collect();
-                scope.insert(
+                for key in keys.iter_mut() {
+                    expression(&mut key.expression);
+                }
+                grouped.insert(
                     "count".into(),
                     Field {
                         name: "count".into(),
@@ -279,8 +323,9 @@ pub(super) fn canonicalize(query: &mut Query, catalog: &Catalog) {
                         ..Field::default()
                     },
                 );
+                scope = grouped;
             }
-            StageKind::Aggregate { aggregates } => {
+            TransformKind::Aggregate { aggregates } => {
                 let grouped = group_input.is_some();
                 let input = group_input.take().unwrap_or_else(|| scope.clone());
                 if !grouped {
@@ -290,11 +335,15 @@ pub(super) fn canonicalize(query: &mut Query, catalog: &Catalog) {
                     let (kind, _) = crate::scope::aggregate_kind(
                         &aggregate.function,
                         aggregate
-                            .fields
+                            .arguments
                             .first()
-                            .and_then(|name| input.get(name))
-                            .map(|field| &field.kind),
+                            .and_then(|argument| field(&input, argument, catalog))
+                            .map(|field| field.kind)
+                            .as_ref(),
                     );
+                    for argument in &mut aggregate.arguments {
+                        expression(argument);
+                    }
                     let name = aggregate.column();
                     scope.insert(
                         name.clone(),
@@ -306,22 +355,38 @@ pub(super) fn canonicalize(query: &mut Query, catalog: &Catalog) {
                     );
                 }
             }
-            StageKind::Fields { fields } => {
-                scope.retain(|name, _| fields.contains(name));
+            TransformKind::Fields { columns } => {
+                let projected: Fields = columns
+                    .iter()
+                    .filter_map(|column| {
+                        field(&scope, &column.expression, catalog).map(|mut f| {
+                            f.name = column.column();
+                            (column.column(), f)
+                        })
+                    })
+                    .collect();
+                for column in columns.iter_mut() {
+                    expression(&mut column.expression);
+                }
+                scope = projected;
                 group_input = None;
             }
-            StageKind::Combine { query, .. } => {
+            TransformKind::Combine { query, .. } | TransformKind::Diff { query } => {
                 canonicalize(query, catalog);
                 group_input = None;
             }
-            StageKind::Temporal { query, within, .. } => {
+            TransformKind::Join { query, on } => {
                 canonicalize(query, catalog);
-                if let Some(within) = within {
-                    duration_value(within);
+                if let JoinOn::Order {
+                    within: Some(within),
+                    ..
+                } = on
+                {
+                    distance(within);
                 }
                 group_input = None;
             }
-            StageKind::Extension { arguments, .. } => arguments
+            TransformKind::Extension { arguments, .. } => arguments
                 .iter_mut()
                 .for_each(|a| argument(a, &scope, catalog)),
             _ => {

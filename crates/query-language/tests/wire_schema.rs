@@ -29,9 +29,7 @@ fn typed_completion_answer_has_the_actual_closed_wire_schema() {
     );
     assert_eq!(
         schema["$defs"]["CompletionKind"]["enum"],
-        json!([
-            "unit", "field", "value", "stage", "operator", "keyword", "command"
-        ])
+        json!(["unit", "field", "value", "transform", "operator", "keyword"])
     );
     for field in ["start", "end"] {
         assert_eq!(

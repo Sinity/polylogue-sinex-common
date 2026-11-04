@@ -444,6 +444,25 @@ pub fn resolve(text: &str, clock: &Clock) -> Result<ResolvedTime, Error> {
     })
 }
 
+/// Whether text is spelled as a time expression `resolve` reads (a
+/// duration, `last D`, a date, an instant, a clock time or a calendar
+/// period), without a clock: the spelling alone, never its value.
+pub fn is_time_expression(text: &str) -> bool {
+    let normalized = text.trim().to_ascii_lowercase();
+    normalized == "now"
+        || duration(&normalized).is_some()
+        || normalized
+            .strip_prefix("last ")
+            .and_then(duration)
+            .is_some()
+        || normalized.parse::<Date>().is_ok()
+        || text.trim().parse::<Timestamp>().is_ok()
+        || text.trim().parse::<DateTime>().is_ok()
+        || (!(normalized.len() == 4 && normalized.bytes().all(|byte| byte.is_ascii_digit()))
+            && normalized.parse::<CivilTime>().is_ok())
+        || calendar_period(&normalized, Date::constant(2000, 1, 1)).is_ok()
+}
+
 fn calendar_period(text: &str, today: Date) -> Result<(Date, Date), Error> {
     let one = |date| Ok((date, date));
     if let Ok(date) = text.parse::<Date>() {

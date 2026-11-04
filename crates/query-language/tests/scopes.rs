@@ -49,9 +49,9 @@ fn catalog(unit: &str) -> Catalog {
 fn checked(text: &str, catalog: &Catalog) -> BoundQuery {
     bind(&parse(text, catalog).unwrap(), catalog).unwrap()
 }
-fn stage(index: usize) -> NodePath {
+fn transform(index: usize) -> NodePath {
     NodePath::default()
-        .field("stages")
+        .field("transforms")
         .index(index)
         .field("kind")
 }
@@ -66,11 +66,11 @@ fn group_scopes_keep_types_closed_values_lineage_and_raw_text() {
     for unit in ["sessions", "events"] {
         let catalog = catalog(unit);
         let text = format!(
-            "{unit} | group by cwd,state | agg count,min(command),avg(n),avg(cost),avg(elapsed),histogram(state),corr(n,n) | where cwd:001 | group by cwd | sum(count)"
+            "{unit} | group by cwd,state | agg count,min(command),avg(n),avg(cost),avg(elapsed),histogram(state),corr(n,n) | where cwd:001 | group by cwd | agg sum(count)"
         );
         let bound = checked(&text, &catalog);
         let scopes = &bound.typing().queries[0];
-        let grouped = &scopes.stages[0].after;
+        let grouped = &scopes.transforms[0].after;
         assert_eq!(grouped.unit.as_deref(), Some(unit));
         assert_eq!(
             grouped
@@ -86,9 +86,9 @@ fn group_scopes_keep_types_closed_values_lineage_and_raw_text() {
             ["open", "closed"]
         );
         assert!(matches!(&grouped.field("cwd").unwrap().origin,
-            Origin::Group { operand, input } if operand == &stage(0).field("keys").index(0)
+            Origin::Group { operand, input } if operand == &transform(0).field("keys").index(0)
                 && matches!(&input.origin, Origin::Catalog { unit: actual, field } if actual == unit && field == "cwd")));
-        let aggregates = &scopes.stages[1].after;
+        let aggregates = &scopes.transforms[1].after;
         for (name, kind) in [
             ("count", FieldKind::Integer),
             ("min_command", FieldKind::Text),
@@ -100,7 +100,7 @@ fn group_scopes_keep_types_closed_values_lineage_and_raw_text() {
         ] {
             assert_eq!(aggregates.field(name).unwrap().field.kind, kind, "{name}");
         }
-        let final_scope = &scopes.stages.last().unwrap().after;
+        let final_scope = &scopes.transforms.last().unwrap().after;
         assert_eq!(
             final_scope.field("sum_count").unwrap().field.kind,
             FieldKind::Integer
@@ -110,7 +110,7 @@ fn group_scopes_keep_types_closed_values_lineage_and_raw_text() {
                 if inputs[0].field.name == "count" && inputs[0].field.kind == FieldKind::Integer));
         let tree = serde_json::to_value(bound.query()).unwrap();
         assert_eq!(
-            tree["stages"][2]["kind"]["condition"]["kind"]["value"]["text"],
+            tree["transforms"][2]["kind"]["condition"]["kind"]["value"]["text"],
             "001"
         );
         for operand in &bound.typing().operands {
@@ -132,23 +132,23 @@ fn group_scopes_keep_types_closed_values_lineage_and_raw_text() {
 fn repeated_groups_have_distinct_structural_origins_and_json_stays_json() {
     let catalog = catalog("events");
     let bound = checked(
-        "events | group by payload.key | min(payload.key) | group by min_payload_key | where min_payload_key:001",
+        "events | group by payload.key | agg min(payload.key) | group by min_payload_key | where min_payload_key:001",
         &catalog,
     );
     let scopes = &bound.typing().queries[0];
-    let final_field = scopes.stages[2].after.field("min_payload_key").unwrap();
+    let final_field = scopes.transforms[2].after.field("min_payload_key").unwrap();
     assert_eq!(final_field.field.kind, FieldKind::Json);
     let Origin::Group { operand, input } = &final_field.origin else {
         panic!("group origin")
     };
-    assert_eq!(operand, &stage(2).field("keys").index(0));
+    assert_eq!(operand, &transform(2).field("keys").index(0));
     let Origin::Aggregate {
         at, inputs, rule, ..
     } = &input.origin
     else {
         panic!("aggregate origin")
     };
-    assert_eq!(at, &stage(1).field("aggregates").index(0));
+    assert_eq!(at, &transform(1).field("aggregates").index(0));
     assert_eq!(*rule, TypeRule::Input);
     assert_eq!(inputs[0].field.name, "payload.key");
     assert!(
@@ -166,7 +166,7 @@ fn nested_and_related_uses_have_their_actual_unit_and_distinct_addresses() {
     );
     let typing = bound.typing();
     assert_eq!(typing.queries.len(), 2);
-    let nested_path = stage(1).field("condition").field("kind").field("query");
+    let nested_path = transform(1).field("condition").field("kind").field("query");
     assert_eq!(
         typing.query(&nested_path).unwrap().source.unit.as_deref(),
         Some("events")
@@ -225,11 +225,9 @@ fn saved_and_result_scopes_retain_snapshot_fields_and_closed_values() {
             ..Field::default()
         }],
         main_time: None,
-        match_patterns: Vec::new(),
     };
     catalog.source_outputs = vec![
         SourceOutput {
-            relation_scope: None,
             source: OutputSource::Saved {
                 name: "named".into(),
                 arguments: vec![],
@@ -237,7 +235,6 @@ fn saved_and_result_scopes_retain_snapshot_fields_and_closed_values() {
             schema: schema.clone(),
         },
         SourceOutput {
-            relation_scope: None,
             source: OutputSource::Result {
                 reference: "result:r".into(),
                 part: ResultPart::Rows,
@@ -245,7 +242,6 @@ fn saved_and_result_scopes_retain_snapshot_fields_and_closed_values() {
             schema: schema.clone(),
         },
         SourceOutput {
-            relation_scope: None,
             source: OutputSource::Result {
                 reference: "result:r".into(),
                 part: ResultPart::Matches,
@@ -271,7 +267,7 @@ fn saved_and_result_scopes_retain_snapshot_fields_and_closed_values() {
         ));
         assert!(Arc::ptr_eq(
             &scope.fields,
-            &bound.typing().queries[0].stages[1].after.fields
+            &bound.typing().queries[0].transforms[1].after.fields
         ));
         assert!(parse(&format!("{source} | where cwd:001"), &catalog).is_err());
     }
@@ -293,37 +289,68 @@ fn saved_and_result_scopes_retain_snapshot_fields_and_closed_values() {
     );
 }
 #[test]
-fn promoted_join_fields_and_nested_group_types_come_from_the_checker() {
+fn joined_fields_and_nested_group_types_come_from_the_checker() {
     let catalog = catalog("events");
     let bound = checked(
-        "events | near (events | group by cwd) within 1h | where offset < 5m | group by near | count",
+        "events | join near (events | group by cwd) within 1h | where match.distance < 5m | group by match.cwd | count",
         &catalog,
     );
-    let scope = &bound.typing().queries[0].stages[0].after;
+    let scope = &bound.typing().queries[0].transforms[0].after;
+    let matched = scope.field("match.cwd").unwrap();
+    assert_eq!(matched.field.kind, FieldKind::Text);
+    assert!(matches!(&matched.origin, Origin::Matched { input }
+        if matches!(&input.origin, Origin::Group { .. })));
     assert_eq!(
-        scope.field("near").unwrap().field.kind,
-        FieldKind::Reference
-    );
-    assert_eq!(
-        scope.field("offset").unwrap().field.kind,
+        scope.field("match.distance").unwrap().field.kind,
         FieldKind::Duration
     );
-    assert!(
-        matches!(&scope.field("near").unwrap().origin, Origin::Temporal { query, all: false, .. } if query == &stage(0).field("query"))
-    );
-    let nested = bound.typing().query(&stage(0).field("query")).unwrap();
     assert_eq!(
-        nested.stages[0].after.field("cwd").unwrap().field.kind,
+        scope.field("match.count").unwrap().field.kind,
+        FieldKind::Integer
+    );
+    let nested = bound.typing().query(&transform(0).field("query")).unwrap();
+    assert_eq!(
+        nested.transforms[0].after.field("cwd").unwrap().field.kind,
         FieldKind::Text
     );
+    let grouped = &bound.typing().queries[0].transforms[2].after;
+    assert_eq!(
+        grouped.field("match.cwd").unwrap().field.kind,
+        FieldKind::Text
+    );
+}
+#[test]
+fn expressions_carry_their_dimension() {
+    let catalog = catalog("events");
+    let bound = checked(
+        "events | fields when - when as span, cost / n as each, elapsed * 2 as twice, n + 1 as next_n",
+        &catalog,
+    );
+    let scope = &bound.typing().queries[0].transforms[0].after;
+    for (name, kind) in [
+        ("span", FieldKind::Duration),
+        ("each", FieldKind::Money),
+        ("twice", FieldKind::Duration),
+        ("next_n", FieldKind::Integer),
+    ] {
+        assert_eq!(scope.field(name).unwrap().field.kind, kind, "{name}");
+    }
+    let tree = serde_json::to_value(bound.query()).unwrap();
+    for operand in &bound.typing().operands {
+        assert!(
+            !value_at(&tree, &operand.path).is_null(),
+            "{:?}",
+            operand.path
+        );
+    }
 }
 #[test]
 fn spans_and_presentation_do_not_identify_scope_or_operand_addresses() {
     let catalog = catalog("events");
     let a = checked("events | group by cwd | where cwd:001", &catalog);
     let mut tree = a.query().clone();
-    for stage in &mut tree.stages {
-        stage.span = Span {
+    for transform in &mut tree.transforms {
+        transform.span = Span {
             start: 999,
             end: 1000,
         };
@@ -366,7 +393,7 @@ fn fixed_results_discard_discrete_values_and_min_preserves_them() {
         "events | group by cwd | agg min(state),max(state),histogram(state),avg(n),sum(n)",
         &catalog,
     );
-    let scope = &bound.typing().queries[0].stages[1].after;
+    let scope = &bound.typing().queries[0].transforms[1].after;
     for name in ["min_state", "max_state"] {
         assert_eq!(scope.field(name).unwrap().field.values, ["open", "closed"]);
     }
@@ -394,12 +421,16 @@ fn both_catalogs_keep_calendar_labels_and_hour_numbers_through_binding() {
                 unit.name
             );
             let bound = checked(&text, &catalog);
-            let output = bound.typing().query(&NodePath::default()).unwrap().stages[0]
+            let output = bound
+                .typing()
+                .query(&NodePath::default())
+                .unwrap()
+                .transforms[0]
                 .after
                 .field(function)
                 .unwrap();
             assert_eq!(output.field.kind, kind, "{text}");
-            let StageKind::Where { condition } = &bound.query().stages[1].kind else {
+            let TransformKind::Where { condition } = &bound.query().transforms[1].kind else {
                 panic!()
             };
             assert!(matches!(&condition.kind, ConditionKind::Match {

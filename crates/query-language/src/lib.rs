@@ -3,11 +3,13 @@ pub mod ast;
 pub mod bind;
 pub mod catalog;
 pub mod complete;
+pub mod coverage;
 pub mod cursor;
+pub mod diff;
 pub mod format;
+pub mod fusion;
 pub mod identity;
 pub mod laws;
-pub mod matches;
 pub mod number;
 pub mod parse;
 pub mod scope;
@@ -16,7 +18,8 @@ pub mod time;
 
 use serde::{Deserialize, Serialize};
 
-/// Stable language refusal kinds. Transport mappings belong to command-surface.
+/// Stable language refusal kinds. `command_surface::Failure` converts each to
+/// its shared failure kind; a compiler adds its own kinds at its own boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
@@ -29,6 +32,14 @@ pub enum ErrorKind {
 }
 
 impl ErrorKind {
+    pub const ALL: [Self; 6] = [
+        Self::InvalidQuery,
+        Self::UnknownField,
+        Self::BadValue,
+        Self::NotAQuery,
+        Self::Ambiguous,
+        Self::StaleCursor,
+    ];
     pub const fn code(self) -> &'static str {
         match self {
             Self::InvalidQuery => "invalid_query",
@@ -46,8 +57,16 @@ impl ErrorKind {
 pub struct Error {
     pub kind: ErrorKind,
     pub message: String,
+    /// UTF-8 byte offset of the refused text.
     pub position: usize,
+    /// Byte length of the refused text; zero marks a position between tokens.
+    #[serde(default)]
+    pub length: usize,
+    /// A corrected query that parses, binds and runs as given.
     pub suggestion: Option<String>,
+    /// The readings of an ambiguous input, or the known names nearest an unknown one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<String>,
     pub hint: Option<String>,
     pub retryable: bool,
 }
@@ -58,7 +77,9 @@ impl Error {
             kind,
             message: message.into(),
             position,
+            length: 0,
             suggestion: None,
+            candidates: Vec::new(),
             hint: None,
             retryable: false,
         }
@@ -71,7 +92,16 @@ impl Error {
         self.hint = Some(text.into());
         self
     }
-    /// Render the source line and a caret at a valid Unicode character boundary.
+    pub fn length(mut self, length: usize) -> Self {
+        self.length = length;
+        self
+    }
+    pub fn candidates(mut self, candidates: Vec<String>) -> Self {
+        self.candidates = candidates;
+        self
+    }
+    /// Render the source line and a caret under the refused text, at valid
+    /// Unicode character boundaries.
     pub fn diagnostic(&self, source: &str) -> String {
         let mut offset = self.position.min(source.len());
         while !source.is_char_boundary(offset) {
@@ -82,11 +112,17 @@ impl Error {
             .find('\n')
             .map_or(source.len(), |i| offset + i);
         let column = source[start..offset].chars().count();
+        let mut caret_end = (offset + self.length).min(end);
+        while !source.is_char_boundary(caret_end) {
+            caret_end -= 1;
+        }
+        let width = source[offset..caret_end].chars().count().max(1);
         format!(
-            "{}\n{}\n{}^",
+            "{}\n{}\n{}{}",
             self.message,
             &source[start..end],
-            " ".repeat(column)
+            " ".repeat(column),
+            "^".repeat(width)
         )
     }
 }

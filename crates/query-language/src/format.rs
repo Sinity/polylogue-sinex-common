@@ -3,8 +3,8 @@ use crate::ast::*;
 use crate::catalog::{Catalog, ExtensionPosition, ExtensionSlot};
 use crate::{Error, ErrorKind};
 
-/// Render capital boolean operators and piped stages while preserving whether
-/// a source unit was explicit or inherited.
+/// Render capital boolean operators and piped transforms while preserving
+/// whether a source unit was explicit or inherited.
 /// A round trip through this catalog must preserve the canonical question. This
 /// also refuses manually constructed trees the language cannot express.
 pub fn format_query(query: &Query, catalog: &Catalog) -> Result<String, Error> {
@@ -87,46 +87,6 @@ impl Renderer<'_> {
                 }
                 text
             }
-            Source::Walk {
-                direction,
-                reference,
-            } => format!(
-                "{} {}",
-                match direction {
-                    WalkDirection::Trace => "trace",
-                    WalkDirection::Descendants => "descendants",
-                    WalkDirection::Parents => "parents",
-                },
-                literal(reference)?
-            ),
-            Source::Recall { time, window } => {
-                let mut text = "recall".to_string();
-                if let Some(time) = time {
-                    text.push(' ');
-                    text.push_str(&value(time)?);
-                }
-                if let Some(window) = window {
-                    text.push_str(" ±");
-                    text.push_str(&window_value(window)?);
-                }
-                text
-            }
-            Source::RecallLast { condition, .. } => {
-                let mut text = "recall last".to_string();
-                if let Some(condition) = condition {
-                    text.push_str(" where ");
-                    text.push_str(&self.condition(condition)?);
-                }
-                text
-            }
-            Source::RecallMark { number, window } => {
-                let mut text = format!("recall mark {number}");
-                if let Some(window) = window {
-                    text.push_str(" ±");
-                    text.push_str(&window_value(window)?);
-                }
-                text
-            }
         };
         if !query.attach.is_empty() {
             text.push_str(" with ");
@@ -139,9 +99,9 @@ impl Renderer<'_> {
                     .join(", "),
             );
         }
-        for stage in &query.stages {
+        for transform in &query.transforms {
             text.push_str(" | ");
-            text.push_str(&self.stage(&stage.kind)?);
+            text.push_str(&self.transform(&transform.kind)?);
         }
         Ok(text)
     }
@@ -197,23 +157,30 @@ impl Renderer<'_> {
                 field,
                 value: literal,
             } => format!("{}:{}", name(field)?, value(literal)?),
-            ConditionKind::Compare {
-                operand: field,
-                op,
-                value: literal,
-            } => format!("{} {} {}", operand(field)?, op.symbol(), value(literal)?),
-            ConditionKind::Since { value: literal, .. } => format!("since {}", value(literal)?),
-            ConditionKind::Until { value: literal, .. } => format!("until {}", value(literal)?),
-            ConditionKind::Between {
-                operand: field,
-                from,
-                to,
-            } => format!(
+            ConditionKind::Compare { left, op, right } => format!(
+                "{} {} {}",
+                self.expression(left)?,
+                op.symbol(),
+                match right {
+                    Expression::Value { value: literal } => value(literal)?,
+                    other => self.expression(other)?,
+                }
+            ),
+            ConditionKind::Since { value: literal, .. } => format!("since:{}", value(literal)?),
+            ConditionKind::Until { value: literal, .. } => format!("until:{}", value(literal)?),
+            ConditionKind::Between { left, from, to } => format!(
                 "{} between {} and {}",
-                operand(field)?,
+                self.expression(left)?,
                 value(from)?,
                 value(to)?
             ),
+            ConditionKind::TimeRange {
+                left,
+                value: literal,
+            } => format!("{} in {}", self.expression(left)?, value(literal)?),
+            ConditionKind::In { left, query } => {
+                format!("{} in ({})", self.expression(left)?, self.query(query)?)
+            }
             ConditionKind::Text { text, mode } => match mode {
                 TextMode::Phrase => quote(text),
                 TextMode::Word => word(text)?,
@@ -227,7 +194,10 @@ impl Renderer<'_> {
                     literal(reference)?
                 }
             }
-            ConditionKind::Similar { value: literal } => format!("similar:{}", value(literal)?),
+            ConditionKind::Rank {
+                list,
+                value: literal,
+            } => format!("{}:{}", list.name(), value(literal)?),
             ConditionKind::Exists { unit, condition } => format!(
                 "exists {}({})",
                 name(unit)?,
@@ -237,7 +207,6 @@ impl Renderer<'_> {
                     .transpose()?
                     .unwrap_or_default()
             ),
-            ConditionKind::FieldExists { operand: field } => format!("{} exists", operand(field)?),
             ConditionKind::Count {
                 unit,
                 condition,
@@ -253,34 +222,6 @@ impl Renderer<'_> {
                     .unwrap_or_default(),
                 op.symbol(),
                 count
-            ),
-            ConditionKind::In {
-                operand: field,
-                query,
-            } => format!("{} in ({})", operand(field)?, self.query(query)?),
-            ConditionKind::TimeRange {
-                operand: field,
-                value: literal,
-            } => format!("{} in {}", operand(field)?, value(literal)?),
-            ConditionKind::Overlaps { from, to } => format!(
-                "overlaps {}{}",
-                value(from)?,
-                to.as_ref()
-                    .map(|to| value(to).map(|text| format!(" .. {text}")))
-                    .transpose()?
-                    .unwrap_or_default()
-            ),
-            ConditionKind::TimeDifference {
-                left,
-                right,
-                op,
-                value: literal,
-            } => format!(
-                "{} - {} {} {}",
-                operand(left)?,
-                operand(right)?,
-                op.symbol(),
-                value(literal)?
             ),
             ConditionKind::Saved { name, arguments } => self.saved(name, arguments)?,
             ConditionKind::Sequence {
@@ -301,8 +242,8 @@ impl Renderer<'_> {
                     match gap {
                         Gap::Later => {}
                         Gap::Next => text.push_str("[next] "),
-                        Gap::Within { duration } => {
-                            text.push_str(&format!("[within:{}] ", value(duration)?))
+                        Gap::Within { distance: d } => {
+                            text.push_str(&format!("[within {}] ", distance(d)?))
                         }
                     }
                     text.push_str(&self.condition(step)?);
@@ -310,6 +251,18 @@ impl Renderer<'_> {
                 text.push(')');
                 text
             }
+            ConditionKind::Order {
+                relation,
+                query,
+                within,
+                at,
+                scope,
+            } => format!(
+                "{}({}){}",
+                relation.name(),
+                self.query(query)?,
+                order_options(within.as_ref(), *at, scope.as_deref())?
+            ),
             ConditionKind::Extension { name, arguments } => {
                 self.extension(name, arguments, ExtensionPosition::Atom)?
             }
@@ -340,10 +293,65 @@ impl Renderer<'_> {
         }
         Ok(text)
     }
-    fn stage(&self, stage: &StageKind) -> Result<String, Error> {
-        Ok(match stage {
-            StageKind::Where { condition } => format!("where {}", self.condition(condition)?),
-            StageKind::Sort { keys } => {
+    /// Arithmetic renders without parentheses, so a tree whose shape differs
+    /// from operator precedence and left association has no spelling.
+    fn expression(&self, expression: &Expression) -> Result<String, Error> {
+        Ok(match expression {
+            Expression::Field { name: field } => name(field)?,
+            Expression::Value { value: literal } => match literal {
+                Value::Scalar {
+                    text,
+                    quoted: false,
+                } if crate::parse::is_literal(text) => text.clone(),
+                other => value(other)?,
+            },
+            Expression::Function {
+                name: function,
+                arguments,
+            } => format!(
+                "{}({})",
+                name(function)?,
+                arguments
+                    .iter()
+                    .map(|argument| self.expression(argument))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join(", ")
+            ),
+            Expression::Arithmetic {
+                operator,
+                left,
+                right,
+            } => {
+                let looser = |child: &Expression, or_equal: bool| {
+                    matches!(child, Expression::Arithmetic { operator: inner, .. }
+                        if (!inner.binds_tightly() && operator.binds_tightly())
+                            || (or_equal && inner.binds_tightly() == operator.binds_tightly()))
+                };
+                if looser(left, false) || looser(right, true) {
+                    return Err(invalid(
+                        "arithmetic needs parentheses, which the language does not have",
+                    ));
+                }
+                format!(
+                    "{} {} {}",
+                    self.expression(left)?,
+                    operator.symbol(),
+                    self.expression(right)?
+                )
+            }
+        })
+    }
+    fn column(&self, column: &Column) -> Result<String, Error> {
+        let expression = self.expression(&column.expression)?;
+        Ok(match &column.name {
+            Some(alias) => format!("{expression} as {}", name(alias)?),
+            None => expression,
+        })
+    }
+    fn transform(&self, transform: &TransformKind) -> Result<String, Error> {
+        Ok(match transform {
+            TransformKind::Where { condition } => format!("where {}", self.condition(condition)?),
+            TransformKind::Sort { keys } => {
                 if keys.is_empty() {
                     return Err(invalid("sort needs a key"));
                 }
@@ -352,43 +360,43 @@ impl Renderer<'_> {
                     keys.iter()
                         .map(|key| Ok(format!(
                             "{} {}",
-                            operand(&key.operand)?,
+                            self.expression(&key.expression)?,
                             if key.descending { "desc" } else { "asc" }
                         )))
                         .collect::<Result<Vec<_>, Error>>()?
                         .join(", ")
                 )
             }
-            StageKind::Group { keys } => format!(
+            TransformKind::Group { keys } => format!(
                 "group by {}",
                 keys.iter()
-                    .map(operand)
+                    .map(|key| self.column(key))
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ")
             ),
-            StageKind::Aggregate { aggregates } => format!(
+            TransformKind::Aggregate { aggregates } => format!(
                 "agg {}",
                 aggregates
                     .iter()
-                    .map(aggregate)
+                    .map(|a| self.aggregate(a))
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ")
             ),
-            StageKind::Limit { count } => format!("limit {count}"),
-            StageKind::Offset { count } => format!("offset {count}"),
-            StageKind::First { count } => format!("first {count}"),
-            StageKind::Distinct => "distinct".into(),
-            StageKind::Matches => "matches".into(),
-            StageKind::Fill => "fill".into(),
-            StageKind::Fields { fields } => format!(
+            TransformKind::Limit { count } => format!("limit {count}"),
+            TransformKind::Offset { count } => format!("offset {count}"),
+            TransformKind::First { count } => format!("first {count}"),
+            TransformKind::Distinct => "distinct".into(),
+            TransformKind::Matches => "matches".into(),
+            TransformKind::Fill => "fill".into(),
+            TransformKind::Fields { columns } => format!(
                 "fields {}",
-                fields
+                columns
                     .iter()
-                    .map(|f| name(f))
+                    .map(|column| self.column(column))
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ")
             ),
-            StageKind::Scope { unit, condition } => format!(
+            TransformKind::Scope { unit, condition } => format!(
                 "{}{}",
                 name(unit)?,
                 condition
@@ -397,7 +405,7 @@ impl Renderer<'_> {
                     .transpose()?
                     .unwrap_or_default()
             ),
-            StageKind::Combine { how, query } => format!(
+            TransformKind::Combine { how, query } => format!(
                 "{} ({})",
                 match how {
                     Combination::Union => "union",
@@ -407,35 +415,27 @@ impl Renderer<'_> {
                 },
                 self.query(query)?
             ),
-            StageKind::Temporal {
-                relation,
-                query,
-                at,
-                within,
-                all,
-            } => format!(
-                "{}{} ({}) at {}{}",
-                match relation {
-                    TemporalRelation::Near => "near",
-                    TemporalRelation::Before => "before",
-                    TemporalRelation::After => "after",
-                    TemporalRelation::During => "during",
-                    TemporalRelation::Containing => "containing",
-                },
-                if *all { " all" } else { "" },
-                self.query(query)?,
-                match at {
-                    TimePoint::When => "when",
-                    TimePoint::Start => "start",
-                    TimePoint::End => "end",
-                },
-                within
-                    .as_ref()
-                    .map(|duration| value(duration).map(|text| format!(" within {text}")))
-                    .transpose()?
-                    .unwrap_or_default()
-            ),
-            StageKind::AsOf {
+            TransformKind::Join { query, on } => match on {
+                JoinOn::Order {
+                    relation,
+                    within,
+                    at,
+                    scope,
+                } => format!(
+                    "join {} ({}){}",
+                    relation.name(),
+                    self.query(query)?,
+                    order_options(within.as_ref(), *at, scope.as_deref())?
+                ),
+                JoinOn::Key { left, right } => format!(
+                    "join ({}) on {} = {}",
+                    self.query(query)?,
+                    name(left)?,
+                    name(right)?
+                ),
+            },
+            TransformKind::Diff { query } => format!("diff ({})", self.query(query)?),
+            TransformKind::AsOf {
                 value: literal,
                 sequence,
             } => format!(
@@ -443,25 +443,38 @@ impl Renderer<'_> {
                 if *sequence { "seq " } else { "" },
                 value(literal)?
             ),
-            StageKind::Measure { name: measure, by } => format!(
-                "measure {}{}",
-                quote(measure),
-                if by.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        " by {}",
-                        by.iter()
-                            .map(operand)
-                            .collect::<Result<Vec<_>, _>>()?
-                            .join(", ")
-                    )
-                }
-            ),
-            StageKind::Extension { name, arguments } => {
-                self.extension(name, arguments, ExtensionPosition::Stage)?
+            TransformKind::Extension { name, arguments } => {
+                self.extension(name, arguments, ExtensionPosition::Transform)?
             }
         })
+    }
+    fn aggregate(&self, aggregate: &Aggregate) -> Result<String, Error> {
+        if !aggregate
+            .function
+            .arguments()
+            .contains(&aggregate.arguments.len())
+        {
+            return Err(invalid(format!(
+                "{} has the wrong number of arguments",
+                aggregate.function.name()
+            )));
+        }
+        let mut text = aggregate.function.name();
+        if !aggregate.arguments.is_empty() {
+            text = format!(
+                "{text}({})",
+                aggregate
+                    .arguments
+                    .iter()
+                    .map(|argument| self.expression(argument))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join(", ")
+            );
+        }
+        if let Some(alias) = &aggregate.name {
+            text.push_str(&format!(" as {}", name(alias)?));
+        }
+        Ok(text)
     }
     fn extension(
         &self,
@@ -499,40 +512,85 @@ impl Renderer<'_> {
         slots
             .iter()
             .zip(arguments)
-            .map(|(slot, argument)| {
-                Ok(match (slot, argument) {
-                    (ExtensionSlot::Keyword(expected), ExtensionArgument::Keyword(actual))
-                        if expected == actual =>
-                    {
-                        expected.clone()
-                    }
-                    (ExtensionSlot::Value, ExtensionArgument::Value(literal)) => value(literal)?,
-                    (ExtensionSlot::Name, ExtensionArgument::Name(identifier)) => name(identifier)?,
-                    (ExtensionSlot::Field, ExtensionArgument::Field(field)) => name(field)?,
-                    (ExtensionSlot::Unit, ExtensionArgument::Unit(unit)) => name(unit)?,
-                    (ExtensionSlot::Condition, ExtensionArgument::Condition(condition)) => {
-                        format!("({})", self.condition(condition)?)
-                    }
-                    (ExtensionSlot::Query, ExtensionArgument::Query(query)) => {
-                        format!("({})", self.query(query)?)
-                    }
-                    (ExtensionSlot::Optional(_), ExtensionArgument::Optional(arguments))
-                        if arguments.is_empty() =>
-                    {
-                        String::new()
-                    }
-                    (ExtensionSlot::Optional(slots), ExtensionArgument::Optional(arguments)) => {
-                        self.extension_arguments(slots, arguments)?.join(" ")
-                    }
-                    _ => {
-                        return Err(invalid(
-                            "extension argument type differs from its declaration",
-                        ));
-                    }
-                })
-            })
+            .map(|(slot, argument)| self.extension_argument(slot, argument))
             .collect()
     }
+    fn extension_argument(
+        &self,
+        slot: &ExtensionSlot,
+        argument: &ExtensionArgument,
+    ) -> Result<String, Error> {
+        Ok(match (slot, argument) {
+            (ExtensionSlot::Keyword(expected), ExtensionArgument::Keyword(actual))
+                if expected == actual =>
+            {
+                expected.clone()
+            }
+            (ExtensionSlot::Value, ExtensionArgument::Value(literal)) => value(literal)?,
+            (ExtensionSlot::Name, ExtensionArgument::Name(identifier)) => name(identifier)?,
+            (ExtensionSlot::Field, ExtensionArgument::Field(field)) => name(field)?,
+            (ExtensionSlot::Unit, ExtensionArgument::Unit(unit)) => name(unit)?,
+            (ExtensionSlot::Condition, ExtensionArgument::Condition(condition)) => {
+                format!("({})", self.condition(condition)?)
+            }
+            (ExtensionSlot::Query, ExtensionArgument::Query(query)) => {
+                format!("({})", self.query(query)?)
+            }
+            (ExtensionSlot::Expression, ExtensionArgument::Expression(expression)) => {
+                self.expression(expression)?
+            }
+            (ExtensionSlot::List(slot), ExtensionArgument::List(items)) => {
+                if items.is_empty() {
+                    return Err(invalid("an extension list needs at least one item"));
+                }
+                items
+                    .iter()
+                    .map(|item| self.extension_argument(slot, item))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join(", ")
+            }
+            (ExtensionSlot::Optional(_), ExtensionArgument::Optional(arguments))
+                if arguments.is_empty() =>
+            {
+                String::new()
+            }
+            (ExtensionSlot::Optional(slots), ExtensionArgument::Optional(arguments)) => {
+                self.extension_arguments(slots, arguments)?.join(" ")
+            }
+            _ => {
+                return Err(invalid(
+                    "extension argument type differs from its declaration",
+                ));
+            }
+        })
+    }
+}
+fn distance(distance: &Distance) -> Result<String, Error> {
+    Ok(match distance {
+        Distance::Time { duration } => value(duration)?,
+        Distance::Steps { count } => {
+            format!("{count} {}", if *count == 1 { "step" } else { "steps" })
+        }
+    })
+}
+fn order_options(
+    within: Option<&Distance>,
+    at: TimePoint,
+    scope: Option<&str>,
+) -> Result<String, Error> {
+    let mut text = String::new();
+    if let Some(within) = within {
+        text.push_str(&format!(" within {}", distance(within)?));
+    }
+    match at {
+        TimePoint::When => {}
+        TimePoint::Start => text.push_str(" at start"),
+        TimePoint::End => text.push_str(" at end"),
+    }
+    if let Some(scope) = scope {
+        text.push_str(&format!(" in {}", name(scope)?));
+    }
+    Ok(text)
 }
 pub(crate) fn quote(text: &str) -> String {
     let mut out = String::from("\"");
@@ -566,6 +624,7 @@ fn value(value: &Value) -> Result<String, Error> {
         }
         Value::Any => "*".into(),
         Value::Unknown => "unknown".into(),
+        Value::Known => "known".into(),
         Value::Parameter { name: parameter } => format!("${}", name(parameter)?),
     })
 }
@@ -593,7 +652,7 @@ fn literal(text: &str) -> Result<String, Error> {
     }
     Ok(text.to_string())
 }
-fn word(text: &str) -> Result<String, Error> {
+pub(crate) fn word(text: &str) -> Result<String, Error> {
     if text.is_empty()
         || text
             .chars()
@@ -614,56 +673,4 @@ fn word(text: &str) -> Result<String, Error> {
         ));
     }
     Ok(word)
-}
-fn window_value(value: &Value) -> Result<String, Error> {
-    match value {
-        Value::Scalar { text, .. } => literal(text),
-        _ => Err(invalid("recall windows are literal durations")),
-    }
-}
-fn operand(operand: &Operand) -> Result<String, Error> {
-    match operand {
-        Operand::Field { name: field } => name(field),
-        Operand::Function {
-            name: function,
-            arguments,
-        } => Ok(format!(
-            "{}({})",
-            name(function)?,
-            arguments
-                .iter()
-                .map(self::operand)
-                .collect::<Result<Vec<_>, _>>()?
-                .join(", ")
-        )),
-    }
-}
-fn aggregate(aggregate: &Aggregate) -> Result<String, Error> {
-    let function = match aggregate.function {
-        AggregateFunction::Count => "count".into(),
-        AggregateFunction::Sum => "sum".into(),
-        AggregateFunction::Avg => "avg".into(),
-        AggregateFunction::Min => "min".into(),
-        AggregateFunction::Max => "max".into(),
-        AggregateFunction::Percentile(p) => format!("p{p}"),
-        AggregateFunction::CountDistinct => "count_distinct".into(),
-        AggregateFunction::Histogram => "histogram".into(),
-        AggregateFunction::Correlation => "corr".into(),
-    };
-    if aggregate.fields.is_empty() {
-        if aggregate.function != AggregateFunction::Count {
-            return Err(invalid("aggregate needs a field"));
-        }
-        Ok(function)
-    } else {
-        Ok(format!(
-            "{function}:{}",
-            aggregate
-                .fields
-                .iter()
-                .map(|field| name(field))
-                .collect::<Result<Vec<_>, _>>()?
-                .join(",")
-        ))
-    }
 }

@@ -125,10 +125,14 @@ and one HTTP status:
 | 7 | `timeout`, `cancelled` | 504; none |
 
 A failure teaches: an unknown name carries the nearest known names as
-`candidates`, and `explain` as `next`. Language errors become failures in one
-conversion, in the query language. A product adds precise codes of its own
-in `Failure::code`, each classified once into a shared `FailureKind` at its
-operation boundary. No refusal
+`candidates`, and `explain` as `next`. A query-language refusal becomes a
+`Failure` through one conversion, in this crate
+(`Failure::from(query_language::Error)`, here because the language crate is
+pure and depends on nothing): its kind becomes the failure kind of the same
+name, its byte offset and length the `position`, its corrected query the
+`suggestion`, and its candidates the `candidates`. A product adds precise
+codes of its own in `Failure::code`, each classified once into a shared
+`FailureKind` at its operation boundary. No refusal
 reason refers to the caller being an agent or lacking a terminal. With
 `--json`, a CLI prints `{"error": {...}}` on standard output and nothing on
 standard error.
@@ -314,6 +318,9 @@ byte boundary of SSE framing. Run `cargo xtask test -p command-surface`.
 - **one-kind-one-exit**: every failure kind maps to exactly one exit code and
   one HTTP status, and every surface reports the same kind for the same
   request.
+- **query-errors-convert-once**: every query-language error kind converts to
+  the failure kind of the same name, keeping position, suggestion, candidates
+  and hint (`tests/query_failure.rs`).
 - **surface-parity**: the CLI, socket, HTTP and MCP return the same answer, or
   the same failure, for the same request.
 - **timeout-never-partial**: a request past its deadline ends `timeout` with

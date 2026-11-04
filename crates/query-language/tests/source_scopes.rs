@@ -24,7 +24,6 @@ fn catalog() -> Catalog {
 }
 fn saved(name: &str, fields: Vec<Field>) -> SourceOutput {
     SourceOutput {
-        relation_scope: None,
         source: OutputSource::Saved {
             name: name.into(),
             arguments: vec![],
@@ -33,13 +32,11 @@ fn saved(name: &str, fields: Vec<Field>) -> SourceOutput {
             unit: Some("sessions".into()),
             fields,
             main_time: None,
-            match_patterns: Vec::new(),
         },
     }
 }
 fn result(reference: &str, part: ResultPart, fields: Vec<Field>) -> SourceOutput {
     SourceOutput {
-        relation_scope: None,
         source: OutputSource::Result {
             reference: reference.into(),
             part,
@@ -48,12 +45,11 @@ fn result(reference: &str, part: ResultPart, fields: Vec<Field>) -> SourceOutput
             unit: Some("sessions".into()),
             fields,
             main_time: None,
-            match_patterns: Vec::new(),
         },
     }
 }
 #[test]
-fn saved_suffix_is_deferred_then_bound_to_actual_typed_output() {
+fn saved_suffix_columns_are_unknown_then_bound_to_actual_typed_output() {
     let mut catalog = catalog();
     let parsed = parse(
         "query:failing session.repo:morrow | sort by count desc",
@@ -63,7 +59,7 @@ fn saved_suffix_is_deferred_then_bound_to_actual_typed_output() {
     assert!(matches!(
         parsed.source,
         Source::Saved {
-            output: OutputBinding::Deferred,
+            output: SourceColumns::Unknown,
             ..
         }
     ));
@@ -82,7 +78,7 @@ fn saved_suffix_is_deferred_then_bound_to_actual_typed_output() {
     assert!(matches!(
         bound.query().source,
         Source::Saved {
-            output: OutputBinding::Known,
+            output: SourceColumns::Known,
             ..
         }
     ));
@@ -103,7 +99,7 @@ fn saved_suffix_is_deferred_then_bound_to_actual_typed_output() {
 #[test]
 fn grouped_promoted_aliases_types_and_closed_sets_come_from_output_snapshot() {
     let mut catalog = catalog();
-    let mut state = field("state", FieldKind::Match);
+    let mut state = field("state", FieldKind::Exact);
     state.values = vec!["Open".into(), "Closed".into()];
     catalog.source_outputs.push(saved(
         "grouped",
@@ -172,7 +168,7 @@ fn kept_columns_and_quoted_literal_ids_keep_rows_and_matches_distinct() {
     )
     .unwrap();
     assert!(
-        matches!(&query.source, Source::Result { reference: value, part: ResultPart::Rows, output: OutputBinding::Known, .. } if value == reference)
+        matches!(&query.source, Source::Result { reference: value, part: ResultPart::Rows, output: SourceColumns::Known, .. } if value == reference)
     );
     let text = format_query(&query, &catalog).unwrap();
     assert_eq!(
@@ -185,7 +181,7 @@ fn kept_columns_and_quoted_literal_ids_keep_rows_and_matches_distinct() {
         matches.source,
         Source::Result {
             part: ResultPart::Matches,
-            output: OutputBinding::Deferred,
+            output: SourceColumns::Unknown,
             ..
         }
     ));
@@ -217,7 +213,7 @@ fn binding_checks_nested_sources_and_never_trusts_serialized_known_marker() {
     assert!(bind(&query, &catalog).is_ok());
     let mut forged = parse("result:missing", &catalog).unwrap();
     if let Source::Result { output, .. } = &mut forged.source {
-        *output = OutputBinding::Known;
+        *output = SourceColumns::Known;
     }
     let forged: Query = serde_json::from_value(serde_json::to_value(forged).unwrap()).unwrap();
     assert!(bind(&forged, &catalog).is_err());
@@ -238,7 +234,7 @@ fn inline_saved_conditions_remain_distinct_from_piped_filters() {
             ..
         }
     ));
-    assert!(inline.stages.is_empty());
+    assert!(inline.transforms.is_empty());
     assert!(matches!(
         piped.source,
         Source::Saved {
@@ -246,7 +242,7 @@ fn inline_saved_conditions_remain_distinct_from_piped_filters() {
             ..
         }
     ));
-    assert_eq!(piped.stages.len(), 1);
+    assert_eq!(piped.transforms.len(), 1);
     assert_ne!(
         question_id(&inline, &catalog, &BTreeMap::new()).unwrap(),
         question_id(&piped, &catalog, &BTreeMap::new()).unwrap()
@@ -269,7 +265,6 @@ fn saved_argument_snapshot_matching_ignores_quoted_spelling_and_parameter_order(
     )
     .unwrap();
     catalog.source_outputs.push(SourceOutput {
-        relation_scope: None,
         source: OutputSource::Saved {
             name: "named".into(),
             arguments: vec![
@@ -287,7 +282,6 @@ fn saved_argument_snapshot_matching_ignores_quoted_spelling_and_parameter_order(
             unit: Some("sessions".into()),
             fields: vec![field("count", FieldKind::Integer)],
             main_time: None,
-            match_patterns: Vec::new(),
         },
     });
     assert!(bind(&parsed, &catalog).is_ok());
@@ -310,7 +304,7 @@ fn nested_implicit_units_inherit_the_row_domain_and_explicit_units_keep_their_ow
         &catalog,
     )
     .unwrap();
-    let StageKind::Where { condition } = &query.stages[1].kind else {
+    let TransformKind::Where { condition } = &query.transforms[1].kind else {
         panic!("where")
     };
     let ConditionKind::In { query: inner, .. } = &condition.kind else {
@@ -342,10 +336,9 @@ fn nested_implicit_units_inherit_the_row_domain_and_explicit_units_keep_their_ow
     );
     assert!(bind(&explicit, &catalog).is_ok());
 
-    let deferred = parse("result:kept | where id in (outcome:error)", &catalog).unwrap();
-    assert!(bind(&deferred, &catalog).is_err());
+    let unbound = parse("result:kept | where id in (outcome:error)", &catalog).unwrap();
+    assert!(bind(&unbound, &catalog).is_err());
     catalog.source_outputs.push(SourceOutput {
-        relation_scope: None,
         source: OutputSource::Result {
             reference: "result:kept".into(),
             part: ResultPart::Rows,
@@ -354,11 +347,10 @@ fn nested_implicit_units_inherit_the_row_domain_and_explicit_units_keep_their_ow
             unit: Some("commands".into()),
             fields: vec![field("id", FieldKind::Reference)],
             main_time: None,
-            match_patterns: Vec::new(),
         },
     });
-    let bound = bind(&deferred, &catalog).unwrap();
-    let StageKind::Where { condition } = &bound.query().stages[0].kind else {
+    let bound = bind(&unbound, &catalog).unwrap();
+    let TransformKind::Where { condition } = &bound.query().transforms[0].kind else {
         panic!("where")
     };
     let ConditionKind::In { query: inner, .. } = &condition.kind else {

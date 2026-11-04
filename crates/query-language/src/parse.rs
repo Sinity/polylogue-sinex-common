@@ -1,13 +1,12 @@
-//! Catalog-driven parsing for piped and clause-oriented surfaces.
+//! The one grammar: catalog-driven parsing, typing, and refusals that carry a
+//! corrected query.
 use crate::ast::*;
-use crate::catalog::{
-    Catalog, ExtensionPosition, ExtensionSlot, Field, FieldKind, MatchPattern, MatchSource,
-    OutputSchema,
-};
+use crate::catalog::{Catalog, ExtensionPosition, ExtensionSlot, Field, FieldKind, OutputSchema};
+use crate::scope::Origin;
 use crate::{Error, ErrorKind};
 use std::collections::{BTreeMap, BTreeSet};
-mod typing;
 use std::sync::Arc;
+mod typing;
 
 #[derive(Debug, Clone)]
 struct Token {
@@ -64,14 +63,12 @@ fn tokens(text: &str, catalog: &Catalog) -> Result<Vec<Token>, Error> {
             });
             continue;
         }
+        // A declared reference is one literal up to whitespace or a delimiter,
+        // so its own punctuation (`#`, `=`, `:`) stays inside it.
         let literal_end = text[i..]
             .find(|c: char| c.is_whitespace() || matches!(c, '|' | ')' | ']' | ','))
             .map_or(text.len(), |offset| i + offset);
-        if !text[i..literal_end].contains('"')
-            && (catalog.is_reference(&text[i..literal_end])
-                || text[i..].starts_with("http://")
-                || text[i..].starts_with("https://"))
-        {
+        if !text[i..literal_end].contains('"') && catalog.is_reference(&text[i..literal_end]) {
             i = literal_end;
             out.push(Token {
                 text: text[start..i].into(),
@@ -190,8 +187,8 @@ pub fn parse(text: &str, catalog: &Catalog) -> Result<Query, Error> {
     match parse_once(text, catalog) {
         Ok(query) => Ok(query),
         Err(mut error) => {
-            // Corrections are complete executable questions, including when more than
-            // one spelling error needs the same deterministic correction.
+            // A suggestion is a complete question that parses as given, also
+            // when more than one mistake needs the same kind of correction.
             let mut candidate = error.suggestion.take();
             let mut seen = BTreeSet::new();
             while let Some(corrected) = candidate {
@@ -200,13 +197,6 @@ pub fn parse(text: &str, catalog: &Catalog) -> Result<Query, Error> {
                 }
                 match parse_once(&corrected, catalog) {
                     Ok(_) => {
-                        error.suggestion = Some(corrected);
-                        break;
-                    }
-                    Err(next)
-                        if next.kind == ErrorKind::NotAQuery
-                            && next.message.contains("is a command") =>
-                    {
                         error.suggestion = Some(corrected);
                         break;
                     }
@@ -223,24 +213,9 @@ fn parse_once(text: &str, catalog: &Catalog) -> Result<Query, Error> {
 pub(crate) fn parse_typed(text: &str, catalog: &Catalog) -> Result<Parsed, Error> {
     parse_internal(text, catalog, true)
 }
-/// Product metadata needed by Matches stages, collected by the same parser
-/// that checks their suffixes. Load saved/result schemas first when deferred.
-pub fn matches_requirements(text: &str, catalog: &Catalog) -> Result<Vec<MatchSource>, Error> {
-    parse_internal(text, catalog, false).map(|parsed| parsed.required_matches)
-}
-/// Qualifiers of the final relation, after this parser has applied every stage.
-/// None denotes unresolved source/projection metadata, not an empty relation.
-pub fn relation_patterns(
-    text: &str,
-    catalog: &Catalog,
-) -> Result<Option<Vec<MatchPattern>>, Error> {
-    parse_internal(text, catalog, false).map(|parsed| parsed.relation_patterns)
-}
 pub(crate) struct Parsed {
     pub query: Query,
     pub typing: crate::scope::Typing,
-    pub required_matches: Vec<MatchSource>,
-    relation_patterns: Option<Vec<MatchPattern>>,
 }
 fn parse_internal(text: &str, catalog: &Catalog, capture_types: bool) -> Result<Parsed, Error> {
     let mut p = Parser {
@@ -251,38 +226,39 @@ fn parse_internal(text: &str, catalog: &Catalog, capture_types: bool) -> Result<
         captures: Vec::new(),
         query_stack: Vec::new(),
         capture_types,
-        required_matches: BTreeSet::new(),
-        relation_patterns: None,
+        inner_scopes: BTreeMap::new(),
     };
-    let query = p.query()?;
+    let (query, _) = p.relation(None)?;
     if p.peek().is_some() {
-        return Err(p.error("expected a stage or the end of the query"));
+        return Err(p.error("expected `|` before a transform, or the end of the query"));
     }
+    check_ranking(&query, text)?;
     let typing = if capture_types {
         typing::project(&p, &query)
     } else {
         crate::scope::Typing::default()
     };
-    Ok(Parsed {
-        query,
-        typing,
-        required_matches: p.required_matches.into_iter().collect(),
-        relation_patterns: p.relation_patterns,
-    })
+    Ok(Parsed { query, typing })
 }
 #[derive(Clone, PartialEq, Eq)]
 struct Scope {
     unit: String,
+    /// The visible columns after a grouping, projection or aggregate; None
+    /// means every field of the unit or output, plus `extra`.
     columns: Option<BTreeSet<String>>,
+    /// Generated names visible beside the unit's own fields.
     extra: BTreeSet<String>,
     bucketed: bool,
     output: Option<Arc<OutputSchema>>,
-    deferred: bool,
+    columns_unknown: bool,
     typed_extra: Arc<Vec<Field>>,
-    origins: Arc<BTreeMap<String, crate::scope::Origin>>,
+    origins: Arc<BTreeMap<String, Origin>>,
     group_input: Option<Arc<Scope>>,
     output_source: Option<crate::catalog::OutputSource>,
-    match_patterns: Option<Vec<MatchPattern>>,
+    /// The step units of the relation's top-level `exists` and `seq`
+    /// patterns, which `matches` expands; None when a saved or kept source
+    /// hides them.
+    patterns: Option<Vec<String>>,
 }
 impl Scope {
     fn new(unit: String) -> Self {
@@ -292,14 +268,23 @@ impl Scope {
             extra: BTreeSet::new(),
             bucketed: false,
             output: None,
-            deferred: false,
+            columns_unknown: false,
             typed_extra: Arc::new(Vec::new()),
             origins: Arc::new(BTreeMap::new()),
             group_input: None,
             output_source: None,
-            match_patterns: Some(Vec::new()),
+            patterns: Some(Vec::new()),
         }
     }
+}
+/// Where an expression stands: the left side of a condition holds fields and
+/// functions; a column or aggregate argument may also hold literals; inside a
+/// function call a word that is not a field is a value (`month_day(today)`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Place {
+    Condition,
+    Column,
+    Argument,
 }
 struct Parser<'a> {
     tokens: Vec<Token>,
@@ -309,8 +294,9 @@ struct Parser<'a> {
     captures: Vec<Option<typing::Capture>>,
     query_stack: Vec<(usize, usize)>,
     capture_types: bool,
-    required_matches: BTreeSet<MatchSource>,
-    relation_patterns: Option<Vec<MatchPattern>>,
+    /// The final scope of each order relation's inner query, by the byte
+    /// offset where the relation starts.
+    inner_scopes: BTreeMap<usize, Scope>,
 }
 impl Parser<'_> {
     fn peek(&self) -> Option<&Token> {
@@ -395,16 +381,23 @@ impl Parser<'_> {
             .ok_or_else(|| self.unknown_unit(&t))
     }
     fn unknown_unit(&self, t: &Token) -> Error {
-        let e = Error::new(
-            ErrorKind::InvalidQuery,
+        let names: Vec<&str> = self.catalog.units.iter().map(|u| u.name.as_str()).collect();
+        self.near_miss(
+            t,
             format!("`{}` is not a unit", t.text),
-            t.span.start,
-        );
-        if let Some(fix) = closest(&t.text, self.catalog.units.iter().map(|u| u.name.as_str())) {
-            e.suggestion(self.replace(t.span, &fix))
-        } else {
-            e
+            ErrorKind::InvalidQuery,
+            names,
+        )
+    }
+    /// A refusal naming the known names nearest to an unknown one; the nearest
+    /// becomes the suggestion.
+    fn near_miss(&self, t: &Token, message: String, kind: ErrorKind, names: Vec<&str>) -> Error {
+        let nearest = closest(&t.text, names.into_iter());
+        let mut e = Error::new(kind, message, t.span.start).length(t.span.end - t.span.start);
+        if let Some(fix) = nearest.first() {
+            e = e.suggestion(self.replace(t.span, fix));
         }
+        e.candidates(nearest)
     }
     fn replace(&self, span: Span, value: &str) -> String {
         format!(
@@ -414,10 +407,13 @@ impl Parser<'_> {
             &self.text[span.end..]
         )
     }
-    fn query(&mut self) -> Result<Query, Error> {
-        self.query_in(None)
+    fn query_in(&mut self, inherited: &Scope) -> Result<(Query, Scope), Error> {
+        self.expect("(")?;
+        let relation = self.relation(Some(inherited))?;
+        self.expect(")")?;
+        Ok(relation)
     }
-    fn query_in(&mut self, inherited: Option<&Scope>) -> Result<Query, Error> {
+    fn relation(&mut self, inherited: Option<&Scope>) -> Result<(Query, Scope), Error> {
         let capture = self.captures.len();
         if self.capture_types {
             self.captures.push(None);
@@ -427,7 +423,7 @@ impl Parser<'_> {
             // An omitted nested source inherits the row domain, rather than
             // the enclosing grouping/projection's visible output columns.
             let mut rows = Scope::new(parent.unit.clone());
-            rows.deferred = self.catalog.unit(&parent.unit).is_none();
+            rows.columns_unknown = self.catalog.unit(&parent.unit).is_none();
             rows
         } else {
             Scope::new(self.catalog.default_unit.clone())
@@ -442,16 +438,16 @@ impl Parser<'_> {
         if let Some(first) = self.peek().cloned()
             && !first.quoted
             && let Some((prefix, raw)) = first.text.split_once(':')
-            && (prefix.eq_ignore_ascii_case("query") || prefix.eq_ignore_ascii_case("result"))
+            && let Some(namespace) = source_namespace(prefix)
         {
             self.at += 1;
-            source = if prefix.eq_ignore_ascii_case("query") {
+            source = if namespace == "query" {
                 let name = self.saved_name(raw, first.span.start)?;
                 Source::Saved {
                     name,
                     arguments: self.arguments()?,
                     condition: None,
-                    output: OutputBinding::Deferred,
+                    output: SourceColumns::Unknown,
                 }
             } else {
                 let (mut id, quoted, end) = if raw.is_empty() {
@@ -485,7 +481,7 @@ impl Parser<'_> {
                     reference: format!("result:{id}"),
                     part,
                     condition: None,
-                    output: OutputBinding::Deferred,
+                    output: SourceColumns::Unknown,
                 }
             };
             if matches!(source, Source::Saved { .. }) && self.bool_is("OR") {
@@ -505,66 +501,10 @@ impl Parser<'_> {
         if !consumed_source
             && let Some(first) = self.peek().cloned()
             && !first.quoted
-            && !self.field_syntax()
+            && !self.field_syntax(&scope)
         {
             let lower = first.text.to_ascii_lowercase();
-            if matches!(lower.as_str(), "trace" | "descendants" | "parents")
-                && self.catalog.commands.iter().any(|w| w == &lower)
-            {
-                self.at += 1;
-                consumed_source = true;
-                let reference = self.next()?.text;
-                source = Source::Walk {
-                    direction: match lower.as_str() {
-                        "trace" => WalkDirection::Trace,
-                        "parents" => WalkDirection::Parents,
-                        _ => WalkDirection::Descendants,
-                    },
-                    reference,
-                };
-            } else if lower == "recall" && self.catalog.commands.iter().any(|w| w == &lower) {
-                self.at += 1;
-                consumed_source = true;
-                source = if self.take("last") {
-                    scope.unit = self
-                        .catalog
-                        .recall_last_unit
-                        .clone()
-                        .unwrap_or_else(|| scope.unit.clone());
-                    let condition = if self.take("where") {
-                        Some(self.condition(&scope)?)
-                    } else {
-                        None
-                    };
-                    Source::RecallLast {
-                        unit: scope.unit.clone(),
-                        condition,
-                    }
-                } else if self.take("mark") {
-                    let number = if self.peek().is_some_and(|t| t.text.parse::<u64>().is_ok()) {
-                        self.number()?
-                    } else {
-                        1
-                    };
-                    if number == 0 {
-                        return Err(self.error("mark number must be positive"));
-                    }
-                    Source::RecallMark {
-                        number,
-                        window: self.recall_window()?,
-                    }
-                } else {
-                    let time = if self.query_end() || self.stage_start() {
-                        None
-                    } else {
-                        Some(self.value()?)
-                    };
-                    Source::Recall {
-                        time,
-                        window: self.recall_window()?,
-                    }
-                };
-            } else if let Some(unit) = self.catalog.unit(&first.text) {
+            if let Some(unit) = self.catalog.unit(&first.text) {
                 self.at += 1;
                 consumed_source = true;
                 scope = Scope::new(unit.name.clone());
@@ -578,41 +518,10 @@ impl Parser<'_> {
                     implicit: false,
                     condition,
                 };
-            } else if self
-                .catalog
-                .commands
-                .iter()
-                .any(|word| word.eq_ignore_ascii_case(&first.text))
-            {
-                return Err(Error::new(
-                    ErrorKind::NotAQuery,
-                    format!(
-                        "`{}` is a command; quote it to search for the word",
-                        first.text
-                    ),
-                    first.span.start,
-                )
-                .hint(format!("run the `{}` command", first.text)));
             } else if self.field_known(&scope, &first.text)
                 && !matches!(lower.as_str(), "since" | "until")
             {
-                return Err(Error::new(
-                    ErrorKind::InvalidQuery,
-                    format!("`{}` is a field; give it an operator and value", first.text),
-                    first.span.start,
-                ));
-            } else if !matches!(lower.as_str(), "since" | "until")
-                && let Some(word) = closest(&first.text, self.catalog.command_words())
-            {
-                return Err(Error::new(
-                    ErrorKind::NotAQuery,
-                    format!(
-                        "`{}` looks like `{word}`; quote it to search for the word",
-                        first.text
-                    ),
-                    first.span.start,
-                )
-                .suggestion(self.replace(first.span, &word)));
+                return Err(self.bare_field(&first));
             } else if self.next_is(1, "where") {
                 return Err(self.unknown_unit(&first));
             }
@@ -628,7 +537,6 @@ impl Parser<'_> {
             && !self.query_end()
             && !self.is("|")
             && !self.is("with")
-            && !self.stage_start()
         {
             return Err(self
                 .error("a unit's conditions start with where")
@@ -641,7 +549,6 @@ impl Parser<'_> {
         // A source not consumed above starts as conditions on the default unit.
         if !self.query_end()
             && !self.is("|")
-            && (!consumed_source || !self.stage_start())
             && !self.is("with")
             && let Source::Unit { condition, .. } = &mut source
             && condition.is_none()
@@ -661,7 +568,7 @@ impl Parser<'_> {
                 name,
                 arguments,
                 condition: None,
-                output: OutputBinding::Deferred,
+                output: SourceColumns::Unknown,
             },
             Source::Unit {
                 implicit: true,
@@ -675,7 +582,7 @@ impl Parser<'_> {
                 reference,
                 part: ResultPart::Rows,
                 condition: None,
-                output: OutputBinding::Deferred,
+                output: SourceColumns::Unknown,
             },
             other => other,
         };
@@ -686,7 +593,6 @@ impl Parser<'_> {
             && !self.query_end()
             && !self.is("|")
             && !self.is("with")
-            && !self.stage_start()
         {
             self.take("where");
             let inline = Some(self.condition(&scope)?);
@@ -699,37 +605,54 @@ impl Parser<'_> {
         if self.take("with") {
             attach = self.attachments()?;
         }
-        scope.match_patterns = crate::matches::source_context(&source, self.catalog).1;
-        let source_scope = self.capture_types.then(|| scope.clone());
-        let mut stage_scopes = Vec::new();
-        let mut stages = Vec::new();
-        while !self.query_end() {
-            if self.take("|") {
-            } else if !self.catalog.unpiped_stages {
-                return Err(self.error("expected `|` before a stage"));
+        scope.patterns = match &source {
+            Source::Unit { condition, .. } => Some(patterns(condition.as_ref())),
+            Source::Saved { .. } | Source::Result { .. } => None,
+        };
+        match &source {
+            Source::Unit {
+                condition: Some(condition),
+                ..
             }
-            self.query_stack.last_mut().unwrap().1 = stages.len();
+            | Source::Saved {
+                condition: Some(condition),
+                ..
+            }
+            | Source::Result {
+                condition: Some(condition),
+                ..
+            } => self.expose_order_match(&mut scope, condition),
+            _ => {}
+        }
+        let source_scope = self.capture_types.then(|| scope.clone());
+        let mut transform_scopes = Vec::new();
+        let mut transforms = Vec::new();
+        while !self.query_end() {
+            if !self.take("|") {
+                return Err(self.error("expected `|` before a transform"));
+            }
+            self.query_stack.last_mut().unwrap().1 = transforms.len();
             let before = self.capture_types.then(|| scope.clone());
-            stages.push(self.stage(&mut scope)?);
+            transforms.push(self.transform(&mut scope)?);
             if let Some(before) = before {
-                stage_scopes.push((before, scope.clone()));
+                transform_scopes.push((before, scope.clone()));
             }
         }
         if let Some(source) = source_scope {
             self.captures[capture] = Some(typing::Capture {
                 source,
-                stages: stage_scopes,
+                transforms: transform_scopes,
             });
         }
-        if self.query_stack.len() == 1 {
-            self.relation_patterns = scope.match_patterns.clone();
-        }
         self.query_stack.pop();
-        Ok(Query {
-            source,
-            attach,
-            stages,
-        })
+        Ok((
+            Query {
+                source,
+                attach,
+                transforms,
+            },
+            scope,
+        ))
     }
     fn output_scope(&self, source: &mut Source, scope: &mut Scope) {
         scope.unit = match source {
@@ -752,7 +675,7 @@ impl Parser<'_> {
             }),
             _ => None,
         };
-        scope.output = self.catalog.source_scope(source).cloned().map(Arc::new);
+        scope.output = self.catalog.source_output(source).cloned().map(Arc::new);
         if let Some(unit) = scope
             .output
             .as_ref()
@@ -760,16 +683,16 @@ impl Parser<'_> {
         {
             scope.unit = unit.clone();
         }
-        scope.deferred = scope.output.is_none();
+        scope.columns_unknown = scope.output.is_none();
         scope.columns = scope
             .output
             .as_ref()
             .map(|output| output.fields.iter().map(|f| f.name.clone()).collect());
         if let Source::Saved { output, .. } | Source::Result { output, .. } = source {
-            *output = if scope.deferred {
-                OutputBinding::Deferred
+            *output = if scope.columns_unknown {
+                SourceColumns::Unknown
             } else {
-                OutputBinding::Known
+                SourceColumns::Known
             };
         }
     }
@@ -781,7 +704,7 @@ impl Parser<'_> {
             .or_else(|| {
                 if let Some(output) = &scope.output {
                     output.fields.iter().find(|field| field.name == name)
-                } else if scope.deferred {
+                } else if scope.columns_unknown {
                     None
                 } else {
                     self.catalog.field(&scope.unit, name)
@@ -791,69 +714,37 @@ impl Parser<'_> {
     fn main_time(&self, scope: &Scope) -> Option<String> {
         if let Some(output) = &scope.output {
             output.main_time.clone()
-        } else if scope.deferred {
-            Some("$deferred_main_time".into())
+        } else if scope.columns_unknown {
+            Some("$unknown_main_time".into())
         } else {
             self.catalog
                 .unit(&scope.unit)
                 .and_then(|unit| unit.main_time.clone())
         }
     }
-    fn recall_window(&mut self) -> Result<Option<Value>, Error> {
-        if let Some(t) = self.peek().cloned()
-            && let Some(w) = t
-                .text
-                .strip_prefix('±')
-                .or_else(|| t.text.strip_prefix("+-"))
-        {
-            self.at += 1;
-            return Ok(Some(Value::scalar(w)));
-        }
-        Ok(None)
-    }
     fn query_end(&self) -> bool {
         self.peek().is_none() || self.is(")")
     }
-    fn field_syntax(&self) -> bool {
-        self.peek()
-            .is_some_and(|t| !t.quoted && t.text.contains(':'))
+    /// The next tokens are a field condition rather than a text term.
+    fn field_syntax(&self, scope: &Scope) -> bool {
+        let Some(current) = self.peek() else {
+            return false;
+        };
+        if current.quoted {
+            return false;
+        }
+        current.text.contains(':')
             || self.tokens.get(self.at + 1).is_some_and(|t| {
                 !t.quoted
                     && (Op::parse(&t.text).is_some()
-                        || matches!(t.text.as_str(), "between" | "in" | "exists" | "-"))
+                        || matches!(t.text.as_str(), "between" | "in" | "exists")
+                        || (Arithmetic::parse(&t.text).is_some()
+                            && self.field_known(scope, &current.text)))
             })
-    }
-    fn stage_start(&self) -> bool {
-        if !self.catalog.unpiped_stages || self.field_syntax() {
-            return false;
-        }
-        let Some(t) = self.peek() else { return false };
-        if t.quoted {
-            return false;
-        }
-        if let Some(stage) = crate::catalog::STAGES
-            .iter()
-            .find(|stage| stage.name.eq_ignore_ascii_case(&t.text))
-        {
-            match stage.form {
-                crate::catalog::StageForm::Plain => true,
-                crate::catalog::StageForm::Count => !self.next_is(1, "("),
-                crate::catalog::StageForm::Function => self.next_is(1, "("),
-                crate::catalog::StageForm::Relation => {
-                    self.next_is(1, "(") || (self.next_is(1, "all") && self.next_is(2, "("))
-                }
-            }
-        } else {
-            self.catalog.extensions.iter().any(|extension| {
-                extension.position == ExtensionPosition::Stage
-                    && extension.name.eq_ignore_ascii_case(&t.text)
-            })
-        }
     }
     fn condition_end(&self) -> bool {
         self.peek().is_none()
             || ["|", ")", "]", ",", "->"].iter().any(|s| self.is(s))
-            || self.stage_start()
             || (self.is("with") && self.next_is(2, "("))
     }
     fn bool_is(&self, word: &str) -> bool {
@@ -880,25 +771,51 @@ impl Parser<'_> {
             if self.bool_is("OR") || self.condition_end() {
                 break;
             }
-            if self
-                .peek()
-                .is_some_and(|t| !t.quoted && matches!(t.text.as_str(), "and" | "or"))
-                && conditions
-                    .iter()
-                    .any(|c| !matches!(c.kind, ConditionKind::Text { .. }))
-            {
-                let t = self.peek().unwrap();
-                return Err(Error::new(
-                    ErrorKind::InvalidQuery,
-                    "boolean operators are AND, OR and NOT in capitals",
-                    t.span.start,
-                )
-                .suggestion(self.replace(t.span, &t.text.to_uppercase())));
-            }
+            self.refuse_lowercase_boolean()?;
             self.take_bool("AND");
             conditions.push(self.atom(scope)?);
         }
         Ok(join_conditions(conditions, true))
+    }
+    /// Attach a corrected query only when it parses and binds as given; a
+    /// refusal without a runnable correction carries none.
+    fn suggest(&self, error: Error, corrected: String) -> Error {
+        if parse(&corrected, self.catalog)
+            .and_then(|query| crate::bind::bind(&query, self.catalog))
+            .is_ok()
+        {
+            error.suggestion(corrected)
+        } else {
+            error
+        }
+    }
+    /// A lowercase `and`, `or` or `not` between two conditions would silently
+    /// become a search word; the capitalised operator is the suggestion.
+    fn refuse_lowercase_boolean(&self) -> Result<(), Error> {
+        let Some(t) = self.peek() else {
+            return Ok(());
+        };
+        if t.quoted || !matches!(t.text.as_str(), "and" | "or" | "not") {
+            return Ok(());
+        }
+        let followed = self.tokens.get(self.at + 1).is_some_and(|next| {
+            next.quoted || !["|", ")", "]", ",", "->"].contains(&next.text.as_str())
+        });
+        if !followed {
+            return Ok(());
+        }
+        let error = Error::new(
+            ErrorKind::InvalidQuery,
+            format!(
+                "`{}` between conditions reads as a search word; boolean operators are AND, OR and NOT in capitals",
+                t.text
+            ),
+            t.span.start,
+        )
+        .length(t.text.len())
+        .hint("quote the word to search for it");
+        // Suggest the capitalised query only when it is itself a query.
+        Err(self.suggest(error, self.replace(t.span, &t.text.to_uppercase())))
     }
     fn atom(&mut self, scope: &Scope) -> Result<Condition, Error> {
         let start = self.pos();
@@ -914,31 +831,12 @@ impl Parser<'_> {
                 "write NOT in capitals",
                 t.span.start,
             )
+            .length(3)
             .suggestion(self.replace(t.span, "NOT")));
         }
-        if self.take_bool("NOT") {
+        if self.take_bool("NOT") || self.take("-") {
             let c = self.atom(scope)?;
-            return Ok(Condition {
-                span: Span {
-                    start,
-                    end: c.span.end,
-                },
-                kind: ConditionKind::Not {
-                    condition: Box::new(c),
-                },
-            });
-        }
-        if self.take("-") {
-            let c = self.atom(scope)?;
-            return Ok(Condition {
-                span: Span {
-                    start,
-                    end: c.span.end,
-                },
-                kind: ConditionKind::Not {
-                    condition: Box::new(c),
-                },
-            });
+            return Ok(self.negation(start, c));
         }
         if self
             .peek()
@@ -949,15 +847,7 @@ impl Parser<'_> {
             token.span.start += 1;
             self.tokens.insert(self.at, token);
             let c = self.atom(scope)?;
-            return Ok(Condition {
-                span: Span {
-                    start,
-                    end: c.span.end,
-                },
-                kind: ConditionKind::Not {
-                    condition: Box::new(c),
-                },
-            });
+            return Ok(self.negation(start, c));
         }
         if self.take("(") {
             let mut c = self.condition(scope)?;
@@ -1013,6 +903,13 @@ impl Parser<'_> {
         if self.is("seq") && (self.next_is(1, "(") || self.next_is(1, "all")) {
             return self.sequence(scope);
         }
+        if let Some(t) = self.peek()
+            && !t.quoted
+            && OrderRelation::parse(&t.text).is_some()
+            && self.next_is(1, "(")
+        {
+            return self.order_condition(scope);
+        }
         if let Some(extension) = self
             .catalog
             .extensions
@@ -1048,184 +945,49 @@ impl Parser<'_> {
             ));
         }
         if let Some((field, raw)) = token.text.split_once(':') {
-            if field.eq_ignore_ascii_case("query") {
-                let name = self.saved_name(raw, start)?;
-                let arguments = self.arguments()?;
-                return Ok(self.cond(start, ConditionKind::Saved { name, arguments }));
-            }
-            if field.eq_ignore_ascii_case("result") {
-                let id = if raw.is_empty() {
-                    let value = self.next()?;
-                    if !value.quoted && is_symbol(&value.text) {
-                        return Err(self.error("a kept result needs a literal identity"));
-                    }
-                    value.text
-                } else {
-                    raw.into()
-                };
-                if id.is_empty() {
-                    return Err(self.error("a kept result needs a literal identity"));
-                }
-                return Ok(self.cond(
-                    start,
-                    ConditionKind::Reference {
-                        reference: format!("result:{id}"),
-                    },
-                ));
-            }
-            if is_reference(&token.text) || self.catalog.is_reference(&token.text) {
-                return Ok(self.cond(
-                    start,
-                    ConditionKind::Reference {
-                        reference: token.text,
-                    },
-                ));
-            }
-            if !["similar", "in", "since", "until"]
-                .iter()
-                .any(|name| field.eq_ignore_ascii_case(name))
-            {
-                self.check_field(scope, field, start)?;
-            }
-            let mut value = if raw.is_empty() {
-                if self
-                    .peek()
-                    .is_some_and(|t| !t.quoted && Op::parse(&t.text).is_some())
-                {
-                    let op = self.next()?;
-                    let value = self.value()?;
-                    let end = self.end();
-                    let replacement = format!("{field} {} {}", op.text, value_surface(&value));
-                    return Err(Error::new(
-                        ErrorKind::InvalidQuery,
-                        "write comparisons with a space, without `:`",
-                        start + field.len(),
-                    )
-                    .suggestion(self.replace(Span { start, end }, &replacement)));
-                }
-                self.value()?
-            } else {
-                value_token(raw, false)
-            };
-            if field.eq_ignore_ascii_case("similar") {
-                return Ok(self.cond(start, ConditionKind::Similar { value }));
-            }
-            if field.eq_ignore_ascii_case("in")
-                && value.text().is_some_and(|v| v.starts_with("result:"))
-            {
-                return Ok(self.cond(
-                    start,
-                    ConditionKind::Reference {
-                        reference: format!("in:{}", value.text().unwrap()),
-                    },
-                ));
-            }
-            if field.eq_ignore_ascii_case("since") || field.eq_ignore_ascii_case("until") {
-                let kind = self.time_bound(scope, field.eq_ignore_ascii_case("until"), value)?;
-                return Ok(self.cond(start, kind));
-            }
-            self.check_field(scope, field, start)?;
-            self.normalize_field_value(scope, field, &mut value);
-            self.check_value(scope, field, &value, start + field.len() + 1)?;
-            return Ok(self.cond(
-                start,
-                ConditionKind::Match {
-                    field: field.into(),
-                    value,
-                },
-            ));
+            return self.colon_atom(scope, &token, field, raw, start);
         }
-        // Function operands and field syntax take precedence over text and keyword positions.
+        // Function calls and field syntax take precedence over text and keyword positions.
         self.at -= 1;
-        let has_operand = self.field_syntax()
-            || (self.next_is(1, "(")
-                && builtin(&token.text, crate::catalog::KEY_FUNCTIONS, token.span.start)?
-                    .is_some());
-        if has_operand {
-            let operand = self.operand(scope)?;
-            if self.take("exists") {
-                return Ok(self.cond(start, ConditionKind::FieldExists { operand }));
-            }
-            if self.take("between") {
-                let mut from = self.value()?;
-                self.expect("and")?;
-                let mut to = self.value()?;
-                self.normalize_operand_value(scope, &operand, &mut from);
-                self.normalize_operand_value(scope, &operand, &mut to);
-                self.check_operand_value(scope, &operand, &from, start)?;
-                self.check_operand_value(scope, &operand, &to, start)?;
-                return Ok(self.cond(start, ConditionKind::Between { operand, from, to }));
-            }
-            if self.take("in") {
-                if self.take("(") {
-                    let query = Box::new(self.query_in(Some(scope))?);
-                    self.expect(")")?;
-                    return Ok(self.cond(start, ConditionKind::In { operand, query }));
-                }
-                let value = self.value()?;
-                return Ok(self.cond(start, ConditionKind::TimeRange { operand, value }));
-            }
-            if self.take("-") {
-                let right = self.operand(scope)?;
-                let op = self.op()?;
-                let value = self.value()?;
-                return Ok(self.cond(
-                    start,
-                    ConditionKind::TimeDifference {
-                        left: operand,
-                        right,
-                        op,
-                        value,
-                    },
-                ));
-            }
-            let op = self.op()?;
-            let mut value = self.value()?;
-            self.normalize_operand_value(scope, &operand, &mut value);
-            if let Operand::Field { name } = &operand
-                && self
-                    .scope_field(scope, name)
-                    .is_some_and(|f| f.kind == FieldKind::Time)
-                && matches!(op, Op::Lt | Op::Le | Op::Gt | Op::Ge)
-                && matches!(&value,Value::Scalar{text,quoted:false} if is_duration(text))
-            {
-                let duration = value.text().unwrap();
-                let end = self.end();
-                return Err(Error::new(
-                    ErrorKind::BadValue,
-                    "a bare duration is not a time instant; use since or a relative range",
-                    start,
-                )
-                .suggestion(
-                    self.replace(Span { start, end }, &format!("{name} in last {duration}")),
-                ));
-            }
-            self.check_operand_value(scope, &operand, &value, start)?;
-            return Ok(self.cond(start, ConditionKind::Compare { operand, op, value }));
+        let function_call = self.next_is(1, "(") && self.catalog.function(&token.text)?.is_some();
+        if self.field_syntax(scope) || function_call {
+            return self.comparison(scope, start);
         }
         self.at += 1;
+        // `since 7d` is the spelling `since:7d` written apart: refuse it with
+        // the joined form, so the word does not silently become a search term.
         if token.text.eq_ignore_ascii_case("since") || token.text.eq_ignore_ascii_case("until") {
-            let value = self.value()?;
-            let kind = self.time_bound(scope, token.text.eq_ignore_ascii_case("until"), value)?;
-            return Ok(self.cond(start, kind));
-        }
-        if token.text == "overlaps" {
-            let from = self.value()?;
-            let to = if self.take("..") {
-                Some(self.value()?)
-            } else {
-                None
-            };
-            return Ok(self.cond(start, ConditionKind::Overlaps { from, to }));
+            let resume = self.at;
+            if let Some(next) = self.peek().cloned()
+                && (next.quoted || !is_symbol(&next.text))
+                && (next.text.starts_with('$') || crate::time::is_time_expression(&next.text))
+                && self.main_time(scope).is_some()
+            {
+                self.at += 1;
+                let end = self.end();
+                let joined = format!(
+                    "{}:{}",
+                    token.text.to_ascii_lowercase(),
+                    &self.text[next.span.start..end]
+                );
+                let error = Error::new(
+                    ErrorKind::InvalidQuery,
+                    format!("a time bound is written `{joined}`"),
+                    start,
+                )
+                .length(end - start);
+                return Err(self.suggest(error, self.replace(Span { start, end }, &joined)));
+            }
+            self.at = resume;
         }
         if token.text == "where" {
             return Err(Error::new(
                 ErrorKind::InvalidQuery,
-                "where starts a unit filter or a stage; use `| where` after conditions",
+                "where starts a unit filter or a transform; use `| where` after conditions",
                 start,
             ));
         }
-        if is_reference(&token.text) || self.catalog.is_reference(&token.text) {
+        if self.catalog.is_reference(&token.text) {
             return Ok(self.cond(
                 start,
                 ConditionKind::Reference {
@@ -1234,13 +996,10 @@ impl Parser<'_> {
             ));
         }
         if self.field_known(scope, &token.text) {
-            return Err(Error::new(
-                ErrorKind::InvalidQuery,
-                format!("`{}` is a field; give it an operator and value", token.text),
-                start,
-            ));
+            return Err(self.bare_field(&token));
         }
-        // Pasted calls remain text, including their parentheses, when no operand function is declared.
+        self.refuse_clause(scope, &token)?;
+        // Pasted calls remain text, including their parentheses, when no function is declared.
         let mut text = token.text;
         if self.is("(") && self.peek().is_some_and(|t| t.span.start == token.span.end) {
             let begin = self.at;
@@ -1263,7 +1022,401 @@ impl Parser<'_> {
         } else {
             TextMode::Word
         };
+        // Construct only text nodes that retain their meaning when rendered.
+        // This also excludes a prefix or approximate match with no word.
+        if let Err(mut error) = crate::format::word(&text) {
+            let end = self.end();
+            error.position = start;
+            error.length = end - start;
+            return Err(error.suggestion(self.replace(
+                Span { start, end },
+                &crate::format::quote(&self.text[start..end]),
+            )));
+        }
         Ok(self.cond(start, ConditionKind::Text { text, mode }))
+    }
+    /// A field name standing alone is never a search word; quoting it searches.
+    fn bare_field(&self, token: &Token) -> Error {
+        Error::new(
+            ErrorKind::InvalidQuery,
+            format!(
+                "`{}` is a field; give it an operator and value, or quote it to search for the word",
+                token.text
+            ),
+            token.span.start,
+        )
+        .length(token.span.end - token.span.start)
+        .suggestion(self.replace(token.span, &crate::format::quote(&token.text)))
+    }
+    fn negation(&self, start: usize, condition: Condition) -> Condition {
+        Condition {
+            span: Span {
+                start,
+                end: condition.span.end,
+            },
+            kind: ConditionKind::Not {
+                condition: Box::new(condition),
+            },
+        }
+    }
+    /// A transform written as a clause without its `|` (`sort when desc`,
+    /// `limit 5`) is refused with the piped spelling.
+    fn refuse_clause(&self, scope: &Scope, token: &Token) -> Result<(), Error> {
+        let lower = token.text.to_ascii_lowercase();
+        let next = self.peek().filter(|t| !t.quoted);
+        let clause = match lower.as_str() {
+            "sort" | "group" => {
+                next.is_some_and(|t| t.text == "by" || self.field_known(scope, &t.text))
+            }
+            "limit" | "offset" | "first" => {
+                next.is_some_and(|t| t.text.chars().all(|c| c.is_ascii_digit()))
+            }
+            "agg" => next.is_some_and(|t| AggregateFunction::parse(&t.text).is_some()),
+            "as" => next.is_some_and(|t| t.text == "of"),
+            "fill" => self.peek().is_none_or(|t| !t.quoted && t.text == "|"),
+            _ => false,
+        };
+        if !clause {
+            return Ok(());
+        }
+        let needs_by = matches!(lower.as_str(), "sort" | "group") && !self.is("by");
+        let replacement = format!("| {}{}", token.text, if needs_by { " by" } else { "" });
+        Err(Error::new(
+            ErrorKind::InvalidQuery,
+            format!("`{}` is a transform; transforms follow `|`", token.text),
+            token.span.start,
+        )
+        .length(token.text.len())
+        .suggestion(self.replace(token.span, &replacement)))
+    }
+    fn colon_atom(
+        &mut self,
+        scope: &Scope,
+        token: &Token,
+        field: &str,
+        raw: &str,
+        start: usize,
+    ) -> Result<Condition, Error> {
+        if field.eq_ignore_ascii_case("query") {
+            let name = self.saved_name(raw, start)?;
+            let arguments = self.arguments()?;
+            return Ok(self.cond(start, ConditionKind::Saved { name, arguments }));
+        }
+        if field.eq_ignore_ascii_case("result") {
+            let id = if raw.is_empty() {
+                let value = self.next()?;
+                if !value.quoted && is_symbol(&value.text) {
+                    return Err(self.error("a kept result needs a literal identity"));
+                }
+                value.text
+            } else {
+                raw.into()
+            };
+            if id.is_empty() {
+                return Err(self.error("a kept result needs a literal identity"));
+            }
+            return Ok(self.cond(
+                start,
+                ConditionKind::Reference {
+                    reference: format!("result:{id}"),
+                },
+            ));
+        }
+        if self.catalog.is_reference(&token.text) {
+            return Ok(self.cond(
+                start,
+                ConditionKind::Reference {
+                    reference: token.text.clone(),
+                },
+            ));
+        }
+        let list = RankList::ALL
+            .into_iter()
+            .find(|list| field.eq_ignore_ascii_case(list.name()));
+        let keyword = list.is_some()
+            || ["in", "since", "until"]
+                .iter()
+                .any(|name| field.eq_ignore_ascii_case(name));
+        if !keyword {
+            self.check_field(scope, field, start)?;
+        }
+        let mut value = if raw.is_empty() {
+            if self
+                .peek()
+                .is_some_and(|t| !t.quoted && Op::parse(&t.text).is_some())
+            {
+                let op = self.next()?;
+                let value = self.value()?;
+                let end = self.end();
+                let replacement = format!("{field} {} {}", op.text, value_surface(&value));
+                return Err(Error::new(
+                    ErrorKind::InvalidQuery,
+                    "write comparisons with a space, without `:`",
+                    start + field.len(),
+                )
+                .suggestion(self.replace(Span { start, end }, &replacement)));
+            }
+            self.value()?
+        } else {
+            value_token(raw, false)
+        };
+        if let Some(list) = list {
+            return Ok(self.cond(start, ConditionKind::Rank { list, value }));
+        }
+        if field.eq_ignore_ascii_case("in")
+            && value.text().is_some_and(|v| v.starts_with("result:"))
+        {
+            return Ok(self.cond(
+                start,
+                ConditionKind::Reference {
+                    reference: format!("in:{}", value.text().unwrap()),
+                },
+            ));
+        }
+        if field.eq_ignore_ascii_case("since") || field.eq_ignore_ascii_case("until") {
+            let kind = self.time_bound(scope, field.eq_ignore_ascii_case("until"), value)?;
+            return Ok(self.cond(start, kind));
+        }
+        self.check_field(scope, field, start)?;
+        self.normalize_field_value(scope, field, &mut value);
+        self.check_value(scope, field, &value, start + field.len() + 1)?;
+        Ok(self.cond(
+            start,
+            ConditionKind::Match {
+                field: field.into(),
+                value,
+            },
+        ))
+    }
+    /// `EXPR OP value`, `EXPR between A and B`, `EXPR in RANGE`, `EXPR in (QUERY)`.
+    fn comparison(&mut self, scope: &Scope, start: usize) -> Result<Condition, Error> {
+        let left = self.expression(scope, Place::Condition)?;
+        if self.is("exists") {
+            let exists = self.next()?;
+            let field = self.text[start..exists.span.start].trim_end().to_string();
+            return Err(Error::new(
+                ErrorKind::InvalidQuery,
+                "a field's presence is written `field:known`",
+                start,
+            )
+            .suggestion(self.replace(
+                Span {
+                    start,
+                    end: exists.span.end,
+                },
+                &format!("{field}:known"),
+            )));
+        }
+        if self.take("between") {
+            let mut from = self.value()?;
+            self.expect("and")?;
+            let mut to = self.value()?;
+            self.normalize_expression_value(scope, &left, &mut from);
+            self.normalize_expression_value(scope, &left, &mut to);
+            self.check_expression_value(scope, &left, &from, start)?;
+            self.check_expression_value(scope, &left, &to, start)?;
+            return Ok(self.cond(start, ConditionKind::Between { left, from, to }));
+        }
+        if self.take("in") {
+            if self.is("(") {
+                let (query, _) = self.query_in(scope)?;
+                return Ok(self.cond(
+                    start,
+                    ConditionKind::In {
+                        left,
+                        query: Box::new(query),
+                    },
+                ));
+            }
+            let value = self.value()?;
+            return Ok(self.cond(start, ConditionKind::TimeRange { left, value }));
+        }
+        let op = self.op()?;
+        if op == Op::Eq
+            && self.is("[")
+            && let Expression::Field { name } = &left
+            && !["since", "until", "in"]
+                .iter()
+                .any(|word| name.eq_ignore_ascii_case(word))
+        {
+            // `F = [a, b]` is the set match `F:(a|b)`.
+            let (open, set) = self.bracket_list()?;
+            let end = self.end();
+            let error = Error::new(
+                ErrorKind::InvalidQuery,
+                "a set is written (a|b) and matched with `:`",
+                open.span.start,
+            );
+            return Err(self.suggest(
+                error,
+                self.replace(
+                    Span { start, end },
+                    &format!("{name}:{}", value_surface(&set)),
+                ),
+            ));
+        }
+        let right = if let Some(t) = self.peek()
+            && !t.quoted
+            && self.next_is(1, "(")
+            && self.catalog.function(&t.text)?.is_some()
+        {
+            let right = self.primary(scope, Place::Argument)?;
+            self.check_comparable(
+                &self.expression_info(scope, &left).field.kind,
+                &self.expression_info(scope, &right).field.kind,
+                start,
+            )?;
+            right
+        } else {
+            let mut value = self.value()?;
+            self.normalize_expression_value(scope, &left, &mut value);
+            if let Expression::Field { name } = &left
+                && self
+                    .scope_field(scope, name)
+                    .is_some_and(|f| f.kind == FieldKind::Time)
+                && matches!(op, Op::Lt | Op::Le | Op::Gt | Op::Ge)
+                && matches!(&value, Value::Scalar { text, quoted: false } if is_duration(text))
+            {
+                let duration = value.text().unwrap();
+                let end = self.end();
+                return Err(Error::new(
+                    ErrorKind::BadValue,
+                    "a bare duration is not a time instant; use since or a relative range",
+                    start,
+                )
+                .suggestion(
+                    self.replace(Span { start, end }, &format!("{name} in last {duration}")),
+                ));
+            }
+            self.check_expression_value(scope, &left, &value, start)?;
+            Expression::Value { value }
+        };
+        Ok(self.cond(start, ConditionKind::Compare { left, op, right }))
+    }
+    /// `term { (+|-) term }`, with `*` and `/` binding tighter. There are no
+    /// parentheses in arithmetic; a parenthesis starts a condition group.
+    fn expression(&mut self, scope: &Scope, place: Place) -> Result<Expression, Error> {
+        let mut left = self.term(scope, place)?;
+        while let Some(operator) = self.arithmetic_operator(false) {
+            let at = self.pos();
+            self.at += 1;
+            let right = self.term(scope, place)?;
+            left = self.arithmetic(scope, operator, left, right, at)?;
+        }
+        Ok(left)
+    }
+    fn term(&mut self, scope: &Scope, place: Place) -> Result<Expression, Error> {
+        let mut left = self.primary(scope, place)?;
+        while let Some(operator) = self.arithmetic_operator(true) {
+            let at = self.pos();
+            self.at += 1;
+            let right = self.primary(scope, place)?;
+            left = self.arithmetic(scope, operator, left, right, at)?;
+        }
+        Ok(left)
+    }
+    fn arithmetic_operator(&self, tight: bool) -> Option<Arithmetic> {
+        let t = self.peek().filter(|t| !t.quoted)?;
+        Arithmetic::parse(&t.text).filter(|operator| operator.binds_tightly() == tight)
+    }
+    fn arithmetic(
+        &self,
+        scope: &Scope,
+        operator: Arithmetic,
+        left: Expression,
+        right: Expression,
+        at: usize,
+    ) -> Result<Expression, Error> {
+        let l = self.expression_info(scope, &left).field.kind;
+        let r = self.expression_info(scope, &right).field.kind;
+        let (l, r) = (
+            typing::operand_kind_in(operator, &left, &l, &r),
+            typing::operand_kind_in(operator, &right, &r, &l),
+        );
+        if crate::scope::arithmetic_kind(operator, &l, &r).is_none() {
+            return Err(Error::new(
+                ErrorKind::InvalidQuery,
+                format!(
+                    "`{}` cannot combine {} and {}",
+                    operator.symbol(),
+                    kind_name(&l),
+                    kind_name(&r)
+                ),
+                at,
+            )
+            .length(1));
+        }
+        Ok(Expression::Arithmetic {
+            operator,
+            left: Box::new(left),
+            right: Box::new(right),
+        })
+    }
+    fn primary(&mut self, scope: &Scope, place: Place) -> Result<Expression, Error> {
+        let t = self
+            .peek()
+            .cloned()
+            .ok_or_else(|| self.error("expected a field"))?;
+        if t.quoted {
+            if place == Place::Condition {
+                return Err(Error::new(
+                    ErrorKind::InvalidQuery,
+                    "expected a field",
+                    t.span.start,
+                ));
+            }
+            self.at += 1;
+            return Ok(Expression::value(Value::Scalar {
+                text: t.text,
+                quoted: true,
+            }));
+        }
+        if is_symbol(&t.text) {
+            return Err(Error::new(
+                ErrorKind::InvalidQuery,
+                "expected a field",
+                t.span.start,
+            ));
+        }
+        if self.next_is(1, "(")
+            && let Some(function) = self.catalog.function(&t.text)?
+        {
+            self.at += 2;
+            let mut arguments = Vec::new();
+            if !self.is(")") {
+                loop {
+                    arguments.push(self.expression(scope, Place::Argument)?);
+                    if !self.take(",") {
+                        break;
+                    }
+                }
+            }
+            self.expect(")")?;
+            if arguments.len() != function.arguments {
+                return Err(Error::new(
+                    ErrorKind::BadValue,
+                    format!(
+                        "`{}` takes {} argument{}",
+                        function.name,
+                        function.arguments,
+                        if function.arguments == 1 { "" } else { "s" }
+                    ),
+                    t.span.start,
+                ));
+            }
+            return Ok(Expression::Function {
+                name: function.name,
+                arguments,
+            });
+        }
+        let known = self.field_known(scope, &t.text);
+        if !known && (place == Place::Argument || is_literal(&t.text)) {
+            self.at += 1;
+            return Ok(Expression::value(value_token(&t.text, false)));
+        }
+        self.at += 1;
+        self.check_field(scope, &t.text, t.span.start)?;
+        Ok(Expression::field(t.text))
     }
     fn cond(&self, start: usize, kind: ConditionKind) -> Condition {
         Condition {
@@ -1273,6 +1426,16 @@ impl Parser<'_> {
             },
             kind,
         }
+    }
+    /// The former list spelling `[a, b]`, read only to refuse it.
+    fn bracket_list(&mut self) -> Result<(Token, Value), Error> {
+        let open = self.next()?;
+        let mut values = vec![self.value()?];
+        while self.take(",") {
+            values.push(self.value()?);
+        }
+        self.expect("]")?;
+        Ok((open, Value::Set { values }))
     }
     fn op(&mut self) -> Result<Op, Error> {
         let t = self.next()?;
@@ -1298,29 +1461,43 @@ impl Parser<'_> {
         let field = self
             .main_time(scope)
             .ok_or_else(|| self.error("this unit has no main time"))?;
-        let operand = Operand::field(field);
         Ok(if until {
-            ConditionKind::Until { operand, value }
+            ConditionKind::Until { field, value }
         } else {
-            ConditionKind::Since { operand, value }
+            ConditionKind::Since { field, value }
         })
     }
     fn value(&mut self) -> Result<Value, Error> {
-        if self.take("(") {
+        if self.is("(") {
+            let open = self.next()?;
             let mut values = vec![self.value()?];
             while self.take("|") {
                 values.push(self.value()?);
             }
+            if self.peek().is_some() && !self.is(")") {
+                return Err(Error::new(
+                    ErrorKind::InvalidQuery,
+                    "a set separates its values with `|`",
+                    open.span.start,
+                ));
+            }
             self.expect(")")?;
             return Ok(Value::Set { values });
         }
-        if self.take("[") {
-            let mut values = vec![self.value()?];
-            while self.take(",") {
-                values.push(self.value()?);
-            }
-            self.expect("]")?;
-            return Ok(Value::Set { values });
+        if self.is("[") {
+            let (open, set) = self.bracket_list()?;
+            return Err(Error::new(
+                ErrorKind::InvalidQuery,
+                "a set is written (a|b)",
+                open.span.start,
+            )
+            .suggestion(self.replace(
+                Span {
+                    start: open.span.start,
+                    end: self.end(),
+                },
+                &value_surface(&set),
+            )));
         }
         let t = self.next()?;
         if !t.quoted && is_symbol(&t.text) {
@@ -1408,34 +1585,35 @@ impl Parser<'_> {
             .unit(&scope.unit)
             .and_then(|unit| unit.sequence_unit.clone())
             .unwrap_or_else(|| scope.unit.clone());
-        let scope = &Scope::new(unit.clone());
+        let steps_scope = &Scope::new(unit.clone());
         let start = self.pos();
         self.expect("seq")?;
         let all = self.take("all");
         self.expect("(")?;
-        let mut steps = vec![self.condition(scope)?];
+        let mut steps = vec![self.condition(steps_scope)?];
         let mut gaps = Vec::new();
         while self.take("->") {
             let gap = if self.take("[") {
                 let gap = if self.take("next") {
                     Gap::Next
+                } else if self.take("within") {
+                    let distance = self.distance()?;
+                    if matches!(distance, Distance::Steps { .. }) {
+                        self.require_order_scope(&unit, start)?;
+                    }
+                    Gap::Within { distance }
                 } else {
                     let t = self.next()?;
-                    if let Some(d) = t.text.strip_prefix("within:") {
-                        Gap::Within {
-                            duration: if d.is_empty() {
-                                self.value()?
-                            } else {
-                                Value::scalar(d)
-                            },
-                        }
-                    } else {
-                        return Err(Error::new(
-                            ErrorKind::InvalidQuery,
-                            "expected next or within:D",
-                            t.span.start,
-                        ));
+                    let mut error = Error::new(
+                        ErrorKind::InvalidQuery,
+                        "a gap is [next] or [within D]",
+                        t.span.start,
+                    );
+                    if let Some(duration) = t.text.strip_prefix("within:") {
+                        error =
+                            error.suggestion(self.replace(t.span, &format!("within {duration}")));
                     }
+                    return Err(error);
                 };
                 self.expect("]")?;
                 gap
@@ -1443,7 +1621,7 @@ impl Parser<'_> {
                 Gap::Later
             };
             gaps.push(gap);
-            steps.push(self.condition(scope)?);
+            steps.push(self.condition(steps_scope)?);
         }
         self.expect(")")?;
         if steps.len() < 2 {
@@ -1459,12 +1637,210 @@ impl Parser<'_> {
             },
         ))
     }
+    /// `5m`, `2 hours` or `N steps`.
+    fn distance(&mut self) -> Result<Distance, Error> {
+        if self.peek().is_some_and(|t| {
+            !t.quoted && !t.text.is_empty() && t.text.chars().all(|c| c.is_ascii_digit())
+        }) && (self.next_is(1, "steps") || self.next_is(1, "step"))
+        {
+            let count = self.number()?;
+            self.at += 1;
+            return Ok(Distance::Steps { count });
+        }
+        Ok(Distance::Time {
+            duration: self.value()?,
+        })
+    }
+    fn order_scope(&self, unit: &str) -> Option<String> {
+        self.catalog
+            .unit(unit)
+            .and_then(|unit| unit.order_scope.clone())
+    }
+    fn require_order_scope(&self, unit: &str, at: usize) -> Result<String, Error> {
+        if self.catalog.unit(unit).is_none() {
+            return Ok(String::new());
+        }
+        self.order_scope(unit).ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidQuery,
+                format!("`{unit}` has no order scope; steps count positions in one, so use a time distance"),
+                at,
+            )
+        })
+    }
+    fn order_condition(&mut self, scope: &Scope) -> Result<Condition, Error> {
+        let start = self.pos();
+        let word = self.next()?;
+        let relation = OrderRelation::parse(&word.text).expect("checked by the caller");
+        let (query, inner) = self.query_in(scope)?;
+        let (within, at, order_scope) = self.order_options(relation, scope, &inner, start)?;
+        self.inner_scopes.insert(start, inner);
+        Ok(self.cond(
+            start,
+            ConditionKind::Order {
+                relation,
+                query: Box::new(query),
+                within,
+                at,
+                scope: order_scope,
+            },
+        ))
+    }
+    /// `[within DISTANCE] [at when|start|end] [in SCOPE]` after an order relation.
+    fn order_options(
+        &mut self,
+        relation: OrderRelation,
+        outer: &Scope,
+        inner: &Scope,
+        start: usize,
+    ) -> Result<(Option<Distance>, TimePoint, Option<String>), Error> {
+        let within = if self.take("within") {
+            Some(self.distance()?)
+        } else {
+            None
+        };
+        // `at` is a time point only when one follows; otherwise it may be a
+        // field named `at` in the next condition.
+        let point_follows = ["when", "start", "end"]
+            .iter()
+            .any(|point| self.next_is(1, point));
+        let at = if self.is("at") && point_follows {
+            self.at += 1;
+            let point = self.next()?;
+            match point.text.as_str() {
+                "when" => TimePoint::When,
+                "start" => TimePoint::Start,
+                "end" => TimePoint::End,
+                _ => {
+                    return Err(Error::new(
+                        ErrorKind::BadValue,
+                        "at takes when, start or end",
+                        point.span.start,
+                    ));
+                }
+            }
+        } else {
+            TimePoint::When
+        };
+        let order_scope = if self.take("in") {
+            Some(self.name()?.text)
+        } else {
+            None
+        };
+        if relation == OrderRelation::Near && within.is_none() {
+            return Err(Error::new(
+                ErrorKind::InvalidQuery,
+                "near needs a distance: `within 5m` or `within 3 steps`",
+                start,
+            ));
+        }
+        if matches!(within, Some(Distance::Steps { .. })) {
+            if !relation.measures_steps() {
+                return Err(Error::new(
+                    ErrorKind::InvalidQuery,
+                    format!(
+                        "{} compares times; steps measure positions",
+                        relation.name()
+                    ),
+                    start,
+                ));
+            }
+            if at != TimePoint::When {
+                return Err(Error::new(
+                    ErrorKind::InvalidQuery,
+                    "at chooses a time point; steps count positions",
+                    start,
+                ));
+            }
+            let declared = self.require_order_scope(&outer.unit, start)?;
+            let inner_scope = self.order_scope(&inner.unit);
+            if !declared.is_empty()
+                && self.catalog.unit(&inner.unit).is_some()
+                && inner_scope.as_deref() != Some(declared.as_str())
+            {
+                return Err(Error::new(
+                    ErrorKind::InvalidQuery,
+                    format!(
+                        "`{}` steps in `{declared}` and `{}` in {}; steps never cross order scopes",
+                        outer.unit,
+                        inner.unit,
+                        inner_scope.map_or("none".to_string(), |scope| format!("`{scope}`"))
+                    ),
+                    start,
+                ));
+            }
+            if let Some(named) = &order_scope
+                && !declared.is_empty()
+                && *named != declared
+            {
+                return Err(Error::new(
+                    ErrorKind::BadValue,
+                    format!("`{}` steps in `{declared}`, not `{named}`", outer.unit),
+                    start,
+                ));
+            }
+        }
+        Ok((within, at, order_scope))
+    }
+    /// One top-level order relation in a relation's condition exposes its
+    /// nearest inner row as `match.F` and the signed distance as `match.distance`.
+    fn expose_order_match(&mut self, scope: &mut Scope, condition: &Condition) {
+        let mut orders = Vec::new();
+        top_level(condition, &mut |c| {
+            if let ConditionKind::Order { within, .. } = &c.kind {
+                orders.push((c.span.start, within.clone()));
+            }
+        });
+        if let [(start, within)] = orders.as_slice()
+            && let Some(inner) = self.inner_scopes.get(start).cloned()
+        {
+            self.expose_inner(scope, &inner, within.as_ref());
+        }
+    }
+    fn expose_inner(&self, scope: &mut Scope, inner: &Scope, within: Option<&Distance>) {
+        for info in self.visible(inner) {
+            let mut field = info.field.clone();
+            field.name = format!("match.{}", info.field.name);
+            self.add_generated(
+                scope,
+                field,
+                Origin::Matched {
+                    input: Box::new(info),
+                },
+            );
+        }
+        if let Some(within) = within {
+            self.add_generated(
+                scope,
+                Field {
+                    name: crate::catalog::MATCH_DISTANCE.into(),
+                    kind: match within {
+                        Distance::Steps { .. } => FieldKind::Integer,
+                        Distance::Time { .. } => FieldKind::Duration,
+                    },
+                    ..Field::default()
+                },
+                Origin::Generated,
+            );
+        }
+    }
+    fn add_generated(&self, scope: &mut Scope, field: Field, origin: Origin) {
+        let name = field.name.clone();
+        Arc::make_mut(&mut scope.typed_extra).retain(|f| f.name != name);
+        Arc::make_mut(&mut scope.typed_extra).push(field);
+        Arc::make_mut(&mut scope.origins).insert(name.clone(), origin);
+        if let Some(columns) = &mut scope.columns {
+            columns.insert(name);
+        } else {
+            scope.extra.insert(name);
+        }
+    }
     fn field_known(&self, scope: &Scope, field: &str) -> bool {
-        if (scope.deferred && scope.columns.is_none()) || scope.extra.contains(field) {
+        if (scope.columns_unknown && scope.columns.is_none()) || scope.extra.contains(field) {
             return true;
         }
         scope.columns.as_ref().map_or_else(
-            || self.scope_field(scope, field).is_some() || scope.extra.contains(field),
+            || self.scope_field(scope, field).is_some(),
             |c| c.contains(field),
         )
     }
@@ -1472,13 +1848,14 @@ impl Parser<'_> {
         if self.field_known(scope, field) {
             return Ok(());
         }
-        let names: Vec<&str> = if let Some(columns) = &scope.columns {
-            columns.iter().map(String::as_str).collect()
+        let names: Vec<String> = if let Some(columns) = &scope.columns {
+            columns.iter().cloned().collect()
         } else {
             self.catalog
                 .unit(&scope.unit)
                 .into_iter()
-                .flat_map(|u| u.fields.iter().map(|f| f.name.as_str()))
+                .flat_map(|u| u.fields.iter().map(|f| f.name.clone()))
+                .chain(scope.extra.iter().cloned())
                 .collect()
         };
         let message = format!(
@@ -1491,21 +1868,23 @@ impl Parser<'_> {
             scope.unit,
             names.join(", ")
         );
-        let e = Error::new(ErrorKind::UnknownField, message, position);
-        Err(if let Some(fix) = closest(field, names.into_iter()) {
-            e.suggestion(self.replace(
-                Span {
-                    start: position,
-                    end: position + field.len(),
-                },
-                &fix,
-            ))
-        } else {
-            e
-        })
+        let token = Token {
+            text: field.into(),
+            quoted: false,
+            span: Span {
+                start: position,
+                end: position + field.len(),
+            },
+        };
+        Err(self.near_miss(
+            &token,
+            message,
+            ErrorKind::UnknownField,
+            names.iter().map(String::as_str).collect(),
+        ))
     }
-    fn normalize_operand_value(&self, scope: &Scope, operand: &Operand, value: &mut Value) {
-        if let Operand::Field { name } = operand {
+    fn normalize_expression_value(&self, scope: &Scope, left: &Expression, value: &mut Value) {
+        if let Expression::Field { name } = left {
             self.normalize_field_value(scope, name, value);
         }
     }
@@ -1564,7 +1943,9 @@ impl Parser<'_> {
                     elsewhere.join(", ")
                 ));
             }
-            return Err(Error::new(ErrorKind::BadValue, message, position));
+            return Err(
+                Error::new(ErrorKind::BadValue, message, position).candidates(spec.values.clone())
+            );
         }
         let valid = match spec.kind {
             FieldKind::Integer => crate::number::is_integer(text),
@@ -1582,17 +1963,50 @@ impl Parser<'_> {
             ))
         }
     }
-    fn check_operand_value(
+    fn check_expression_value(
         &self,
         scope: &Scope,
-        operand: &Operand,
+        left: &Expression,
         value: &Value,
         position: usize,
     ) -> Result<(), Error> {
-        if let Operand::Field { name } = operand {
-            self.check_value(scope, name, value, position)
-        } else {
+        if let Expression::Field { name } = left {
+            return self.check_value(scope, name, value, position);
+        }
+        let left_kind = self.expression_info(scope, left).field.kind;
+        let values = match value {
+            Value::Set { values } => values.as_slice(),
+            other => std::slice::from_ref(other),
+        };
+        for value in values {
+            if matches!(value, Value::Scalar { .. }) {
+                let right_kind =
+                    typing::operand_kind(&Expression::value(value.clone()), &left_kind);
+                self.check_comparable(&left_kind, &right_kind, position)?;
+            }
+        }
+        Ok(())
+    }
+    /// Refuse a comparison whose two sides have different dimensions:
+    /// `cost * 2 > 1h` compares money with a duration.
+    fn check_comparable(
+        &self,
+        left: &FieldKind,
+        right: &FieldKind,
+        position: usize,
+    ) -> Result<(), Error> {
+        if typing::comparable(left, right) {
             Ok(())
+        } else {
+            Err(Error::new(
+                ErrorKind::InvalidQuery,
+                format!(
+                    "cannot compare {} with {}",
+                    kind_name(left),
+                    kind_name(right)
+                ),
+                position,
+            ))
         }
     }
     fn saved_name(&mut self, raw: &str, position: usize) -> Result<String, Error> {
@@ -1610,34 +2024,6 @@ impl Parser<'_> {
             ));
         }
         Ok(name)
-    }
-    fn operand(&mut self, scope: &Scope) -> Result<Operand, Error> {
-        let t = self.name()?;
-        if self.take("(") {
-            let Some(name) = builtin(&t.text, crate::catalog::KEY_FUNCTIONS, t.span.start)? else {
-                return Err(Error::new(
-                    ErrorKind::InvalidQuery,
-                    format!("unknown key function `{}`", t.text),
-                    t.span.start,
-                ));
-            };
-            let mut arguments = Vec::new();
-            if !self.is(")") {
-                loop {
-                    arguments.push(self.operand(scope)?);
-                    if !self.take(",") {
-                        break;
-                    }
-                }
-            }
-            self.expect(")")?;
-            return Ok(Operand::Function {
-                name: name.into(),
-                arguments,
-            });
-        }
-        self.check_field(scope, &t.text, t.span.start)?;
-        Ok(Operand::field(t.text))
     }
     fn attachments(&mut self) -> Result<Vec<Attachment>, Error> {
         let mut attachments = Vec::new();
@@ -1706,352 +2092,300 @@ impl Parser<'_> {
         }
         Ok(attachments)
     }
-    fn stage(&mut self, scope: &mut Scope) -> Result<Stage, Error> {
+    fn transform(&mut self, scope: &mut Scope) -> Result<Transform, Error> {
         let start = self.pos();
         let t = self.name()?;
         let word = t.text.to_ascii_lowercase();
         let kind = match word.as_str() {
-            "where" => StageKind::Where {
-                condition: self.condition(scope)?,
-            },
+            "where" => {
+                let condition = self.condition(scope)?;
+                self.expose_order_match(scope, &condition);
+                TransformKind::Where { condition }
+            }
             "since" | "until" => {
-                self.at -= 1;
-                StageKind::Where {
-                    condition: self.condition(scope)?,
-                }
+                let error = Error::new(
+                    ErrorKind::InvalidQuery,
+                    "time bounds are conditions; write them after where",
+                    start,
+                );
+                // Suggest the joined bound only for a value that reads as a time.
+                return Err(
+                    match self.peek().filter(|next| {
+                        (next.quoted || !is_symbol(&next.text))
+                            && (next.text.starts_with('$')
+                                || crate::time::is_time_expression(&next.text))
+                    }) {
+                        Some(next) => {
+                            let bound = Span {
+                                start: t.span.start,
+                                end: next.span.end,
+                            };
+                            let value = &self.text[next.span.start..next.span.end];
+                            self.suggest(
+                                error,
+                                self.replace(bound, &format!("where {word}:{value}")),
+                            )
+                        }
+                        None => error,
+                    },
+                );
             }
             "sort" => {
-                self.take("by");
+                if !self.take("by") {
+                    return Err(Error::new(
+                        ErrorKind::InvalidQuery,
+                        "sort is written `sort by KEY`",
+                        start,
+                    )
+                    .suggestion(self.replace(t.span, &format!("{} by", t.text))));
+                }
                 let mut keys = Vec::new();
                 loop {
-                    let operand = if self.take("random") {
+                    let expression = if self.is("random") && !self.field_known(scope, "random") {
+                        self.at += 1;
                         let mut arguments = Vec::new();
                         if self.take("(") && !self.take(")") {
                             let n = self.number()?;
-                            arguments.push(Operand::field(n.to_string()));
+                            arguments.push(Expression::value(Value::scalar(n.to_string())));
                             self.expect(")")?;
                         }
-                        Operand::Function {
+                        Expression::Function {
                             name: "random".into(),
                             arguments,
                         }
-                    } else if self.take("rank") {
-                        Operand::field("rank")
+                    } else if self.is("rank") && !self.field_known(scope, "rank") {
+                        self.at += 1;
+                        Expression::field("rank")
                     } else {
-                        self.operand(scope)?
+                        self.expression(scope, Place::Condition)?
                     };
                     let descending = self.take("desc");
                     if !descending {
                         self.take("asc");
                     }
                     keys.push(SortKey {
-                        operand,
+                        expression,
                         descending,
                     });
                     if !self.take(",") {
                         break;
                     }
                 }
-                StageKind::Sort { keys }
+                TransformKind::Sort { keys }
             }
             "group" => {
                 self.expect("by")?;
                 let mut keys = Vec::new();
                 loop {
-                    keys.push(self.operand(scope)?);
+                    let expression = self.expression(scope, Place::Condition)?;
+                    let name = if self.take("as") {
+                        Some(self.name()?.text)
+                    } else {
+                        None
+                    };
+                    keys.push(Column { expression, name });
                     if !self.take(",") {
                         break;
                     }
                 }
                 let inputs: Vec<_> = keys
                     .iter()
-                    .map(|key| self.operand_info(scope, key))
+                    .map(|key| self.expression_info(scope, &key.expression))
                     .collect();
                 let rows = scope.clone();
                 Arc::make_mut(&mut scope.typed_extra).clear();
                 Arc::make_mut(&mut scope.origins).clear();
                 scope.extra.clear();
+                scope.columns = Some(BTreeSet::new());
                 for (index, (key, mut info)) in keys.iter().zip(inputs).enumerate() {
                     let input = info.clone();
                     info.field.name = key.column();
-                    Arc::make_mut(&mut scope.origins).insert(
-                        info.field.name.clone(),
-                        crate::scope::Origin::Group {
-                            operand: self.stage_path().field("keys").index(index),
+                    self.add_generated(
+                        scope,
+                        info.field,
+                        Origin::Group {
+                            operand: self.transform_path().field("keys").index(index),
                             input: Box::new(input),
                         },
                     );
-                    Arc::make_mut(&mut scope.typed_extra)
-                        .retain(|field| field.name != info.field.name);
-                    Arc::make_mut(&mut scope.typed_extra).push(info.field);
                 }
-                self.generated_field(
+                self.add_generated(
                     scope,
-                    "count",
-                    FieldKind::Integer,
-                    crate::scope::Origin::Aggregate {
-                        at: self.stage_path(),
+                    Field {
+                        name: "count".into(),
+                        kind: FieldKind::Integer,
+                        ..Field::default()
+                    },
+                    Origin::Aggregate {
+                        at: self.transform_path(),
                         function: AggregateFunction::Count,
                         inputs: Vec::new(),
                         rule: crate::scope::TypeRule::Fixed,
                     },
                 );
                 scope.group_input = Some(Arc::new(rows));
-                scope.bucketed = keys.iter().any(|key| matches!(key, Operand::Function { name, .. } if matches!(name.as_str(), "day" | "hour" | "week" | "month")));
-                scope.columns = Some(
-                    keys.iter()
-                        .map(Operand::column)
-                        .chain(std::iter::once("count".into()))
-                        .collect(),
-                );
-                StageKind::Group { keys }
+                scope.bucketed = keys.iter().any(|key| {
+                    matches!(&key.expression, Expression::Function { name, .. }
+                        if crate::catalog::TIME_BUCKETS.contains(&name.as_str()))
+                });
+                TransformKind::Group { keys }
             }
-            "agg" => {
-                let aggregates = self.aggregates(scope)?;
-                StageKind::Aggregate { aggregates }
-            }
-            "count" | "sum" | "avg" | "min" | "max" | "count_distinct" | "histogram" | "corr" => {
+            "agg" => TransformKind::Aggregate {
+                aggregates: self.aggregates(scope, false)?,
+            },
+            // `| count` is exactly `| agg count`.
+            "count" => {
                 self.at -= 1;
-                let aggregates = self.aggregates(scope)?;
-                StageKind::Aggregate { aggregates }
+                TransformKind::Aggregate {
+                    aggregates: self.aggregates(scope, true)?,
+                }
             }
-            "limit" => StageKind::Limit {
+            "limit" => TransformKind::Limit {
                 count: self.number()?,
             },
             "offset" => {
                 if self.query_end() && self.field_known(scope, &t.text) {
-                    return Err(Error::new(ErrorKind::InvalidQuery,"`offset` is a field and a stage; supply a stage count or quote it to search",t.span.start).suggestion(self.replace(t.span,"\"offset\"")));
+                    return Err(Error::new(
+                        ErrorKind::InvalidQuery,
+                        "`offset` is a field and a transform; supply a count or quote it to search",
+                        t.span.start,
+                    )
+                    .suggestion(self.replace(t.span, "\"offset\"")));
                 }
-                StageKind::Offset {
+                TransformKind::Offset {
                     count: self.number()?,
                 }
             }
-            "first" => StageKind::First {
+            "first" => TransformKind::First {
                 count: self.number()?,
             },
-            "distinct" => StageKind::Distinct,
+            "distinct" => TransformKind::Distinct,
             "matches" => {
-                let unit = self
-                    .catalog
-                    .unit(&scope.unit)
-                    .map(|unit| unit.name.as_str());
-                let request =
-                    crate::matches::request(unit, scope.match_patterns.as_deref(), start)?;
-                let output = request
-                    .as_ref()
-                    .and_then(|request| self.catalog.match_output(request))
-                    .cloned();
-                if let Some(request) = &request {
-                    self.required_matches.insert(request.clone());
-                }
-                *scope = Scope::new(
-                    output
-                        .as_ref()
-                        .and_then(|output| output.unit.clone())
-                        .unwrap_or_else(|| "$matches".into()),
-                );
-                scope.deferred = output.is_none();
-                scope.match_patterns = output.as_ref().map(|_| Vec::new());
-                if let Some(output) = output {
-                    let source = request.expect("a declared Matches output has its validated key");
-                    for field in &output.fields {
-                        Arc::make_mut(&mut scope.origins).insert(
-                            field.name.clone(),
-                            crate::scope::Origin::Matches {
-                                source: source.clone(),
-                            },
-                        );
-                    }
-                    scope.output = Some(Arc::new(output));
-                }
-                StageKind::Matches
+                self.matches(scope, start)?;
+                TransformKind::Matches
             }
             "fill" => {
                 if !scope.bucketed {
-                    return Err(self.error("fill follows a time-bucketed group by"));
+                    return Err(self.error("fill follows a group by a time bucket"));
                 }
-                scope.columns.as_mut().unwrap().insert("coverage".into());
-                self.generated_field(
+                self.add_generated(
                     scope,
-                    "coverage",
-                    FieldKind::Json,
-                    crate::scope::Origin::Generated,
+                    Field {
+                        name: crate::coverage::STATE_FIELD.into(),
+                        kind: FieldKind::Exact,
+                        values: crate::coverage::CoverageState::STATES
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect(),
+                        ..Field::default()
+                    },
+                    Origin::Generated,
                 );
-                StageKind::Fill
+                self.add_generated(
+                    scope,
+                    Field {
+                        name: crate::coverage::DETAIL_FIELD.into(),
+                        kind: FieldKind::Text,
+                        ..Field::default()
+                    },
+                    Origin::Generated,
+                );
+                TransformKind::Fill
             }
             "fields" => {
-                let mut fields = Vec::new();
+                let mut columns = Vec::new();
                 loop {
-                    let f = self.name()?;
-                    self.check_field(scope, &f.text, f.span.start)?;
-                    fields.push(f.text);
+                    let expression = self.expression(scope, Place::Column)?;
+                    let name = if self.take("as") {
+                        Some(self.name()?.text)
+                    } else {
+                        None
+                    };
+                    columns.push(Column { expression, name });
                     if !self.take(",") {
                         break;
                     }
                 }
-                scope.extra.retain(|name| fields.contains(name));
-                scope.columns = Some(fields.iter().cloned().collect());
-                StageKind::Fields { fields }
-            }
-            "measure" => {
-                let first = self.next()?;
-                let mut name = first.text;
-                if !first.quoted {
-                    while self.take(",") {
-                        let selector = self.next()?;
-                        if !selector.quoted && is_symbol(&selector.text) {
-                            return Err(Error::new(
-                                ErrorKind::InvalidQuery,
-                                "a measure selector needs a name after the comma",
-                                selector.span.start,
-                            ));
-                        }
-                        name.push(',');
-                        name.push_str(&selector.text);
+                let infos: Vec<_> = columns
+                    .iter()
+                    .map(|column| {
+                        let mut info = self.expression_info(scope, &column.expression);
+                        info.field.name = column.column();
+                        info
+                    })
+                    .collect();
+                let mut names = BTreeSet::new();
+                for info in &infos {
+                    if !names.insert(info.field.name.clone()) {
+                        return Err(Error::new(
+                            ErrorKind::InvalidQuery,
+                            format!("two columns are named `{}`", info.field.name),
+                            start,
+                        ));
                     }
                 }
-                let mut by = Vec::new();
-                if self.take("by") {
-                    loop {
-                        if self.peek().is_some_and(|t| {
-                            matches!(t.text.as_str(), "day" | "week" | "month")
-                                && !self.next_is(1, "(")
-                                && !self.field_known(scope, &t.text)
-                        }) {
-                            let bucket = self.next()?;
-                            let time = self.main_time(scope).ok_or_else(|| {
-                                self.error("period measure keys need the unit's main time")
-                            })?;
-                            by.push(Operand::Function {
-                                name: bucket.text,
-                                arguments: vec![Operand::field(time)],
-                            });
-                        } else {
-                            by.push(self.operand(scope)?);
-                        }
-                        if !self.take(",") {
-                            break;
-                        }
-                    }
-                }
-                StageKind::Measure { name, by }
+                *Arc::make_mut(&mut scope.typed_extra) =
+                    infos.iter().map(|info| info.field.clone()).collect();
+                *Arc::make_mut(&mut scope.origins) = infos
+                    .into_iter()
+                    .map(|info| (info.field.name, info.origin))
+                    .collect();
+                scope.extra.clear();
+                scope.columns = Some(names);
+                TransformKind::Fields { columns }
             }
             "union" | "intersect" | "except" | "fuse" => {
-                self.expect("(")?;
-                let query = Box::new(self.query_in(Some(scope))?);
-                self.expect(")")?;
-                StageKind::Combine {
-                    how: match word.as_str() {
-                        "union" => Combination::Union,
-                        "intersect" => Combination::Intersect,
-                        "except" => Combination::Except,
-                        _ => Combination::Fuse,
-                    },
-                    query,
+                let (query, inner) = self.query_in(scope)?;
+                let how = match word.as_str() {
+                    "union" => Combination::Union,
+                    "intersect" => Combination::Intersect,
+                    "except" => Combination::Except,
+                    _ => Combination::Fuse,
+                };
+                if how != Combination::Fuse {
+                    self.check_same_rows(scope, &inner, &word, start)?;
+                }
+                TransformKind::Combine {
+                    how,
+                    query: Box::new(query),
                 }
             }
-            "near" | "before" | "after" | "during" | "containing" => {
-                let all = self.take("all");
-                self.expect("(")?;
-                let query = Box::new(self.query_in(Some(scope))?);
-                self.expect(")")?;
-                let at = if self.take("at") {
-                    let point = self.next()?;
-                    match point.text.as_str() {
-                        "when" => TimePoint::When,
-                        "start" => TimePoint::Start,
-                        "end" => TimePoint::End,
-                        _ => {
-                            return Err(Error::new(
-                                ErrorKind::BadValue,
-                                "at takes when, start or end",
-                                point.span.start,
-                            ));
-                        }
-                    }
-                } else {
-                    TimePoint::When
-                };
-                let within = if matches!(word.as_str(), "near" | "before" | "after") {
-                    self.expect("within")?;
-                    Some(self.value()?)
-                } else {
-                    None
-                };
-                let number = scope
-                    .extra
-                    .iter()
-                    .filter(|name| {
-                        name.starts_with("near")
-                            || name.starts_with("during")
-                            || name.starts_with("containing")
-                    })
-                    .count()
-                    + 1;
-                let suffix = if number == 1 {
-                    String::new()
-                } else {
-                    format!("_{number}")
-                };
-                let base = match word.as_str() {
-                    "during" => "during",
-                    "containing" => "containing",
-                    _ => "near",
-                };
-                scope.extra.insert(format!("{base}{suffix}"));
-                self.generated_field(
+            "join" => self.join(scope, start)?,
+            "diff" => {
+                let (query, inner) = self.query_in(scope)?;
+                self.check_same_rows(scope, &inner, "diff", start)?;
+                self.add_generated(
                     scope,
-                    &format!("{base}{suffix}"),
-                    FieldKind::Reference,
-                    crate::scope::Origin::Temporal {
-                        output: crate::scope::TemporalOutput::Match,
-                        query: self.stage_path().field("query"),
-                        relation: match word.as_str() {
-                            "during" => TemporalRelation::During,
-                            "containing" => TemporalRelation::Containing,
-                            "before" => TemporalRelation::Before,
-                            "after" => TemporalRelation::After,
-                            _ => TemporalRelation::Near,
-                        },
-                        all,
+                    Field {
+                        name: "change".into(),
+                        kind: FieldKind::Exact,
+                        values: crate::diff::ChangeKind::NAMES
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect(),
+                        ..Field::default()
                     },
+                    Origin::Generated,
                 );
-                if base == "near" {
-                    scope.extra.insert(format!("offset{suffix}"));
-                    self.generated_field(
+                for name in ["old_rank", "new_rank"] {
+                    self.add_generated(
                         scope,
-                        &format!("offset{suffix}"),
-                        FieldKind::Duration,
-                        crate::scope::Origin::Temporal {
-                            output: crate::scope::TemporalOutput::Offset,
-                            query: self.stage_path().field("query"),
-                            relation: match word.as_str() {
-                                "before" => TemporalRelation::Before,
-                                "after" => TemporalRelation::After,
-                                _ => TemporalRelation::Near,
-                            },
-                            all,
+                        Field {
+                            name: name.into(),
+                            kind: FieldKind::Integer,
+                            ..Field::default()
                         },
+                        Origin::Generated,
                     );
                 }
-                StageKind::Temporal {
-                    relation: match word.as_str() {
-                        "near" => TemporalRelation::Near,
-                        "before" => TemporalRelation::Before,
-                        "after" => TemporalRelation::After,
-                        "during" => TemporalRelation::During,
-                        _ => TemporalRelation::Containing,
-                    },
-                    query,
-                    at,
-                    within,
-                    all,
+                TransformKind::Diff {
+                    query: Box::new(query),
                 }
             }
             "as" => {
                 self.expect("of")?;
                 let sequence = self.take("seq");
-                StageKind::AsOf {
+                TransformKind::AsOf {
                     value: self.value()?,
                     sequence,
                 }
@@ -2062,41 +2396,78 @@ impl Parser<'_> {
                     .extensions
                     .iter()
                     .find(|e| {
-                        e.position == ExtensionPosition::Stage
+                        e.position == ExtensionPosition::Transform
                             && e.name.eq_ignore_ascii_case(&t.text)
                     })
                     .cloned()
                 {
                     let arguments = self.extension_arguments(scope, &extension.arguments)?;
-                    StageKind::Extension {
+                    TransformKind::Extension {
                         name: extension.name,
                         arguments,
                     }
-                } else {
-                    let Some(unit) = self.catalog.unit(&t.text) else {
-                        return Err(self.unknown_unit(&t));
-                    };
+                } else if let Some(unit) = self.catalog.unit(&t.text) {
                     *scope = Scope::new(unit.name.clone());
                     let condition = if self.take("where") {
                         Some(self.condition(scope)?)
                     } else {
                         None
                     };
-                    scope.match_patterns = Some(crate::matches::patterns(condition.as_ref()));
-                    StageKind::Scope {
+                    scope.patterns = Some(patterns(condition.as_ref()));
+                    if let Some(condition) = &condition {
+                        self.expose_order_match(scope, condition);
+                    }
+                    TransformKind::Scope {
                         unit: scope.unit.clone(),
                         condition,
                     }
+                } else if AggregateFunction::parse(t.text.split(':').next().unwrap_or("")).is_some()
+                {
+                    return Err(Error::new(
+                        ErrorKind::InvalidQuery,
+                        "aggregates follow agg",
+                        start,
+                    )
+                    .suggestion(self.replace(t.span, &format!("agg {}", t.text))));
+                } else {
+                    let names: Vec<&str> = crate::catalog::TRANSFORMS
+                        .iter()
+                        .map(|transform| transform.name)
+                        .chain(self.catalog.units.iter().map(|u| u.name.as_str()))
+                        .chain(
+                            self.catalog
+                                .extensions
+                                .iter()
+                                .filter(|e| e.position == ExtensionPosition::Transform)
+                                .map(|e| e.name.as_str()),
+                        )
+                        .collect();
+                    return Err(self.near_miss(
+                        &t,
+                        format!("`{}` is not a transform or a unit", t.text),
+                        ErrorKind::InvalidQuery,
+                        names,
+                    ));
                 }
             }
         };
-        if crate::matches::invalidates(&kind) {
-            scope.match_patterns = Some(Vec::new());
+        if matches!(
+            kind,
+            TransformKind::Group { .. }
+                | TransformKind::Aggregate { .. }
+                | TransformKind::Fields { .. }
+                | TransformKind::Join { .. }
+                | TransformKind::Diff { .. }
+        ) {
+            scope.patterns = Some(Vec::new());
         }
-        if !matches!(kind, StageKind::Group { .. } | StageKind::Aggregate { .. }) {
+        if !matches!(
+            kind,
+            TransformKind::Group { .. } | TransformKind::Aggregate { .. }
+        ) {
             scope.group_input = None;
         }
-        Ok(Stage {
+        Ok(Transform {
             span: Span {
                 start,
                 end: self.end(),
@@ -2104,7 +2475,142 @@ impl Parser<'_> {
             kind,
         })
     }
-    fn aggregates(&mut self, scope: &mut Scope) -> Result<Vec<Aggregate>, Error> {
+    /// Set algebra and diff need rows of one unit, or identical projected columns.
+    fn check_same_rows(
+        &self,
+        outer: &Scope,
+        inner: &Scope,
+        word: &str,
+        at: usize,
+    ) -> Result<(), Error> {
+        if outer.columns_unknown || inner.columns_unknown {
+            return Ok(());
+        }
+        let same = match (&outer.columns, &inner.columns) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => {
+                self.catalog.unit(&outer.unit).map(|u| &u.name)
+                    == self.catalog.unit(&inner.unit).map(|u| &u.name)
+            }
+            _ => false,
+        };
+        if same {
+            return Ok(());
+        }
+        Err(Error::new(
+            ErrorKind::InvalidQuery,
+            format!(
+                "{word} needs rows of one unit or the same projected fields; project both sides with `| fields …`"
+            ),
+            at,
+        ))
+    }
+    fn join(&mut self, scope: &mut Scope, start: usize) -> Result<TransformKind, Error> {
+        if self.is("(") {
+            let (query, inner) = self.query_in(scope)?;
+            self.expect("on")?;
+            let left = self.name()?;
+            self.check_field(scope, &left.text, left.span.start)?;
+            self.expect("=")?;
+            let right = self.name()?;
+            self.check_field(&inner, &right.text, right.span.start)?;
+            self.expose_inner(scope, &inner, None);
+            return Ok(TransformKind::Join {
+                query: Box::new(query),
+                on: JoinOn::Key {
+                    left: left.text,
+                    right: right.text,
+                },
+            });
+        }
+        let word = self.name()?;
+        let Some(relation) = OrderRelation::parse(&word.text) else {
+            return Err(Error::new(
+                ErrorKind::InvalidQuery,
+                "join takes an order relation (near, before, after, during, containing) or `(QUERY) on F = G`",
+                word.span.start,
+            ));
+        };
+        let (query, inner) = self.query_in(scope)?;
+        let (within, at, order_scope) = self.order_options(relation, scope, &inner, start)?;
+        self.expose_inner(scope, &inner, within.as_ref());
+        Ok(TransformKind::Join {
+            query: Box::new(query),
+            on: JoinOn::Order {
+                relation,
+                within,
+                at,
+                scope: order_scope,
+            },
+        })
+    }
+    /// One row per step of each match: `parent`, `match`, `position`, `step`,
+    /// and the step row's fields as `step.F`.
+    fn matches(&mut self, scope: &mut Scope, start: usize) -> Result<(), Error> {
+        let Some(patterns) = scope.patterns.clone() else {
+            return Err(Error::new(
+                ErrorKind::InvalidQuery,
+                "matches expands an exists or seq written in this query; a saved or kept source hides its own",
+                start,
+            ));
+        };
+        let unit = match patterns.as_slice() {
+            [unit] => unit.clone(),
+            [] => {
+                return Err(Error::new(
+                    ErrorKind::InvalidQuery,
+                    "matches needs one top-level exists or seq",
+                    start,
+                ));
+            }
+            _ => {
+                return Err(Error::new(
+                    ErrorKind::Ambiguous,
+                    format!(
+                        "matches needs exactly one top-level exists or seq; this relation has {}",
+                        patterns.len()
+                    ),
+                    start,
+                ));
+            }
+        };
+        let parent = scope.unit.clone();
+        let step_fields: Vec<Field> = self
+            .catalog
+            .unit(&unit)
+            .map(|u| u.fields.clone())
+            .unwrap_or_default();
+        *scope = Scope::new("$matches".into());
+        scope.columns = Some(BTreeSet::new());
+        for (name, kind, unit) in [
+            ("parent", FieldKind::Reference, Some(parent)),
+            ("match", FieldKind::Integer, None),
+            ("position", FieldKind::Integer, None),
+            ("step", FieldKind::Reference, Some(unit.clone())),
+        ] {
+            self.add_generated(
+                scope,
+                Field {
+                    name: name.into(),
+                    kind,
+                    unit,
+                    ..Field::default()
+                },
+                Origin::Generated,
+            );
+        }
+        for mut field in step_fields {
+            let origin = Origin::Catalog {
+                unit: unit.clone(),
+                field: field.name.clone(),
+            };
+            field.name = format!("step.{}", field.name);
+            self.add_generated(scope, field, origin);
+        }
+        Ok(())
+    }
+    /// `agg A, …`; `single` reads the one aggregate of `| count`.
+    fn aggregates(&mut self, scope: &mut Scope, single: bool) -> Result<Vec<Aggregate>, Error> {
         let mut aggregates = Vec::new();
         let grouped = scope.group_input.is_some();
         let rows = scope
@@ -2120,95 +2626,107 @@ impl Parser<'_> {
         }
         loop {
             let t = self.name()?;
-            let (name, field) = t
-                .text
-                .split_once(':')
-                .map_or((t.text.as_str(), None), |(a, b)| (a, Some(b)));
-            let function = match name.to_ascii_lowercase().as_str() {
-                "count" => AggregateFunction::Count,
-                "sum" => AggregateFunction::Sum,
-                "avg" => AggregateFunction::Avg,
-                "min" => AggregateFunction::Min,
-                "max" => AggregateFunction::Max,
-                "count_distinct" => AggregateFunction::CountDistinct,
-                "histogram" => AggregateFunction::Histogram,
-                "corr" => AggregateFunction::Correlation,
-                n if n.starts_with('p') => {
-                    let p = n[1..]
-                        .parse::<u8>()
-                        .ok()
-                        .filter(|p| *p <= 100)
-                        .ok_or_else(|| {
-                            Error::new(
-                                ErrorKind::BadValue,
-                                "percentile must be p0 through p100",
-                                t.span.start,
-                            )
-                        })?;
-                    AggregateFunction::Percentile(p)
+            if let Some((name, field)) = t.text.split_once(':')
+                && AggregateFunction::parse(name).is_some()
+            {
+                let mut error = Error::new(
+                    ErrorKind::InvalidQuery,
+                    "aggregates are written as functions: sum(cost)",
+                    t.span.start,
+                );
+                if !field.is_empty() {
+                    error = error.suggestion(self.replace(t.span, &format!("{name}({field})")));
                 }
-                _ => {
+                return Err(error);
+            }
+            let function = AggregateFunction::parse(&t.text).ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidQuery,
+                    format!("`{}` is not an aggregate", t.text),
+                    t.span.start,
+                )
+                .candidates(
+                    crate::catalog::AGGREGATES
+                        .iter()
+                        .map(|a| a.to_string())
+                        .collect(),
+                )
+            })?;
+            let mut arguments = Vec::new();
+            if self.take("(") {
+                if !self.is(")") {
+                    loop {
+                        arguments.push(self.expression(&rows, Place::Column)?);
+                        if !self.take(",") {
+                            break;
+                        }
+                    }
+                }
+                self.expect(")")?;
+            }
+            if !function.arguments().contains(&arguments.len()) {
+                let range = function.arguments();
+                return Err(Error::new(
+                    ErrorKind::BadValue,
+                    format!(
+                        "`{}` takes {} argument{}",
+                        function.name(),
+                        range.end(),
+                        if *range.end() == 1 { "" } else { "s" }
+                    ),
+                    t.span.start,
+                ));
+            }
+            if function == AggregateFunction::Covered {
+                let kinds: Vec<_> = arguments
+                    .iter()
+                    .map(|a| self.expression_info(&rows, a).field.kind)
+                    .collect();
+                let interval = |k: &FieldKind| {
+                    matches!(
+                        k,
+                        FieldKind::Time
+                            | FieldKind::Integer
+                            | FieldKind::Number
+                            | FieldKind::Duration
+                            | FieldKind::Json
+                    )
+                };
+                if kinds[0] != kinds[1] || !interval(&kinds[0]) {
                     return Err(Error::new(
                         ErrorKind::InvalidQuery,
-                        "expected an aggregate function",
+                        "covered takes a start and an end of one time or number kind",
                         t.span.start,
                     ));
                 }
+            }
+            let name = if self.take("as") {
+                Some(self.name()?.text)
+            } else {
+                None
             };
-            let mut fields = Vec::new();
-            let parenthesis = self.take("(");
-            if let Some(field) = field {
-                if field.is_empty() {
-                    fields.push(self.name()?.text);
-                } else {
-                    fields.push(field.into());
-                }
-            } else if parenthesis {
-                fields.push(self.name()?.text);
-            } else if function != AggregateFunction::Count {
-                return Err(self.error("aggregate needs a field"));
-            }
-            if function == AggregateFunction::Correlation {
-                self.expect(",")?;
-                fields.push(self.name()?.text);
-            }
-            if parenthesis {
-                self.expect(")")?;
-            }
-            // Aggregate operands read the actual entering group rows, including
-            // outputs of earlier groups, rather than reopening the unit catalog.
-            for f in &fields {
-                self.check_field(&rows, f, t.span.start)?;
-            }
-            let aggregate = Aggregate { function, fields };
+            let aggregate = Aggregate {
+                function,
+                arguments,
+                name,
+            };
             let inputs = aggregate
-                .fields
+                .arguments
                 .iter()
-                .map(|name| self.field_info(&rows, name))
+                .map(|argument| self.expression_info(&rows, argument))
                 .collect();
             let info = self.aggregate_info(
                 &aggregate,
                 inputs,
-                self.stage_path()
+                self.transform_path()
                     .field("aggregates")
                     .index(aggregates.len()),
             );
-            Arc::make_mut(&mut scope.origins).insert(info.field.name.clone(), info.origin);
-            Arc::make_mut(&mut scope.typed_extra).retain(|f| f.name != info.field.name);
-            Arc::make_mut(&mut scope.typed_extra).push(info.field);
-            if let Some(columns) = &mut scope.columns {
-                columns.insert(aggregate.column());
-            } else {
-                scope.columns = Some(std::iter::once(aggregate.column()).collect());
-            }
+            self.add_generated(scope, info.field, info.origin);
             aggregates.push(aggregate);
-            if self.take(",") {
-                continue;
+            if single || !self.take(",") {
+                break;
             }
-            if self.catalog.unpiped_stages && self.peek().is_some_and(|t| is_aggregate(&t.text)) {
-                continue;
-            }
-            break;
         }
         Ok(aggregates)
     }
@@ -2219,45 +2737,240 @@ impl Parser<'_> {
     ) -> Result<Vec<ExtensionArgument>, Error> {
         let mut arguments = Vec::new();
         for slot in slots {
-            arguments.push(match slot {
-                ExtensionSlot::Keyword(word) => {
-                    self.expect(word)?;
-                    ExtensionArgument::Keyword(word.clone())
-                }
-                ExtensionSlot::Value => ExtensionArgument::Value(self.value()?),
-                ExtensionSlot::Name => ExtensionArgument::Name(self.name()?.text),
-                ExtensionSlot::Optional(slots) => {
-                    let checkpoint = self.at;
-                    match self.extension_arguments(scope, slots) {
-                        Ok(arguments) => ExtensionArgument::Optional(arguments),
-                        Err(_) => {
-                            self.at = checkpoint;
-                            ExtensionArgument::Optional(Vec::new())
-                        }
-                    }
-                }
-                ExtensionSlot::Field => {
-                    let t = self.name()?;
-                    self.check_field(scope, &t.text, t.span.start)?;
-                    ExtensionArgument::Field(t.text)
-                }
-                ExtensionSlot::Unit => ExtensionArgument::Unit(self.unit_name()?),
-                ExtensionSlot::Condition => {
-                    self.expect("(")?;
-                    let condition = self.condition(scope)?;
-                    self.expect(")")?;
-                    ExtensionArgument::Condition(Box::new(condition))
-                }
-                ExtensionSlot::Query => {
-                    self.expect("(")?;
-                    let query = self.query_in(Some(scope))?;
-                    self.expect(")")?;
-                    ExtensionArgument::Query(Box::new(query))
-                }
-            });
+            arguments.push(self.extension_argument(scope, slot)?);
         }
         Ok(arguments)
     }
+    fn extension_argument(
+        &mut self,
+        scope: &Scope,
+        slot: &ExtensionSlot,
+    ) -> Result<ExtensionArgument, Error> {
+        Ok(match slot {
+            ExtensionSlot::Keyword(word) => {
+                self.expect(word)?;
+                ExtensionArgument::Keyword(word.clone())
+            }
+            ExtensionSlot::Value => ExtensionArgument::Value(self.value()?),
+            ExtensionSlot::Name => ExtensionArgument::Name(self.name()?.text),
+            ExtensionSlot::Optional(slots) => {
+                // A failed optional part leaves no trace: position, captured
+                // scopes and open queries return to the checkpoint.
+                let checkpoint = (
+                    self.at,
+                    self.captures.len(),
+                    self.query_stack.len(),
+                    self.inner_scopes.clone(),
+                );
+                match self.extension_arguments(scope, slots) {
+                    Ok(arguments) => ExtensionArgument::Optional(arguments),
+                    Err(_) => {
+                        self.at = checkpoint.0;
+                        self.captures.truncate(checkpoint.1);
+                        self.query_stack.truncate(checkpoint.2);
+                        self.inner_scopes = checkpoint.3;
+                        ExtensionArgument::Optional(Vec::new())
+                    }
+                }
+            }
+            ExtensionSlot::Field => {
+                let t = self.name()?;
+                self.check_field(scope, &t.text, t.span.start)?;
+                ExtensionArgument::Field(t.text)
+            }
+            ExtensionSlot::Unit => ExtensionArgument::Unit(self.unit_name()?),
+            ExtensionSlot::Condition => {
+                self.expect("(")?;
+                let condition = self.condition(scope)?;
+                self.expect(")")?;
+                ExtensionArgument::Condition(Box::new(condition))
+            }
+            ExtensionSlot::Query => {
+                let (query, _) = self.query_in(scope)?;
+                ExtensionArgument::Query(Box::new(query))
+            }
+            ExtensionSlot::Expression => {
+                ExtensionArgument::Expression(self.expression(scope, Place::Column)?)
+            }
+            ExtensionSlot::List(slot) => {
+                let mut items = vec![self.extension_argument(scope, slot)?];
+                while self.take(",") {
+                    items.push(self.extension_argument(scope, slot)?);
+                }
+                ExtensionArgument::List(items)
+            }
+        })
+    }
+}
+/// Visit the operands of a condition's top-level AND.
+fn top_level<'a>(condition: &'a Condition, visit: &mut impl FnMut(&'a Condition)) {
+    match &condition.kind {
+        ConditionKind::And { conditions } => {
+            for c in conditions {
+                top_level(c, visit);
+            }
+        }
+        _ => visit(condition),
+    }
+}
+/// The step units of a condition's top-level `exists` and `seq` patterns.
+fn patterns(condition: Option<&Condition>) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(condition) = condition {
+        top_level(condition, &mut |c| match &c.kind {
+            ConditionKind::Exists { unit, .. } | ConditionKind::Sequence { unit, .. } => {
+                out.push(unit.clone())
+            }
+            _ => {}
+        });
+    }
+    out
+}
+/// A ranking atom orders the whole relation, so it stands only in a top-level
+/// AND of a query's conditions; under OR or NOT, or inside `exists`, `count`
+/// or `seq`, it is refused.
+fn check_ranking(query: &Query, text: &str) -> Result<(), Error> {
+    /// Where a condition stands: `None` is a top-level AND position; otherwise
+    /// why a ranking atom cannot stand there, and the OR it is a direct
+    /// operand of when that OR is itself in a top-level position.
+    #[derive(Clone, Copy)]
+    struct Place<'a> {
+        refused: Option<&'static str>,
+        top_or: Option<&'a Condition>,
+    }
+    const TOP: Place<'static> = Place {
+        refused: None,
+        top_or: None,
+    };
+    fn nested(why: &'static str) -> Place<'static> {
+        Place {
+            refused: Some(why),
+            top_or: None,
+        }
+    }
+    fn condition(c: &Condition, place: Place<'_>, text: &str) -> Result<(), Error> {
+        match &c.kind {
+            ConditionKind::And { conditions } => {
+                let inner = Place {
+                    top_or: None,
+                    ..place
+                };
+                for child in conditions {
+                    condition(child, inner, text)?;
+                }
+            }
+            ConditionKind::Or { conditions } => {
+                let inner = Place {
+                    refused: Some(place.refused.unwrap_or("under OR")),
+                    top_or: place.refused.is_none().then_some(c),
+                };
+                for child in conditions {
+                    condition(child, inner, text)?;
+                }
+            }
+            ConditionKind::Not { condition: inner } => condition(inner, nested("under NOT"), text)?,
+            ConditionKind::Rank { list, .. } if place.refused.is_some() => {
+                let mut error = Error::new(
+                    ErrorKind::InvalidQuery,
+                    format!(
+                        "{}: ranks the whole query and cannot sit {}",
+                        list.name(),
+                        place.refused.unwrap_or_default()
+                    ),
+                    c.span.start,
+                )
+                .length(c.span.end - c.span.start);
+                if let Some(or) = place.top_or
+                    && let ConditionKind::Or { conditions } = &or.kind
+                {
+                    let rest: Vec<&str> = conditions
+                        .iter()
+                        .filter(|other| other.span != c.span)
+                        .map(|other| &text[other.span.start..other.span.end])
+                        .collect();
+                    let rest = if rest.len() == 1 {
+                        rest[0].to_string()
+                    } else {
+                        format!("({})", rest.join(" OR "))
+                    };
+                    error = error.suggestion(format!(
+                        "{}{rest} {}{}",
+                        &text[..or.span.start],
+                        &text[c.span.start..c.span.end],
+                        &text[or.span.end..]
+                    ));
+                }
+                return Err(error);
+            }
+            ConditionKind::Exists {
+                condition: Some(inner),
+                ..
+            }
+            | ConditionKind::Count {
+                condition: Some(inner),
+                ..
+            } => condition(inner, nested("inside a related-row condition"), text)?,
+            ConditionKind::Sequence { steps, .. } => {
+                for step in steps {
+                    condition(step, nested("inside a sequence"), text)?;
+                }
+            }
+            ConditionKind::In { query, .. } | ConditionKind::Order { query, .. } => {
+                check_ranking(query, text)?
+            }
+            ConditionKind::Extension { arguments, .. } => arguments_check(arguments, text)?,
+            _ => {}
+        }
+        Ok(())
+    }
+    fn arguments_check(arguments: &[ExtensionArgument], text: &str) -> Result<(), Error> {
+        for argument in arguments {
+            match argument {
+                ExtensionArgument::Condition(c) => {
+                    condition(c, nested("inside an extension"), text)?
+                }
+                ExtensionArgument::Query(q) => check_ranking(q, text)?,
+                ExtensionArgument::Optional(a) | ExtensionArgument::List(a) => {
+                    arguments_check(a, text)?
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    match &query.source {
+        Source::Unit {
+            condition: Some(c), ..
+        }
+        | Source::Saved {
+            condition: Some(c), ..
+        }
+        | Source::Result {
+            condition: Some(c), ..
+        } => condition(c, TOP, text)?,
+        _ => {}
+    }
+    for attachment in &query.attach {
+        for window in &attachment.windows {
+            if let Window::Where(c) = window {
+                condition(c, nested("inside an attachment window"), text)?;
+            }
+        }
+    }
+    for transform in &query.transforms {
+        match &transform.kind {
+            TransformKind::Where { condition: c }
+            | TransformKind::Scope {
+                condition: Some(c), ..
+            } => condition(c, TOP, text)?,
+            TransformKind::Combine { query, .. }
+            | TransformKind::Join { query, .. }
+            | TransformKind::Diff { query } => check_ranking(query, text)?,
+            TransformKind::Extension { arguments, .. } => arguments_check(arguments, text)?,
+            _ => {}
+        }
+    }
+    Ok(())
 }
 fn join_conditions(mut conditions: Vec<Condition>, and: bool) -> Condition {
     if conditions.len() == 1 {
@@ -2278,11 +2991,11 @@ fn join_conditions(mut conditions: Vec<Condition>, and: bool) -> Condition {
 }
 fn value_token(text: &str, quoted: bool) -> Value {
     if !quoted {
-        if text == "*" {
-            return Value::Any;
-        }
-        if text == "unknown" {
-            return Value::Unknown;
+        match text {
+            "*" => return Value::Any,
+            "unknown" => return Value::Unknown,
+            "known" => return Value::Known,
+            _ => {}
         }
         if let Some(name) = text.strip_prefix('$') {
             return Value::Parameter { name: name.into() };
@@ -2300,6 +3013,7 @@ fn value_surface(value: &Value) -> String {
         }
         Value::Scalar { text, .. } => text.clone(),
         Value::Unknown => "unknown".into(),
+        Value::Known => "known".into(),
         Value::Any => "*".into(),
         Value::Parameter { name } => format!("${name}"),
         Value::Set { values } => format!(
@@ -2323,61 +3037,54 @@ fn is_clock(text: &str) -> bool {
         && text.as_bytes().get(2) == Some(&b':')
         && text[..2].chars().all(|c| c.is_ascii_digit())
 }
-fn builtin<'a>(
-    name: &str,
-    declarations: &'a [&str],
-    position: usize,
-) -> Result<Option<&'a str>, Error> {
-    let mut matches = declarations
-        .iter()
-        .copied()
-        .filter(|value| value.eq_ignore_ascii_case(name));
-    let found = matches.next();
-    if matches.next().is_some() {
-        return Err(Error::new(
-            ErrorKind::Ambiguous,
-            format!("ambiguous builtin declaration `{name}`"),
-            position,
-        ));
+/// A literal a column or aggregate argument may hold unquoted: a number, a
+/// duration or an amount of money.
+pub(crate) fn is_literal(text: &str) -> bool {
+    crate::number::is_decimal(text) || is_duration(text) || is_money(text)
+}
+pub(crate) fn is_money(text: &str) -> bool {
+    let digits = text
+        .strip_suffix("usd")
+        .or_else(|| text.strip_prefix('$'))
+        .unwrap_or("");
+    !digits.is_empty() && crate::number::is_decimal(digits)
+}
+fn kind_name(kind: &FieldKind) -> String {
+    match kind {
+        FieldKind::List(inner) => format!("a list of {}", kind_name(inner)),
+        FieldKind::Integer | FieldKind::Number => "a number".into(),
+        FieldKind::Money => "money".into(),
+        FieldKind::Time => "a time".into(),
+        FieldKind::Duration => "a duration".into(),
+        FieldKind::Bool => "a boolean".into(),
+        FieldKind::Reference => "a reference".into(),
+        FieldKind::Json => "a document".into(),
+        _ => "text".into(),
     }
-    Ok(found)
 }
-#[cfg(test)]
-mod tests;
-
-fn is_aggregate(text: &str) -> bool {
-    let name = text.split(':').next().unwrap_or(text);
-    crate::catalog::AGGREGATES.contains(&name)
-        || name
-            .strip_prefix('p')
-            .is_some_and(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
-}
-fn is_reference(text: &str) -> bool {
-    text.starts_with("https://")
-        || text.starts_with("http://")
-        || text.starts_with("sinex:")
-        || text.starts_with("polylogue:")
-        || text.starts_with('@')
-        || matches!(text, "self" | "last" | "latest")
-        || (text.len() >= 12 && text.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
-}
-/// The shared command-word policy; transposition counts as one typing mistake.
-pub(crate) fn closest<'a>(word: &str, candidates: impl Iterator<Item = &'a str>) -> Option<String> {
+/// Known names within two typing mistakes of an unknown one, nearest first.
+/// Transposition counts as one mistake; words under four letters never match.
+pub(crate) fn closest<'a>(word: &str, candidates: impl Iterator<Item = &'a str>) -> Vec<String> {
     let length = word.chars().count();
     let bound = if length < 4 {
-        return None;
+        return Vec::new();
     } else if length <= 6 {
         1
     } else {
         2
     };
-    candidates
+    let mut found: Vec<(usize, &str)> = candidates
         .filter_map(|candidate| {
             let distance = distance(&word.to_lowercase(), &candidate.to_lowercase());
             (distance <= bound).then_some((distance, candidate))
         })
-        .min_by(|a, b| a.cmp(b))
+        .collect();
+    found.sort();
+    found.dedup();
+    found
+        .into_iter()
         .map(|(_, word)| word.to_string())
+        .collect()
 }
 fn distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
@@ -2400,7 +3107,7 @@ fn distance(a: &str, b: &str) -> usize {
     previous[b.len()]
 }
 
-fn is_duration(text: &str) -> bool {
+pub(crate) fn is_duration(text: &str) -> bool {
     let at = text.find(|c: char| !c.is_ascii_digit() && c != '.');
     at.is_some_and(|at| {
         at > 0
@@ -2408,3 +3115,5 @@ fn is_duration(text: &str) -> bool {
             && text[..at].parse::<f64>().is_ok()
     })
 }
+#[cfg(test)]
+mod tests;

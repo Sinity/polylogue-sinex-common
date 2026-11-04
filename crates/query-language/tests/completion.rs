@@ -7,7 +7,7 @@ fn values(text: &str, c: &query_language::catalog::Catalog) -> Vec<String> {
         .collect()
 }
 #[test]
-fn units_fields_values_stages_and_operators() {
+fn units_fields_values_transforms_and_operators() {
     let c = support::sinex();
     assert!(values("comm", &c).contains(&"commands".into()));
     assert!(values("commands where exit_c", &c).contains(&"exit_code".into()));
@@ -18,7 +18,7 @@ fn units_fields_values_stages_and_operators() {
 #[test]
 fn grouped_completion_uses_output_columns() {
     let c = support::polylogue();
-    let text = "tool_calls | group by tool | agg count, sum:duration | where ";
+    let text = "tool_calls | group by tool | agg count, sum(duration) | where ";
     let got = values(text, &c);
     assert!(got.contains(&"count".into()), "{got:?}");
     assert!(got.contains(&"sum_duration".into()));
@@ -27,7 +27,7 @@ fn grouped_completion_uses_output_columns() {
 #[test]
 fn nested_completion_binds_inner_unit() {
     let c = support::polylogue();
-    let got = values("sessions where exists tool_call(", &c);
+    let got = values("sessions where exists tool_calls(", &c);
     assert!(got.contains(&"outcome".into()), "{got:?}");
     let got = values("sessions where id in (messages where ", &c);
     assert!(got.contains(&"role".into()), "{got:?}");
@@ -51,14 +51,14 @@ fn closed_set_values_complete_inside_alternatives() {
 }
 
 #[test]
-fn completion_shares_every_declared_stage() {
+fn completion_shares_every_declared_transform() {
     let c = support::polylogue();
     let got = values("sessions | ", &c);
-    for stage in query_language::catalog::STAGES {
+    for transform in query_language::catalog::TRANSFORMS {
         assert!(
-            got.contains(&stage.completion.to_string()),
+            got.contains(&transform.completion.to_string()),
             "{}",
-            stage.name
+            transform.name
         );
     }
     assert!(values("sessions | group by origin | fi", &c).contains(&"first".into()));
@@ -123,7 +123,7 @@ fn closed_set_literal_completion_preserves_reserved_words_and_query_punctuation(
 #[test]
 fn closed_literal_completion_respects_custom_unknown_words_and_calendar_keywords() {
     use query_language::{
-        ast::{ConditionKind, Source, Value},
+        ast::{ConditionKind, Expression, Source, Value},
         catalog::UnknownRule,
         parse::parse,
     };
@@ -141,8 +141,8 @@ fn closed_literal_completion_respects_custom_unknown_words_and_calendar_keywords
     field.unknown = UnknownRule::Word("missing".into());
     for (prefix, tail, literal) in [
         ("runs where status:m", "", "missing"),
-        ("runs where status = l", " sort started", "last"),
-        ("runs where status = t", " sort started", "this"),
+        ("runs where status = l", " | sort by started", "last"),
+        ("runs where status = t", " | sort by started", "this"),
     ] {
         let text = format!("{prefix}{tail}");
         let completion = complete(&text, prefix.len(), &catalog)
@@ -163,7 +163,11 @@ fn closed_literal_completion_respects_custom_unknown_words_and_calendar_keywords
             panic!("unit condition")
         };
         let value = match condition.kind {
-            ConditionKind::Match { value, .. } | ConditionKind::Compare { value, .. } => value,
+            ConditionKind::Match { value, .. }
+            | ConditionKind::Compare {
+                right: Expression::Value { value },
+                ..
+            } => value,
             _ => panic!("scalar comparison"),
         };
         assert!(matches!(value,Value::Scalar{text,..} if text==literal));
@@ -173,7 +177,7 @@ fn closed_literal_completion_respects_custom_unknown_words_and_calendar_keywords
 #[test]
 fn declared_values_complete_inside_open_quotes_with_escaped_replacements() {
     use query_language::{
-        ast::{ConditionKind, Source, Value},
+        ast::{ConditionKind, Expression, Source, Value},
         parse::parse,
     };
     for (mut catalog, unit, field) in [
@@ -220,7 +224,11 @@ fn declared_values_complete_inside_open_quotes_with_escaped_replacements() {
                 panic!("missing condition")
             };
             let value = match condition.kind {
-                ConditionKind::Match { value, .. } | ConditionKind::Compare { value, .. } => value,
+                ConditionKind::Match { value, .. }
+                | ConditionKind::Compare {
+                    right: Expression::Value { value },
+                    ..
+                } => value,
                 other => panic!("{other:?}"),
             };
             assert_eq!(
@@ -272,7 +280,7 @@ fn grouped_completion_includes_implicit_count_before_explicit_aggregation() {
 #[test]
 fn saved_output_completion_uses_typed_snapshot_fields_and_every_value_path() {
     use query_language::{
-        ast::OutputBinding,
+        ast::SourceColumns,
         catalog::{Field, FieldKind, OutputSchema, OutputSource, SourceOutput},
         complete::CompletionKind,
         parse::parse,
@@ -292,7 +300,6 @@ fn saved_output_completion_uses_typed_snapshot_fields_and_every_value_path() {
             ..Field::default()
         });
         catalog.source_outputs.push(SourceOutput {
-            relation_scope: None,
             source: OutputSource::Saved {
                 name: "failing".into(),
                 arguments: vec![],
@@ -309,7 +316,7 @@ fn saved_output_completion_uses_typed_snapshot_fields_and_every_value_path() {
                     },
                     Field {
                         name: "outcome".into(),
-                        kind: FieldKind::Match,
+                        kind: FieldKind::Exact,
                         values: vec![
                             "error".into(),
                             "error with spaces".into(),
@@ -324,7 +331,6 @@ fn saved_output_completion_uses_typed_snapshot_fields_and_every_value_path() {
                         ..Field::default()
                     },
                 ],
-                match_patterns: Vec::new(),
             },
         });
         let fields: Vec<_> = complete("query:failing | where ", 22, &catalog)
@@ -370,7 +376,7 @@ fn saved_output_completion_uses_typed_snapshot_fields_and_every_value_path() {
         assert!(matches!(
             parse(&applied, &catalog).unwrap().source,
             query_language::ast::Source::Saved {
-                output: OutputBinding::Known,
+                output: SourceColumns::Known,
                 ..
             }
         ));
@@ -378,7 +384,7 @@ fn saved_output_completion_uses_typed_snapshot_fields_and_every_value_path() {
 }
 
 #[test]
-fn deferred_and_incomplete_saved_or_result_sources_never_offer_default_fields() {
+fn unknown_and_incomplete_saved_or_result_sources_never_offer_default_fields() {
     use query_language::complete::CompletionKind;
     for catalog in [support::polylogue(), support::sinex()] {
         for prefix in [
@@ -412,7 +418,6 @@ fn result_rows_and_matches_have_separate_field_and_value_completion_scopes() {
             (ResultPart::Matches, "match_alias", "match_value"),
         ] {
             catalog.source_outputs.push(SourceOutput {
-                relation_scope: None,
                 source: OutputSource::Result {
                     reference: "result:kept".into(),
                     part,
@@ -426,7 +431,6 @@ fn result_rows_and_matches_have_separate_field_and_value_completion_scopes() {
                         help: value.into(),
                         ..Field::default()
                     }],
-                    match_patterns: Vec::new(),
                 },
             });
         }
@@ -467,7 +471,6 @@ fn nested_implicit_completion_uses_saved_actual_row_domain_and_defers_unknown_do
         (support::sinex(), "commands", "exit_code"),
     ] {
         catalog.source_outputs.push(SourceOutput {
-            relation_scope: None,
             source: OutputSource::Saved {
                 name: "grouped".into(),
                 arguments: vec![],
@@ -479,7 +482,6 @@ fn nested_implicit_completion_uses_saved_actual_row_domain_and_defers_unknown_do
                     ..Field::default()
                 }],
                 main_time: None,
-                match_patterns: Vec::new(),
             },
         });
         let prefix = "query:grouped | where id in (";
@@ -517,7 +519,6 @@ fn requirements_load_active_source_schema_before_its_value_section() {
         assert_eq!(missing.sources.as_slice(), std::slice::from_ref(&source));
         assert!(missing.value.is_none());
         catalog.source_outputs.push(SourceOutput {
-            relation_scope: None,
             source: source.clone(),
             schema: OutputSchema {
                 unit: Some(unit.into()),
@@ -527,7 +528,6 @@ fn requirements_load_active_source_schema_before_its_value_section() {
                     values: vec!["prefix value".into()],
                     ..Field::default()
                 }],
-                match_patterns: Vec::new(),
             },
         });
         let loaded = requirements(text, text.len(), &catalog);
@@ -553,7 +553,6 @@ fn requirements_decode_quotes_and_stop_at_the_byte_cursor_in_every_value_positio
     };
     let mut catalog = support::polylogue();
     catalog.source_outputs.push(SourceOutput {
-        relation_scope: None,
         source: OutputSource::Saved {
             name: "failing".into(),
             arguments: vec![],
@@ -565,7 +564,6 @@ fn requirements_decode_quotes_and_stop_at_the_byte_cursor_in_every_value_positio
                 name: "session.repo".into(),
                 ..Field::default()
             }],
-            match_patterns: Vec::new(),
         },
     });
     for (text, cursor, expected) in [
@@ -629,7 +627,6 @@ fn requirements_keep_result_parts_and_nested_source_dependencies_typed() {
         (ResultPart::Matches, "match_alias"),
     ] {
         catalog.source_outputs.push(SourceOutput {
-            relation_scope: None,
             source: OutputSource::Result {
                 reference: "result:kept".into(),
                 part,
@@ -641,7 +638,6 @@ fn requirements_keep_result_parts_and_nested_source_dependencies_typed() {
                     name: field.into(),
                     ..Field::default()
                 }],
-                match_patterns: Vec::new(),
             },
         });
     }
@@ -742,7 +738,6 @@ fn requirements_keep_group_aliases_and_exclude_stage_reference_requests() {
     };
     let mut catalog = support::sinex();
     catalog.source_outputs.push(SourceOutput {
-        relation_scope: None,
         source: OutputSource::Saved {
             name: "grouped".into(),
             arguments: vec![],
@@ -755,7 +750,6 @@ fn requirements_keep_group_aliases_and_exclude_stage_reference_requests() {
                 values: vec!["prefix".into()],
                 ..Field::default()
             }],
-            match_patterns: Vec::new(),
         },
     });
     for (text, field, prefix) in [
@@ -778,11 +772,7 @@ fn requirements_keep_group_aliases_and_exclude_stage_reference_requests() {
         assert_eq!(value.prefix, prefix);
         assert!(request.reference.is_none());
     }
-    for text in [
-        "events limit 1 ",
-        "events | limit 1 ",
-        "events | sort by when ",
-    ] {
+    for text in ["events | limit 1 ", "events | sort by when "] {
         assert!(
             requirements(text, text.len(), &catalog).reference.is_none(),
             "{text}"

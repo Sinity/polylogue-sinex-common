@@ -48,11 +48,17 @@ are renames the operator may still change (default; open operator question).
 | order scope | the sequence a unit's rows have steps in, such as a session's timeline |
 | ranked list | one ordering of selected rows (text relevance, `similar:`, `fuse` …); ranking never changes membership |
 | fusion | combining a query's ranked lists into one order by reciprocal rank |
-| answer (of a query) | one evaluation of a query, `answer:<id>`; `@last` is the caller's latest |
+| answer (of a query) | one evaluation of a query, `answer:<id>`; `@last` is the caller's latest and `@N` one of its rows |
 | kept result | a stored answer with its read context, `result:<id>`; reading it never re-runs |
 | mixed query | a query whose units belong to both products |
 | part | the largest piece of a mixed query that one product evaluates alone |
 | coverage state | how completely a source covers an interval: `complete`, `gap`, `unknown`, `outside_span`, `not_yet`, `excluded`, `unavailable` |
+| expression | a field, literal, function call or arithmetic, with checked dimensions |
+| step | one position in an order scope; `within 1 step` is adjacent |
+| pattern | a top-level `exists` or `seq` condition; `\| matches` lists one row per step of each of its matches |
+| exact text | a field kind for identifiers and closed words, whose `field:value` is equality |
+| generated field | a field the language adds to a relation (`match.distance`, `change`, `coverage`); it never hides a stored field |
+| catalog reference form | a reference a product declares: a prefix with an optional marker, a whole word, or a bare identifier |
 | unknown | the third truth value: a condition over a missing value is neither true nor false |
 | closed set | the fixed list of values a field may hold |
 | namespace | the `pl.` or `sx.` prefix that says which product a unit belongs to |

@@ -2,23 +2,20 @@
 use crate::ast::{Argument, ResultPart, Source, Value};
 use serde::{Deserialize, Serialize};
 
+/// One product's units, functions, extensions and reference forms. The
+/// grammar is the same for every catalog; only these declarations differ.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Catalog {
     pub default_unit: String,
-    pub recall_last_unit: Option<String>,
     pub units: Vec<Unit>,
-    pub commands: Vec<String>,
+    /// Functions the product adds beside the built-in ones (`FUNCTIONS`).
+    #[serde(default)]
+    pub functions: Vec<Function>,
     pub extensions: Vec<Extension>,
-    pub references: Vec<ReferenceSyntax>,
+    pub references: Vec<ReferenceForm>,
     /// Immutable product-derived outputs of expanded saved questions and kept results.
     #[serde(default)]
     pub source_outputs: Vec<SourceOutput>,
-    /// Product-declared columns emitted by an actual Matches projection.
-    #[serde(skip)]
-    #[schemars(skip)]
-    pub match_outputs: Vec<MatchOutput>,
-    /// Both products accept pipes; products may additionally expose clauses without pipes.
-    pub unpiped_stages: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -38,60 +35,30 @@ pub struct OutputSchema {
     pub unit: Option<String>,
     pub fields: Vec<Field>,
     pub main_time: Option<String>,
-    /// Runtime qualifiers of the actual entering relation, rebuilt from frozen
-    /// syntax. They are outside serialized canonical bodies and their schemas.
-    #[serde(skip)]
-    #[schemars(skip)]
-    pub match_patterns: Vec<MatchPattern>,
-}
-#[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
-)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum MatchPattern {
-    Exists { unit: String },
-    Sequence { unit: String, steps: usize },
-}
-#[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
-)]
-pub struct MatchSource {
-    pub parent_unit: String,
-    pub pattern: MatchPattern,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct MatchOutput {
-    pub source: MatchSource,
-    pub schema: OutputSchema,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SourceOutput {
     pub source: OutputSource,
-    // Columns actually emitted by the product's projection.
+    /// The columns the saved question or kept result produces.
     pub schema: OutputSchema,
-    /// Recomputed queryable relation fields from the retained bound definition.
-    /// This pure runtime snapshot is never part of canonical source bodies.
-    #[serde(skip)]
-    #[schemars(skip)]
-    pub relation_scope: Option<OutputSchema>,
 }
 impl Catalog {
-    pub fn match_output(&self, source: &MatchSource) -> Option<&OutputSchema> {
-        self.match_outputs
+    pub fn new(default_unit: impl Into<String>) -> Self {
+        Self {
+            default_unit: default_unit.into(),
+            ..Self::default()
+        }
+    }
+    pub fn unit(&self, name: &str) -> Option<&Unit> {
+        self.units
             .iter()
-            .find(|output| &output.source == source)
-            .map(|output| &output.schema)
+            .find(|u| u.name.eq_ignore_ascii_case(name))
     }
+    pub fn field(&self, unit: &str, name: &str) -> Option<&Field> {
+        self.unit(unit)?.fields.iter().find(|f| f.name == name)
+    }
+    /// The output schema a saved question or kept result source reads.
     pub fn source_output(&self, source: &Source) -> Option<&OutputSchema> {
-        self.source_snapshot(source).map(|output| &output.schema)
-    }
-    /// One semantic scope for parser, binder, identity and completion. Products
-    /// rebuild it from frozen bound syntax; absent metadata uses produced fields.
-    pub fn source_scope(&self, source: &Source) -> Option<&OutputSchema> {
-        self.source_snapshot(source)
-            .map(|output| output.relation_scope.as_ref().unwrap_or(&output.schema))
-    }
-    fn source_snapshot(&self, source: &Source) -> Option<&SourceOutput> {
         self.source_outputs
             .iter()
             .find(|output| match (&output.source, source) {
@@ -113,14 +80,47 @@ impl Catalog {
                 ) => reference == other && part == actual,
                 _ => false,
             })
+            .map(|output| &output.schema)
+    }
+    pub fn units_accepting(&self, value: &str) -> Vec<String> {
+        self.units
+            .iter()
+            .flat_map(|u| {
+                u.fields
+                    .iter()
+                    .filter(move |f| f.values.iter().any(|v| v.eq_ignore_ascii_case(value)))
+                    .map(move |f| format!("{}.{}", u.name, f.name))
+            })
+            .collect()
+    }
+    /// A built-in function or one this catalog declares, looked up without
+    /// regard to case. Two declarations that differ only in case are ambiguous.
+    pub fn function(&self, name: &str) -> Result<Option<Function>, crate::Error> {
+        let mut found = builtin_functions()
+            .into_iter()
+            .chain(self.functions.iter().cloned())
+            .filter(|function| function.name.eq_ignore_ascii_case(name));
+        let first = found.next();
+        if found.next().is_some() {
+            return Err(crate::Error::new(
+                crate::ErrorKind::Ambiguous,
+                format!("ambiguous function declaration `{name}`"),
+                0,
+            ));
+        }
+        Ok(first)
     }
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Unit {
     pub name: String,
-    /// The row domain of sequence steps; None means this unit itself.
+    /// The row domain of `seq` steps written on this unit; None means this unit.
     pub sequence_unit: Option<String>,
-    pub aliases: Vec<String>,
+    /// The order its rows have steps in (for example a session's timeline).
+    /// Units naming the same scope interleave in one order; None means the
+    /// unit's rows have no steps and only time distances apply.
+    #[serde(default)]
+    pub order_scope: Option<String>,
     pub fields: Vec<Field>,
     pub defaults: Vec<DefaultFilter>,
     pub default_order: Vec<String>,
@@ -141,11 +141,16 @@ pub struct Field {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FieldKind {
+    /// Short text; its natural match is a case-insensitive substring.
     #[default]
     Text,
-    Match,
+    /// Exact text: an identifier or closed word, whose natural match is
+    /// equality.
+    Exact,
     Substring,
+    /// Prose; its natural match is word search.
     Words,
+    /// A path; its natural match is the whole-component subtree.
     Subtree,
     Integer,
     Number,
@@ -156,6 +161,48 @@ pub enum FieldKind {
     Reference,
     Json,
     List(Box<FieldKind>),
+}
+/// What `field:value` means for a field, declared once by its kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NaturalMatch {
+    /// Closed sets, identifiers, booleans and numbers: equality.
+    Equal,
+    /// Short text: case-insensitive substring.
+    Contains,
+    /// Prose: word search.
+    Words,
+    /// Paths: the value itself or anything under it, by whole components.
+    Subtree,
+    /// Times: inside the named period.
+    Period,
+    /// References: the same object.
+    Same,
+}
+impl Field {
+    pub fn natural_match(&self) -> NaturalMatch {
+        if !self.values.is_empty() {
+            return NaturalMatch::Equal;
+        }
+        natural_match(&self.kind)
+    }
+}
+fn natural_match(kind: &FieldKind) -> NaturalMatch {
+    match kind {
+        FieldKind::Text | FieldKind::Substring => NaturalMatch::Contains,
+        FieldKind::Words => NaturalMatch::Words,
+        FieldKind::Subtree => NaturalMatch::Subtree,
+        FieldKind::Time => NaturalMatch::Period,
+        FieldKind::Reference => NaturalMatch::Same,
+        FieldKind::List(kind) => natural_match(kind),
+        FieldKind::Exact
+        | FieldKind::Integer
+        | FieldKind::Number
+        | FieldKind::Money
+        | FieldKind::Duration
+        | FieldKind::Bool
+        | FieldKind::Json => NaturalMatch::Equal,
+    }
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -170,6 +217,79 @@ pub struct DefaultFilter {
     pub field: String,
     pub value: Value,
 }
+/// A function usable in expressions: a built-in time bucket or `len`, or one
+/// a product declares (Polylogue's `program(command)`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Function {
+    pub name: String,
+    pub arguments: usize,
+    pub result: FieldKind,
+    pub help: String,
+}
+/// Built-in functions: time buckets on the logical day, and `len`.
+pub const FUNCTIONS: &[&str] = &[
+    "hour",
+    "day",
+    "week",
+    "weekday",
+    "month",
+    "month_day",
+    "year",
+    "len",
+];
+/// Bucket functions whose groups `fill` can complete.
+pub const TIME_BUCKETS: &[&str] = &["hour", "day", "week", "month", "year"];
+/// The prefix of an order relation's or join's inner-row fields (`match.F`).
+pub const MATCH_PREFIX: &str = "match.";
+/// The signed distance from an outer row to its matched row, in the
+/// distance's unit (time or steps).
+pub const MATCH_DISTANCE: &str = "match.distance";
+/// Fields the language adds beside a unit's stored fields: the order
+/// relation's distance, `diff`'s change and ranks, and `fill`'s coverage.
+/// A generated field never hides a stored one; `Catalog::hidden_fields`
+/// finds a catalog that would.
+pub const GENERATED_FIELDS: &[&str] = &[
+    MATCH_DISTANCE,
+    "change",
+    "old_rank",
+    "new_rank",
+    crate::coverage::STATE_FIELD,
+    crate::coverage::DETAIL_FIELD,
+];
+impl Catalog {
+    /// Stored fields a generated field would hide, as `unit.field`: a field
+    /// named like a generated one, or one whose `match.` form is one.
+    pub fn hidden_fields(&self) -> Vec<String> {
+        let mut hidden = Vec::new();
+        for unit in &self.units {
+            for field in &unit.fields {
+                let matched = format!("{MATCH_PREFIX}{}", field.name);
+                if GENERATED_FIELDS
+                    .iter()
+                    .any(|name| *name == field.name || *name == matched)
+                {
+                    hidden.push(format!("{}.{}", unit.name, field.name));
+                }
+            }
+        }
+        hidden
+    }
+}
+fn builtin_functions() -> Vec<Function> {
+    FUNCTIONS
+        .iter()
+        .map(|name| Function {
+            name: (*name).into(),
+            arguments: 1,
+            result: match *name {
+                "day" | "week" | "month" => FieldKind::Time,
+                "hour" | "year" | "len" => FieldKind::Integer,
+                _ => FieldKind::Text,
+            },
+            help: String::new(),
+        })
+        .collect()
+}
 /// An extension declares its syntax as typed slots; no product parses an opaque remainder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Extension {
@@ -182,7 +302,7 @@ pub struct Extension {
 #[serde(rename_all = "snake_case")]
 pub enum ExtensionPosition {
     Atom,
-    Stage,
+    Transform,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -195,239 +315,155 @@ pub enum ExtensionSlot {
     Unit,
     Condition,
     Query,
-}
-impl Catalog {
-    pub fn new(default_unit: impl Into<String>) -> Self {
-        Self {
-            default_unit: default_unit.into(),
-            ..Self::default()
-        }
-    }
-    pub fn unit(&self, name: &str) -> Option<&Unit> {
-        self.units.iter().find(|u| {
-            u.name.eq_ignore_ascii_case(name)
-                || u.aliases.iter().any(|a| a.eq_ignore_ascii_case(name))
-        })
-    }
-    pub fn field(&self, unit: &str, name: &str) -> Option<&Field> {
-        self.unit(unit)?.fields.iter().find(|f| f.name == name)
-    }
-    pub fn units_accepting(&self, value: &str) -> Vec<String> {
-        self.units
-            .iter()
-            .flat_map(|u| {
-                u.fields
-                    .iter()
-                    .filter(move |f| f.values.iter().any(|v| v.eq_ignore_ascii_case(value)))
-                    .map(move |f| format!("{}.{}", u.name, f.name))
-            })
-            .collect()
-    }
-    pub fn command_words(&self) -> impl Iterator<Item = &str> {
-        self.commands
-            .iter()
-            .map(String::as_str)
-            .chain(self.units.iter().flat_map(|u| {
-                std::iter::once(u.name.as_str()).chain(u.aliases.iter().map(String::as_str))
-            }))
-    }
+    Expression,
+    /// One or more of the slot, separated by commas.
+    List(Box<ExtensionSlot>),
 }
 
-/// A product reference is one literal node. A required marker disambiguates
-/// reference forms from a field with the same prefix (for example tool:Bash).
+/// A reference form a product declares. A reference is one literal node and,
+/// used as a condition, means "this row". The language's own forms
+/// (`query:`, `result:`, `answer:`, `@N`, `@last`) need no declaration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ReferenceSyntax {
-    pub prefix: String,
-    pub marker: Option<String>,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReferenceForm {
+    /// `<prefix><id>`; a required marker disambiguates a reference from a
+    /// field with the same prefix (`tool:Bash` is a field, `tool:x#y` a call).
+    Prefix {
+        prefix: String,
+        marker: Option<String>,
+    },
+    /// A whole word that names one row (`self`, `last`, `here`).
+    Word { word: String },
+    /// A bare native identifier: hexadecimal digits and dashes, at least this long.
+    Identifier { min_length: usize },
+}
+impl ReferenceForm {
+    pub fn prefix(prefix: impl Into<String>) -> Self {
+        Self::Prefix {
+            prefix: prefix.into(),
+            marker: None,
+        }
+    }
+    pub fn word(word: impl Into<String>) -> Self {
+        Self::Word { word: word.into() }
+    }
+    fn matches(&self, text: &str) -> bool {
+        match self {
+            Self::Prefix { prefix, marker } => {
+                text.strip_prefix(prefix.as_str()).is_some_and(|rest| {
+                    !rest.is_empty()
+                        && marker
+                            .as_ref()
+                            .is_none_or(|marker| rest.contains(marker.as_str()))
+                })
+            }
+            Self::Word { word } => text == word,
+            Self::Identifier { min_length } => {
+                text.len() >= *min_length
+                    && text.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+                    && text.chars().any(|c| c.is_ascii_hexdigit())
+            }
+        }
+    }
 }
 impl Catalog {
     pub fn is_reference(&self, text: &str) -> bool {
-        self.references.iter().any(|form| {
-            text.strip_prefix(&form.prefix).is_some_and(|rest| {
-                !rest.is_empty()
-                    && form
-                        .marker
-                        .as_ref()
-                        .is_none_or(|marker| rest.contains(marker))
-            })
-        })
+        is_language_reference(text) || self.references.iter().any(|form| form.matches(text))
     }
 }
+/// The answer-relative references every product reads the same way: an
+/// answer object, the latest answer, and a row of the latest answer.
+pub fn is_language_reference(text: &str) -> bool {
+    text.strip_prefix("answer:")
+        .is_some_and(|id| !id.is_empty())
+        || text == "@last"
+        || text
+            .strip_prefix('@')
+            .is_some_and(|row| !row.is_empty() && row.chars().all(|c| c.is_ascii_digit()))
+}
 
-/// Shared stage vocabulary for parsing, completion and product discovery.
+/// Shared transform vocabulary for parsing, completion and product discovery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StageSyntax {
+pub struct TransformSyntax {
     pub name: &'static str,
     pub completion: &'static str,
-    pub form: StageForm,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StageForm {
-    Plain,
-    Function,
-    Relation,
-    Count,
-}
-pub const STAGES: &[StageSyntax] = &[
-    StageSyntax {
+pub const TRANSFORMS: &[TransformSyntax] = &[
+    TransformSyntax {
         name: "where",
         completion: "where",
-        form: StageForm::Plain,
     },
-    StageSyntax {
-        name: "since",
-        completion: "since",
-        form: StageForm::Plain,
-    },
-    StageSyntax {
-        name: "until",
-        completion: "until",
-        form: StageForm::Plain,
-    },
-    StageSyntax {
+    TransformSyntax {
         name: "sort",
         completion: "sort by",
-        form: StageForm::Plain,
     },
-    StageSyntax {
+    TransformSyntax {
         name: "group",
         completion: "group by",
-        form: StageForm::Plain,
     },
-    StageSyntax {
+    TransformSyntax {
         name: "agg",
         completion: "agg",
-        form: StageForm::Plain,
     },
-    StageSyntax {
+    TransformSyntax {
         name: "count",
         completion: "count",
-        form: StageForm::Count,
     },
-    StageSyntax {
-        name: "sum",
-        completion: "sum",
-        form: StageForm::Function,
-    },
-    StageSyntax {
-        name: "avg",
-        completion: "avg",
-        form: StageForm::Function,
-    },
-    StageSyntax {
-        name: "min",
-        completion: "min",
-        form: StageForm::Function,
-    },
-    StageSyntax {
-        name: "max",
-        completion: "max",
-        form: StageForm::Function,
-    },
-    StageSyntax {
-        name: "count_distinct",
-        completion: "count_distinct",
-        form: StageForm::Function,
-    },
-    StageSyntax {
-        name: "histogram",
-        completion: "histogram",
-        form: StageForm::Function,
-    },
-    StageSyntax {
-        name: "corr",
-        completion: "corr",
-        form: StageForm::Function,
-    },
-    StageSyntax {
+    TransformSyntax {
         name: "limit",
         completion: "limit",
-        form: StageForm::Plain,
     },
-    StageSyntax {
+    TransformSyntax {
         name: "offset",
         completion: "offset",
-        form: StageForm::Plain,
     },
-    StageSyntax {
+    TransformSyntax {
         name: "first",
         completion: "first",
-        form: StageForm::Plain,
     },
-    StageSyntax {
+    TransformSyntax {
         name: "distinct",
         completion: "distinct",
-        form: StageForm::Plain,
     },
-    StageSyntax {
+    TransformSyntax {
         name: "matches",
         completion: "matches",
-        form: StageForm::Plain,
     },
-    StageSyntax {
+    TransformSyntax {
         name: "fields",
         completion: "fields",
-        form: StageForm::Plain,
     },
-    StageSyntax {
+    TransformSyntax {
         name: "fill",
         completion: "fill",
-        form: StageForm::Plain,
     },
-    StageSyntax {
-        name: "measure",
-        completion: "measure",
-        form: StageForm::Plain,
-    },
-    StageSyntax {
+    TransformSyntax {
         name: "as",
         completion: "as of",
-        form: StageForm::Plain,
     },
-    StageSyntax {
+    TransformSyntax {
         name: "union",
         completion: "union",
-        form: StageForm::Relation,
     },
-    StageSyntax {
+    TransformSyntax {
         name: "intersect",
         completion: "intersect",
-        form: StageForm::Relation,
     },
-    StageSyntax {
+    TransformSyntax {
         name: "except",
         completion: "except",
-        form: StageForm::Relation,
     },
-    StageSyntax {
+    TransformSyntax {
         name: "fuse",
         completion: "fuse",
-        form: StageForm::Relation,
     },
-    StageSyntax {
-        name: "near",
-        completion: "near",
-        form: StageForm::Relation,
+    TransformSyntax {
+        name: "join",
+        completion: "join",
     },
-    StageSyntax {
-        name: "before",
-        completion: "before",
-        form: StageForm::Relation,
-    },
-    StageSyntax {
-        name: "after",
-        completion: "after",
-        form: StageForm::Relation,
-    },
-    StageSyntax {
-        name: "during",
-        completion: "during",
-        form: StageForm::Relation,
-    },
-    StageSyntax {
-        name: "containing",
-        completion: "containing",
-        form: StageForm::Relation,
+    TransformSyntax {
+        name: "diff",
+        completion: "diff",
     },
 ];
 pub const AGGREGATES: &[&str] = &[
@@ -439,16 +475,7 @@ pub const AGGREGATES: &[&str] = &[
     "count_distinct",
     "histogram",
     "corr",
-];
-pub const KEY_FUNCTIONS: &[&str] = &[
-    "day",
-    "hour",
-    "week",
-    "weekday",
-    "month",
-    "month_day",
-    "program",
-    "fingerprint",
+    "covered",
 ];
 
 fn arguments_equal(a: &[Argument], b: &[Argument]) -> bool {

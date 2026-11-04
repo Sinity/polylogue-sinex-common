@@ -56,7 +56,6 @@ fn leading_saved_or_is_the_same_boolean_tree_as_parenthesized_conditions() {
 fn saved_sources_keep_their_own_suffix_schema_outside_boolean_membership() {
     for (mut catalog, native_field) in catalogs() {
         catalog.source_outputs.push(SourceOutput {
-            relation_scope: None,
             source: OutputSource::Saved {
                 name: "ExactCase".into(),
                 arguments: Vec::new(),
@@ -69,7 +68,6 @@ fn saved_sources_keep_their_own_suffix_schema_outside_boolean_membership() {
                     ..Field::default()
                 }],
                 main_time: None,
-                match_patterns: Vec::new(),
             },
         });
         for text in [
@@ -134,7 +132,6 @@ fn missing_parentheses_offer_only_a_complete_executable_closure() {
 fn incomplete_saved_boolean_completion_uses_the_enclosing_native_domain() {
     for (mut catalog, native) in catalogs() {
         catalog.source_outputs.push(SourceOutput {
-            relation_scope: None,
             source: OutputSource::Saved {
                 name: "ExactCase".into(),
                 arguments: Vec::new(),
