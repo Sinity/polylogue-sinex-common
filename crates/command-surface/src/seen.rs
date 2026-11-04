@@ -36,22 +36,28 @@ impl Consumer {
 /// at that showing, and for a session the anchor of the last item shown.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct SeenMark {
+pub struct SeenMark<A> {
     pub consumer: Consumer,
     /// The target's reference.
     pub target: String,
     pub position: Position,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub anchor: Option<String>,
+    pub anchor: Option<A>,
 }
-impl SeenMark {
+impl<A: Ord> SeenMark<A> {
     /// Record that the target was put before the consumer at `position`.
     /// Only a showing moves the mark, and only forward within the mark's
     /// generation. A position from another generation of the product's
     /// index does not compare, so the later showing replaces the mark.
+    /// Within one position, anchors follow the product's item order (`A::Ord`),
+    /// so paging an unchanged session advances without moving backwards.
     /// Returns whether the mark moved.
-    pub fn show(&mut self, showing: Showing, position: Position, anchor: Option<String>) -> bool {
-        if !showing.moves_seen_mark() || position.is_after(&self.position) == Some(false) {
+    pub fn show(&mut self, showing: Showing, position: Position, anchor: Option<A>) -> bool {
+        if !showing.moves_seen_mark()
+            || (position.generation == self.position.generation
+                && (position.counter < self.position.counter
+                    || (position.counter == self.position.counter && anchor <= self.anchor)))
+        {
             return false;
         }
         self.position = position;
@@ -117,7 +123,7 @@ impl Since {
     }
     /// The position to read after, given the consumer's mark if any; `None`
     /// reads from the start (`seen` with no mark yet).
-    pub fn after<'a>(&'a self, mark: Option<&'a SeenMark>) -> Option<&'a Position> {
+    pub fn after<'a, A>(&'a self, mark: Option<&'a SeenMark<A>>) -> Option<&'a Position> {
         match self {
             Self::Seen => mark.map(|mark| &mark.position),
             Self::Position(position) => Some(position),

@@ -118,6 +118,7 @@ impl Operation for Search {
                         "unknown field \"reop\" for sessions",
                         15,
                     )
+                    .length(10)
                     .suggestion("sessions where repo:sinex")
                     .candidates(vec!["repo".into(), "role".into()]);
                     Answer::error(Failure::from_query_error(error, query))

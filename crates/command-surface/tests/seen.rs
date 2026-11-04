@@ -8,7 +8,7 @@ fn session() -> AgentSession {
 fn at(generation: &str, counter: u64) -> Position {
     Position::new(generation, counter)
 }
-fn mark() -> SeenMark {
+fn mark() -> SeenMark<String> {
     SeenMark {
         consumer: Consumer::Session(session()),
         target: "session:abc".into(),
@@ -21,7 +21,7 @@ fn mark() -> SeenMark {
 fn seen_mark_moves_forward() {
     let mut mark = mark();
     assert!(!mark.show(Showing::Displayed, at("g1", 7), Some("m-7".into())));
-    assert!(!mark.show(Showing::Displayed, at("g1", 10), Some("m-10b".into())));
+    assert!(!mark.show(Showing::Displayed, at("g1", 10), Some("m-09".into())));
     assert_eq!(mark.position, at("g1", 10));
     assert_eq!(mark.anchor.as_deref(), Some("m-10"));
     assert!(mark.show(Showing::Displayed, at("g1", 12), Some("m-12".into())));
@@ -37,7 +37,10 @@ fn seen_mark_moves_forward() {
         json!({"consumer": "session", "session": "claude-code:worker"})
     );
     assert_eq!(wire["position"], json!({"generation": "g2", "counter": 3}));
-    assert_eq!(serde_json::from_value::<SeenMark>(wire).unwrap(), mark);
+    assert_eq!(
+        serde_json::from_value::<SeenMark<String>>(wire).unwrap(),
+        mark
+    );
 }
 
 #[test]
@@ -118,7 +121,7 @@ fn since_reads_after_the_mark_or_a_position() {
     assert_eq!(Since::parse("12"), None);
     assert_eq!(Since::parse("yesterday"), None);
     assert_eq!(Since::Seen.after(Some(&mark)), Some(&at("g1", 10)));
-    assert_eq!(Since::Seen.after(None), None);
+    assert_eq!(Since::Seen.after::<String>(None), None);
     let explicit = Since::Position(at("g1", 12));
     assert_eq!(explicit.after(Some(&mark)), Some(&at("g1", 12)));
     assert_eq!(serde_json::to_value(Since::Seen).unwrap(), "seen");
@@ -127,4 +130,21 @@ fn since_reads_after_the_mark_or_a_position() {
         Since::Position(at("g1", 12))
     );
     assert!(serde_json::from_value::<Since>(json!("later")).is_err());
+}
+
+#[test]
+fn paging_an_unchanged_session_uses_product_item_order() {
+    // IDs deliberately sort against reading order. Products supply the order,
+    // rather than the common layer comparing opaque reference strings.
+    let mut mark = SeenMark {
+        consumer: Consumer::Operator,
+        target: "session:abc".into(),
+        position: at("g1", 10),
+        anchor: Some((1u64, "z")),
+    };
+    assert!(mark.show(Showing::Displayed, at("g1", 10), Some((2, "a"))));
+    assert!(!mark.show(Showing::Displayed, at("g1", 10), Some((1, "z"))));
+    assert!(!mark.show(Showing::Displayed, at("g1", 10), Some((2, "a"))));
+    assert!(!mark.show(Showing::Displayed, at("g1", 10), None));
+    assert_eq!(mark.anchor, Some((2, "a")));
 }

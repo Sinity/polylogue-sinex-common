@@ -613,7 +613,7 @@ impl OperationTable {
         let measure = |answer: &Answer<Value>, kept: usize| {
             let value: String = lines[..kept].concat();
             let footer = self.forms().footer(via, answer);
-            let used = approximate_tokens(&value) + approximate_tokens(&footer);
+            let used = approximate_tokens(&format!("{value}{footer}"));
             (value, footer, used)
         };
         let (mut value_text, mut footer, mut used) = measure(&answer, lines.len());

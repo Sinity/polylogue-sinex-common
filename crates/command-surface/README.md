@@ -326,7 +326,9 @@ never write one (`Showing::moves_seen_mark`). A view counts as displayed
 once it has been visible for `Showing::DISPLAY_TIME` (one second, so
 scrolling past or a flicker never counts; `Showing::of_visible_view`); the
 web shell measures visibility and reports the showing. `SeenMark::show`
-applies a showing: it moves the mark only forward within one generation of
+applies a showing. `SeenMark<A>` takes the product's ordered item anchor;
+within an unchanged position, later anchors advance the mark. Opaque IDs
+alone do not establish reading order. It moves the mark only forward within one generation of
 the product's index, and a showing from a new generation replaces it. Only the operator and an
 identified session are consumers. Each product stores seen marks with its
 authored state, so they survive a rebuild of everything derived. `--since
