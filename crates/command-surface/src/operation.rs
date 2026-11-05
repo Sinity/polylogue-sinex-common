@@ -74,7 +74,8 @@ pub enum OperationKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ArgumentForm {
-    /// One word by position. Required when the request type requires it.
+    /// One word by position, with lists and objects written as JSON.
+    /// Required when the request type requires it.
     Positional,
     /// The remaining words by position, flags between them still read as
     /// flags: joined by spaces for a string field, a list for an array field.

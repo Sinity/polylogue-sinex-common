@@ -52,7 +52,7 @@ command line writes each field in its row's declared form:
 
 | Form | Written | Value |
 |---|---|---|
-| positional | one word by position | the field's type; required when the request type requires it |
+| positional | one word by position | strings as written, other types as JSON (including an entire array); required when the request type requires it |
 | words | the remaining words, flags between them still flags | joined by spaces for a string field, a list for an array field |
 | rest | everything after it, flags included | as for words |
 | named | `--name VALUE` or `--name=VALUE` | a string as written, other types as JSON |

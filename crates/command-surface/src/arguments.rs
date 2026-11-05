@@ -162,8 +162,7 @@ pub(crate) fn check(description: &OperationDescription) -> Result<(), Failure> {
             ArgumentForm::Words | ArgumentForm::Rest => {
                 matches!(kind, ValueKind::Text | ValueKind::List(_))
             }
-            ArgumentForm::Positional => !matches!(kind, ValueKind::List(_)),
-            ArgumentForm::Named => true,
+            ArgumentForm::Positional | ArgumentForm::Named => true,
         };
         if !fits {
             return refuse(format!(
@@ -308,11 +307,11 @@ impl OperationTable {
                     .ok_or_else(|| bad_request(format!("unexpected word {word}")))?;
                 match argument.form {
                     ArgumentForm::Positional => {
-                        let value = word_value(
-                            &kind_of(description, &argument.name),
-                            word,
-                            &argument.name,
-                        )?;
+                        let kind = match kind_of(description, &argument.name) {
+                            ValueKind::List(_) => ValueKind::Json,
+                            kind => kind,
+                        };
+                        let value = word_value(&kind, word, &argument.name)?;
                         fields.insert(argument.name.clone(), value);
                         positional += 1;
                     }
@@ -634,6 +633,9 @@ fn natural_words(
         }
         let kind = kind_of(description, &argument.name);
         match (&kind, argument.form) {
+            (ValueKind::List(_), ArgumentForm::Positional) => {
+                positional_words.push(value.to_string());
+            }
             (ValueKind::List(item), _) => {
                 let items = value.as_array().filter(|items| !items.is_empty())?;
                 for item_value in items {

@@ -207,7 +207,7 @@ fn declarations_the_request_cannot_hold_are_refused() {
             "cannot be written",
         ),
         (
-            ArgumentSpec::new("tag", ArgumentForm::Positional, ""),
+            ArgumentSpec::new("target", ArgumentForm::Repeated, ""),
             "cannot be written",
         ),
         (
@@ -475,4 +475,65 @@ fn a_positional_field_may_share_a_flags_name() {
         .parse_cli(&["page".into(), "c-7".into()], "r-1")
         .unwrap();
     assert_eq!(parsed.request.arguments, json!({"cursor": "c-7"}));
+}
+
+#[test]
+fn a_positional_array_is_one_json_value_including_empty_and_structured_lists() {
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    struct BatchRequest {
+        entries: Vec<Value>,
+    }
+    struct Batch;
+    impl Operation for Batch {
+        type Request = BatchRequest;
+        type Response = Value;
+        fn spec(&self) -> OperationSpec {
+            OperationSpec {
+                arguments: vec![ArgumentSpec::new(
+                    "entries",
+                    ArgumentForm::Positional,
+                    "records",
+                )],
+                ..OperationSpec::request(
+                    "batch",
+                    &["batch"],
+                    "act",
+                    "Write records",
+                    "Writes records",
+                )
+            }
+        }
+        fn execute(
+            &self,
+            request: BatchRequest,
+            _: RequestContext,
+        ) -> OperationFuture<'_, Answer<Value>> {
+            Box::pin(async move { Answer::ok(json!(request.entries)) })
+        }
+        fn render_text(&self, value: &Value) -> String {
+            value.to_string()
+        }
+    }
+    let mut table = table();
+    table.register(Batch).unwrap();
+    for entries in [
+        json!([]),
+        json!(["two words", {"note":"quote ' and λ"}, [1, 2], false]),
+    ] {
+        let parsed = table
+            .parse_cli(&["batch".into(), entries.to_string()], "r-array")
+            .unwrap();
+        assert_eq!(parsed.request.arguments, json!({"entries": entries}));
+        let rendered = table.cli_command(&parsed.request).unwrap();
+        let words = shell_words(&rendered);
+        let restored = table.parse_cli(&words[1..], "unused").unwrap();
+        assert_eq!(restored.request, parsed.request);
+    }
+    for invalid in ["not-json", "[broken"] {
+        assert!(
+            table
+                .parse_cli(&["batch".into(), invalid.into()], "r-invalid")
+                .is_err()
+        );
+    }
 }
