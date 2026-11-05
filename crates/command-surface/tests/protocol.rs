@@ -216,3 +216,54 @@ fn token_budget_distinguishes_absent_null_and_a_count() {
         assert_eq!(serde_json::to_value(parsed).unwrap(), request);
     }
 }
+
+/// Payload numbers are read directly into their declared type, including when
+/// a product unifies serde_json's arbitrary_precision feature into this crate.
+#[test]
+fn typed_numeric_answers_deserialize_without_a_value_round_trip() {
+    #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct Pass {
+        seconds: f64,
+    }
+    #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct Report {
+        pass: Pass,
+    }
+    for seconds in [0.0, 0.125, 4096.5, 16777216.25] {
+        for answer in [
+            Answer::ok(Report {
+                pass: Pass { seconds },
+            }),
+            Answer::empty(Report {
+                pass: Pass { seconds },
+            }),
+            Answer::degraded(
+                Report {
+                    pass: Pass { seconds },
+                },
+                vec!["synthetic source".into()],
+            ),
+        ] {
+            let bytes = serde_json::to_vec(&answer).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Answer<Report>>(&bytes).unwrap(),
+                answer
+            );
+            let value = serde_json::to_value(&answer).unwrap();
+            assert_eq!(
+                serde_json::from_value::<Answer<Report>>(value).unwrap(),
+                answer
+            );
+        }
+    }
+    let value_first = br#"{"value":{"pass":{"seconds":0.125}},"outcome":"ok"}"#;
+    assert_eq!(
+        serde_json::from_slice::<Answer<Report>>(value_first)
+            .unwrap()
+            .value()
+            .unwrap()
+            .pass
+            .seconds,
+        0.125
+    );
+}
