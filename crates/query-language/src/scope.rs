@@ -78,6 +78,8 @@ pub struct Scope {
     /// Actual underlying row domain, not a saved name or a grouped alias.
     pub unit: Option<String>,
     pub fields: Arc<[FieldInfo]>,
+    /// Eligible top-level match patterns, retained with the semantic relation.
+    pub match_units: Option<Vec<String>>,
 }
 impl Scope {
     pub fn field(&self, name: &str) -> Option<&FieldInfo> {

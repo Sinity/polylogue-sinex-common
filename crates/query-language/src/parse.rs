@@ -609,7 +609,15 @@ impl Parser<'_> {
         }
         scope.patterns = match &source {
             Source::Unit { condition, .. } => Some(patterns(condition.as_ref())),
-            Source::Saved { .. } | Source::Result { .. } => None,
+            Source::Saved { condition, .. } => self
+                .catalog
+                .source_output(&source)
+                .and_then(|output| output.match_units.clone())
+                .map(|mut inherited| {
+                    inherited.extend(patterns(condition.as_ref()));
+                    inherited
+                }),
+            Source::Result { .. } => None,
         };
         match &source {
             Source::Unit {
@@ -1111,7 +1119,10 @@ impl Parser<'_> {
                 },
             ));
         }
-        if self.catalog.is_reference(&token.text) {
+        if self.catalog.is_reference(&token.text)
+            && (self.scope_field(scope, field).is_none()
+                || self.catalog.reference_overrides_field(&token.text))
+        {
             return Ok(self.cond(
                 start,
                 ConditionKind::Reference {
@@ -2085,6 +2096,9 @@ impl Parser<'_> {
         let kind = match word.as_str() {
             "where" => {
                 let condition = self.condition(scope)?;
+                if let Some(known) = &mut scope.patterns {
+                    known.extend(patterns(Some(&condition)));
+                }
                 self.expose_order_match(scope, &condition);
                 TransformKind::Where { condition }
             }
@@ -2211,6 +2225,7 @@ impl Parser<'_> {
                     matches!(&key.expression, Expression::Function { name, .. }
                         if crate::catalog::TIME_BUCKETS.contains(&name.as_str()))
                 });
+                scope.patterns = Some(Vec::new());
                 TransformKind::Group { keys }
             }
             "agg" => TransformKind::Aggregate {
@@ -2531,6 +2546,14 @@ impl Parser<'_> {
     /// and the step row's fields as `step.F`.
     fn matches(&mut self, scope: &mut Scope, start: usize) -> Result<(), Error> {
         let Some(patterns) = scope.patterns.clone() else {
+            // Unknown saved outputs are syntax until the caller supplies their
+            // immutable schema. Binding reparses and validates the actual steps.
+            if scope.columns_unknown {
+                *scope = Scope::new("$matches".into());
+                scope.columns_unknown = true;
+                scope.patterns = None;
+                return Ok(());
+            }
             return Err(Error::new(
                 ErrorKind::InvalidQuery,
                 "matches expands an exists or seq written in this query; a saved or kept source hides its own",
@@ -2711,6 +2734,7 @@ impl Parser<'_> {
                 break;
             }
         }
+        scope.patterns = Some(Vec::new());
         Ok(aggregates)
     }
     fn extension_arguments(

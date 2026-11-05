@@ -197,6 +197,7 @@ impl Parser<'_> {
         crate::scope::Scope {
             unit: self.catalog.unit(&scope.unit).map(|unit| unit.name.clone()),
             fields: self.visible(scope).into(),
+            match_units: scope.patterns.clone(),
         }
     }
 }

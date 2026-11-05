@@ -112,7 +112,9 @@ recursion, not on the size of a query.
   `field >= N` as the suggestion.
 - **Default unit.** Without a unit, the unit is the product's default
   (Polylogue `sessions`, Sinex `events`). A mixed query names every unit.
-- **Namespaces.** Inside a product its own units are unprefixed; the other
+- **Namespaces.** Each catalog declares its product namespace and may declare
+  a unit's singular form. Both resolve to the canonical unit name, preserving
+  question identity. Inside a product its own units are unprefixed; the other
   product's units carry `pl.` or `sx.`.
 
 ### Match operators
@@ -193,7 +195,7 @@ Four operators, each with one meaning in both products:
 | `fill` | after a time-bucketed group: every bucket of a finite range, each with the product's coverage state for it (below) |
 | `fields F [as N], E as N, …` | projection and computed columns |
 | `with CHILD(fields)[cond, first:k\|last:k]` | attached child lists; never changes the parents |
-| `matches` | one row per step of each match of the relation's one top-level `exists` or `seq`: `parent` (the row that matched), `match` (its number within the parent), `position` (the step's place in the match), `step` (a reference to the matched row) and the step row's fields as `step.F`. A relation without such a pattern is refused, and one with two is ambiguous; a saved or kept source hides its own, so `matches` follows the `exists` or `seq` it expands |
+| `matches` | one row per step of each match of the relation's one top-level `exists` or `seq`: `parent` (the row that matched), `match` (its number within the parent), `position` (the step's place in the match), `step` (a reference to the matched row) and the step row's fields as `step.F`. A relation without such a pattern is refused, and one with two is ambiguous; a saved definition can carry its captured top-level match units in its declared semantic output; without that provenance it is refused. A kept result remains opaque and reads its retained `.matches` part |
 | `UNIT [where C]` | switch to the related rows of another unit (`messages … \| sessions` lifts to the containing sessions) |
 | `union (Q)`, `intersect (Q)`, `except (Q)` | set algebra over one unit, or over identical projected schemas |
 | `fuse (Q)` | adds Q's order as one more ranked list without adding rows |

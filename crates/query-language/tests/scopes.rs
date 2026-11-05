@@ -217,6 +217,7 @@ fn nested_and_related_uses_have_their_actual_unit_and_distinct_addresses() {
 fn saved_and_result_scopes_retain_snapshot_fields_and_closed_values() {
     let mut catalog = catalog("events");
     let schema = OutputSchema {
+        match_units: None,
         unit: Some("children".into()),
         fields: vec![Field {
             name: "promoted".into(),
@@ -247,6 +248,7 @@ fn saved_and_result_scopes_retain_snapshot_fields_and_closed_values() {
                 part: ResultPart::Matches,
             },
             schema: OutputSchema {
+                match_units: None,
                 fields: vec![field("match_only", FieldKind::Integer)],
                 ..schema
             },

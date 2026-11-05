@@ -68,6 +68,11 @@ fn check_schema(output: &crate::catalog::OutputSchema, catalog: &Catalog) -> Res
     {
         return Err(unbound(format!("output row domain {unit:?}")));
     }
+    for unit in output.match_units.iter().flatten() {
+        if catalog.unit(unit).is_none() {
+            return Err(unbound(format!("match row domain {unit:?}")));
+        }
+    }
     let mut names = BTreeSet::new();
     for field in &output.fields {
         if field.name.is_empty() || !names.insert(field.name.as_str()) {
