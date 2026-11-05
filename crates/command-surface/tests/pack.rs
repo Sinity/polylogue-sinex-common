@@ -33,7 +33,7 @@ fn pending_first() {
     let sections = vec![section("past", false, 3), section("waiting", true, 3)];
     let fitted = fit(
         sections,
-        Budget::new(Some(16), 0, None),
+        Budget::new(command_surface::TokenBudget::Tokens(16), 0, None),
         &words,
         &left_out_line,
     );
@@ -64,7 +64,7 @@ fn whole_entries() {
     // the two-line entry (6) does not, and none of its lines is kept.
     let fitted = fit(
         vec![multi],
-        Budget::new(Some(9), 0, None),
+        Budget::new(command_surface::TokenBudget::Tokens(9), 0, None),
         &words,
         &left_out_line,
     );
@@ -80,7 +80,7 @@ fn ample_budget_leaves_nothing_out() {
         .collect();
     let fitted = fit(
         sections,
-        Budget::new(None, 100_000, None),
+        Budget::new(command_surface::TokenBudget::Default, 100_000, None),
         &words,
         &left_out_line,
     );
@@ -93,11 +93,16 @@ fn ample_budget_leaves_nothing_out() {
 
 #[test]
 fn budget_clamped_to_the_callers_cap_says_so() {
-    let budget = Budget::new(Some(50_000), 4_000, Some(25_000));
-    assert_eq!(budget.tokens, 25_000);
-    assert_eq!(budget.clamped_from, Some(50_000));
+    let budget = Budget::new(
+        command_surface::TokenBudget::Tokens(50_000),
+        4_000,
+        Some(25_000),
+    );
     assert!(budget.note().unwrap().contains("50000 to 25000"));
-    assert_eq!(Budget::new(None, 4_000, Some(25_000)).note(), None);
+    assert_eq!(
+        Budget::new(command_surface::TokenBudget::Default, 4_000, Some(25_000)).note(),
+        None
+    );
     assert_eq!(approximate_tokens("abcde"), 2);
 }
 
@@ -137,7 +142,7 @@ fn section_status_travels_with_its_reason() {
     empty.status = SectionStatus::Empty;
     let fitted = fit(
         vec![empty],
-        Budget::new(Some(100), 0, None),
+        Budget::new(command_surface::TokenBudget::Tokens(100), 0, None),
         &words,
         &left_out_line,
     );
@@ -167,7 +172,7 @@ proptest! {
                     .min(whole_of(s))
             })
             .sum();
-        let fitted = fit(sections.clone(), Budget::new(Some(budget), 0, None), &words, &left_out_line);
+        let fitted = fit(sections.clone(), Budget::new(command_surface::TokenBudget::Tokens(budget), 0, None), &words, &left_out_line);
         // What was kept and what was left out add up to everything.
         let kept: usize = fitted.sections.iter().map(|s| s.entries.len()).sum();
         let left: u64 = fitted.left_out.iter().map(|l| l.count).sum();
@@ -191,4 +196,30 @@ proptest! {
             prop_assert_eq!(kept, total);
         }
     }
+}
+
+#[test]
+fn an_unlimited_budget_keeps_whole_entries_and_still_obeys_the_callers_cap() {
+    let section = Section {
+        title: "rows".into(),
+        status: SectionStatus::Complete,
+        pending: false,
+        entries: (0..40)
+            .map(|n| Entry::new(format!("row {n} with detail"), format!("ref:{n}")))
+            .collect(),
+        expand: None,
+    };
+    let unlimited = fit(
+        vec![section.clone()],
+        Budget::new(command_surface::TokenBudget::Unlimited, 1, None),
+        &words,
+        &left_out_line,
+    );
+    assert_eq!(unlimited.sections[0].entries.len(), 40);
+    assert!(unlimited.left_out.is_empty());
+    let budget = Budget::new(command_surface::TokenBudget::Unlimited, 1, Some(18));
+    assert!(budget.note().unwrap().contains("unlimited to 18"));
+    let capped = fit(vec![section], budget, &words, &left_out_line);
+    assert!(!capped.left_out.is_empty());
+    assert!(capped.used_tokens <= 18);
 }

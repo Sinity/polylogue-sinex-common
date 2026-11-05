@@ -25,7 +25,7 @@ proptest! {
     }
     #[test]
     fn envelope_serialization_preserves_unicode_and_identity(text in ".*",id in ".+"){
-        let request=RunnableRequest{operation:"read".into(),arguments:json!({"text":text}),request_id:id,deadline:Deadline::None,budget_tokens:Some(4000),cursor:Some("c-1".into()),fresh:true,format:Format::Json};
+        let request=RunnableRequest{operation:"read".into(),arguments:json!({"text":text}),request_id:id,deadline:Deadline::None,budget_tokens: command_surface::TokenBudget::Tokens(4000),cursor:Some("c-1".into()),fresh:true,format:Format::Json};
         let bytes=serde_json::to_vec(&request).unwrap();prop_assert_eq!(serde_json::from_slice::<RunnableRequest>(&bytes).unwrap(),request);
         let answer=Answer::ok(json!({"text":text}));let bytes=serde_json::to_vec(&answer).unwrap();prop_assert_eq!(serde_json::from_slice::<Answer<Value>>(&bytes).unwrap(),answer);
     }
@@ -186,5 +186,33 @@ fn cli_quote_is_interpreted_as_one_exact_argument() {
             .unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, text.as_bytes());
+    }
+}
+
+#[test]
+fn token_budget_distinguishes_absent_null_and_a_count() {
+    for (wire, expected) in [
+        (json!({}), command_surface::TokenBudget::Default),
+        (
+            json!({"budget_tokens":null}),
+            command_surface::TokenBudget::Unlimited,
+        ),
+        (
+            json!({"budget_tokens":0}),
+            command_surface::TokenBudget::Tokens(0),
+        ),
+        (
+            json!({"budget_tokens":80}),
+            command_surface::TokenBudget::Tokens(80),
+        ),
+    ] {
+        let mut request = json!({"operation":"read","arguments":{},"request_id":"r-budget"});
+        for (key, value) in wire.as_object().unwrap() {
+            request[key] = value.clone();
+        }
+        let parsed: command_surface::RunnableRequest =
+            serde_json::from_value(request.clone()).unwrap();
+        assert_eq!(parsed.budget_tokens, expected);
+        assert_eq!(serde_json::to_value(parsed).unwrap(), request);
     }
 }

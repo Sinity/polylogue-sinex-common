@@ -129,7 +129,10 @@ fn positional_words_flags_and_repeats_fill_the_request() {
         parsed.calling_process,
         json!({"out": "/tmp/x"}).as_object().unwrap().clone()
     );
-    assert_eq!(parsed.request.budget_tokens, Some(900));
+    assert_eq!(
+        parsed.request.budget_tokens,
+        command_surface::TokenBudget::Tokens(900)
+    );
     assert_eq!(
         parsed.request.arguments,
         json!({"target": "session-1", "words": "why it failed", "full": true, "view": "outline", "tag": ["a", "b"]})

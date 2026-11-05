@@ -62,7 +62,7 @@ command line writes each field in its row's declared form:
 A field without a declaration is written `--name VALUE`. A flag that acts on
 the calling process (`--out FILE`) is read by the command line and kept out
 of the request. `--` ends the flags. Every row also takes `--json`,
-`--deadline MS|none`, `--request-id ID`, `--budget N`, `--cursor C`,
+`--deadline MS|none`, `--request-id ID`, `--budget N|none`, `--cursor C`,
 `--fresh` and `--request JSON` (the whole value, for any request type). A
 product may name one **default operation**, run when a command line's first
 words name no command (`polylogue QUERY`).
@@ -119,8 +119,8 @@ A **request** carries the operation, its typed arguments, a deadline, and a
 after a lost reply is applied once. Every request may also carry:
 
 - `budget_tokens`: how much text the answer may hold, the one name for it on
-  every surface; each operation has its own default, and a caller whose
-  harness declares a tool-output cap has the budget clamped to it;
+  every surface; absence uses the operation's default, and JSON null
+  (`--budget none`) lifts it. A caller's declared tool-output cap still applies;
 - `cursor`, to continue an answer;
 - `fresh`, which renders in full what the caller already holds (below);
 - `format`: `text` (the default) or `json`.
@@ -172,7 +172,7 @@ of (a count, its unit and the query that lists it); a ratio over a zero
 denominator is unknown.
 [web-shell](../web-shell/README.md#visual-language) renders each state.
 
-**Fitting a budget.** The answer is fitted to `budget_tokens` in whole lines:
+**Fitting a budget.** The answer is fitted to `budget_tokens` in whole logical entries:
 pending before past, every omission counted in `left_out` with its expand
 handle, never a cut inside a structure. A deadline, a page size and a budget
 each bound only what they name; none changes the question. The fitter:
@@ -188,23 +188,27 @@ each bound only what they name; none changes the question. The fitter:
   everything fits; a section with no room for its heading is left out whole;
 - counts each left-out line as the answer's surface prints it (a command
   line, or an MCP tool call), and holds back the envelope's other lines
-  (`RequestContext::fit` takes the envelope), so the whole text stays within
+  (`RequestContext::fit` takes the typed answer), so the whole text stays within
   any budget that can hold what every section is sure to need.
 
 The budget is the request's `budget_tokens`, else the operation's default,
 lowered to the caller's output cap; a lowered budget is named in `notes`.
 Tokens are counted one per four bytes, rounded up (`approximate_tokens`),
-the same way everywhere. Every surface that shows an answer as text takes
-one path, `OperationTable::render_answer`: the command line and MCP here,
-and a product's client for an answer it read from the socket (the socket
-and HTTP carry the typed answer, and the web renders HTML). It measures the
-text after the envelope is final into `used_tokens`. Text over the budget
-is fitted, never failed: whole lines are dropped from the end of the
-value's text and named as left out ("lines of this answer"), with the
-request that reads them with its budget lifted. The outcome never changes,
-so a committed write still reads as done. `RequestContext::fit` counts the
-count's line in its longest form ("shown N of at least M") so an operation
-that fits through its context is not trimmed.
+the same way everywhere. The operation fits its typed logical sections
+through `RequestContext::fit`, before giving its response to a transport.
+That method preserves the outcome and updates the typed value, shown count,
+omissions and any cap note together.
+Every omitted section or entry keeps an expansion request with the budget
+explicitly lifted; expanding cannot accidentally request the same default
+budget again. The response retains exactly the fitted sections and entries,
+and `shown` counts those entries.
+
+Every surface that shows an answer as text takes one rendering path,
+`OperationTable::render_answer`: the command line and MCP here, and a
+product's client for an answer it read from the socket. The socket and HTTP
+carry the typed answer, and the web renders HTML. Rendering measures the
+final value and envelope into `used_tokens` and preserves the operation's
+logical entries. It does not fit a second time or trim rendered lines.
 
 **Text and data.** The text part is the rendering: rows one line each,
 values every row shares printed once in a header line, absolute times, and
@@ -545,11 +549,14 @@ the serialization, command-line and fitter boundaries. Run
   everything is kept whenever everything fits; and the text with its
   left-out lines stays within any budget that can hold what every section is
   sure to need.
-- **text-within-budget**: the text a surface renders for an answer, value
-  and envelope lines together, is within the request's budget: an
-  operation that fits through its context fits as rendered, and other text
-  is fitted by whole lines named as left out, never failed; `used_tokens`
-  is what the text measures.
+- **text-within-budget**: the operation fits the typed answer through its
+  context, reserving its envelope lines. Rendering preserves every retained
+  entry and measures the final text into `used_tokens`; it never trims the
+  value again. A budget large enough for the required envelope and omission
+  lines holds the rendered answer within that budget.
+- **expansion-lifts-default-budget**: an omission's expansion explicitly
+  lifts the budget, so executing it cannot fall back to the same default.
+- **json-keeps-data**: a text budget does not cut rows carried as JSON.
 - **text-answers-read-back**: an MCP answer in text format reads back as
   `Answer<Option<T>>` with the value `None` and `value_in_text`, and
   `Answer<T>` refuses it saying where the value is.

@@ -64,6 +64,30 @@ impl Deadline {
     }
 }
 
+/// A token count, an explicitly lifted budget (JSON null), or the operation's
+/// default when absent. Unlimited is distinct from requesting the default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum TokenBudget {
+    Tokens(u32),
+    Unlimited,
+    #[default]
+    #[serde(skip)]
+    Default,
+}
+impl TokenBudget {
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::Default)
+    }
+    pub fn resolve(self, default: Option<u32>) -> Option<u32> {
+        match self {
+            Self::Default => default,
+            Self::Unlimited => None,
+            Self::Tokens(n) => Some(n),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Request<T> {
@@ -72,10 +96,10 @@ pub struct Request<T> {
     pub request_id: String,
     #[serde(default, skip_serializing_if = "is_default")]
     pub deadline: Deadline,
-    /// How many tokens the answer's text may use; absent uses the operation's
-    /// default. The caller's harness cap clamps it (see `Budget`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub budget_tokens: Option<u32>,
+    /// The answer's token budget; null lifts it and absence uses the default.
+    /// The caller's harness cap still applies (see `Budget`).
+    #[serde(default, skip_serializing_if = "TokenBudget::is_default")]
+    pub budget_tokens: TokenBudget,
     /// Continues an earlier answer from where its page ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
@@ -117,7 +141,7 @@ impl RequestOption {
     /// Whether `request` uses the option.
     pub fn used_by<T>(self, request: &Request<T>) -> bool {
         match self {
-            Self::BudgetTokens => request.budget_tokens.is_some(),
+            Self::BudgetTokens => !request.budget_tokens.is_default(),
             Self::Cursor => request.cursor.is_some(),
             Self::Fresh => request.fresh,
             Self::Format => request.format != Format::Text,
@@ -153,7 +177,7 @@ impl RunnableRequest {
             arguments,
             request_id: request_id.into(),
             deadline: Deadline::Default,
-            budget_tokens: None,
+            budget_tokens: TokenBudget::Default,
             cursor: None,
             fresh: false,
             format: Format::Text,

@@ -144,7 +144,7 @@ fn request(text: &str) -> RunnableRequest {
         arguments: json!({"text":text}),
         request_id: "r-1".into(),
         deadline: Deadline::None,
-        budget_tokens: None,
+        budget_tokens: command_surface::TokenBudget::Default,
         cursor: None,
         fresh: false,
         format: Format::Text,

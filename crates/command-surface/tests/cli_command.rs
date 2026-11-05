@@ -65,7 +65,7 @@ fn request(operation: &str, text: &str, request_id: &str, deadline: Deadline) ->
         arguments: json!({ "text": text }),
         request_id: request_id.into(),
         deadline,
-        budget_tokens: None,
+        budget_tokens: command_surface::TokenBudget::Default,
         cursor: None,
         fresh: false,
         format: Format::Text,

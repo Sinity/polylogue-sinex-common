@@ -5,7 +5,7 @@
 //! sections before past ones; and it says, per section, how many entries it
 //! left out and how to read them. Its text, left-out lines included, stays
 //! within any budget that can hold what every section is sure to need.
-use crate::{LeftOut, RunnableRequest};
+use crate::{LeftOut, RunnableRequest, TokenBudget};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -108,25 +108,20 @@ pub struct Section {
     pub expand: Option<RunnableRequest>,
 }
 
-/// The token budget of one answer: what was asked, clamped to what the
-/// caller's harness accepts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+/// An applied token budget, after resolving the operation's default and the
+/// caller's output cap. Only this constructor creates its states.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Budget {
-    pub tokens: u32,
-    /// The budget asked for, when the harness's cap lowered it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub clamped_from: Option<u32>,
+    tokens: Option<u32>,
+    clamped_from: Option<TokenBudget>,
 }
 impl Budget {
-    /// The requested budget, else the operation's default, lowered to the
-    /// caller's cap when it has one.
-    pub fn new(requested: Option<u32>, default: u32, cap: Option<u32>) -> Self {
-        let asked = requested.unwrap_or(default);
+    pub fn new(requested: TokenBudget, default: u32, cap: Option<u32>) -> Self {
+        let asked = requested.resolve(Some(default));
         match cap {
-            Some(cap) if asked > cap => Self {
-                tokens: cap,
-                clamped_from: Some(asked),
+            Some(cap) if asked.is_none_or(|asked| asked > cap) => Self {
+                tokens: Some(cap),
+                clamped_from: Some(asked.map_or(TokenBudget::Unlimited, TokenBudget::Tokens)),
             },
             _ => Self {
                 tokens: asked,
@@ -134,13 +129,22 @@ impl Budget {
             },
         }
     }
-    /// The note an answer carries when the cap lowered its budget.
+    pub(crate) fn reserve(self, held: u32) -> Self {
+        Self {
+            tokens: self.tokens.map(|tokens| tokens.saturating_sub(held)),
+            ..self
+        }
+    }
     pub fn note(&self) -> Option<String> {
-        self.clamped_from.map(|asked| {
-            format!(
-                "budget lowered from {asked} to {} tokens, the caller's output cap",
-                self.tokens
-            )
+        self.clamped_from.and_then(|asked| {
+            self.tokens.map(|tokens| {
+                let from = match asked {
+                    TokenBudget::Tokens(n) => n.to_string(),
+                    TokenBudget::Unlimited => "unlimited".into(),
+                    TokenBudget::Default => unreachable!("the constructor resolves defaults"),
+                };
+                format!("budget lowered from {from} to {tokens} tokens, the caller's output cap")
+            })
         })
     }
 }
@@ -149,6 +153,21 @@ impl Budget {
 /// with a tokenizer for the caller's model pass their own counter.
 pub fn approximate_tokens(text: &str) -> u32 {
     u32::try_from(text.len().div_ceil(4)).unwrap_or(u32::MAX)
+}
+
+/// Render the logical sections retained by the fitter without fitting them again.
+pub fn render_sections(sections: &[Section]) -> String {
+    sections
+        .iter()
+        .map(|section| render_section(section, &section.entries))
+        .collect()
+}
+fn render_section(section: &Section, entries: &[Entry]) -> String {
+    let mut text = heading(section);
+    for entry in entries {
+        text.push_str(&entry.text());
+    }
+    text
 }
 
 /// The fitted sections in their given order, the text of what was kept, and
@@ -191,7 +210,10 @@ pub fn fit(
     let left_out = |section: &Section, count: usize| LeftOut {
         what: section.title.clone(),
         count: count as u64,
-        expand: section.expand.clone(),
+        expand: section.expand.clone().map(|mut request| {
+            request.budget_tokens = TokenBudget::Unlimited;
+            request
+        }),
     };
     let line_cost = |section: &Section| {
         u64::from(tokens(&left_out_line(&left_out(
@@ -211,11 +233,11 @@ pub fn fit(
     // being named as left out, whichever is cheaper.
     let reserve = |section: &Section| line_cost(section).min(whole_cost(section));
     let mut reserved: u64 = sections.iter().map(reserve).sum();
-    let mut remaining = u64::from(budget.tokens);
+    let mut remaining = budget.tokens.map(u64::from);
     // For each section, how many entries it keeps, or `None` when it is left
     // out whole.
     let mut kept: Vec<Option<usize>> = vec![None; sections.len()];
-    if reserved <= remaining {
+    if remaining.is_none_or(|remaining| reserved <= remaining) {
         let mut order: Vec<usize> = (0..sections.len()).collect();
         order.sort_by_key(|&index| !sections[index].pending);
         for index in order {
@@ -223,13 +245,14 @@ pub fn fit(
             reserved -= reserve(section);
             // Room for this section with every later one's need held back;
             // never less than this section's own need.
-            let free = remaining - reserved;
+            let free = remaining.map(|remaining| remaining - reserved);
             let whole = whole_cost(section);
-            if whole <= free {
+            if free.is_none_or(|free| whole <= free) {
                 kept[index] = Some(section.entries.len());
-                remaining -= whole;
+                remaining = remaining.map(|remaining| remaining - whole);
                 continue;
             }
+            let free = free.expect("an unlimited budget kept the whole section");
             // Some entry is left out, so the section ends with its left-out line.
             let line = line_cost(section);
             let mut used = u64::from(tokens(&heading(section))) + line;
@@ -244,10 +267,10 @@ pub fn fit(
             }
             if used <= free {
                 kept[index] = Some(count);
-                remaining -= used;
+                remaining = remaining.map(|remaining| remaining - used);
             } else {
                 // Its own need was the left-out line, which `free` holds.
-                remaining -= line;
+                remaining = remaining.map(|remaining| remaining - line);
             }
         }
     }
@@ -258,10 +281,7 @@ pub fn fit(
     for (mut section, kept) in sections.into_iter().zip(kept) {
         let count = kept.unwrap_or(0);
         if kept.is_some() {
-            let mut part = heading(&section);
-            for entry in &section.entries[..count] {
-                part.push_str(&entry.text());
-            }
+            let part = render_section(&section, &section.entries[..count]);
             used_tokens += u64::from(tokens(&part));
             text.push_str(&part);
         }

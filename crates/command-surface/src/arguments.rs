@@ -248,7 +248,7 @@ impl OperationTable {
         let mut calling_process = Map::new();
         let mut request = None;
         let mut deadline = Deadline::Default;
-        let mut budget_tokens = None;
+        let mut budget_tokens = crate::TokenBudget::Default;
         let mut cursor = None;
         let mut fresh = false;
         let mut id = request_id.into();
@@ -356,11 +356,14 @@ impl OperationTable {
                 "--cursor" => cursor = Some(value()?),
                 "--fresh" if inline.is_none() => fresh = true,
                 "--budget" => {
-                    budget_tokens = Some(
-                        value()?
-                            .parse()
-                            .map_err(|_| bad_request("budget must be a number of tokens"))?,
-                    );
+                    let value = value()?;
+                    budget_tokens = if value == "none" {
+                        crate::TokenBudget::Unlimited
+                    } else {
+                        crate::TokenBudget::Tokens(value.parse().map_err(|_| {
+                            bad_request("budget must be a number of tokens or none")
+                        })?)
+                    };
                 }
                 "--request" => {
                     if request.is_some() {
@@ -543,8 +546,10 @@ impl Forms {
             Deadline::None => words.extend(["--deadline".into(), "none".into()]),
             Deadline::Milliseconds(ms) => words.extend(["--deadline".into(), ms.to_string()]),
         }
-        if let Some(budget) = request.budget_tokens {
-            words.extend(["--budget".into(), budget.to_string()]);
+        match request.budget_tokens {
+            crate::TokenBudget::Default => {}
+            crate::TokenBudget::Unlimited => words.extend(["--budget".into(), "none".into()]),
+            crate::TokenBudget::Tokens(n) => words.extend(["--budget".into(), n.to_string()]),
         }
         if let Some(cursor) = &request.cursor {
             words.extend(["--cursor".into(), quote_argument(cursor)]);

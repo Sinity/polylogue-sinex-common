@@ -227,7 +227,7 @@ fn request(id: &str, value: &str) -> RunnableRequest {
         arguments: json!({"value":value}),
         request_id: id.into(),
         deadline: Deadline::None,
-        budget_tokens: None,
+        budget_tokens: crate::TokenBudget::Default,
         cursor: None,
         fresh: false,
         format: crate::Format::Text,
