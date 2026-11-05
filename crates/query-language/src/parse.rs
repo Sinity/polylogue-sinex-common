@@ -196,8 +196,10 @@ pub fn parse(text: &str, catalog: &Catalog) -> Result<Query, Error> {
                     break;
                 }
                 match parse_once(&corrected, catalog) {
-                    Ok(_) => {
-                        error.suggestion = Some(corrected);
+                    Ok(query) => {
+                        if crate::bind::check_parsed(&query, catalog).is_ok() {
+                            error.suggestion = Some(corrected);
+                        }
                         break;
                     }
                     Err(next) => candidate = next.suggestion,
@@ -777,18 +779,6 @@ impl Parser<'_> {
         }
         Ok(join_conditions(conditions, true))
     }
-    /// Attach a corrected query only when it parses and binds as given; a
-    /// refusal without a runnable correction carries none.
-    fn suggest(&self, error: Error, corrected: String) -> Error {
-        if parse(&corrected, self.catalog)
-            .and_then(|query| crate::bind::bind(&query, self.catalog))
-            .is_ok()
-        {
-            error.suggestion(corrected)
-        } else {
-            error
-        }
-    }
     /// A lowercase `and`, `or` or `not` between two conditions would silently
     /// become a search word; the capitalised operator is the suggestion.
     fn refuse_lowercase_boolean(&self) -> Result<(), Error> {
@@ -814,8 +804,7 @@ impl Parser<'_> {
         )
         .length(t.text.len())
         .hint("quote the word to search for it");
-        // Suggest the capitalised query only when it is itself a query.
-        Err(self.suggest(error, self.replace(t.span, &t.text.to_uppercase())))
+        Err(error.suggestion(self.replace(t.span, &t.text.to_uppercase())))
     }
     fn atom(&mut self, scope: &Scope) -> Result<Condition, Error> {
         let start = self.pos();
@@ -976,7 +965,7 @@ impl Parser<'_> {
                     start,
                 )
                 .length(end - start);
-                return Err(self.suggest(error, self.replace(Span { start, end }, &joined)));
+                return Err(error.suggestion(self.replace(Span { start, end }, &joined)));
             }
             self.at = resume;
         }
@@ -1247,13 +1236,10 @@ impl Parser<'_> {
                 "a set is written (a|b) and matched with `:`",
                 open.span.start,
             );
-            return Err(self.suggest(
-                error,
-                self.replace(
-                    Span { start, end },
-                    &format!("{name}:{}", value_surface(&set)),
-                ),
-            ));
+            return Err(error.suggestion(self.replace(
+                Span { start, end },
+                &format!("{name}:{}", value_surface(&set)),
+            )));
         }
         let right = if let Some(t) = self.peek()
             && !t.quoted
@@ -2121,10 +2107,7 @@ impl Parser<'_> {
                                 end: next.span.end,
                             };
                             let value = &self.text[next.span.start..next.span.end];
-                            self.suggest(
-                                error,
-                                self.replace(bound, &format!("where {word}:{value}")),
-                            )
+                            error.suggestion(self.replace(bound, &format!("where {word}:{value}")))
                         }
                         None => error,
                     },

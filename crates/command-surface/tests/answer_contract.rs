@@ -566,3 +566,31 @@ fn coverage_states_round_trip() {
         assert_eq!(source.is_complete(), state.is_complete());
     }
 }
+
+#[test]
+fn coverage_footer_uses_the_typed_state_and_detail() {
+    let mut answer = Answer::ok(Value::Null);
+    answer.envelope.coverage = vec![SourceCoverage {
+        source: "terminal".into(),
+        state: CoverageState::Unavailable {
+            cause: "offline".into(),
+        },
+        not_complete: vec![CoverageInterval {
+            start: "2026-11-01T10:00:00Z".parse().unwrap(),
+            end: "2026-11-01T11:00:00Z".parse().unwrap(),
+            state: CoverageState::Gap {
+                reason: "overflow".into(),
+            },
+        }],
+    }];
+    let rendered = table().render_answer(Via::Cli, None, answer);
+    assert!(
+        rendered
+            .footer
+            .contains("coverage: terminal unavailable (offline)"),
+        "{}",
+        rendered.footer
+    );
+    assert!(rendered.footer.contains("gap"), "{}", rendered.footer);
+    assert!(!rendered.footer.contains("complete"), "{}", rendered.footer);
+}

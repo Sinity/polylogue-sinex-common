@@ -58,6 +58,10 @@ meaning in the other.
 - Percentiles are nearest-rank.
 - Cursors are sealed keyset cursors.
 
+Correction paths produce edits to the original question. The outer parser chains
+those edits until the whole question parses, then checks the resulting tree
+against the catalog once. An intermediate correction need not be runnable.
+
 There is no command-name typo guessing. Ruling, 2026-07-05: "typo hint is
 actually unnecessary given we do not want bare query support anyway"
 (cc:900c6128-99a3-4986-8ed4-d5d7aacb38fe:e5f52f29-85e8-4cfc-9088-b5ea79b7bccc).

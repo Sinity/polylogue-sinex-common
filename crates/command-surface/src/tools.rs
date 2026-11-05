@@ -346,22 +346,16 @@ impl Forms {
             ));
         }
         for source in envelope.coverage.iter().filter(|s| !s.is_complete()) {
-            let state = serde_json::to_value(&source.state).expect("coverage serializes");
-            let mut words = vec![state["state"].as_str().unwrap_or_default().to_owned()];
-            if let Some(why) = state
-                .get("reason")
-                .or(state.get("cause"))
-                .and_then(Value::as_str)
-            {
+            let mut words = vec![source.state.state().to_owned()];
+            if let Some(why) = source.state.detail() {
                 words.push(format!("({why})"));
             }
             for interval in &source.not_complete {
-                let state = serde_json::to_value(&interval.state).expect("coverage serializes");
                 words.push(format!(
                     "{}–{} {}",
                     interval.start,
                     interval.end,
-                    state["state"].as_str().unwrap_or_default()
+                    interval.state.state()
                 ));
             }
             text.push_str(&format!(

@@ -557,3 +557,18 @@ fn generated_names_never_hide_stored_fields() {
         vec![format!("{unit}.distance"), format!("{unit}.change")]
     );
 }
+
+/// More than one primitive correction is completed at the outer boundary.
+#[test]
+fn correction_chains_reach_a_runnable_question() {
+    for catalog in [support::polylogue(), support::sinex()] {
+        assert_eq!(
+            suggestion(&catalog, "rock and roll and jazz"),
+            "rock AND roll AND jazz"
+        );
+        assert_eq!(
+            suggestion(&catalog, "rock or roll and jazz"),
+            "rock OR roll AND jazz"
+        );
+    }
+}
