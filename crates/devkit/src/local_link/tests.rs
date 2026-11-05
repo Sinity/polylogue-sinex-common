@@ -147,6 +147,51 @@ fn link_roundtrip_restores_both_locks_without_leaving_auxiliary_state() {
 }
 
 #[test]
+fn a_shared_crate_reached_only_through_another_dependency_is_linked() {
+    let fixture = Fixture::new();
+    let bridge = fixture.directory.path().join("bridge");
+    package(
+        &bridge,
+        "bridge",
+        "0.1.0",
+        &format!(
+            "[dependencies]\nshared = {{ git = {}, branch = \"master\", version = \"1.0.0\" }}\n",
+            serde_json::to_string(&fixture.repository).unwrap()
+        ),
+    );
+    package(
+        &fixture.root(),
+        "consumer-root",
+        "0.1.0",
+        "[dependencies]\nbridge = { path = \"../bridge\" }\n",
+    );
+    cargo(&fixture.root(), &["metadata", "--format-version", "1"]);
+    let paths = fixture.paths();
+    let original = fs::read(&paths[1]).unwrap();
+    let locks = [(paths[1].as_path(), paths[2].as_path())];
+    let link = LocalLink {
+        repository: &fixture.repository,
+        patch: &paths[0],
+        locks: &locks,
+    };
+    assert_eq!(link.link(&fixture.first).unwrap(), ["shared"]);
+    let metadata = super::metadata(&fixture.root(), false).unwrap();
+    let shared = metadata["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "shared")
+        .unwrap();
+    assert!(shared["source"].is_null());
+    assert_eq!(
+        Path::new(shared["manifest_path"].as_str().unwrap()).parent(),
+        Some(fixture.first.as_path())
+    );
+    link.unlink().unwrap();
+    assert_eq!(fs::read(&paths[1]).unwrap(), original);
+}
+
+#[test]
 fn failed_relink_preserves_the_active_checkout_and_original_locks() {
     let fixture = Fixture::new();
     let original = fixture.state();

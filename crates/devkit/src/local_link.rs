@@ -32,23 +32,26 @@ impl LocalLink<'_> {
             .map_err(|error| format!("{}: {error}", checkout.display()))?;
         let available = crate_directories(&metadata(&checkout, true)?);
         self.change(|| {
-            for (lock, _) in self.locks {
-                read(lock)?;
+            for (lock, backup) in self.locks {
+                let original = read(lock)?;
+                if !backup.exists() {
+                    write(backup, &original)?;
+                }
             }
             remove(self.patch)?;
             let mut used = BTreeSet::new();
             for (lock, _) in self.locks {
-                used.extend(shared_crates(&metadata(workspace(lock)?, true)?, self.repository));
+                // Discover transitive crates in the Git graph without changing
+                // which versions the caller had locked before installing the override.
+                let before = read(lock)?;
+                let graph = metadata(workspace(lock)?, false)?;
+                write(lock, &before)?;
+                used.extend(shared_crates(&graph, self.repository));
             }
             if used.is_empty() {
                 return Err(format!("no workspace dependency comes from {}", self.repository));
             }
             let patch = patch_config(self.repository, &used, &available)?;
-            for (lock, backup) in self.locks {
-                if !backup.exists() {
-                    write(backup, &read(lock)?)?;
-                }
-            }
             write(self.patch, patch.as_bytes())?;
             for (lock, _) in self.locks {
                 let resolved = metadata(workspace(lock)?, false)?;
