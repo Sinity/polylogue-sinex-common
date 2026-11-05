@@ -32,6 +32,10 @@ pub struct Vocabulary {
     pub outer: String,
     pub children: String,
     pub number: String,
+    /// A number of `children`, independently named from the outer number.
+    pub child_number: String,
+    /// The child identity exposed beside an order match.
+    pub child_identity: String,
     /// A second number of the same kind, the end of `number`'s interval.
     pub end: String,
     pub category: String,
@@ -45,6 +49,8 @@ impl Default for Vocabulary {
             outer: "rows".into(),
             children: "children".into(),
             number: "value".into(),
+            child_number: "value".into(),
+            child_identity: "id".into(),
             end: "end".into(),
             category: "category".into(),
             text: "title".into(),
@@ -75,7 +81,21 @@ fn t(kind: TransformKind) -> Transform {
         kind,
     }
 }
-fn query(unit: &str, condition: Option<Condition>, transforms: Vec<Transform>) -> Query {
+fn query(
+    v: &Vocabulary,
+    unit: &str,
+    condition: Option<Condition>,
+    transforms: Vec<Transform>,
+) -> Query {
+    // Fixture order is explicit: a product's ordinary recency order is not a
+    // property of these language laws. Subsequent transforms may replace it.
+    let number = if unit == v.children {
+        &v.child_number
+    } else {
+        &v.number
+    };
+    let mut ordered = vec![sort(number, false)];
+    ordered.extend(transforms);
     Query {
         source: Source::Unit {
             unit: unit.into(),
@@ -83,7 +103,7 @@ fn query(unit: &str, condition: Option<Condition>, transforms: Vec<Transform>) -
             condition,
         },
         attach: vec![],
-        transforms,
+        transforms: ordered,
     }
 }
 fn comparison(field: &str, op: Op, value: &str) -> Condition {
@@ -143,7 +163,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     ];
     let mut children = vec![];
     for (id, n, order, time) in [("x", 1., 0, 20), ("y", 3., 1, 10), ("z", 3., 2, 30)] {
-        let mut row = Row::new(id).with(&v.number, n);
+        let mut row = Row::new(id).with(&v.child_number, n);
         row.parent = Some("a".into());
         row.order = order;
         row.time = Some(Extent {
@@ -153,7 +173,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
         });
         children.push(row);
     }
-    let mut unknown = Row::new("unknown-child").with(&v.number, Scalar::Unknown);
+    let mut unknown = Row::new("unknown-child").with(&v.child_number, Scalar::Unknown);
     unknown.parent = Some("u".into());
     children.push(unknown);
     let fixture = BTreeMap::from([
@@ -186,7 +206,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     ] {
         output.push(case(
             "ql.filter.composition",
-            query(&v.outer, None, transforms),
+            query(v, &v.outer, None, transforms),
             vec![rows[1].clone()],
         ));
     }
@@ -200,13 +220,14 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     ] {
         output.push(case(
             "ql.filter.three-valued",
-            query(&v.outer, Some(comparison(&v.number, op, "3")), vec![]),
+            query(v, &v.outer, Some(comparison(&v.number, op, "3")), vec![]),
             expected,
         ));
     }
     output.push(case(
         "ql.filter.three-valued",
         query(
+            v,
             &v.outer,
             Some(not(comparison(&v.number, Op::Eq, "3"))),
             vec![],
@@ -223,6 +244,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
         output.push(case(
             "ql.filter.three-valued",
             query(
+                v,
                 &v.outer,
                 Some(c(ConditionKind::Match {
                     field: v.number.clone(),
@@ -236,6 +258,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     output.push(case(
         "ql.match.natural",
         query(
+            v,
             &v.outer,
             Some(c(ConditionKind::Match {
                 field: v.category.clone(),
@@ -251,6 +274,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     output.push(Case {
         law: "ql.match.natural".into(),
         query: query(
+            v,
             &v.outer,
             Some(c(ConditionKind::Match {
                 field: v.text.clone(),
@@ -284,12 +308,12 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     });
     output.push(case(
         "ql.expr.unknown",
-        query(&v.outer, Some(more_than_five.clone()), vec![]),
+        query(v, &v.outer, Some(more_than_five.clone()), vec![]),
         vec![rows[1].clone(), rows[2].clone()],
     ));
     output.push(case(
         "ql.expr.unknown",
-        query(&v.outer, Some(not(more_than_five)), vec![]),
+        query(v, &v.outer, Some(not(more_than_five)), vec![]),
         vec![rows[0].clone()],
     ));
     let aggregate = Aggregate {
@@ -308,6 +332,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     output.push(case(
         "ql.group.relation",
         query(
+            v,
             &v.outer,
             None,
             vec![
@@ -334,6 +359,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     output.push(case(
         "ql.aggregate.nearest-rank",
         query(
+            v,
             &v.outer,
             None,
             vec![t(TransformKind::Aggregate {
@@ -355,6 +381,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     output.push(case(
         "ql.covered",
         query(
+            v,
             &v.outer,
             None,
             vec![t(TransformKind::Aggregate {
@@ -374,10 +401,11 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     output.push(case(
         "ql.filter.three-valued",
         query(
+            v,
             &v.outer,
             Some(not(c(ConditionKind::Exists {
                 unit: v.children.clone(),
-                condition: Some(Box::new(comparison(&v.number, Op::Eq, "3"))),
+                condition: Some(Box::new(comparison(&v.child_number, Op::Eq, "3"))),
             }))),
             vec![],
         ),
@@ -387,8 +415,8 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
         unit: v.children.clone(),
         all: false,
         steps: vec![
-            comparison(&v.number, Op::Eq, "1"),
-            comparison(&v.number, Op::Eq, "3"),
+            comparison(&v.child_number, Op::Eq, "1"),
+            comparison(&v.child_number, Op::Eq, "3"),
         ],
         gaps: vec![Gap::Later],
     });
@@ -398,19 +426,20 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
             .with("match", 1.)
             .with("position", position as f64)
             .with("step", id)
-            .with(format!("step.{}", v.number), n);
+            .with(format!("step.{}", v.child_number), n);
         row.parent = Some("a".into());
         row.matches = vec![id.into()];
         row
     };
     output.push(case(
         "ql.match-order",
-        query(&v.outer, Some(seq), vec![t(TransformKind::Matches)]),
+        query(v, &v.outer, Some(seq), vec![t(TransformKind::Matches)]),
         vec![step(1, "x", 1.), step(2, "y", 3.)],
     ));
     output.push(case(
         "ql.page-not-answer",
         query(
+            v,
             &v.outer,
             None,
             vec![sort(&v.number, true), t(TransformKind::Limit { count: 3 })],
@@ -439,7 +468,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     let pair = |inner: &str, offset: f64| {
         let mut row = outer
             .clone()
-            .with("match.id", inner)
+            .with(format!("match.{}", v.child_identity), inner)
             .with("match.distance", offset);
         row.id = format!("outer:{inner}");
         row.matches = vec![inner.into()];
@@ -448,7 +477,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     let near = |relation| JoinOn::Order {
         relation,
         within: Some(Distance::Time {
-            duration: Value::scalar("5"),
+            duration: Value::scalar("5s"),
         }),
         at: TimePoint::When,
         scope: None,
@@ -456,10 +485,11 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     output.push(Case {
         law: "ql.order.join-grain".into(),
         query: query(
+            v,
             &v.outer,
             None,
             vec![t(TransformKind::Join {
-                query: Box::new(query(&v.children, None, vec![])),
+                query: Box::new(query(v, &v.children, None, vec![])),
                 on: near(OrderRelation::Near),
             })],
         ),
@@ -472,9 +502,9 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     });
     let near_condition = c(ConditionKind::Order {
         relation: OrderRelation::Near,
-        query: Box::new(query(&v.children, None, vec![])),
+        query: Box::new(query(v, &v.children, None, vec![])),
         within: Some(Distance::Time {
-            duration: Value::scalar("5"),
+            duration: Value::scalar("5s"),
         }),
         at: TimePoint::When,
         scope: None,
@@ -483,18 +513,18 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     // neither the relation nor its negation keeps it.
     output.push(Case {
         law: "ql.order.semijoin".into(),
-        query: query(&v.outer, Some(near_condition.clone()), vec![]),
+        query: query(v, &v.outer, Some(near_condition.clone()), vec![]),
         fixture: timed.clone(),
         expected: answer(vec![
             outer
                 .clone()
-                .with("match.id", "near-a")
+                .with(format!("match.{}", v.child_identity), "near-a")
                 .with("match.distance", -1.),
         ]),
     });
     output.push(Case {
         law: "ql.order.semijoin".into(),
-        query: query(&v.outer, Some(not(near_condition)), vec![]),
+        query: query(v, &v.outer, Some(not(near_condition)), vec![]),
         fixture: timed,
         expected: answer(vec![at("far", 100)]),
     });
@@ -502,8 +532,9 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     let after_one = c(ConditionKind::Order {
         relation: OrderRelation::After,
         query: Box::new(query(
+            v,
             &v.children,
-            Some(comparison(&v.number, Op::Eq, "1")),
+            Some(comparison(&v.child_number, Op::Eq, "1")),
             vec![],
         )),
         within: Some(Distance::Steps { count: 1 }),
@@ -512,12 +543,12 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     });
     output.push(case(
         "ql.order.steps",
-        query(&v.children, Some(after_one), vec![]),
+        query(v, &v.children, Some(after_one), vec![]),
         vec![
             children[1]
                 .clone()
-                .with("match.id", "x")
-                .with(format!("match.{}", v.number), 1.)
+                .with(format!("match.{}", v.child_identity), "x")
+                .with(format!("match.{}", v.child_number), 1.)
                 .with("match.distance", -1.),
         ],
     ));
@@ -538,16 +569,18 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     let order = |relation, within: Option<u64>| {
         c(ConditionKind::Order {
             relation,
-            query: Box::new(query(&v.children, None, vec![])),
+            query: Box::new(query(v, &v.children, None, vec![])),
             within: within.map(|w| Distance::Time {
-                duration: Value::scalar(w.to_string()),
+                duration: Value::scalar(format!("{w}s")),
             }),
             at: TimePoint::When,
             scope: None,
         })
     };
     let matched = |row: &Row, inner: &str, offset: Option<f64>| {
-        let row = row.clone().with("match.id", inner);
+        let row = row
+            .clone()
+            .with(format!("match.{}", v.child_identity), inner);
         match offset {
             Some(offset) => row.with("match.distance", offset),
             None => row,
@@ -580,7 +613,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     ] {
         output.push(Case {
             law: "ql.order.coarse".into(),
-            query: query(&v.outer, Some(order(relation, within)), vec![]),
+            query: query(v, &v.outer, Some(order(relation, within)), vec![]),
             fixture: coarse_fixture.clone(),
             expected: answer(expected),
         });
@@ -589,7 +622,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     let east = || Some(comparison(&v.category, Op::Eq, "east"));
     output.push(case(
         "ql.rank.membership",
-        query(&v.outer, east(), vec![]),
+        query(v, &v.outer, east(), vec![]),
         vec![rows[0].clone(), rows[1].clone()],
     ));
     for (descending, expected) in [
@@ -599,11 +632,12 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
         output.push(case(
             "ql.rank.membership",
             query(
+                v,
                 &v.outer,
                 east(),
                 vec![t(TransformKind::Combine {
                     how: Combination::Fuse,
-                    query: Box::new(query(&v.outer, None, vec![sort(&v.number, descending)])),
+                    query: Box::new(query(v, &v.outer, None, vec![sort(&v.number, descending)])),
                 })],
             ),
             expected,
@@ -612,8 +646,13 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     output.push(case(
         "ql.order.steps",
         query(
+            v,
             &v.children,
-            Some(comparison(&format!("previous.{}", v.number), Op::Eq, "1")),
+            Some(comparison(
+                &format!("previous.{}", v.child_number),
+                Op::Eq,
+                "1",
+            )),
             vec![],
         ),
         vec![children[1].clone()],
@@ -627,10 +666,12 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     output.push(case(
         "ql.diff.watch",
         query(
+            v,
             &v.outer,
             Some(comparison(&v.number, Op::Gt, "1")),
             vec![t(TransformKind::Diff {
                 query: Box::new(query(
+                    v,
                     &v.outer,
                     Some(comparison(&v.number, Op::Lt, "5")),
                     vec![],
@@ -646,11 +687,13 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     output.push(case(
         "ql.rank.unranked-kept",
         query(
+            v,
             &v.outer,
             None,
             vec![t(TransformKind::Combine {
                 how: Combination::Fuse,
                 query: Box::new(query(
+                    v,
                     &v.outer,
                     Some(comparison(&v.number, Op::Gt, "1")),
                     vec![sort(&v.number, true)],
@@ -667,10 +710,11 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     output.push(case(
         "ql.filter.count-known",
         query(
+            v,
             &v.outer,
             Some(c(ConditionKind::Count {
                 unit: v.children.clone(),
-                condition: Some(Box::new(comparison(&v.number, Op::Eq, "3"))),
+                condition: Some(Box::new(comparison(&v.child_number, Op::Eq, "3"))),
                 op: Op::Eq,
                 count: 0,
             })),
@@ -679,6 +723,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
         vec![rows[1].clone(), rows[2].clone(), rows[3].clone()],
     ));
     let inner = query(
+        v,
         &v.outer,
         Some(comparison(&v.number, Op::Gt, "3")),
         vec![t(TransformKind::Group {
@@ -688,6 +733,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     output.push(case(
         "ql.filter.membership",
         query(
+            v,
             &v.outer,
             Some(c(ConditionKind::In {
                 left: Expression::field(&v.category),

@@ -527,7 +527,7 @@ own.
 ## Laws
 
 The crate's suite runs against both catalogs, through each product's real
-compiler; each product also runs its own laws. The reference evaluator, a
+compiler; each product also runs its own laws. The reusable fixtures name outer and child numeric fields separately and put their source order in the query explicitly, so a product retains its own ordinary listing order. Fixture time ticks are exact units chosen by the adapter and must be converted consistently with the query durations. The reference evaluator, a
 synthetic-row oracle, is the independent answer for relational mechanics,
 order relations, ranking and federation; it refuses storage, time-bucket and
 extension mechanics that need a product.

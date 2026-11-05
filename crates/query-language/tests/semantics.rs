@@ -160,11 +160,118 @@ fn reference_catalog() -> query_language::catalog::Catalog {
     });
     catalog
 }
+// This compiler binds one fixture tick to one second before handing the
+// query to the exact-tick oracle. Product compilers perform their own binding.
+fn resolve_fixture_times(query: &mut Query) -> Result<(), Error> {
+    fn distance(distance: &mut Distance) -> Result<(), Error> {
+        if let Distance::Time { duration } = distance {
+            let nanos = duration
+                .text()
+                .and_then(query_language::time::duration)
+                .map(|duration| duration.as_nanos())
+                .filter(|nanos| *nanos > 0 && nanos % 1_000_000_000 == 0)
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::BadValue,
+                        "fixture durations require whole seconds",
+                        0,
+                    )
+                })?;
+            *duration = Value::scalar((nanos / 1_000_000_000).to_string());
+        }
+        Ok(())
+    }
+    fn condition(value: &mut Condition) -> Result<(), Error> {
+        match &mut value.kind {
+            ConditionKind::And { conditions } | ConditionKind::Or { conditions } => {
+                for value in conditions {
+                    condition(value)?;
+                }
+            }
+            ConditionKind::Not { condition: value } => condition(value)?,
+            ConditionKind::Exists {
+                condition: Some(value),
+                ..
+            }
+            | ConditionKind::Count {
+                condition: Some(value),
+                ..
+            } => condition(value)?,
+            ConditionKind::Sequence { steps, gaps, .. } => {
+                for value in steps {
+                    condition(value)?;
+                }
+                for gap in gaps {
+                    if let Gap::Within { distance: value } = gap {
+                        distance(value)?;
+                    }
+                }
+            }
+            ConditionKind::Order { query, within, .. } => {
+                if let Some(value) = within {
+                    distance(value)?;
+                }
+                resolve_fixture_times(query)?;
+            }
+            ConditionKind::In { query, .. } => resolve_fixture_times(query)?,
+            _ => {}
+        }
+        Ok(())
+    }
+    match &mut query.source {
+        Source::Unit {
+            condition: Some(value),
+            ..
+        }
+        | Source::Saved {
+            condition: Some(value),
+            ..
+        }
+        | Source::Result {
+            condition: Some(value),
+            ..
+        } => condition(value)?,
+        _ => {}
+    }
+    for attachment in &mut query.attach {
+        for window in &mut attachment.windows {
+            if let Window::Where(value) = window {
+                condition(value)?;
+            }
+        }
+    }
+    for transform in &mut query.transforms {
+        match &mut transform.kind {
+            TransformKind::Where { condition: value }
+            | TransformKind::Scope {
+                condition: Some(value),
+                ..
+            } => condition(value)?,
+            TransformKind::Join { query, on } => {
+                if let JoinOn::Order {
+                    within: Some(value),
+                    ..
+                } = on
+                {
+                    distance(value)?;
+                }
+                resolve_fixture_times(query)?;
+            }
+            TransformKind::Combine { query, .. } | TransformKind::Diff { query } => {
+                resolve_fixture_times(query)?
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
 struct Reference;
 impl Compiler for Reference {
     type Plan = Query;
     fn compile(&self, query: &Query) -> Result<Query, Error> {
-        Ok(query.clone())
+        let mut query = query.clone();
+        resolve_fixture_times(&mut query)?;
+        Ok(query)
     }
 }
 impl Executor<Query> for Reference {
@@ -204,6 +311,8 @@ fn compiler_laws_run_against_both_product_vocabularies() {
                 outer: "sessions".into(),
                 children: "tool_calls".into(),
                 number: "cost".into(),
+                child_number: "cost".into(),
+                child_identity: "id".into(),
                 end: "tree_cost".into(),
                 category: "origin".into(),
                 text: "title".into(),
@@ -215,6 +324,8 @@ fn compiler_laws_run_against_both_product_vocabularies() {
                 outer: "events".into(),
                 children: "commands".into(),
                 number: "commit_seq".into(),
+                child_number: "commit_seq".into(),
+                child_identity: "id".into(),
                 end: "offset".into(),
                 category: "source".into(),
                 text: "host".into(),
