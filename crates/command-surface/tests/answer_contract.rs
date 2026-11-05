@@ -33,7 +33,11 @@ impl Operation for Search {
             )
         }
     }
-    fn execute(&self, request: Find, context: RequestContext) -> OperationFuture<'_, Answer<Rows>> {
+    fn execute(
+        &self,
+        request: Find,
+        _context: RequestContext,
+    ) -> OperationFuture<'_, Answer<Rows>> {
         Box::pin(async move {
             let rows = Rows {
                 rows: vec!["row-one-unique".into()],

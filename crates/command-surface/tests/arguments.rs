@@ -331,7 +331,11 @@ fn envelope_strategy(
         arguments,
         "[ -~λ]{1,10}",
         deadline_strategy(),
-        proptest::option::of(1u32..100_000),
+        prop_oneof![
+            Just(TokenBudget::Default),
+            Just(TokenBudget::Unlimited),
+            (0u32..100_000).prop_map(TokenBudget::Tokens),
+        ],
         proptest::option::of("[ -~]{0,8}"),
         any::<bool>(),
         any::<bool>(),
