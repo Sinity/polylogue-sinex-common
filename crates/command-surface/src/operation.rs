@@ -235,6 +235,10 @@ pub trait Operation: Send + Sync + 'static {
     type Request: Serialize + DeserializeOwned + JsonSchema + Send + 'static;
     type Response: Serialize + DeserializeOwned + JsonSchema + Send + 'static;
     fn spec(&self) -> OperationSpec;
+    /// Access for this typed request. The declaration advertises the row's maximum.
+    fn required_access(&self, _request: &Self::Request) -> Access {
+        self.spec().access
+    }
     fn execute(
         &self,
         request: Self::Request,
@@ -549,6 +553,13 @@ impl<O: Operation> ErasedOperation for O {
                 Ok(request) => request,
                 Err(error) => return Answer::error(bad_request(error.to_string())),
             };
+            let access = Operation::required_access(self, &request);
+            if access > context.caller().access() {
+                return Answer::error(Failure::new(
+                    FailureKind::Refused,
+                    format!("{} needs {} access", self.spec().name, access.name()),
+                ));
+            }
             let answer = Operation::execute(self, request, context).await;
             let Answer { outcome, envelope } = answer;
             let outcome = match outcome.map(serde_json::to_value) {
@@ -947,7 +958,7 @@ impl OperationTable {
         {
             return Err(bad_request(format!("unknown argument {key}")));
         }
-        if description.spec.access > caller.access {
+        if !matches!(row, Row::Request(_)) && description.spec.access > caller.access {
             return Err(Failure::new(
                 FailureKind::Refused,
                 format!(

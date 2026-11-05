@@ -513,3 +513,106 @@ async fn timeout_distinguishes_unmeasured_work_from_measured_zero_and_keeps_foll
         assert_eq!(next[1].request.deadline, Deadline::None);
     }
 }
+
+#[tokio::test]
+async fn mixed_rows_authorize_the_typed_request_before_any_write() {
+    #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+    struct Arguments {
+        value: Option<String>,
+    }
+    struct Mixed {
+        store: Arc<Store>,
+    }
+    impl Operation for Mixed {
+        type Request = Arguments;
+        type Response = Value;
+        fn spec(&self) -> OperationSpec {
+            OperationSpec {
+                access: Access::Write,
+                ..OperationSpec::request(
+                    "setting",
+                    &["setting"],
+                    "settings",
+                    "Read or write",
+                    "Reads or writes a setting",
+                )
+            }
+        }
+        fn required_access(&self, request: &Arguments) -> Access {
+            if request.value.is_some() {
+                Access::Write
+            } else {
+                Access::Read
+            }
+        }
+        fn execute(
+            &self,
+            request: Arguments,
+            context: RequestContext,
+        ) -> OperationFuture<'_, Answer<Value>> {
+            Box::pin(async move {
+                match request.value {
+                    Some(value) => match self.store.commit(
+                        context.caller().scope(),
+                        &context.request_id,
+                        &value,
+                    ) {
+                        Ok(row) => Answer::ok(json!({"row":row.row})),
+                        Err(error) => Answer::error(error),
+                    },
+                    None => Answer::ok(json!({"records":self.store.count()})),
+                }
+            })
+        }
+        fn render_text(&self, value: &Value) -> String {
+            value.to_string()
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("records.db"));
+    let mut table = OperationTable::new("example", Deadlines::default());
+    table
+        .declare_tool(crate::ToolFamily {
+            name: "settings".into(),
+            description: "settings".into(),
+            open_world: false,
+            idempotent: true,
+        })
+        .unwrap();
+    table
+        .register(Mixed {
+            store: store.clone(),
+        })
+        .unwrap();
+    let read = table
+        .call_as(
+            RunnableRequest::new("setting", json!({}), "catalog"),
+            Via::Cli,
+            Caller::default(),
+            Default::default(),
+        )
+        .await;
+    assert_eq!(read.value(), Some(&json!({"records":0})));
+    let refused = table
+        .call_as(
+            RunnableRequest::new("setting", json!({"value":"new"}), "blocked"),
+            Via::Cli,
+            Caller::default(),
+            Default::default(),
+        )
+        .await;
+    assert!(
+        matches!(refused.outcome, Outcome::Error(ref error) if error.kind == FailureKind::Refused)
+    );
+    assert_eq!(store.count(), 0);
+    let written = table
+        .call_as(
+            RunnableRequest::new("setting", json!({"value":"new"}), "allowed"),
+            Via::Cli,
+            Caller::default().with_access(Access::Write),
+            Default::default(),
+        )
+        .await;
+    assert!(written.value().is_some(), "{written:?}");
+    assert_eq!(store.count(), 1);
+}

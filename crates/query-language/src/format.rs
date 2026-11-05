@@ -190,6 +190,14 @@ impl Renderer<'_> {
             ConditionKind::Reference { reference } => {
                 if let Some(id) = reference.strip_prefix("result:") {
                     format!("result:{}", quote(id))
+                } else if reference
+                    .chars()
+                    .any(|c| c.is_whitespace() || "()[]|,\"".contains(c))
+                {
+                    let (prefix, identity) = reference
+                        .split_once(':')
+                        .ok_or_else(|| invalid("a quoted reference needs a declared prefix"))?;
+                    format!("{}:{}", name(prefix)?, quote(identity))
                 } else {
                     literal(reference)?
                 }

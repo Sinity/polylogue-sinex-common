@@ -383,7 +383,12 @@ impl Parser<'_> {
             .ok_or_else(|| self.unknown_unit(&t))
     }
     fn unknown_unit(&self, t: &Token) -> Error {
-        let names: Vec<&str> = self.catalog.units.iter().map(|u| u.name.as_str()).collect();
+        let names: Vec<&str> = self
+            .catalog
+            .units
+            .iter()
+            .flat_map(|unit| std::iter::once(unit.name.as_str()).chain(unit.singular.as_deref()))
+            .collect();
         self.near_miss(
             t,
             format!("`{}` is not a unit", t.text),
@@ -1119,16 +1124,22 @@ impl Parser<'_> {
                 },
             ));
         }
-        if self.catalog.is_reference(&token.text)
+        let quoted_reference = raw
+            .is_empty()
+            .then(|| self.peek())
+            .flatten()
+            .filter(|value| value.quoted)
+            .map(|value| format!("{field}:{}", value.text));
+        let reference = quoted_reference.as_deref().unwrap_or(&token.text);
+        if self.catalog.is_reference(reference)
             && (self.scope_field(scope, field).is_none()
-                || self.catalog.reference_overrides_field(&token.text))
+                || self.catalog.reference_overrides_field(reference))
         {
-            return Ok(self.cond(
-                start,
-                ConditionKind::Reference {
-                    reference: token.text.clone(),
-                },
-            ));
+            let reference = reference.to_owned();
+            if quoted_reference.is_some() {
+                self.at += 1;
+            }
+            return Ok(self.cond(start, ConditionKind::Reference { reference }));
         }
         let list = RankList::ALL
             .into_iter()

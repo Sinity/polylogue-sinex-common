@@ -572,3 +572,5 @@ the serialization, command-line and fitter boundaries. Run
   position.
 - **only-showing-moves-seen-mark**: only a display or a `since: seen` read
   moves a seen mark.
+
+For a row that both reads and writes, `required_access` classifies its typed request before execution. The row's declaration advertises its maximum access, so tool annotations remain conservative. Ordinary rows use their declared access for every call.

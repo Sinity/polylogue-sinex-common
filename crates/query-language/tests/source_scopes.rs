@@ -583,3 +583,67 @@ fn native_reference_prefixes_preserve_real_fields_in_the_current_scope() {
         }
     ));
 }
+
+#[test]
+fn quoted_native_references_round_trip_without_stealing_scoped_fields() {
+    let mut catalog = catalog();
+    catalog.references.push(ReferenceForm::prefix("event:"));
+    catalog.references.push(ReferenceForm::Prefix {
+        prefix: "session:".into(),
+        marker: Some(":".into()),
+    });
+    for reference in [
+        "event:record with |,[] and \"quotes\"",
+        "session:origin:native \\ id",
+    ] {
+        let query = Query {
+            source: Source::Unit {
+                unit: "sessions".into(),
+                implicit: false,
+                condition: Some(Condition {
+                    span: Span::default(),
+                    kind: ConditionKind::Reference {
+                        reference: reference.into(),
+                    },
+                }),
+            },
+            attach: vec![],
+            transforms: vec![],
+        };
+        let text = format_query(&query, &catalog).unwrap();
+        let parsed = parse(&text, &catalog).unwrap();
+        assert_eq!(
+            question_id(&parsed, &catalog, &BTreeMap::new()).unwrap(),
+            question_id(&query, &catalog, &BTreeMap::new()).unwrap(),
+            "{text}"
+        );
+    }
+    catalog.units[0]
+        .fields
+        .push(field("event", FieldKind::Exact));
+    let query = parse(r#"sessions where event:"a recorded value""#, &catalog).unwrap();
+    assert!(matches!(
+        query.source,
+        Source::Unit {
+            condition: Some(Condition {
+                kind: ConditionKind::Match { .. },
+                ..
+            }),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn unknown_units_suggest_declared_singular_names() {
+    let mut catalog = catalog();
+    catalog.units[0].singular = Some("session".into());
+    let error = parse("sessin where id:one", &catalog).unwrap_err();
+    let correction = error.suggestion.unwrap();
+    let corrected = parse(&correction, &catalog).unwrap();
+    let expected = parse("sessions where id:one", &catalog).unwrap();
+    assert_eq!(
+        question_id(&corrected, &catalog, &BTreeMap::new()).unwrap(),
+        question_id(&expected, &catalog, &BTreeMap::new()).unwrap()
+    );
+}
