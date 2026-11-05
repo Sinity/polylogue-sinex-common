@@ -539,7 +539,7 @@ trait ErasedOperation: Send + Sync {
         &self,
         arguments: Value,
         context: RequestContext,
-    ) -> OperationFuture<'_, Answer<Value>>;
+    ) -> OperationFuture<'_, Result<Answer<Value>, Failure>>;
     fn render_text(&self, value: Value) -> Result<String, Failure>;
 }
 impl<O: Operation> ErasedOperation for O {
@@ -547,15 +547,15 @@ impl<O: Operation> ErasedOperation for O {
         &self,
         arguments: Value,
         context: RequestContext,
-    ) -> OperationFuture<'_, Answer<Value>> {
+    ) -> OperationFuture<'_, Result<Answer<Value>, Failure>> {
         Box::pin(async move {
             let request = match serde_json::from_value(arguments) {
                 Ok(request) => request,
-                Err(error) => return Answer::error(bad_request(error.to_string())),
+                Err(error) => return Err(bad_request(error.to_string())),
             };
             let access = Operation::required_access(self, &request);
             if access > context.caller().access() {
-                return Answer::error(Failure::new(
+                return Err(Failure::new(
                     FailureKind::Refused,
                     format!("{} needs {} access", self.spec().name, access.name()),
                 ));
@@ -576,7 +576,7 @@ impl<O: Operation> ErasedOperation for O {
                     value: Err(error), ..
                 } => Outcome::Error(Failure::new(FailureKind::Io, error.to_string())),
             };
-            Answer { outcome, envelope }
+            Ok(Answer { outcome, envelope })
         })
     }
     fn render_text(&self, value: Value) -> Result<String, Failure> {
@@ -1027,12 +1027,15 @@ impl OperationTable {
         };
         let answer = tokio::select! {
             biased;
-            _ = cancellation.cancelled() => Answer::error(Failure::new(FailureKind::Cancelled, "request cancelled")),
-            _ = wait_deadline => timeout_answer(&request, &progress),
+            _ = cancellation.cancelled() => Err(Failure::new(FailureKind::Cancelled, "request cancelled")),
+            _ = wait_deadline => Ok(timeout_answer(&request, &progress)),
             answer = operation.execute(request.arguments.clone(), context) => answer,
         };
         drop(guard);
-        self.checked_answer(answer, &description.spec)
+        match answer {
+            Ok(answer) => self.checked_answer(answer, &description.spec),
+            Err(failure) => Answer::error(failure),
+        }
     }
     /// Open a stream row. Its events arrive until the stream ends, the
     /// caller drops `Events`, or `cancellation` fires; streams have no
