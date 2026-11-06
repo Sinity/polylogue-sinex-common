@@ -1945,14 +1945,9 @@ impl Parser<'_> {
     /// One top-level order relation in a relation's condition exposes its
     /// nearest inner row as `match.F` and the signed distance as `match.distance`.
     fn expose_order_match(&mut self, scope: &mut Scope, condition: &Condition) {
-        let mut orders = Vec::new();
-        top_level(condition, &mut |c| {
-            if let ConditionKind::Order { within, .. } = &c.kind {
-                orders.push((c.span.start, within.clone()));
-            }
-        });
-        if let [(start, within)] = orders.as_slice()
-            && let Some(inner) = self.inner_scopes.get(start).cloned()
+        if let Some(order) = condition.exposed_order()
+            && let ConditionKind::Order { within, .. } = &order.kind
+            && let Some(inner) = self.inner_scopes.get(&order.span.start).cloned()
         {
             self.expose_inner(scope, &inner, within.as_ref());
         }

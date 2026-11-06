@@ -239,7 +239,10 @@ DISTANCE := DURATION | N steps
   inner row stands in the relation, so matches never multiply rows. It
   exposes the selected witness as `match.` and `match.distance`, the signed distance in the distance's unit. An outer row whose
   time or position is unknown is unknown. It composes with `NOT` and `OR`
-  like any condition.
+  like any condition. Every operand reads the immutable incoming row. After
+  the whole predicate, exactly one positive order under top-level `AND`
+  exposes its witness. Multiple orders, and orders under `OR` or `NOT`,
+  retain any prior match namespace instead of replacing it.
 - **As a transform,** `| join REL (QUERY) within D` returns one row per
   matching pair; the change of grain shows in the query and in its reading.
 - **Steps** count positions in a unit's declared **order scope**: the

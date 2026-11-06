@@ -271,3 +271,99 @@ fn absolute_payload_values_defer_json_narrowing_to_the_product() {
             .is_err()
     );
 }
+
+#[test]
+fn condition_order_is_commutative_and_witness_publication_happens_after_its_predicate() {
+    let catalog = support::sinex();
+    let mut rows = vec![];
+    for (id, source, at) in [
+        ("outer", "outer", 10),
+        ("prior", "prior", 9),
+        ("a", "A", 11),
+        ("b", "B", 12),
+    ] {
+        let mut row = Row::new(id)
+            .with("source", source)
+            .with("when", f64::from(at));
+        row.time = Some(point(i64::from(at)));
+        rows.push(row);
+    }
+    let data = BTreeMap::from([("events".into(), rows)]);
+    let evaluator = ReferenceEvaluator::new(&data);
+    let prefix =
+        "events where source = outer AND near(events where source = prior) within 5m | where ";
+    let a = "near(events where source = A) within 5m";
+    let b = "near(events where source = B) within 5m";
+    for (first, second, witness) in [
+        (format!("{a} AND {b}"), format!("{b} AND {a}"), "prior"),
+        (format!("{a} OR {b}"), format!("{b} OR {a}"), "prior"),
+        (
+            format!("{a} AND match.source = prior"),
+            format!("match.source = prior AND {a}"),
+            "a",
+        ),
+    ] {
+        let left = parse(
+            &format!("{prefix}{first} | fields id, match.id as witness"),
+            &catalog,
+        )
+        .unwrap();
+        let right = parse(
+            &format!("{prefix}{second} | fields id, match.id as witness"),
+            &catalog,
+        )
+        .unwrap();
+        bind(&left, &catalog).unwrap();
+        bind(&right, &catalog).unwrap();
+        assert_eq!(
+            question_id(&left, &catalog, &BTreeMap::new()).unwrap(),
+            question_id(&right, &catalog, &BTreeMap::new()).unwrap()
+        );
+        let mut left = left;
+        let mut right = right;
+        resolve_test_durations(&mut left);
+        resolve_test_durations(&mut right);
+        let answer = evaluator.execute(&left).unwrap();
+        assert_eq!(answer.rows, evaluator.execute(&right).unwrap().rows);
+        assert_eq!(answer.rows.len(), 1);
+        assert_eq!(answer.rows[0].value("witness"), Scalar::from(witness));
+        let TransformKind::Where { condition } = &left.transforms[0].kind else {
+            panic!()
+        };
+        assert_eq!(condition.exposed_order().is_some(), witness == "a");
+    }
+}
+fn resolve_test_durations(query: &mut Query) {
+    fn resolve_condition(node: &mut Condition) {
+        match &mut node.kind {
+            ConditionKind::And { conditions } | ConditionKind::Or { conditions } => {
+                for child in conditions {
+                    resolve_condition(child);
+                }
+            }
+            ConditionKind::Order { query, within, .. } => {
+                if let Some(Distance::Time { duration }) = within {
+                    *duration = Value::scalar(
+                        query_language::time::duration_ms(duration.text().unwrap())
+                            .unwrap()
+                            .to_string(),
+                    );
+                }
+                resolve_test_durations(query);
+            }
+            _ => {}
+        }
+    }
+    if let Source::Unit {
+        condition: Some(filter),
+        ..
+    } = &mut query.source
+    {
+        resolve_condition(filter);
+    }
+    for transform in &mut query.transforms {
+        if let TransformKind::Where { condition: filter } = &mut transform.kind {
+            resolve_condition(filter);
+        }
+    }
+}

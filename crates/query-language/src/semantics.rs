@@ -1489,21 +1489,15 @@ impl<'a> ReferenceEvaluator<'a> {
         Ok(pairs.into_iter().next())
     }
     fn filter(&self, rows: Vec<Row>, c: &Condition) -> Result<Vec<Row>, Error> {
-        let mut orders = Vec::new();
-        collect_orders(c, &mut orders);
-        // One top-level order relation exposes its nearest inner row as
-        // `match.F` and, with a distance, the signed `match.distance`.
-        let exposed = match orders.as_slice() {
-            [
-                ConditionKind::Order {
-                    relation,
-                    query,
-                    within,
-                    at,
-                    pick,
-                    ..
-                },
-            ] => Some((
+        let exposed = match c.exposed_order().map(|order| &order.kind) {
+            Some(ConditionKind::Order {
+                relation,
+                query,
+                within,
+                at,
+                pick,
+                ..
+            }) => Some((
                 self.execute(query)?.rows,
                 *relation,
                 within.as_ref(),
@@ -1802,14 +1796,6 @@ fn apply_fusion(rows: Vec<Row>, lists: Vec<Vec<crate::fusion::Entry<String>>>) -
         .filter_map(|key| by_id.remove(key))
         .chain(unranked)
         .collect()
-}
-/// The order relations standing in a condition's top-level AND.
-fn collect_orders<'a>(condition: &'a Condition, out: &mut Vec<&'a ConditionKind>) {
-    match &condition.kind {
-        ConditionKind::And { conditions } => conditions.iter().for_each(|c| collect_orders(c, out)),
-        kind @ ConditionKind::Order { .. } => out.push(kind),
-        _ => {}
-    }
 }
 fn collect_patterns<'a>(condition: &'a Condition, out: &mut Vec<&'a Condition>) {
     match &condition.kind {

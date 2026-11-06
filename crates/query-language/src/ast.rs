@@ -708,6 +708,29 @@ impl Query {
     }
 }
 impl Condition {
+    /// One positive order relation exposes its selected witness after the
+    /// complete condition. All predicates read the same incoming row.
+    /// Multiple orders and orders beneath OR or NOT expose no new namespace.
+    pub fn exposed_order(&self) -> Option<&Condition> {
+        fn collect<'a>(condition: &'a Condition, orders: &mut Vec<&'a Condition>) {
+            match &condition.kind {
+                ConditionKind::And { conditions } => {
+                    for condition in conditions {
+                        collect(condition, orders);
+                    }
+                }
+                ConditionKind::Order { .. } => orders.push(condition),
+                _ => {}
+            }
+        }
+        let mut orders = Vec::new();
+        collect(self, &mut orders);
+        if orders.len() == 1 {
+            orders.pop()
+        } else {
+            None
+        }
+    }
     pub fn visit_units(&self, visitor: &mut impl FnMut(&str)) {
         match &self.kind {
             ConditionKind::And { conditions } | ConditionKind::Or { conditions } => {
