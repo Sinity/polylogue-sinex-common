@@ -1324,7 +1324,7 @@ fn first_per_group_restores_original_rows_and_global_input_order() {
         ("f", 6, "B"),
     ] {
         let mut row = Row::new(id)
-            .with("rank", f64::from(rank))
+            .with("input_order", f64::from(rank))
             .with("kind", kind);
         row.parent = Some(format!("parent:{id}"));
         row.order = i64::from(rank);
@@ -1349,7 +1349,7 @@ fn first_per_group_restores_original_rows_and_global_input_order() {
             vec![
                 TransformKind::Sort {
                     keys: vec![SortKey {
-                        expression: Expression::field("rank"),
+                        expression: Expression::field("input_order"),
                         descending: false,
                     }],
                 },
