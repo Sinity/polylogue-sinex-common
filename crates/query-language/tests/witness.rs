@@ -16,6 +16,27 @@ fn explicit_witness_keys_bind_inner_output_and_local_candidate_metadata() {
         (support::sinex(), "events", "when"),
     ] {
         let nearest = parse(&format!("{unit} where near({unit}) within 5m"), &catalog).unwrap();
+        let mut explicit = nearest.clone();
+        let Source::Unit {
+            condition: Some(condition),
+            ..
+        } = &mut explicit.source
+        else {
+            panic!()
+        };
+        let ConditionKind::Order { pick, .. } = &mut condition.kind else {
+            panic!()
+        };
+        *pick = WitnessChoice::FirstBy {
+            keys: vec![key("match.id", false)],
+        };
+        assert_ne!(
+            question_id(&nearest, &catalog, &BTreeMap::new()).unwrap(),
+            question_id(&explicit, &catalog, &BTreeMap::new()).unwrap()
+        );
+        let wire = serde_json::to_value(&nearest).unwrap();
+        assert!(wire["source"]["condition"]["kind"].get("pick").is_none());
+        assert_eq!(serde_json::from_value::<Query>(wire).unwrap(), nearest);
         let text = format!(
             "{unit} where near({unit} | fields id, {time} as selected) within 5m pick first by abs(match.distance), selected desc, match.id"
         );
@@ -30,7 +51,13 @@ fn explicit_witness_keys_bind_inner_output_and_local_candidate_metadata() {
             question_id(&nearest, &catalog, &BTreeMap::new()).unwrap(),
             question_id(&query, &catalog, &BTreeMap::new()).unwrap()
         );
-        assert!(!bound.typing().operands.is_empty());
+        assert!(bound.typing().operands.iter().any(|operand| {
+            operand.result.field.kind == query_language::catalog::FieldKind::Duration
+                && operand.path.0.iter().any(|element| {
+                    matches!(element,
+                    query_language::scope::PathElement::Field(name) if name == "pick")
+                })
+        }));
         let bad = format!("{unit} where near({unit} | fields id) within 5m pick first by {time}");
         assert!(parse(&bad, &catalog).is_err());
         assert!(
