@@ -511,10 +511,10 @@ fn matches_parent_fields_preserve_only_actual_outer_types_and_origins() {
     }
     let catalog = catalog("parents");
     let projected = checked(
-        "parents where exists children() | fields cwd | matches",
+        "parents | fields cwd | where exists children() | matches",
         &catalog,
     );
-    let transform = &projected.typing().queries[0].transforms[1];
+    let transform = &projected.typing().queries[0].transforms[2];
     for absent in ["parent.id", "parent.n", "parent.cost", "parent.count"] {
         assert!(transform.after.field(absent).is_none(), "{absent}");
     }
