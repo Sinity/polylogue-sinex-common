@@ -488,7 +488,7 @@ fn matches_parent_fields_preserve_only_actual_outer_types_and_origins() {
         if !declares_id {
             catalog.units[0].fields.retain(|field| field.name != "id");
         }
-        let bound = checked("parents where exists(children) | matches", &catalog);
+        let bound = checked("parents where exists children() | matches", &catalog);
         let scope = &bound.typing().queries[0].transforms[0].after;
         let parent = scope.field("parent.cwd").unwrap();
         assert_eq!(parent.field.kind, FieldKind::Text);
@@ -498,7 +498,7 @@ fn matches_parent_fields_preserve_only_actual_outer_types_and_origins() {
         assert_eq!(scope.field("parent.id").is_some(), declares_id);
         assert_eq!(
             parse(
-                "parents where exists(children) | matches | fields parent.id",
+                "parents where exists children() | matches | fields parent.id",
                 &catalog
             )
             .is_ok(),
@@ -511,7 +511,7 @@ fn matches_parent_fields_preserve_only_actual_outer_types_and_origins() {
     }
     let catalog = catalog("parents");
     let projected = checked(
-        "parents where exists(children) | fields cwd | matches",
+        "parents where exists children() | fields cwd | matches",
         &catalog,
     );
     let transform = &projected.typing().queries[0].transforms[1];
