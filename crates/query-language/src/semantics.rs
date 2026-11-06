@@ -558,6 +558,15 @@ impl<'a> ReferenceEvaluator<'a> {
                     _ => return Err(bad("len takes text or a list")),
                 })
             }
+            Expression::Function { name, arguments } if name == "text" => {
+                let [argument] = arguments.as_slice() else {
+                    return Err(bad("text takes one argument"));
+                };
+                match self.expression(row, argument)? {
+                    value @ (Scalar::Text(_) | Scalar::Unknown) => Ok(value),
+                    _ => Err(bad("text takes a string value")),
+                }
+            }
             Expression::Function { name, arguments } if name == "abs" => {
                 let [argument] = arguments.as_slice() else {
                     return Err(bad("abs takes one argument"));
@@ -1825,7 +1834,7 @@ fn validate_expression(e: &Expression, at: usize) -> Result<(), Error> {
         Expression::Field { .. } => Ok(()),
         Expression::Value { value } => validate_value(value),
         Expression::Function { name, arguments }
-            if matches!(name.as_str(), "len" | "abs") && arguments.len() == 1 =>
+            if matches!(name.as_str(), "len" | "abs" | "text") && arguments.len() == 1 =>
         {
             validate_expression(&arguments[0], at)
         }

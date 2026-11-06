@@ -262,6 +262,7 @@ pub const FUNCTIONS: &[&str] = &[
     "case_eq",
     "glob",
     "abs",
+    "text",
 ];
 /// Bucket functions whose groups `fill` can complete.
 pub const TIME_BUCKETS: &[&str] = &["hour", "day", "week", "month", "year"];

@@ -147,7 +147,9 @@ Four operators, each with one meaning in both products:
   `fields`, with dimensions checked at bind time: duration − duration is a
   duration, money / count is money, time − time is a duration, money +
   duration is refused. An unknown input makes the result unknown. Built-in
-  `abs(X)` preserves a number, money or duration's dimension and propagates
+  `text(X)` reads an existing string as ordinary text, clearing reference,
+  path and closed-set meaning; unknown stays unknown. It never stringifies
+  numbers, booleans, times, lists or objects. `abs(X)` preserves a number, money or duration's dimension and propagates
   unknown; affine time is refused. Other built-in functions are the time buckets `hour`, `day`, `week`, `weekday`, `month`,
   `month_day` and `year` on the logical day, `len()`, and
   `case_eq(a, b, value)` and `glob(text, pattern)`; a product adds its

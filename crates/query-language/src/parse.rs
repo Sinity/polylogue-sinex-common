@@ -1440,7 +1440,7 @@ impl Parser<'_> {
                     t.span.start,
                 ));
             }
-            if function.name == "glob" {
+            if matches!(function.name.as_str(), "glob" | "text") {
                 for argument in &arguments {
                     if !matches!(
                         self.expression_info(scope, argument).field.kind,
@@ -1454,7 +1454,7 @@ impl Parser<'_> {
                     ) {
                         return Err(Error::new(
                             ErrorKind::BadValue,
-                            "glob takes text values",
+                            format!("{} takes text values", function.name),
                             t.span.start,
                         ));
                     }
