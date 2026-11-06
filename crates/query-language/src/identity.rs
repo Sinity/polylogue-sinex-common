@@ -1,5 +1,6 @@
 //! Canonical question identity. Paging and resolved clocks never enter this form.
 use crate::{Error, ErrorKind, ast::Query, catalog::Catalog};
+mod encoding;
 mod scalars;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -21,7 +22,7 @@ impl std::fmt::Display for QuestionId {
 pub fn normal_form(query: &Query, catalog: &Catalog) -> Result<Value, Error> {
     let mut query = query.clone();
     scalars::canonicalize(&mut query, catalog);
-    let mut value = serde_json::to_value(query).map_err(serialization)?;
+    let mut value = encoding::query(&query);
     normalize(&mut value);
     Ok(value)
 }

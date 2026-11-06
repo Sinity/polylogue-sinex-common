@@ -32,6 +32,19 @@ fn field(scope: &Fields, expression: &Expression, catalog: &Catalog) -> Option<F
                 .map_or(FieldKind::Json, |function| function.result),
             ..Field::default()
         }),
+        Expression::Arithmetic {
+            operator,
+            left,
+            right,
+        } => Some(Field {
+            name: expression.column(),
+            kind: crate::scope::arithmetic_kind(
+                *operator,
+                &field(scope, left, catalog)?.kind,
+                &field(scope, right, catalog)?.kind,
+            )?,
+            ..Field::default()
+        }),
         _ => None,
     }
 }

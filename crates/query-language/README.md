@@ -302,6 +302,13 @@ product supplies its lists.
   scalars canonicalised by field type, commutative operands sorted, spans
   and spelling dropped, and relative times kept as written (`since:7d`, not
   the instant). Numeric-looking text stays text.
+The normal form has an explicit semantic encoding, independent of Rust AST
+serialization. Constructs with unchanged meanings retain their original identity
+encoding. New meanings, including one row per matched step and projections at an
+intermediate relation boundary, have distinct encodings. Source spans, known-output
+markers and display spellings are absent; parameter declarations remain part of
+the question.
+
 - **`query:<hash>`** is the BLAKE3 of the normal form and its declared
   parameter types. One algorithm serves both products, and a mixed query has
   one hash. A name or a transport option is never part of the question.
