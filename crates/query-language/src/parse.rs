@@ -2339,9 +2339,13 @@ impl Parser<'_> {
                     count: self.number()?,
                 }
             }
-            "first" => TransformKind::First {
-                count: self.number()?,
-            },
+            "first" => {
+                let count = self.number()?;
+                if let Some(input) = scope.group_input.take() {
+                    *scope = (*input).clone();
+                }
+                TransformKind::First { count }
+            }
             "distinct" => TransformKind::Distinct,
             "matches" => {
                 self.matches(scope, start)?;

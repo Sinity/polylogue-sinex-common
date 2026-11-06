@@ -198,6 +198,7 @@ Four operators, each with one meaning in both products:
 | `sort by K [asc\|desc], …` | total order; unknowns last; the row identity is the final key. `sort by random[(seed)]`; `sort by rank` names the fused rank |
 | `limit N`, `offset N` | selection; part of the question; no maximum |
 | `first N [by K]` | per-group selection after `group by` |
+| `group by K, … \| first N` | the first N original input rows of each group in their input order; their original fields and provenance remain available |
 | `distinct [by F]` | deduplication over the declared identity or a field |
 | `group by K, …` | grouped relation; keys are fields, expressions or time buckets |
 | `agg A, …`, `count` | `count`, `sum(F)`, `avg(F)`, `min(F)`, `max(F)`, `pNN(F)`, `count_distinct(F)`, `histogram(F)`, `corr(F, G)` and `covered(start, end)`, the length of the union of the intervals, so overlapping intervals are not counted twice. Each reports `unknown_F` and `partial_F` |

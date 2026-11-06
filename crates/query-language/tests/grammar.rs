@@ -532,3 +532,19 @@ fn matched_time_selectors_are_explicit_and_round_trip() {
         assert_eq!(upper_point, point);
     }
 }
+
+#[test]
+fn grouped_first_restores_the_input_columns_and_provenance() {
+    let catalog = support::polylogue();
+    let text = "messages | fields id as original, session | group by session | first 2 | fields original, session";
+    let query = parse(text, &catalog).unwrap();
+    let bound = query_language::bind::bind(&query, &catalog).unwrap();
+    let scopes = &bound
+        .typing()
+        .query(&query_language::scope::NodePath::default())
+        .unwrap()
+        .transforms;
+    assert!(scopes[2].after.field("original").is_some());
+    assert!(scopes[2].after.field("count").is_none());
+    assert!(scopes[3].after.field("original").is_some());
+}
