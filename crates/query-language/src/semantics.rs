@@ -101,6 +101,29 @@ pub struct Extent {
     pub end: i64,
     pub coarse: bool,
 }
+/// Declared state lifetime, independent of occurrence uncertainty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeclaredSpan {
+    pub start: i64,
+    /// None is a known open end, rather than missing span evidence.
+    pub end: Option<i64>,
+    pub end_inclusive: bool,
+}
+impl DeclaredSpan {
+    fn contains(self, evidence: Extent) -> bool {
+        evidence.start >= self.start
+            && self.end.is_none_or(|end| {
+                if evidence.coarse && evidence.end > evidence.start {
+                    evidence.end <= end
+                        || (self.end_inclusive && evidence.end.saturating_sub(1) <= end)
+                } else if self.end_inclusive {
+                    evidence.start <= end
+                } else {
+                    evidence.start < end
+                }
+            })
+    }
+}
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
     pub id: String,
@@ -111,7 +134,11 @@ pub struct Row {
     /// The row's place in its parent's order. Rows of every relation sharing
     /// a parent interleave in one order; ties go to identity.
     pub order: i64,
+    /// Occurrence evidence; a coarse extent bounds when the occurrence happened.
     pub time: Option<Extent>,
+    /// An independently declared state interval. Its endpoints are not inferred
+    /// from the uncertainty bounds of `time`.
+    pub span: Option<DeclaredSpan>,
     /// Selected relation identities, including sequence steps in occurrence order.
     pub matches: Vec<String>,
 }
@@ -123,6 +150,7 @@ impl Row {
             parent: None,
             order: 0,
             time: None,
+            span: None,
             matches: vec![],
         }
     }
@@ -781,6 +809,12 @@ impl<'a> ReferenceEvaluator<'a> {
         window: Option<u64>,
         at: TimePoint,
     ) -> Result<Option<Vec<(&'r Row, i128)>>, Error> {
+        if matches!(
+            at,
+            TimePoint::MatchWhen | TimePoint::MatchStart | TimePoint::MatchEnd
+        ) {
+            return self.related_at_match(row, inner, relation, window, at);
+        }
         let Some(a) = row.time else {
             return Ok(None);
         };
@@ -874,6 +908,92 @@ impl<'a> ReferenceEvaluator<'a> {
             candidates
                 .into_iter()
                 .map(|(_, _, _, other, offset)| (other, offset))
+                .collect(),
+        ))
+    }
+    fn related_at_match<'r>(
+        &self,
+        row: &Row,
+        inner: &'r [Row],
+        relation: OrderRelation,
+        window: Option<u64>,
+        at: TimePoint,
+    ) -> Result<Option<Vec<(&'r Row, i128)>>, Error> {
+        let Some(a) = row.time else { return Ok(None) };
+        if relation == OrderRelation::Containing && row.span.is_none() {
+            return Ok(None);
+        }
+        let point = |tick| Extent {
+            start: tick,
+            end: tick,
+            coarse: false,
+        };
+        let last = |v: Extent| {
+            if v.coarse && v.end > v.start {
+                v.end - 1
+            } else {
+                v.start
+            }
+        };
+        let mut pairs = vec![];
+        let mut unknown = false;
+        for other in inner {
+            // During selects a state by its declared lifetime. The occurrence
+            // time may precede its start, and is not its ordering anchor.
+            let selected = if relation == OrderRelation::During {
+                other.span.map(|span| point(span.start))
+            } else {
+                match at {
+                    TimePoint::MatchWhen => other.time,
+                    TimePoint::MatchStart => other.span.map(|span| point(span.start)),
+                    TimePoint::MatchEnd => other.span.and_then(|span| span.end.map(point)),
+                    _ => unreachable!(),
+                }
+            };
+            let Some(b) = selected else {
+                unknown = true;
+                continue;
+            };
+            let offset = i128::from(b.start) - i128::from(a.start);
+            let distance = offset.unsigned_abs();
+            let greatest = [
+                (a.start, b.start),
+                (a.start, last(b)),
+                (last(a), b.start),
+                (last(a), last(b)),
+            ]
+            .into_iter()
+            .map(|(x, y)| (i128::from(y) - i128::from(x)).unsigned_abs())
+            .max()
+            .unwrap();
+            if window.is_some_and(|w| {
+                if a.coarse || b.coarse {
+                    greatest > u128::from(w)
+                } else {
+                    distance > u128::from(w)
+                }
+            }) {
+                continue;
+            }
+            let fits = match relation {
+                OrderRelation::Near => true,
+                OrderRelation::Before => last(a) < b.start,
+                OrderRelation::After => a.start > last(b),
+                OrderRelation::During => other.span.unwrap().contains(a),
+                OrderRelation::Containing => row.span.unwrap().contains(b),
+            };
+            if fits {
+                pairs.push((a.coarse || b.coarse, distance, &other.id, other, offset))
+            }
+        }
+        pairs.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
+        if pairs.is_empty() && unknown {
+            return Ok(None);
+        }
+        Ok(Some(
+            pairs
+                .into_iter()
+                .map(|(_, _, _, row, offset)| (row, offset))
                 .collect(),
         ))
     }

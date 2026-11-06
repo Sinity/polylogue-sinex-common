@@ -1125,3 +1125,189 @@ fn containing_obeys_literal_half_open_point_and_span_boundaries() {
         }
     }
 }
+
+#[test]
+fn matched_time_selectors_keep_declared_spans_separate_from_occurrence_uncertainty() {
+    let point = |tick| Extent {
+        start: tick,
+        end: tick,
+        coarse: false,
+    };
+    let mut outer = Row::new("outer");
+    outer.time = Some(point(10));
+    outer.span = Some(DeclaredSpan {
+        start: 0,
+        end: Some(20),
+        end_inclusive: false,
+    });
+    let mut inner = Row::new("inner");
+    inner.time = Some(point(30));
+    inner.span = Some(DeclaredSpan {
+        start: 5,
+        end: Some(15),
+        end_inclusive: false,
+    });
+    let truth = |outer: &Row, inner: Row, relation, at| {
+        let data = BTreeMap::from([("inner".into(), vec![inner])]);
+        ReferenceEvaluator::new(&data)
+            .condition(
+                outer,
+                &condition(ConditionKind::Order {
+                    relation,
+                    query: Box::new(query("inner", vec![])),
+                    within: None,
+                    at,
+                    scope: None,
+                }),
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        truth(
+            &outer,
+            inner.clone(),
+            OrderRelation::Before,
+            TimePoint::MatchWhen
+        ),
+        Truth::True
+    );
+    assert_eq!(
+        truth(
+            &outer,
+            inner.clone(),
+            OrderRelation::Before,
+            TimePoint::MatchStart
+        ),
+        Truth::False
+    );
+    assert_eq!(
+        truth(
+            &outer,
+            inner.clone(),
+            OrderRelation::Before,
+            TimePoint::MatchEnd
+        ),
+        Truth::True
+    );
+    assert_eq!(
+        truth(
+            &outer,
+            inner.clone(),
+            OrderRelation::Containing,
+            TimePoint::MatchWhen
+        ),
+        Truth::False
+    );
+    assert_eq!(
+        truth(
+            &outer,
+            inner.clone(),
+            OrderRelation::Containing,
+            TimePoint::MatchEnd
+        ),
+        Truth::True
+    );
+    // During uses the state lifetime, even though its occurrence is later.
+    assert_eq!(
+        truth(
+            &outer,
+            inner.clone(),
+            OrderRelation::During,
+            TimePoint::MatchWhen
+        ),
+        Truth::True
+    );
+    inner.span.as_mut().unwrap().end = None;
+    assert_eq!(
+        truth(
+            &outer,
+            inner.clone(),
+            OrderRelation::During,
+            TimePoint::MatchEnd
+        ),
+        Truth::True
+    );
+    assert_eq!(
+        truth(
+            &outer,
+            inner.clone(),
+            OrderRelation::Before,
+            TimePoint::MatchEnd
+        ),
+        Truth::Unknown
+    );
+    // An uncertain occurrence's upper bound is not a declared state endpoint.
+    inner.span = None;
+    inner.time = Some(Extent {
+        start: 5,
+        end: 15,
+        coarse: true,
+    });
+    assert_eq!(
+        truth(
+            &outer,
+            inner.clone(),
+            OrderRelation::Before,
+            TimePoint::MatchEnd
+        ),
+        Truth::Unknown
+    );
+    assert_eq!(
+        truth(
+            &outer,
+            inner.clone(),
+            OrderRelation::Containing,
+            TimePoint::MatchWhen
+        ),
+        Truth::True
+    );
+    outer.span.as_mut().unwrap().end = Some(10);
+    assert_eq!(
+        truth(
+            &outer,
+            inner,
+            OrderRelation::Containing,
+            TimePoint::MatchWhen
+        ),
+        Truth::False
+    );
+}
+
+#[test]
+fn declared_span_end_membership_is_explicit_and_unknown_candidates_do_not_hide_matches() {
+    let mut outer = Row::new("outer");
+    outer.time = Some(Extent {
+        start: 0,
+        end: 0,
+        coarse: false,
+    });
+    outer.span = Some(DeclaredSpan {
+        start: 0,
+        end: Some(10),
+        end_inclusive: false,
+    });
+    let mut inner = Row::new("inner");
+    inner.time = Some(Extent {
+        start: 10,
+        end: 10,
+        coarse: false,
+    });
+    let data = BTreeMap::from([("inner".into(), vec![Row::new("unknown"), inner])]);
+    let evaluator = ReferenceEvaluator::new(&data);
+    let condition = condition(ConditionKind::Order {
+        relation: OrderRelation::Containing,
+        query: Box::new(query("inner", vec![])),
+        within: None,
+        at: TimePoint::MatchWhen,
+        scope: None,
+    });
+    assert_eq!(
+        evaluator.condition(&outer, &condition).unwrap(),
+        Truth::Unknown
+    );
+    outer.span.as_mut().unwrap().end_inclusive = true;
+    assert_eq!(
+        evaluator.condition(&outer, &condition).unwrap(),
+        Truth::True
+    );
+}

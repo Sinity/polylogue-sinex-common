@@ -657,3 +657,13 @@ Cross-system, run by Polylogue's executor against a devkit Sinex:
   as `polylogue` given it.
 - **mixed-typed-binds**: bind values cross only as typed parameters; a value
   containing query punctuation stays one value.
+
+`at match.when` selects the matched row's occurrence evidence, retaining any
+uncertainty. `at match.start` and `at match.end` select independently declared
+state endpoints; an occurrence's uncertainty bounds are not state endpoints.
+An open state has no selected end. With matched selectors, `during` tests the
+outer occurrence against the inner declared lifetime and orders states by their
+start; `containing` tests the selected inner evidence against the outer declared
+lifetime. State ends carry their declared inclusion rule. Products refuse a
+selector when their source has no such capability; missing evidence in an
+otherwise capable source remains unknown.
