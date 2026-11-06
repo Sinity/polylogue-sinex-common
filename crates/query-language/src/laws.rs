@@ -506,6 +506,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
         }),
         at: TimePoint::When,
         scope: None,
+        pick: WitnessChoice::Nearest,
     });
     // The semijoin keeps each outer row once; an untimed row is unknown, so
     // neither the relation nor its negation keeps it.
@@ -538,6 +539,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
         within: Some(Distance::Steps { count: 1 }),
         at: TimePoint::When,
         scope: None,
+        pick: WitnessChoice::Nearest,
     });
     output.push(case(
         "ql.order.steps",
@@ -573,6 +575,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
             }),
             at: TimePoint::When,
             scope: None,
+            pick: WitnessChoice::Nearest,
         })
     };
     let matched = |row: &Row, inner: &str, offset: Option<f64>| {

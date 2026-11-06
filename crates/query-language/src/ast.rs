@@ -147,11 +147,28 @@ pub enum ConditionKind {
         within: Option<Distance>,
         at: TimePoint,
         scope: Option<String>,
+        #[serde(default, skip_serializing_if = "WitnessChoice::is_nearest")]
+        pick: WitnessChoice,
     },
     Extension {
         name: String,
         arguments: Vec<ExtensionArgument>,
     },
+}
+/// How an order semijoin chooses the one exposed matching row.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WitnessChoice {
+    #[default]
+    Nearest,
+    FirstBy {
+        keys: Vec<SortKey>,
+    },
+}
+impl WitnessChoice {
+    pub fn is_nearest(&self) -> bool {
+        matches!(self, Self::Nearest)
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]

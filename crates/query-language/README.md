@@ -147,7 +147,8 @@ Four operators, each with one meaning in both products:
   `fields`, with dimensions checked at bind time: duration − duration is a
   duration, money / count is money, time − time is a duration, money +
   duration is refused. An unknown input makes the result unknown. Built-in
-  functions are the time buckets `hour`, `day`, `week`, `weekday`, `month`,
+  `abs(X)` preserves a number, money or duration's dimension and propagates
+  unknown; affine time is refused. Other built-in functions are the time buckets `hour`, `day`, `week`, `weekday`, `month`,
   `month_day` and `year` on the logical day, `len()`, and
   `case_eq(a, b, value)` and `glob(text, pattern)`; a product adds its
   own functions as catalog extensions. Built-in function names are
@@ -236,8 +237,7 @@ DISTANCE := DURATION | N steps
 
 - **As a condition** it is a semijoin: an outer row is kept when at least one
   inner row stands in the relation, so matches never multiply rows. It
-  exposes `match.` (the nearest inner row, ties broken by the inner row's
-  identity) and `match.distance`, the signed distance in the distance's unit. An outer row whose
+  exposes the selected witness as `match.` and `match.distance`, the signed distance in the distance's unit. An outer row whose
   time or position is unknown is unknown. It composes with `NOT` and `OR`
   like any condition.
 - **As a transform,** `| join REL (QUERY) within D` returns one row per
@@ -261,6 +261,20 @@ DISTANCE := DURATION | N steps
 - `seq` stays for an ordered pattern of three or more steps; its steps may be
   any units in the scope's order, and a step may carry `within N steps` or
   `within D`.
+
+An order condition can append `pick first by EXPR [asc|desc], ...` to choose
+its exposed witness. Without a pick clause it chooses the nearest witness
+(precise before coarse, distance, then identity). Explicit keys use the inner
+query's actual output; unknown keys sort last in either direction, and identity
+breaks ties. Inner query ordering does not change witness selection. This
+choice changes neither semijoin membership nor outer identity and ordering;
+order joins still return all matching pairs.
+
+Within a pick clause, `match.id`, `match.distance` and `match.coarse` describe
+the current candidate, shadowing any prior match metadata on the inner row.
+Distance is the signed selected-anchor offset (a duration, or a step count);
+it is available to pick keys even without an explicit window. These local
+metadata fields do not expand the ordinary selected output schema.
 
 ## Ranking
 

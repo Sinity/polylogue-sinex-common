@@ -261,6 +261,7 @@ pub const FUNCTIONS: &[&str] = &[
     "len",
     "case_eq",
     "glob",
+    "abs",
 ];
 /// Bucket functions whose groups `fill` can complete.
 pub const TIME_BUCKETS: &[&str] = &["hour", "day", "week", "month", "year"];
@@ -313,7 +314,7 @@ fn builtin_functions() -> Vec<Function> {
             result: match *name {
                 "day" | "week" | "month" => FieldKind::Time,
                 "hour" | "year" | "len" => FieldKind::Integer,
-                "case_eq" => FieldKind::Json,
+                "case_eq" | "abs" => FieldKind::Json,
                 "glob" => FieldKind::Bool,
                 _ => FieldKind::Text,
             },

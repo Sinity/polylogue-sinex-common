@@ -97,6 +97,7 @@ fn declared_builtin_names_are_case_insensitive_but_fields_and_text_are_exact() {
         let arguments = match *name {
             "case_eq" => "when,when,when",
             "glob" => "source,source",
+            "abs" => "10",
             _ => "when",
         };
         let lower = parse(&format!("events | group by {name}({arguments})"), &catalog).unwrap();

@@ -68,6 +68,8 @@ impl Parser<'_> {
                 };
                 let rule = if name == "case_eq" {
                     TypeRule::Input(2)
+                } else if name == "abs" {
+                    TypeRule::Input(0)
                 } else {
                     TypeRule::Fixed
                 };
@@ -532,7 +534,28 @@ impl Walker<'_, '_> {
                 self.expression(left, scope, at.field("left"));
                 self.query(query, at.field("query"));
             }
-            ConditionKind::Order { query, .. } => self.query(query, at.field("query")),
+            ConditionKind::Order {
+                query,
+                within,
+                pick,
+                ..
+            } => {
+                self.query(query, at.field("query"));
+                if let WitnessChoice::FirstBy { keys } = pick {
+                    let inner = &self.parser.inner_scopes[&condition.span.start];
+                    let candidate = self.parser.witness_scope(inner, within.as_ref());
+                    for (index, key) in keys.iter().enumerate() {
+                        self.expression(
+                            &key.expression,
+                            &candidate,
+                            at.field("pick")
+                                .field("keys")
+                                .index(index)
+                                .field("expression"),
+                        );
+                    }
+                }
+            }
             ConditionKind::Exists {
                 unit,
                 condition: Some(condition),

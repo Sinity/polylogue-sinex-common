@@ -203,8 +203,13 @@ fn condition_kind(c: &ConditionKind) -> Json {
             within,
             at,
             scope,
+            pick,
         } => {
-            json!({"kind":"order","relation":relation.name(),"query":query(q),"within":within.as_ref().map(distance),"at":point(*at),"scope":scope})
+            let mut form = json!({"kind":"order","relation":relation.name(),"query":query(q),"within":within.as_ref().map(distance),"at":point(*at),"scope":scope});
+            if let WitnessChoice::FirstBy { keys } = pick {
+                form["pick"] = json!({"kind":"first_by","keys":keys.iter().map(|key| json!({"expression":expression(&key.expression),"descending":key.descending})).collect::<Vec<_>>()});
+            }
+            form
         }
         ConditionKind::Extension { name, arguments } => extension(name, arguments),
     }

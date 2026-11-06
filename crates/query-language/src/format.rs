@@ -265,12 +265,32 @@ impl Renderer<'_> {
                 within,
                 at,
                 scope,
-            } => format!(
-                "{}({}){}",
-                relation.name(),
-                self.query(query)?,
-                order_options(within.as_ref(), *at, scope.as_deref())?
-            ),
+                pick,
+            } => {
+                let mut text = format!(
+                    "{}({}){}",
+                    relation.name(),
+                    self.query(query)?,
+                    order_options(within.as_ref(), *at, scope.as_deref())?
+                );
+                if let WitnessChoice::FirstBy { keys } = pick {
+                    if keys.is_empty() {
+                        return Err(invalid("pick first needs a sort key"));
+                    }
+                    let keys = keys
+                        .iter()
+                        .map(|key| {
+                            Ok(format!(
+                                "{} {}",
+                                self.expression(&key.expression)?,
+                                if key.descending { "desc" } else { "asc" }
+                            ))
+                        })
+                        .collect::<Result<Vec<_>, Error>>()?;
+                    text.push_str(&format!(" pick first by {}", keys.join(", ")));
+                }
+                text
+            }
             ConditionKind::Extension { name, arguments } => {
                 self.extension(name, arguments, ExtensionPosition::Atom)?
             }

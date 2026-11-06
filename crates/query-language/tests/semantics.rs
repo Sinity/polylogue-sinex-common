@@ -905,6 +905,7 @@ fn steps_stay_inside_one_scope_instance() {
                 within: Some(Distance::Steps { count }),
                 at: TimePoint::When,
                 scope: None,
+                pick: WitnessChoice::Nearest,
             }),
             vec![],
         )
@@ -1158,6 +1159,7 @@ fn matched_time_selectors_keep_declared_spans_separate_from_occurrence_uncertain
                     within: None,
                     at,
                     scope: None,
+                    pick: WitnessChoice::Nearest,
                 }),
             )
             .unwrap()
@@ -1300,6 +1302,7 @@ fn declared_span_end_membership_is_explicit_and_unknown_candidates_do_not_hide_m
         within: None,
         at: TimePoint::MatchWhen,
         scope: None,
+        pick: WitnessChoice::Nearest,
     });
     assert_eq!(
         evaluator.condition(&outer, &condition).unwrap(),

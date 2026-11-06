@@ -20,8 +20,8 @@ fn fields(catalog: &Catalog, unit: &str) -> Fields {
 fn field(scope: &Fields, expression: &Expression, catalog: &Catalog) -> Option<Field> {
     match expression {
         Expression::Field { name } => scope.get(name).cloned(),
-        Expression::Function { name, arguments } if name == "case_eq" => arguments
-            .get(2)
+        Expression::Function { name, arguments } if name == "case_eq" || name == "abs" => arguments
+            .get(if name == "abs" { 0 } else { 2 })
             .and_then(|argument| field(scope, argument, catalog)),
         Expression::Function { name, .. } => Some(Field {
             name: expression.column(),
@@ -232,8 +232,37 @@ fn condition(c: &mut Condition, scope: &Fields, catalog: &Catalog) {
             expression(left, scope, catalog);
             canonicalize(query, catalog);
         }
-        ConditionKind::Order { query, within, .. } => {
-            canonicalize(query, catalog);
+        ConditionKind::Order {
+            query,
+            within,
+            pick,
+            ..
+        } => {
+            let mut candidate = canonicalize_fields(query, catalog);
+            if let WitnessChoice::FirstBy { keys } = pick {
+                let distance_kind = if matches!(within, Some(Distance::Steps { .. })) {
+                    FieldKind::Integer
+                } else {
+                    FieldKind::Duration
+                };
+                for (name, kind) in [
+                    ("match.distance", distance_kind),
+                    ("match.id", FieldKind::Reference),
+                    ("match.coarse", FieldKind::Bool),
+                ] {
+                    candidate.insert(
+                        name.into(),
+                        Field {
+                            name: name.into(),
+                            kind,
+                            ..Field::default()
+                        },
+                    );
+                }
+                for key in keys {
+                    expression(&mut key.expression, &candidate, catalog);
+                }
+            }
             if let Some(within) = within {
                 distance(within);
             }
@@ -268,6 +297,9 @@ fn argument(a: &mut ExtensionArgument, scope: &Fields, catalog: &Catalog) {
     }
 }
 pub(super) fn canonicalize(query: &mut Query, catalog: &Catalog) {
+    canonicalize_fields(query, catalog);
+}
+fn canonicalize_fields(query: &mut Query, catalog: &Catalog) -> Fields {
     let mut scope = match &query.source {
         Source::Unit { unit, .. } => fields(catalog, unit),
         Source::Saved { .. } | Source::Result { .. } => catalog
@@ -428,4 +460,5 @@ pub(super) fn canonicalize(query: &mut Query, catalog: &Catalog) {
             }
         }
     }
+    scope
 }

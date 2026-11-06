@@ -558,6 +558,16 @@ impl<'a> ReferenceEvaluator<'a> {
                     _ => return Err(bad("len takes text or a list")),
                 })
             }
+            Expression::Function { name, arguments } if name == "abs" => {
+                let [argument] = arguments.as_slice() else {
+                    return Err(bad("abs takes one argument"));
+                };
+                match self.expression(row, argument)? {
+                    Scalar::Number(value) => Ok(Scalar::Number(value.abs())),
+                    Scalar::Unknown => Ok(Scalar::Unknown),
+                    _ => Err(bad("abs takes a linear number")),
+                }
+            }
             Expression::Function { name, arguments } if name == "glob" => {
                 let [text, pattern] = arguments.as_slice() else {
                     return Err(bad("glob takes two arguments"));
@@ -835,8 +845,12 @@ impl<'a> ReferenceEvaluator<'a> {
             _ => a.start,
         };
         let mut candidates = vec![];
+        let mut unknown = false;
         for other in inner {
-            let Some(b) = other.time else { continue };
+            let Some(b) = other.time else {
+                unknown = true;
+                continue;
+            };
             let offset = i128::from(b.start) - i128::from(point);
             let distance = offset.unsigned_abs();
             let last = |v: Extent| if v.end > v.start { v.end - 1 } else { v.start };
@@ -914,6 +928,9 @@ impl<'a> ReferenceEvaluator<'a> {
                     offset,
                 ));
             }
+        }
+        if candidates.is_empty() && unknown {
+            return Ok(None);
         }
         candidates.sort_by(|x, y| (x.0, x.1, &x.2).cmp(&(y.0, y.1, &y.2)));
         Ok(Some(
@@ -1401,6 +1418,76 @@ impl<'a> ReferenceEvaluator<'a> {
         });
         Ok(rows)
     }
+    fn witness<'r>(
+        &self,
+        outer: &Row,
+        mut pairs: Vec<(&'r Row, i128)>,
+        pick: &WitnessChoice,
+        order: (OrderRelation, Option<&Distance>, TimePoint),
+    ) -> Result<Option<(&'r Row, i128)>, Error> {
+        let (relation, within, at) = order;
+        if let WitnessChoice::FirstBy { keys } = pick {
+            if keys.is_empty() {
+                return Err(bad("pick first needs a sort key"));
+            }
+            let mut values = BTreeMap::new();
+            for (inner, offset) in &pairs {
+                let mut candidate = (**inner).clone();
+                candidate
+                    .fields
+                    .insert("match.id".into(), Scalar::Text(inner.id.clone()));
+                candidate
+                    .fields
+                    .insert("match.distance".into(), Scalar::Number(*offset as f64));
+                let coarse = !matches!(within, Some(Distance::Steps { .. }))
+                    && (outer.time.is_some_and(|time| time.coarse)
+                        || (!matches!(at, TimePoint::MatchStart | TimePoint::MatchEnd)
+                            && !(relation == OrderRelation::During && at == TimePoint::MatchWhen)
+                            && inner.time.is_some_and(|time| time.coarse)));
+                candidate
+                    .fields
+                    .insert("match.coarse".into(), Scalar::Bool(coarse));
+                let row_values = keys
+                    .iter()
+                    .map(|key| self.expression(&candidate, &key.expression))
+                    .collect::<Result<Vec<_>, _>>()?;
+                values.insert(inner.id.clone(), row_values);
+            }
+            for index in 0..keys.len() {
+                let known = values
+                    .values()
+                    .map(|row| &row[index])
+                    .filter(|value| !value.is_unknown())
+                    .collect::<Vec<_>>();
+                for pair in known.windows(2) {
+                    if pair[0].order(pair[1]).is_none() {
+                        return Err(bad("sort requires compatible ordered scalars"));
+                    }
+                }
+            }
+            pairs.sort_by(|(a, a_offset), (b, b_offset)| {
+                for (index, key) in keys.iter().enumerate() {
+                    let left = &values[&a.id][index];
+                    let right = &values[&b.id][index];
+                    let known_order = match &key.expression {
+                        Expression::Field { name } if name == "match.distance" => a_offset.cmp(b_offset),
+                        Expression::Function { name, arguments } if name == "abs" && matches!(arguments.as_slice(), [Expression::Field { name }] if name == "match.distance") => a_offset.unsigned_abs().cmp(&b_offset.unsigned_abs()),
+                        _ => left.order(right).unwrap_or(Ordering::Equal),
+                    };
+                    let order = match (left.is_unknown(), right.is_unknown()) {
+                        (true,false) => Ordering::Greater,
+                        (false,true) => Ordering::Less,
+                        (true,true) => Ordering::Equal,
+                        _ if key.descending => known_order.reverse(),
+                        _ => known_order,
+                    };
+                    if order != Ordering::Equal { return order; }
+                }
+                a.id.cmp(&b.id)
+            });
+        }
+        Ok(pairs.into_iter().next())
+    }
     fn filter(&self, rows: Vec<Row>, c: &Condition) -> Result<Vec<Row>, Error> {
         let mut orders = Vec::new();
         collect_orders(c, &mut orders);
@@ -1413,9 +1500,16 @@ impl<'a> ReferenceEvaluator<'a> {
                     query,
                     within,
                     at,
+                    pick,
                     ..
                 },
-            ] => Some((self.execute(query)?.rows, *relation, within.as_ref(), *at)),
+            ] => Some((
+                self.execute(query)?.rows,
+                *relation,
+                within.as_ref(),
+                *at,
+                pick,
+            )),
             _ => None,
         };
         let mut selected = vec![];
@@ -1423,10 +1517,10 @@ impl<'a> ReferenceEvaluator<'a> {
             if !self.condition(&row, c)?.matches() {
                 continue;
             }
-            if let Some((inner, relation, within, at)) = &exposed
-                && let Some((nearest, offset)) = self
-                    .related(&row, inner, *relation, *within, *at)?
-                    .and_then(|pairs| pairs.into_iter().next())
+            if let Some((inner, relation, within, at, pick)) = &exposed
+                && let Some(pairs) = self.related(&row, inner, *relation, *within, *at)?
+                && let Some((nearest, offset)) =
+                    self.witness(&row, pairs, pick, (*relation, *within, *at))?
             {
                 row.fields
                     .insert("match.id".into(), Scalar::Text(nearest.id.clone()));
@@ -1739,7 +1833,9 @@ fn validate_expression(e: &Expression, at: usize) -> Result<(), Error> {
     match e {
         Expression::Field { .. } => Ok(()),
         Expression::Value { value } => validate_value(value),
-        Expression::Function { name, arguments } if name == "len" && arguments.len() == 1 => {
+        Expression::Function { name, arguments }
+            if matches!(name.as_str(), "len" | "abs") && arguments.len() == 1 =>
+        {
             validate_expression(&arguments[0], at)
         }
         Expression::Function { name, arguments }
@@ -1794,7 +1890,17 @@ fn validate_condition(c: &Condition) -> Result<(), Error> {
             validate_expression(left, at)?;
             validate_query(query)?;
         }
-        ConditionKind::Order { query, .. } => validate_query(query)?,
+        ConditionKind::Order { query, pick, .. } => {
+            validate_query(query)?;
+            if let WitnessChoice::FirstBy { keys } = pick {
+                if keys.is_empty() {
+                    return Err(bad("pick first needs a sort key"));
+                }
+                for key in keys {
+                    validate_expression(&key.expression, at)?;
+                }
+            }
+        }
         ConditionKind::Exists { condition, .. } | ConditionKind::Count { condition, .. } => {
             if let Some(c) = condition {
                 validate_condition(c)?;

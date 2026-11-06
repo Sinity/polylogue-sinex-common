@@ -1418,6 +1418,24 @@ impl Parser<'_> {
                     t.span.start,
                 ));
             }
+            if function.name == "abs"
+                && !matches!(
+                    self.expression_info(scope, &arguments[0]).field.kind,
+                    FieldKind::Integer | FieldKind::Number | FieldKind::Money | FieldKind::Duration
+                )
+                && !matches!(
+                    &arguments[0],
+                    Expression::Value {
+                        value: Value::Unknown
+                    }
+                )
+            {
+                return Err(Error::new(
+                    ErrorKind::BadValue,
+                    "abs takes a linear number, money or duration",
+                    t.span.start,
+                ));
+            }
             if function.name == "glob" {
                 for argument in &arguments {
                     if !matches!(
@@ -1752,6 +1770,29 @@ impl Parser<'_> {
         let relation = OrderRelation::parse(&word.text).expect("checked by the caller");
         let (query, inner) = self.query_in(scope)?;
         let (within, at, order_scope) = self.order_options(relation, scope, &inner, start)?;
+        let pick = if self.take("pick") {
+            self.expect("first")?;
+            self.expect("by")?;
+            let candidate = self.witness_scope(&inner, within.as_ref());
+            let mut keys = Vec::new();
+            loop {
+                let expression = self.expression(&candidate, Place::Condition)?;
+                let descending = self.take("desc");
+                if !descending {
+                    self.take("asc");
+                }
+                keys.push(SortKey {
+                    expression,
+                    descending,
+                });
+                if !self.take(",") {
+                    break;
+                }
+            }
+            WitnessChoice::FirstBy { keys }
+        } else {
+            WitnessChoice::Nearest
+        };
         self.inner_scopes.insert(start, inner);
         Ok(self.cond(
             start,
@@ -1761,8 +1802,35 @@ impl Parser<'_> {
                 within,
                 at,
                 scope: order_scope,
+                pick,
             },
         ))
+    }
+    fn witness_scope(&self, inner: &Scope, within: Option<&Distance>) -> Scope {
+        let mut candidate = inner.clone();
+        for (name, kind) in [
+            ("match.id", FieldKind::Reference),
+            ("match.coarse", FieldKind::Bool),
+            (
+                crate::catalog::MATCH_DISTANCE,
+                if matches!(within, Some(Distance::Steps { .. })) {
+                    FieldKind::Integer
+                } else {
+                    FieldKind::Duration
+                },
+            ),
+        ] {
+            self.add_generated(
+                &mut candidate,
+                Field {
+                    name: name.into(),
+                    kind,
+                    ..Field::default()
+                },
+                Origin::Generated,
+            );
+        }
+        candidate
     }
     /// `[within DISTANCE] [at when|start|end] [in SCOPE]` after an order relation.
     fn order_options(
