@@ -206,7 +206,11 @@ impl Parser<'_> {
     }
     fn snapshot(&self, scope: &Scope) -> crate::scope::Scope {
         crate::scope::Scope {
-            unit: self.catalog.unit(&scope.unit).map(|unit| unit.name.clone()),
+            unit: scope
+                .row_domain
+                .as_deref()
+                .and_then(|unit| self.catalog.unit(unit))
+                .map(|unit| unit.name.clone()),
             fields: self.visible(scope).into(),
             match_units: scope.patterns.clone(),
         }

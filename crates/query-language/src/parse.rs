@@ -245,6 +245,8 @@ fn parse_internal(text: &str, catalog: &Catalog, capture_types: bool) -> Result<
 #[derive(Clone, PartialEq, Eq)]
 struct Scope {
     unit: String,
+    // Native field ownership survives grouping; the resulting row domain does not.
+    row_domain: Option<String>,
     /// The visible columns after a grouping, projection or aggregate; None
     /// means every field of the unit or output, plus `extra`.
     columns: Option<BTreeSet<String>>,
@@ -265,6 +267,7 @@ struct Scope {
 impl Scope {
     fn new(unit: String) -> Self {
         Self {
+            row_domain: Some(unit.clone()),
             unit,
             columns: None,
             extra: BTreeSet::new(),
@@ -691,6 +694,7 @@ impl Parser<'_> {
             _ => None,
         };
         scope.output = self.catalog.source_output(source).cloned().map(Arc::new);
+        scope.row_domain = scope.output.as_ref().and_then(|output| output.unit.clone());
         if let Some(unit) = scope
             .output
             .as_ref()
@@ -731,6 +735,8 @@ impl Parser<'_> {
             output.main_time.clone()
         } else if scope.columns_unknown {
             Some("$unknown_main_time".into())
+        } else if scope.row_domain.is_none() {
+            None
         } else {
             self.catalog
                 .unit(&scope.unit)
@@ -2538,6 +2544,12 @@ impl Parser<'_> {
                 }
             }
         };
+        if matches!(
+            kind,
+            TransformKind::Group { .. } | TransformKind::Aggregate { .. }
+        ) {
+            scope.row_domain = None;
+        }
         if matches!(
             kind,
             TransformKind::Group { .. }

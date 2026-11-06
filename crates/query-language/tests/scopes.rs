@@ -446,3 +446,36 @@ fn both_catalogs_keep_calendar_labels_and_hour_numbers_through_binding() {
         }
     }
 }
+
+#[test]
+fn grouped_row_domain_is_separate_from_native_field_provenance() {
+    let c = catalog("events");
+    let q = parse(
+        "events | group by cwd | agg sum(cost) | fields cwd,sum_cost",
+        &c,
+    )
+    .unwrap();
+    let bound = bind(&q, &c).unwrap();
+    let root = bound.typing().query(&NodePath::default()).unwrap();
+    assert_eq!(root.source.unit.as_deref(), Some("events"));
+    for stage in &root.transforms {
+        assert!(stage.after.unit.is_none());
+    }
+    let Origin::Group { input, .. } = &root.transforms[0].after.field("cwd").unwrap().origin else {
+        panic!("missing group origin")
+    };
+    assert!(matches!(&input.origin,Origin::Catalog {unit,field} if unit=="events"&&field=="cwd"));
+    let q = parse("events | group by cwd | events", &c).unwrap();
+    let bound = bind(&q, &c).unwrap();
+    assert_eq!(
+        bound
+            .typing()
+            .query(&NodePath::default())
+            .unwrap()
+            .transforms[1]
+            .after
+            .unit
+            .as_deref(),
+        Some("events")
+    );
+}
