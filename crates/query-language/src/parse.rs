@@ -1753,20 +1753,30 @@ impl Parser<'_> {
         };
         // `at` is a time point only when one follows; otherwise it may be a
         // field named `at` in the next condition.
-        let point_follows = ["when", "start", "end"]
-            .iter()
-            .any(|point| self.next_is(1, point));
+        let point_follows = [
+            "when",
+            "start",
+            "end",
+            "match.when",
+            "match.start",
+            "match.end",
+        ]
+        .iter()
+        .any(|point| self.next_is(1, point));
         let at = if self.is("at") && point_follows {
             self.at += 1;
             let point = self.next()?;
-            match point.text.as_str() {
+            match point.text.to_ascii_lowercase().as_str() {
                 "when" => TimePoint::When,
                 "start" => TimePoint::Start,
                 "end" => TimePoint::End,
+                "match.when" => TimePoint::MatchWhen,
+                "match.start" => TimePoint::MatchStart,
+                "match.end" => TimePoint::MatchEnd,
                 _ => {
                     return Err(Error::new(
                         ErrorKind::BadValue,
-                        "at takes when, start or end",
+                        "at takes when, start, end, match.when, match.start or match.end",
                         point.span.start,
                     ));
                 }

@@ -530,6 +530,12 @@ pub enum TimePoint {
     When,
     Start,
     End,
+    /// The matched row's occurrence time, independent of its actual span.
+    MatchWhen,
+    /// The start of the matched row's explicitly declared actual span.
+    MatchStart,
+    /// The end of the matched row's explicitly declared actual span.
+    MatchEnd,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Aggregate {

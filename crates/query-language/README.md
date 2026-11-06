@@ -91,6 +91,7 @@ atom      := field ":" value | field cmp value | field "~" text | field "^" text
 value     := word | "quoted" | "(" v "|" v … ")" | "*" | "unknown" | "known" | "$" param
 cmp       := "=" | "!=" | "<" | "<=" | ">" | ">="
 order     := "near" | "before" | "after" | "during" | "containing"
+point     := "when" | "start" | "end" | "match.when" | "match.start" | "match.end"
 distance  := duration | N "steps"
 attach    := "with" child "(" fields ")" ["[" cond ["," ("first:"|"last:") N] "]"] { "," … }
 transform := "where" cond | "sort by" keys | "limit" N | "offset" N | "first" N ["by" keys]

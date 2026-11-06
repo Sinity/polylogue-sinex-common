@@ -493,3 +493,42 @@ fn both_product_catalogs_share_builtin_spelling_and_reference_spacing() {
         }
     }
 }
+
+#[test]
+fn matched_time_selectors_are_explicit_and_round_trip() {
+    let catalog = support::sinex();
+    for (word, point) in [
+        ("match.when", TimePoint::MatchWhen),
+        ("match.start", TimePoint::MatchStart),
+        ("match.end", TimePoint::MatchEnd),
+    ] {
+        let text = format!("events | join near (commands) within 5m at {word}");
+        let query = parse(&text, &catalog).unwrap();
+        let TransformKind::Join {
+            on: JoinOn::Order { at, .. },
+            ..
+        } = query.transforms[0].kind
+        else {
+            panic!()
+        };
+        assert_eq!(at, point);
+        let encoded = serde_json::to_value(&query).unwrap();
+        let decoded: Query = serde_json::from_value(encoded).unwrap();
+        let rendered = query_language::format::format_query(&decoded, &catalog).unwrap();
+        assert!(rendered.contains(&format!(" at {word}")));
+        let bound = query_language::bind::bind(&decoded, &catalog).unwrap();
+        let reparsed = parse(&rendered, &catalog).unwrap();
+        assert_eq!(bound.query().transforms, reparsed.transforms);
+        let upper = parse(&text.to_uppercase(), &catalog).unwrap();
+        let TransformKind::Join {
+            on: JoinOn::Order {
+                at: upper_point, ..
+            },
+            ..
+        } = upper.transforms[0].kind
+        else {
+            panic!()
+        };
+        assert_eq!(upper_point, point);
+    }
+}

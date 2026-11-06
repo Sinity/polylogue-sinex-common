@@ -594,6 +594,9 @@ fn order_options(
         TimePoint::When => {}
         TimePoint::Start => text.push_str(" at start"),
         TimePoint::End => text.push_str(" at end"),
+        TimePoint::MatchWhen => text.push_str(" at match.when"),
+        TimePoint::MatchStart => text.push_str(" at match.start"),
+        TimePoint::MatchEnd => text.push_str(" at match.end"),
     }
     if let Some(scope) = scope {
         text.push_str(&format!(" in {}", name(scope)?));
