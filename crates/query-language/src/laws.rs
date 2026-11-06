@@ -129,6 +129,7 @@ fn answer(rows: Vec<Row>) -> Answer {
         rows,
     }
 }
+// Fixture instants and periods use exact seconds, as their query durations do.
 fn at(id: &str, time: i64) -> Row {
     let mut row = Row::new(id);
     row.time = Some(Extent {
