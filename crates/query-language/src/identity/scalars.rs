@@ -20,6 +20,9 @@ fn fields(catalog: &Catalog, unit: &str) -> Fields {
 fn field(scope: &Fields, expression: &Expression, catalog: &Catalog) -> Option<Field> {
     match expression {
         Expression::Field { name } => scope.get(name).cloned(),
+        Expression::Function { name, arguments } if name == "case_eq" => arguments
+            .get(2)
+            .and_then(|argument| field(scope, argument, catalog)),
         Expression::Function { name, .. } => Some(Field {
             name: expression.column(),
             kind: catalog
@@ -102,7 +105,7 @@ fn distance(d: &mut Distance) {
     }
 }
 /// Literals inside expressions take the spelling of their own literal kind.
-fn expression(e: &mut Expression) {
+fn expression(e: &mut Expression, scope: &Fields, catalog: &Catalog) {
     match e {
         Expression::Value {
             value:
@@ -126,14 +129,32 @@ fn expression(e: &mut Expression) {
                 *text = canonical;
             }
         }
+        Expression::Function { name, arguments } if name == "case_eq" && arguments.len() == 3 => {
+            let left = field(scope, &arguments[0], catalog);
+            let right = field(scope, &arguments[1], catalog);
+            for (index, argument) in arguments.iter_mut().enumerate() {
+                let contextual = match index {
+                    0 => right.as_ref(),
+                    1 => left.as_ref(),
+                    _ => None,
+                };
+                if let (Some(declared), Expression::Value { value: v }) =
+                    (contextual, &mut *argument)
+                {
+                    value(v, declared);
+                } else {
+                    expression(argument, scope, catalog);
+                }
+            }
+        }
         Expression::Function { arguments, .. } => {
             for argument in arguments {
-                expression(argument);
+                expression(argument, scope, catalog);
             }
         }
         Expression::Arithmetic { left, right, .. } => {
-            expression(left);
-            expression(right);
+            expression(left, scope, catalog);
+            expression(right, scope, catalog);
         }
         _ => {}
     }
@@ -156,14 +177,14 @@ fn condition(c: &mut Condition, scope: &Fields, catalog: &Catalog) {
         }
         ConditionKind::Compare { left, right, .. } => {
             let declared = field(scope, left, catalog);
-            expression(left);
+            expression(left, scope, catalog);
             match right {
                 Expression::Value { value: v } => {
                     if let Some(f) = declared {
                         value(v, &f);
                     }
                 }
-                other => expression(other),
+                other => expression(other, scope, catalog),
             }
         }
         ConditionKind::Since {
@@ -183,9 +204,9 @@ fn condition(c: &mut Condition, scope: &Fields, catalog: &Catalog) {
                 value(from, &f);
                 value(to, &f);
             }
-            expression(left);
+            expression(left, scope, catalog);
         }
-        ConditionKind::TimeRange { left, .. } => expression(left),
+        ConditionKind::TimeRange { left, .. } => expression(left, scope, catalog),
         ConditionKind::Exists { unit, condition: c }
         | ConditionKind::Count {
             unit, condition: c, ..
@@ -195,7 +216,7 @@ fn condition(c: &mut Condition, scope: &Fields, catalog: &Catalog) {
             }
         }
         ConditionKind::In { left, query } => {
-            expression(left);
+            expression(left, scope, catalog);
             canonicalize(query, catalog);
         }
         ConditionKind::Order { query, within, .. } => {
@@ -226,7 +247,7 @@ fn argument(a: &mut ExtensionArgument, scope: &Fields, catalog: &Catalog) {
     match a {
         ExtensionArgument::Condition(c) => condition(c, scope, catalog),
         ExtensionArgument::Query(q) => canonicalize(q, catalog),
-        ExtensionArgument::Expression(e) => expression(e),
+        ExtensionArgument::Expression(e) => expression(e, scope, catalog),
         ExtensionArgument::Optional(arguments) | ExtensionArgument::List(arguments) => arguments
             .iter_mut()
             .for_each(|a| argument(a, scope, catalog)),
@@ -297,7 +318,7 @@ pub(super) fn canonicalize(query: &mut Query, catalog: &Catalog) {
             }
             TransformKind::Sort { keys } => {
                 for key in keys {
-                    expression(&mut key.expression);
+                    expression(&mut key.expression, &scope, catalog);
                 }
                 group_input = None;
             }
@@ -313,7 +334,7 @@ pub(super) fn canonicalize(query: &mut Query, catalog: &Catalog) {
                     })
                     .collect();
                 for key in keys.iter_mut() {
-                    expression(&mut key.expression);
+                    expression(&mut key.expression, &scope, catalog);
                 }
                 grouped.insert(
                     "count".into(),
@@ -342,7 +363,7 @@ pub(super) fn canonicalize(query: &mut Query, catalog: &Catalog) {
                             .as_ref(),
                     );
                     for argument in &mut aggregate.arguments {
-                        expression(argument);
+                        expression(argument, &input, catalog);
                     }
                     let name = aggregate.column();
                     scope.insert(
@@ -366,7 +387,7 @@ pub(super) fn canonicalize(query: &mut Query, catalog: &Catalog) {
                     })
                     .collect();
                 for column in columns.iter_mut() {
-                    expression(&mut column.expression);
+                    expression(&mut column.expression, &scope, catalog);
                 }
                 scope = projected;
                 group_input = None;

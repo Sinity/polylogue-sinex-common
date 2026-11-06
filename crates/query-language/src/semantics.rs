@@ -530,6 +530,27 @@ impl<'a> ReferenceEvaluator<'a> {
                     _ => return Err(bad("len takes text or a list")),
                 })
             }
+            Expression::Function { name, arguments } if name == "case_eq" => {
+                let [left, right, selected] = arguments.as_slice() else {
+                    return Err(bad("case_eq takes three arguments"));
+                };
+                let mut left_value = self.expression(row, left)?;
+                let right_value = match right {
+                    Expression::Value { value } => literal(value, &left_value)?,
+                    other => self.expression(row, other)?,
+                };
+                if let Expression::Value { value } = left {
+                    left_value = literal(value, &right_value)?;
+                }
+                if left_value != Scalar::Unknown
+                    && right_value != Scalar::Unknown
+                    && left_value == right_value
+                {
+                    self.expression(row, selected)
+                } else {
+                    Ok(Scalar::Unknown)
+                }
+            }
             Expression::Function { name, .. } => Err(unsupported(name, 0)),
             Expression::Arithmetic {
                 operator,
@@ -1564,6 +1585,12 @@ fn validate_expression(e: &Expression, at: usize) -> Result<(), Error> {
         Expression::Value { value } => validate_value(value),
         Expression::Function { name, arguments } if name == "len" && arguments.len() == 1 => {
             validate_expression(&arguments[0], at)
+        }
+        Expression::Function { name, arguments } if name == "case_eq" && arguments.len() == 3 => {
+            for argument in arguments {
+                validate_expression(argument, at)?;
+            }
+            Ok(())
         }
         Expression::Function { name, .. } if name == "random" => Ok(()),
         Expression::Function { name, .. } => Err(unsupported(name, at)),

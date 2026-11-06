@@ -1412,6 +1412,50 @@ impl Parser<'_> {
                     t.span.start,
                 ));
             }
+            if function.name == "case_eq" {
+                let (first, rest) = arguments.split_at_mut(1);
+                let (left, right) = (&mut first[0], &mut rest[0]);
+                match (left, right) {
+                    (left, Expression::Value { value }) => {
+                        self.normalize_expression_value(scope, left, value);
+                        self.check_expression_value(scope, left, value, t.span.start)?;
+                    }
+                    (Expression::Value { value }, right) => {
+                        self.normalize_expression_value(scope, right, value);
+                        self.check_expression_value(scope, right, value, t.span.start)?;
+                    }
+                    _ => {}
+                }
+                let left = &arguments[0];
+                let right = &arguments[1];
+                let left_kind = self.expression_info(scope, left).field.kind;
+                let right_kind = self.expression_info(scope, right).field.kind;
+                let contextual = |expression: &Expression, own: &FieldKind, other: &FieldKind| {
+                    if let Expression::Value { value } = expression {
+                        if matches!(value, Value::Unknown) {
+                            FieldKind::Json
+                        } else if matches!(
+                            other,
+                            FieldKind::Text
+                                | FieldKind::Reference
+                                | FieldKind::Bool
+                                | FieldKind::Json
+                                | FieldKind::List(_)
+                        ) {
+                            other.clone()
+                        } else {
+                            typing::operand_kind(expression, other)
+                        }
+                    } else {
+                        own.clone()
+                    }
+                };
+                self.check_comparable(
+                    &contextual(left, &left_kind, &right_kind),
+                    &contextual(right, &right_kind, &left_kind),
+                    t.span.start,
+                )?;
+            }
             return Ok(Expression::Function {
                 name: function.name,
                 arguments,

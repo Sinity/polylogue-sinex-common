@@ -106,7 +106,7 @@ fn group_scopes_keep_types_closed_values_lineage_and_raw_text() {
             FieldKind::Integer
         );
         assert!(matches!(&final_scope.field("sum_count").unwrap().origin,
-            Origin::Aggregate { inputs, rule: TypeRule::Input, .. }
+            Origin::Aggregate { inputs, rule: TypeRule::Input(0), .. }
                 if inputs[0].field.name == "count" && inputs[0].field.kind == FieldKind::Integer));
         let tree = serde_json::to_value(bound.query()).unwrap();
         assert_eq!(
@@ -149,7 +149,7 @@ fn repeated_groups_have_distinct_structural_origins_and_json_stays_json() {
         panic!("aggregate origin")
     };
     assert_eq!(at, &transform(1).field("aggregates").index(0));
-    assert_eq!(*rule, TypeRule::Input);
+    assert_eq!(*rule, TypeRule::Input(0));
     assert_eq!(inputs[0].field.name, "payload.key");
     assert!(
         matches!(&inputs[0].origin, Origin::Catalog { unit, field } if unit == "events" && field == "payload.key")

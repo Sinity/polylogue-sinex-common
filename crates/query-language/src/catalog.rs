@@ -259,6 +259,7 @@ pub const FUNCTIONS: &[&str] = &[
     "month_day",
     "year",
     "len",
+    "case_eq",
 ];
 /// Bucket functions whose groups `fill` can complete.
 pub const TIME_BUCKETS: &[&str] = &["hour", "day", "week", "month", "year"];
@@ -303,10 +304,11 @@ fn builtin_functions() -> Vec<Function> {
         .iter()
         .map(|name| Function {
             name: (*name).into(),
-            arguments: 1,
+            arguments: if *name == "case_eq" { 3 } else { 1 },
             result: match *name {
                 "day" | "week" | "month" => FieldKind::Time,
                 "hour" | "year" | "len" => FieldKind::Integer,
+                "case_eq" => FieldKind::Json,
                 _ => FieldKind::Text,
             },
             help: String::new(),
