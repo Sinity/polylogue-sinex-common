@@ -318,8 +318,23 @@ fn isomorphic_constructs_keep_original_question_ids() {
             .collect(),
         ..Default::default()
     };
+    for (current_text, old_text) in [
+        ("events | fields source as source", "events | fields source"),
+        (
+            "events | group by source as source | agg sum(cost) as sum_cost",
+            "events | group by source | agg sum(cost)",
+        ),
+    ] {
+        let current = query_language::parse::parse(current_text, &native).unwrap();
+        let original = historical_query_format_v1::parse::parse(old_text, &old).unwrap();
+        assert_eq!(
+            normal_form(&current, &native).unwrap(),
+            historical_query_format_v1::identity::normal_form(&original, &old).unwrap(),
+            "{current_text} / {old_text}"
+        );
+    }
     for text in [
-        "events source:alpha",
+        "events where source:alpha",
         "events where source = alpha",
         "events where duration > 1.5s",
         "events where cost between 1usd and 2usd",

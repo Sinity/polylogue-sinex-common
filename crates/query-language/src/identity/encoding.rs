@@ -243,7 +243,7 @@ fn column(c: &Column) -> Json {
 }
 fn original_columns(cs: &[Column]) -> bool {
     cs.iter()
-        .all(|c| c.name.is_none() && original_operand(&c.expression))
+        .all(|c| c.column() == c.expression.column() && original_operand(&c.expression))
 }
 fn transform(t: &TransformKind, terminal: bool) -> Json {
     match t {
@@ -274,8 +274,7 @@ fn transform(t: &TransformKind, terminal: bool) -> Json {
         TransformKind::Fill => json!({"kind":"fill"}),
         TransformKind::Fields { columns }
             if terminal && columns.iter().all(|c| {
-                c.name.is_none()
-                    && matches!(&c.expression,Expression::Field {name} if !name.contains(['.','-']))
+                matches!(&c.expression,Expression::Field {name} if c.column() == name.replace(['.','-'], "_"))
             }) =>
         {
             json!({"kind":"fields","fields":columns.iter().map(|c|if let Expression::Field {name}=&c.expression {name.as_str()} else {unreachable!()}).collect::<Vec<_>>()})
@@ -300,8 +299,11 @@ fn transform(t: &TransformKind, terminal: bool) -> Json {
     }
 }
 fn original_aggregate(a: &Aggregate) -> bool {
-    a.name.is_none()
-        && !matches!(a.function, AggregateFunction::Covered)
+    a.name.as_ref().is_none_or(|name| {
+        let mut unnamed = a.clone();
+        unnamed.name = None;
+        *name == unnamed.column()
+    }) && !matches!(a.function, AggregateFunction::Covered)
         && a.arguments
             .iter()
             .all(|a| matches!(a, Expression::Field { .. }))
