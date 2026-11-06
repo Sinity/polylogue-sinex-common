@@ -248,6 +248,11 @@ DISTANCE := DURATION | N steps
   are refused, as is a unit without an order scope. `near` needs a distance.
 - **Time** distance crosses scopes, units and products. Spans are
   half-open; a point inside a span is distinct from two spans overlapping.
+  `at when` and `at start` select the outer row’s start; `at end` selects
+  its end. The inner row retains its native period and start. The signed
+  distance is the inner start minus that outer anchor. Choosing an anchor
+  does not turn a coarse period into a point or bypass the whole-period
+  window requirement.
 - `seq` stays for an ordered pattern of three or more steps; its steps may be
   any units in the scope's order, and a step may carry `within N steps` or
   `within D`.
