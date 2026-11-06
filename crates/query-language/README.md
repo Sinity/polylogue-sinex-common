@@ -499,6 +499,11 @@ does not encrypt.
 
 - Only the page size may change between pages. The count is computed once
   per question and read position and carried in the cursor.
+- A product resolving an immutable recorded run may authenticate the token
+  before lookup with `CursorSeal::authenticate`. The resulting proof exposes
+  only captured context. It must then bind to the question established by the
+  stored object and validate the current request, grants, versions and read
+  positions before obtaining a continuation. Captured context grants no authority.
 - A cursor from a different question is `invalid_query`. A cursor whose read
   context the product no longer serves (a rebuilt index, a ranked cursor
   after the ranking data changed) is `stale_cursor`, never a silent restart.
