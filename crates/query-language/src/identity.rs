@@ -21,8 +21,8 @@ impl std::fmt::Display for QuestionId {
 /// Relative time expressions deliberately remain expressions.
 pub fn normal_form(query: &Query, catalog: &Catalog) -> Result<Value, Error> {
     let mut query = query.clone();
-    scalars::canonicalize(&mut query, catalog);
-    let mut value = encoding::query(&query);
+    let canonical = scalars::canonicalize(&mut query, catalog);
+    let mut value = encoding::query(&canonical);
     normalize(&mut value);
     Ok(value)
 }

@@ -339,6 +339,9 @@ fn isomorphic_constructs_keep_original_question_ids() {
         "events where duration > 1.5s",
         "events where cost between 1usd and 2usd",
         "events where ended - started > 5s",
+        "events where ended - started > 0.005s",
+        "events where ended - started > $window",
+        "events | group by ended,started | where ended - started > $window",
         "events where NOT host:beta OR source:alpha",
         "events | sort by source desc | offset 2 | limit 4 | fields source,host",
         "events | group by source | agg count,sum(cost)",
@@ -403,4 +406,66 @@ fn intermediate_projection_is_distinct_from_original_final_fields() {
     current.transforms.swap(0, 1);
     let terminal = normal_form(&current, &catalog()).unwrap();
     assert_eq!(terminal["stages"][1]["kind"]["kind"], "fields");
+}
+
+#[test]
+fn time_difference_identity_uses_each_conditions_actual_field_types() {
+    let mut native = catalog();
+    native.units.push(Unit {
+        name: "numbers".into(),
+        fields: ["ended", "started"]
+            .into_iter()
+            .map(|name| Field {
+                name: name.into(),
+                kind: FieldKind::Number,
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    });
+    let subtraction = |threshold| Condition {
+        span: Span::default(),
+        kind: ConditionKind::Compare {
+            left: Expression::Arithmetic {
+                operator: Arithmetic::Subtract,
+                left: Box::new(Expression::field("ended")),
+                right: Box::new(Expression::field("started")),
+            },
+            op: Op::Gt,
+            right: Expression::value(threshold),
+        },
+    };
+    let q = query(vec![
+        subtraction(Value::Parameter {
+            name: "window".into(),
+        }),
+        Condition {
+            span: Span::default(),
+            kind: ConditionKind::Exists {
+                unit: "numbers".into(),
+                condition: Some(Box::new(subtraction(Value::scalar("5")))),
+            },
+        },
+    ]);
+    let form = normal_form(&q, &native).unwrap();
+    let conditions = form["source"]["condition"]["kind"]["conditions"]
+        .as_array()
+        .unwrap();
+    assert!(
+        conditions
+            .iter()
+            .any(|condition| condition["kind"]["kind"] == "time_difference"
+                && condition["kind"]["value"]["kind"] == "parameter")
+    );
+    let numeric = conditions
+        .iter()
+        .find(|condition| condition["kind"]["kind"] == "exists")
+        .unwrap();
+    assert_eq!(
+        numeric["kind"]["condition"]["kind"]["kind"],
+        "expression_compare"
+    );
+    let bytes = serde_json::to_vec(&q).unwrap();
+    let copy = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(normal_form(&copy, &native).unwrap(), form);
 }

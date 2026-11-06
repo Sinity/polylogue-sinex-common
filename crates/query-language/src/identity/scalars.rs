@@ -3,8 +3,28 @@ use crate::{
     ast::*,
     catalog::{Catalog, Field, FieldKind, UnknownRule},
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 type Fields = BTreeMap<String, Field>;
+/// Facts belong to this borrowed, immobile tree. Addresses select nodes only;
+/// no address enters the canonical encoding or escapes normal-form construction.
+pub(super) struct CanonicalQuery<'a> {
+    pub(super) query: &'a Query,
+    time_differences: BTreeSet<*const Condition>,
+}
+impl CanonicalQuery<'_> {
+    pub(super) fn time_difference(&self, condition: &Condition) -> bool {
+        self.time_differences
+            .contains(&std::ptr::from_ref(condition))
+    }
+}
+pub(super) fn canonicalize<'a>(query: &'a mut Query, catalog: &Catalog) -> CanonicalQuery<'a> {
+    let mut time_differences = BTreeSet::new();
+    canonicalize_into(query, catalog, &mut time_differences);
+    CanonicalQuery {
+        query,
+        time_differences,
+    }
+}
 fn fields(catalog: &Catalog, unit: &str) -> Fields {
     catalog
         .unit(unit)
@@ -172,14 +192,35 @@ fn expression(e: &mut Expression, scope: &Fields, catalog: &Catalog) {
         _ => {}
     }
 }
-fn condition(c: &mut Condition, scope: &Fields, catalog: &Catalog) {
+fn condition(
+    c: &mut Condition,
+    scope: &Fields,
+    catalog: &Catalog,
+    facts: &mut BTreeSet<*const Condition>,
+) {
+    if let ConditionKind::Compare {
+        left:
+            Expression::Arithmetic {
+                operator: Arithmetic::Subtract,
+                left,
+                right,
+            },
+        right: Expression::Value { value },
+        ..
+    } = &c.kind
+        && !matches!(value, Value::Known)
+        && field(scope, left, catalog).is_some_and(|field| field.kind == FieldKind::Time)
+        && field(scope, right, catalog).is_some_and(|field| field.kind == FieldKind::Time)
+    {
+        facts.insert(std::ptr::from_ref(c));
+    }
     match &mut c.kind {
         ConditionKind::And { conditions } | ConditionKind::Or { conditions } => {
             for c in conditions {
-                condition(c, scope, catalog);
+                condition(c, scope, catalog, facts);
             }
         }
-        ConditionKind::Not { condition: c } => condition(c, scope, catalog),
+        ConditionKind::Not { condition: c } => condition(c, scope, catalog, facts),
         ConditionKind::Match {
             field: name,
             value: v,
@@ -225,12 +266,12 @@ fn condition(c: &mut Condition, scope: &Fields, catalog: &Catalog) {
             unit, condition: c, ..
         } => {
             if let Some(c) = c {
-                condition(c, &fields(catalog, unit), catalog);
+                condition(c, &fields(catalog, unit), catalog, facts);
             }
         }
         ConditionKind::In { left, query } => {
             expression(left, scope, catalog);
-            canonicalize(query, catalog);
+            canonicalize_into(query, catalog, facts);
         }
         ConditionKind::Order {
             query,
@@ -238,7 +279,7 @@ fn condition(c: &mut Condition, scope: &Fields, catalog: &Catalog) {
             pick,
             ..
         } => {
-            let mut candidate = canonicalize_fields(query, catalog);
+            let mut candidate = canonicalize_into(query, catalog, facts);
             if let WitnessChoice::FirstBy { keys } = pick {
                 let distance_kind = if matches!(within, Some(Distance::Steps { .. })) {
                     FieldKind::Integer
@@ -271,7 +312,7 @@ fn condition(c: &mut Condition, scope: &Fields, catalog: &Catalog) {
             unit, steps, gaps, ..
         } => {
             for c in steps {
-                condition(c, &fields(catalog, unit), catalog);
+                condition(c, &fields(catalog, unit), catalog, facts);
             }
             for gap in gaps {
                 if let Gap::Within { distance: d } = gap {
@@ -281,25 +322,33 @@ fn condition(c: &mut Condition, scope: &Fields, catalog: &Catalog) {
         }
         ConditionKind::Extension { arguments, .. } => arguments
             .iter_mut()
-            .for_each(|a| argument(a, scope, catalog)),
+            .for_each(|a| argument(a, scope, catalog, facts)),
         _ => {}
     }
 }
-fn argument(a: &mut ExtensionArgument, scope: &Fields, catalog: &Catalog) {
+fn argument(
+    a: &mut ExtensionArgument,
+    scope: &Fields,
+    catalog: &Catalog,
+    facts: &mut BTreeSet<*const Condition>,
+) {
     match a {
-        ExtensionArgument::Condition(c) => condition(c, scope, catalog),
-        ExtensionArgument::Query(q) => canonicalize(q, catalog),
+        ExtensionArgument::Condition(c) => condition(c, scope, catalog, facts),
+        ExtensionArgument::Query(q) => {
+            canonicalize_into(q, catalog, facts);
+        }
         ExtensionArgument::Expression(e) => expression(e, scope, catalog),
         ExtensionArgument::Optional(arguments) | ExtensionArgument::List(arguments) => arguments
             .iter_mut()
-            .for_each(|a| argument(a, scope, catalog)),
+            .for_each(|a| argument(a, scope, catalog, facts)),
         _ => {}
     }
 }
-pub(super) fn canonicalize(query: &mut Query, catalog: &Catalog) {
-    canonicalize_fields(query, catalog);
-}
-fn canonicalize_fields(query: &mut Query, catalog: &Catalog) -> Fields {
+fn canonicalize_into(
+    query: &mut Query,
+    catalog: &Catalog,
+    facts: &mut BTreeSet<*const Condition>,
+) -> Fields {
     let mut scope = match &query.source {
         Source::Unit { unit, .. } => fields(catalog, unit),
         Source::Saved { .. } | Source::Result { .. } => catalog
@@ -325,7 +374,7 @@ fn canonicalize_fields(query: &mut Query, catalog: &Catalog) -> Fields {
                 *implicit = false;
             }
             if let Some(c) = c {
-                condition(c, &scope, catalog);
+                condition(c, &scope, catalog, facts);
             }
         }
         Source::Saved {
@@ -333,13 +382,13 @@ fn canonicalize_fields(query: &mut Query, catalog: &Catalog) -> Fields {
         }
         | Source::Result {
             condition: Some(c), ..
-        } => condition(c, &scope, catalog),
+        } => condition(c, &scope, catalog, facts),
         _ => {}
     }
     for attachment in &mut query.attach {
         for window in &mut attachment.windows {
             if let Window::Where(c) = window {
-                condition(c, &fields(catalog, &attachment.unit), catalog);
+                condition(c, &fields(catalog, &attachment.unit), catalog, facts);
             }
         }
     }
@@ -347,14 +396,14 @@ fn canonicalize_fields(query: &mut Query, catalog: &Catalog) -> Fields {
     for transform in &mut query.transforms {
         match &mut transform.kind {
             TransformKind::Where { condition: c } => {
-                condition(c, &scope, catalog);
+                condition(c, &scope, catalog, facts);
                 group_input = None;
             }
             TransformKind::Scope { unit, condition: c } => {
                 group_input = None;
                 scope = fields(catalog, unit);
                 if let Some(c) = c {
-                    condition(c, &scope, catalog);
+                    condition(c, &scope, catalog, facts);
                 }
             }
             TransformKind::Matches => {
@@ -438,11 +487,11 @@ fn canonicalize_fields(query: &mut Query, catalog: &Catalog) -> Fields {
                 group_input = None;
             }
             TransformKind::Combine { query, .. } | TransformKind::Diff { query } => {
-                canonicalize(query, catalog);
+                canonicalize_into(query, catalog, facts);
                 group_input = None;
             }
             TransformKind::Join { query, on } => {
-                canonicalize(query, catalog);
+                canonicalize_into(query, catalog, facts);
                 if let JoinOn::Order {
                     within: Some(within),
                     ..
@@ -454,7 +503,7 @@ fn canonicalize_fields(query: &mut Query, catalog: &Catalog) -> Fields {
             }
             TransformKind::Extension { arguments, .. } => arguments
                 .iter_mut()
-                .for_each(|a| argument(a, &scope, catalog)),
+                .for_each(|a| argument(a, &scope, catalog, facts)),
             _ => {
                 group_input = None;
             }

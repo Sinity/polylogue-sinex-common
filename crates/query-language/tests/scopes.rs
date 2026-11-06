@@ -71,7 +71,8 @@ fn group_scopes_keep_types_closed_values_lineage_and_raw_text() {
         let bound = checked(&text, &catalog);
         let scopes = &bound.typing().queries[0];
         let grouped = &scopes.transforms[0].after;
-        assert_eq!(grouped.unit.as_deref(), Some(unit));
+        assert_eq!(scopes.source.unit.as_deref(), Some(unit));
+        assert!(grouped.unit.is_none());
         assert_eq!(
             grouped
                 .fields
