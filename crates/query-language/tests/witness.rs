@@ -367,3 +367,104 @@ fn resolve_test_durations(query: &mut Query) {
         }
     }
 }
+
+#[test]
+fn question_identity_keeps_order_occurrences_and_nonpublishing_boolean_wrappers() {
+    let catalog = support::sinex();
+    let mut rows = vec![];
+    for (id, source, at) in [
+        ("outer", "outer", 10),
+        ("prior", "prior", 9),
+        ("chosen", "chosen", 11),
+    ] {
+        let mut row = Row::new(id).with("source", source);
+        row.time = Some(point(at));
+        rows.push(row);
+    }
+    let data = BTreeMap::from([("events".into(), rows)]);
+    let evaluator = ReferenceEvaluator::new(&data);
+    let prefix =
+        "events where source = outer AND near(events where source = prior) within 5m | where ";
+    let order = "near(events where source = chosen) within 5m";
+    let mut single_id = None;
+    for (predicate, witness) in [
+        (order.into(), "chosen"),
+        (format!("{order} AND {order}"), "prior"),
+        (format!("{order} OR {order}"), "prior"),
+        (format!("NOT (NOT ({order}))"), "prior"),
+    ] {
+        let query = parse(
+            &format!("{prefix}{predicate} | fields id, match.id as witness"),
+            &catalog,
+        )
+        .unwrap();
+        let id = question_id(&query, &catalog, &BTreeMap::new()).unwrap();
+        if let Some(single_id) = single_id {
+            assert_ne!(id, single_id);
+        } else {
+            single_id = Some(id);
+        }
+        let bound = bind(&query, &catalog).unwrap().into_query();
+        assert_eq!(id, question_id(&bound, &catalog, &BTreeMap::new()).unwrap());
+        let rendered = format_query(&query, &catalog).unwrap();
+        let reparsed = parse(&rendered, &catalog).unwrap();
+        assert_eq!(
+            normal_form(&query, &catalog).unwrap(),
+            normal_form(&reparsed, &catalog).unwrap()
+        );
+        let mut resolved = bound;
+        resolve_test_durations(&mut resolved);
+        let answer = evaluator.execute(&resolved).unwrap();
+        assert_eq!(answer.rows.len(), 1);
+        assert_eq!(answer.rows[0].value("witness"), Scalar::from(witness));
+    }
+    let mut singleton = parse(
+        &format!("{prefix}{order} | fields id, match.id as witness"),
+        &catalog,
+    )
+    .unwrap();
+    let TransformKind::Where { condition } = &mut singleton.transforms[0].kind else {
+        panic!()
+    };
+    *condition = Condition {
+        span: Span::default(),
+        kind: ConditionKind::Or {
+            conditions: vec![condition.clone()],
+        },
+    };
+    let rendered = format_query(&singleton, &catalog).unwrap();
+    let reparsed = parse(&rendered, &catalog).unwrap();
+    assert_eq!(
+        normal_form(&singleton, &catalog).unwrap(),
+        normal_form(&reparsed, &catalog).unwrap()
+    );
+    let mut resolved = bind(&singleton, &catalog).unwrap().into_query();
+    resolve_test_durations(&mut resolved);
+    assert_eq!(
+        evaluator.execute(&resolved).unwrap().rows[0].value("witness"),
+        Scalar::from("prior")
+    );
+    // An order inside a membership query does not produce its caller's match.
+    let membership = "source in (events where near(events) within 5m | fields source)";
+    let one = parse(&format!("events where {membership}"), &catalog).unwrap();
+    let duplicate = parse(
+        &format!("events where ({membership}) AND ({membership})"),
+        &catalog,
+    )
+    .unwrap();
+    assert_eq!(
+        question_id(&one, &catalog, &BTreeMap::new()).unwrap(),
+        question_id(&duplicate, &catalog, &BTreeMap::new()).unwrap()
+    );
+    let pure = parse("events where source = outer", &catalog).unwrap();
+    for predicate in [
+        "source = outer AND source = outer",
+        "source = outer OR source = outer",
+    ] {
+        let duplicate = parse(&format!("events where {predicate}"), &catalog).unwrap();
+        assert_eq!(
+            question_id(&pure, &catalog, &BTreeMap::new()).unwrap(),
+            question_id(&duplicate, &catalog, &BTreeMap::new()).unwrap()
+        );
+    }
+}

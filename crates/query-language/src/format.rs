@@ -26,6 +26,16 @@ pub(crate) fn render_query(query: &Query, catalog: &Catalog) -> Result<String, E
 fn invalid(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::InvalidQuery, message, 0)
 }
+fn order_bearing(condition: &Condition) -> bool {
+    match &condition.kind {
+        ConditionKind::Order { .. } => true,
+        ConditionKind::And { conditions } | ConditionKind::Or { conditions } => {
+            conditions.iter().any(order_bearing)
+        }
+        ConditionKind::Not { condition } => order_bearing(condition),
+        _ => false,
+    }
+}
 struct Renderer<'a> {
     catalog: &'a Catalog,
 }
@@ -146,11 +156,28 @@ impl Renderer<'_> {
                 };
                 let mut terms = conditions
                     .iter()
-                    .map(|c| self.condition(c))
-                    .collect::<Result<Vec<_>, _>>()?;
-                terms.sort();
-                terms.dedup();
-                format!("({})", terms.join(join))
+                    .map(|condition| Ok((self.condition(condition)?, order_bearing(condition))))
+                    .collect::<Result<Vec<_>, Error>>()?;
+                terms.sort_by(|a, b| a.0.cmp(&b.0));
+                terms.dedup_by(|a, b| {
+                    a.0 == b.0 && (!matches!(condition.kind, ConditionKind::And { .. }) || !a.1)
+                });
+                // A one-term OR still suppresses witness publication. The
+                // surface's binary OR spells that wrapper with the term twice.
+                if matches!(condition.kind, ConditionKind::Or { .. })
+                    && terms.len() == 1
+                    && terms[0].1
+                {
+                    terms.push(terms[0].clone());
+                }
+                format!(
+                    "({})",
+                    terms
+                        .iter()
+                        .map(|(text, _)| text.as_str())
+                        .collect::<Vec<_>>()
+                        .join(join)
+                )
             }
             ConditionKind::Not { condition } => format!("NOT ({})", self.condition(condition)?),
             ConditionKind::Match {
