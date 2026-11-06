@@ -11,6 +11,7 @@ fn historical_native_source_and_identity_are_frozen_independently_of_current_lin
             name: "events".into(),
             ..Unit::default()
         }],
+        commands: vec!["recall".into()],
         unpiped_stages: true,
         ..Catalog::default()
     };

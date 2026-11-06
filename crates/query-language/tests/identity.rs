@@ -306,7 +306,16 @@ fn isomorphic_constructs_keep_original_question_ids() {
     let native = catalog();
     let old = historical_query_format_v1::catalog::Catalog {
         default_unit: native.default_unit.clone(),
-        units: serde_json::from_value(serde_json::to_value(&native.units).unwrap()).unwrap(),
+        units: native
+            .units
+            .iter()
+            .map(|unit| historical_query_format_v1::catalog::Unit {
+                name: unit.name.clone(),
+                fields: serde_json::from_value(serde_json::to_value(&unit.fields).unwrap())
+                    .unwrap(),
+                ..Default::default()
+            })
+            .collect(),
         ..Default::default()
     };
     for text in [
