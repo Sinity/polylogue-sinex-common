@@ -468,29 +468,3 @@ fn values_equal(a: &Value, b: &Value) -> bool {
         _ => a == b,
     }
 }
-
-pub(crate) fn same_output_source(a: &OutputSource, b: &OutputSource) -> bool {
-    match (a, b) {
-        (
-            OutputSource::Saved {
-                name: a,
-                arguments: av,
-            },
-            OutputSource::Saved {
-                name: b,
-                arguments: bv,
-            },
-        ) => a == b && arguments_equal(av, bv),
-        (
-            OutputSource::Result {
-                reference: a,
-                part: ap,
-            },
-            OutputSource::Result {
-                reference: b,
-                part: bp,
-            },
-        ) => a == b && ap == bp,
-        _ => false,
-    }
-}

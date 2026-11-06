@@ -7,7 +7,6 @@ use crate::{
     ast::{AggregateFunction, TemporalRelation},
     catalog::{Field, OutputSource},
 };
-use std::sync::Arc;
 
 /// A structural address in the returned bound tree. Field names and array
 /// indexes follow the AST, including enum payloads; byte spans are never keys.
@@ -84,51 +83,6 @@ pub struct FieldInfo {
     pub field: Field,
     pub origin: Origin,
 }
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Scope {
-    /// Actual underlying row domain, not a saved name or a grouped alias.
-    pub unit: Option<String>,
-    pub fields: Arc<[FieldInfo]>,
-}
-impl Scope {
-    pub fn field(&self, name: &str) -> Option<&FieldInfo> {
-        self.fields.iter().find(|f| f.field.name == name)
-    }
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StageScope {
-    pub before: Scope,
-    pub after: Scope,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QueryScope {
-    pub path: NodePath,
-    pub source: Scope,
-    pub stages: Vec<StageScope>,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypedOperand {
-    pub path: NodePath,
-    pub unit: Option<String>,
-    pub result: FieldInfo,
-}
-/// Associated only with the tree returned alongside it by shared binding.
-/// Cloning this snapshot does not validate a modified syntax tree; bind again
-/// after transformations or catalog/schema changes.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Typing {
-    pub queries: Vec<QueryScope>,
-    pub operands: Vec<TypedOperand>,
-}
-impl Typing {
-    pub fn query(&self, path: &NodePath) -> Option<&QueryScope> {
-        self.queries.iter().find(|query| &query.path == path)
-    }
-    pub fn operand(&self, path: &NodePath) -> Option<&TypedOperand> {
-        self.operands.iter().find(|operand| &operand.path == path)
-    }
-}
-
 /// One aggregate type rule shared by parsing and identity normalization.
 pub(crate) fn aggregate_kind(
     function: &AggregateFunction,

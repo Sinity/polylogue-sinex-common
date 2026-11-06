@@ -129,62 +129,7 @@ fn source_namespace(name: &str) -> Option<&'static str> {
         None
     }
 }
-/// Source-name completion uses the parser's tokens and original byte offsets.
-pub(crate) fn source_value(text: &str, catalog: &Catalog) -> Option<(&'static str, String, Span)> {
-    let words = tokens(text, catalog).ok()?;
-    let (index, token, field, raw) =
-        words.iter().enumerate().rev().find_map(|(index, token)| {
-            if token.quoted {
-                return None;
-            }
-            let (field, raw) = token.text.split_once(':')?;
-            Some((index, token, source_namespace(field)?, raw))
-        })?;
-    if raw.is_empty() {
-        match &words[index + 1..] {
-            [] => Some((
-                field,
-                String::new(),
-                Span {
-                    start: text.len(),
-                    end: text.len(),
-                },
-            )),
-            [value]
-                if !value.quoted
-                    && !text.ends_with(char::is_whitespace)
-                    && !is_symbol(&value.text) =>
-            {
-                Some((field, value.text.clone(), value.span))
-            }
-            _ => None,
-        }
-    } else if index + 1 == words.len() && !text.ends_with(char::is_whitespace) {
-        let colon = text[token.span.start..token.span.end].find(':')? + token.span.start;
-        Some((
-            field,
-            raw.into(),
-            Span {
-                start: colon + 1,
-                end: token.span.end,
-            },
-        ))
-    } else {
-        None
-    }
-}
-pub(crate) fn starts_with_source(text: &str, catalog: &Catalog) -> bool {
-    tokens(text, catalog)
-        .ok()
-        .and_then(|words| words.into_iter().next())
-        .is_some_and(|token| {
-            !token.quoted
-                && token
-                    .text
-                    .split_once(':')
-                    .is_some_and(|(field, _)| source_namespace(field).is_some())
-        })
-}
+
 /// Parse a complete question using one immutable vocabulary snapshot.
 pub fn parse(text: &str, catalog: &Catalog) -> Result<Query, Error> {
     match parse_once(text, catalog) {
@@ -218,15 +163,13 @@ pub fn parse(text: &str, catalog: &Catalog) -> Result<Query, Error> {
     }
 }
 fn parse_once(text: &str, catalog: &Catalog) -> Result<Query, Error> {
-    parse_internal(text, catalog, false).map(|parsed| parsed.query)
+    parse_internal(text, catalog).map(|parsed| parsed.query)
 }
-pub(crate) fn parse_typed(text: &str, catalog: &Catalog) -> Result<Parsed, Error> {
-    parse_internal(text, catalog, true)
-}
+
 /// Product metadata needed by Matches stages, collected by the same parser
 /// that checks their suffixes. Load saved/result schemas first when deferred.
 pub fn matches_requirements(text: &str, catalog: &Catalog) -> Result<Vec<MatchSource>, Error> {
-    parse_internal(text, catalog, false).map(|parsed| parsed.required_matches)
+    parse_internal(text, catalog).map(|parsed| parsed.required_matches)
 }
 /// Qualifiers of the final relation, after this parser has applied every stage.
 /// None denotes unresolved source/projection metadata, not an empty relation.
@@ -234,23 +177,20 @@ pub fn relation_patterns(
     text: &str,
     catalog: &Catalog,
 ) -> Result<Option<Vec<MatchPattern>>, Error> {
-    parse_internal(text, catalog, false).map(|parsed| parsed.relation_patterns)
+    parse_internal(text, catalog).map(|parsed| parsed.relation_patterns)
 }
 pub(crate) struct Parsed {
     pub query: Query,
-    pub typing: crate::scope::Typing,
     pub required_matches: Vec<MatchSource>,
     relation_patterns: Option<Vec<MatchPattern>>,
 }
-fn parse_internal(text: &str, catalog: &Catalog, capture_types: bool) -> Result<Parsed, Error> {
+fn parse_internal(text: &str, catalog: &Catalog) -> Result<Parsed, Error> {
     let mut p = Parser {
         tokens: tokens(text, catalog)?,
         at: 0,
         text,
         catalog,
-        captures: Vec::new(),
         query_stack: Vec::new(),
-        capture_types,
         required_matches: BTreeSet::new(),
         relation_patterns: None,
     };
@@ -258,14 +198,8 @@ fn parse_internal(text: &str, catalog: &Catalog, capture_types: bool) -> Result<
     if p.peek().is_some() {
         return Err(p.error("expected a stage or the end of the query"));
     }
-    let typing = if capture_types {
-        typing::project(&p, &query)
-    } else {
-        crate::scope::Typing::default()
-    };
     Ok(Parsed {
         query,
-        typing,
         required_matches: p.required_matches.into_iter().collect(),
         relation_patterns: p.relation_patterns,
     })
@@ -306,9 +240,7 @@ struct Parser<'a> {
     at: usize,
     text: &'a str,
     catalog: &'a Catalog,
-    captures: Vec<Option<typing::Capture>>,
     query_stack: Vec<(usize, usize)>,
-    capture_types: bool,
     required_matches: BTreeSet<MatchSource>,
     relation_patterns: Option<Vec<MatchPattern>>,
 }
@@ -418,11 +350,7 @@ impl Parser<'_> {
         self.query_in(None)
     }
     fn query_in(&mut self, inherited: Option<&Scope>) -> Result<Query, Error> {
-        let capture = self.captures.len();
-        if self.capture_types {
-            self.captures.push(None);
-        }
-        self.query_stack.push((capture, 0));
+        self.query_stack.push((0, 0));
         let mut scope = if let Some(parent) = inherited {
             // An omitted nested source inherits the row domain, rather than
             // the enclosing grouping/projection's visible output columns.
@@ -700,8 +628,6 @@ impl Parser<'_> {
             attach = self.attachments()?;
         }
         scope.match_patterns = crate::matches::source_context(&source, self.catalog).1;
-        let source_scope = self.capture_types.then(|| scope.clone());
-        let mut stage_scopes = Vec::new();
         let mut stages = Vec::new();
         while !self.query_end() {
             if self.take("|") {
@@ -709,17 +635,7 @@ impl Parser<'_> {
                 return Err(self.error("expected `|` before a stage"));
             }
             self.query_stack.last_mut().unwrap().1 = stages.len();
-            let before = self.capture_types.then(|| scope.clone());
             stages.push(self.stage(&mut scope)?);
-            if let Some(before) = before {
-                stage_scopes.push((before, scope.clone()));
-            }
-        }
-        if let Some(source) = source_scope {
-            self.captures[capture] = Some(typing::Capture {
-                source,
-                stages: stage_scopes,
-            });
         }
         if self.query_stack.len() == 1 {
             self.relation_patterns = scope.match_patterns.clone();

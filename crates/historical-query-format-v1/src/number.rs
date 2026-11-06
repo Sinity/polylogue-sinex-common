@@ -72,29 +72,6 @@ impl Decimal {
             scale,
         })
     }
-    fn absolute_cmp(&self, other: &Self) -> Ordering {
-        if self.digits == "0" || other.digits == "0" {
-            return (self.digits != "0").cmp(&(other.digits != "0"));
-        }
-        let magnitude = add_integer(&self.scale, &self.digits.len().to_string());
-        let other_magnitude = add_integer(&other.scale, &other.digits.len().to_string());
-        let order = integer_cmp(&magnitude, &other_magnitude);
-        if order != Ordering::Equal {
-            return order;
-        }
-        let width = self.digits.len().max(other.digits.len());
-        self.digits
-            .bytes()
-            .chain(std::iter::repeat(b'0'))
-            .take(width)
-            .cmp(
-                other
-                    .digits
-                    .bytes()
-                    .chain(std::iter::repeat(b'0'))
-                    .take(width),
-            )
-    }
 }
 // Arithmetic on signed decimal exponent strings stays proportional to the
 // lexeme, never to the represented magnitude. Inputs have passed `parts`.
@@ -114,18 +91,7 @@ fn integer_parts(text: &str) -> (bool, &str) {
 fn unsigned_cmp(left: &str, right: &str) -> Ordering {
     left.len().cmp(&right.len()).then_with(|| left.cmp(right))
 }
-fn integer_cmp(left: &str, right: &str) -> Ordering {
-    let (a, left) = integer_parts(left);
-    let (b, right) = integer_parts(right);
-    match (a, b) {
-        (true, false) => Ordering::Less,
-        (false, true) => Ordering::Greater,
-        (negative, _) => {
-            let order = unsigned_cmp(left, right);
-            if negative { order.reverse() } else { order }
-        }
-    }
-}
+
 fn add_integer(left: &str, right: &str) -> String {
     let (a, left) = integer_parts(left);
     let (b, right) = integer_parts(right);
@@ -196,16 +162,4 @@ pub(crate) fn canonical(text: &str) -> Option<String> {
         value.digits,
         value.scale
     ))
-}
-pub(crate) fn compare(left: &str, right: &str) -> Option<Ordering> {
-    let left = Decimal::parse(left)?;
-    let right = Decimal::parse(right)?;
-    Some(match (left.negative, right.negative) {
-        (true, false) => Ordering::Less,
-        (false, true) => Ordering::Greater,
-        (negative, _) => {
-            let order = left.absolute_cmp(&right);
-            if negative { order.reverse() } else { order }
-        }
-    })
 }
