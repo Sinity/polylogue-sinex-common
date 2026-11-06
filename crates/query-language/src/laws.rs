@@ -34,8 +34,6 @@ pub struct Vocabulary {
     pub number: String,
     /// A number of `children`, independently named from the outer number.
     pub child_number: String,
-    /// The child identity exposed beside an order match.
-    pub child_identity: String,
     /// A second number of the same kind, the end of `number`'s interval.
     pub end: String,
     pub category: String,
@@ -50,7 +48,6 @@ impl Default for Vocabulary {
             children: "children".into(),
             number: "value".into(),
             child_number: "value".into(),
-            child_identity: "id".into(),
             end: "end".into(),
             category: "category".into(),
             text: "title".into(),
@@ -468,7 +465,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     let pair = |inner: &str, offset: f64| {
         let mut row = outer
             .clone()
-            .with(format!("match.{}", v.child_identity), inner)
+            .with("match.id", inner)
             .with("match.distance", offset);
         row.id = format!("outer:{inner}");
         row.matches = vec![inner.into()];
@@ -518,7 +515,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
         expected: answer(vec![
             outer
                 .clone()
-                .with(format!("match.{}", v.child_identity), "near-a")
+                .with("match.id", "near-a")
                 .with("match.distance", -1.),
         ]),
     });
@@ -547,7 +544,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
         vec![
             children[1]
                 .clone()
-                .with(format!("match.{}", v.child_identity), "x")
+                .with("match.id", "x")
                 .with(format!("match.{}", v.child_number), 1.)
                 .with("match.distance", -1.),
         ],
@@ -578,9 +575,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
         })
     };
     let matched = |row: &Row, inner: &str, offset: Option<f64>| {
-        let row = row
-            .clone()
-            .with(format!("match.{}", v.child_identity), inner);
+        let row = row.clone().with("match.id", inner);
         match offset {
             Some(offset) => row.with("match.distance", offset),
             None => row,
