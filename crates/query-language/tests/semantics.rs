@@ -1311,3 +1311,74 @@ fn declared_span_end_membership_is_explicit_and_unknown_candidates_do_not_hide_m
         Truth::True
     );
 }
+
+#[test]
+fn first_per_group_restores_original_rows_and_global_input_order() {
+    let mut input = vec![];
+    for (id, rank, kind) in [
+        ("a", 5, "A"),
+        ("b", 2, "A"),
+        ("c", 4, "B"),
+        ("d", 1, "B"),
+        ("e", 3, "C"),
+        ("f", 6, "B"),
+    ] {
+        let mut row = Row::new(id)
+            .with("rank", f64::from(rank))
+            .with("kind", kind);
+        row.parent = Some(format!("parent:{id}"));
+        row.order = i64::from(rank);
+        row.time = Some(Extent {
+            start: i64::from(rank),
+            end: i64::from(rank),
+            coarse: false,
+        });
+        row.span = Some(DeclaredSpan {
+            start: 0,
+            end: None,
+            end_inclusive: false,
+        });
+        row.matches = vec![format!("match:{id}")];
+        input.push(row);
+    }
+    let data = BTreeMap::from([("rows".into(), input.clone())]);
+    let evaluator = ReferenceEvaluator::new(&data);
+    let first = |count| {
+        query(
+            "rows",
+            vec![
+                TransformKind::Sort {
+                    keys: vec![SortKey {
+                        expression: Expression::field("rank"),
+                        descending: false,
+                    }],
+                },
+                TransformKind::Group {
+                    keys: vec![Column::field("kind")],
+                },
+                TransformKind::First { count },
+            ],
+        )
+    };
+    let mut expected = input;
+    expected.sort_by_key(|row| row.order);
+    assert_eq!(evaluator.execute(&first(2)).unwrap().rows, expected[..5]);
+    assert_eq!(ids(&evaluator.execute(&first(1)).unwrap()), ["d", "b", "e"]);
+    assert!(evaluator.execute(&first(0)).unwrap().rows.is_empty());
+    // Limit ends the group boundary: later First now selects grouped rows.
+    let grouped = evaluator
+        .execute(&query(
+            "rows",
+            vec![
+                TransformKind::Group {
+                    keys: vec![Column::field("kind")],
+                },
+                TransformKind::Limit { count: 2 },
+                TransformKind::First { count: 1 },
+            ],
+        ))
+        .unwrap();
+    assert_eq!(grouped.rows.len(), 1);
+    assert_eq!(grouped.rows[0].value("count"), Scalar::Number(2.));
+    assert!(grouped.rows[0].time.is_none());
+}

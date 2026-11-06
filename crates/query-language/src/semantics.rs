@@ -1164,7 +1164,8 @@ impl<'a> ReferenceEvaluator<'a> {
             rows = self.filter(rows, c)?;
         }
         let mut pattern = condition.clone();
-        let mut groups: Option<Vec<Vec<Row>>> = None;
+        type IndexedRows = Vec<(usize, Row)>;
+        let mut groups: Option<(Vec<IndexedRows>, Option<Condition>)> = None;
         // Ranked lists of one level of fuse and union, fused once.
         let mut lists: Vec<Vec<crate::fusion::Entry<String>>> = Vec::new();
         for (index, transform) in query.transforms.iter().enumerate() {
@@ -1178,8 +1179,16 @@ impl<'a> ReferenceEvaluator<'a> {
                     rows = self.sort(rows, keys, at)?;
                     groups = None;
                 }
-                TransformKind::First { .. } if groups.is_some() => {
-                    return Err(unsupported("per-group first", at));
+                TransformKind::First { count } if groups.is_some() => {
+                    let (members, input_pattern) = groups.take().unwrap();
+                    let count = usize::try_from(*count).unwrap_or(usize::MAX);
+                    let mut selected = members
+                        .into_iter()
+                        .flat_map(|members| members.into_iter().take(count))
+                        .collect::<Vec<_>>();
+                    selected.sort_by_key(|(position, _)| *position);
+                    rows = selected.into_iter().map(|(_, row)| row).collect();
+                    pattern = input_pattern;
                 }
                 TransformKind::Limit { count } | TransformKind::First { count } => {
                     rows.truncate(usize::try_from(*count).unwrap_or(usize::MAX));
@@ -1193,16 +1202,16 @@ impl<'a> ReferenceEvaluator<'a> {
                     groups = None;
                 }
                 TransformKind::Group { keys } => {
-                    let mut grouped: Vec<(Vec<Scalar>, Vec<Row>)> = vec![];
-                    for row in rows {
+                    let mut grouped: Vec<(Vec<Scalar>, IndexedRows)> = vec![];
+                    for (position, row) in rows.into_iter().enumerate() {
                         let values = keys
                             .iter()
                             .map(|k| self.expression(&row, &k.expression))
                             .collect::<Result<Vec<_>, _>>()?;
                         if let Some((_, members)) = grouped.iter_mut().find(|(v, _)| *v == values) {
-                            members.push(row);
+                            members.push((position, row));
                         } else {
-                            grouped.push((values, vec![row]));
+                            grouped.push((values, vec![(position, row)]));
                         }
                     }
                     grouped.sort_by_key(|(v, _)| format!("{v:?}"));
@@ -1218,12 +1227,19 @@ impl<'a> ReferenceEvaluator<'a> {
                         rows.push(row);
                         members.push(items);
                     }
-                    groups = Some(members);
-                    pattern = None;
+                    groups = Some((members, pattern.take()));
                 }
                 TransformKind::Aggregate { aggregates } => {
                     let grouped = groups.is_some();
-                    let members = groups.take().unwrap_or_else(|| vec![rows.clone()]);
+                    let members = groups
+                        .take()
+                        .map(|(groups, _)| {
+                            groups
+                                .into_iter()
+                                .map(|group| group.into_iter().map(|(_, row)| row).collect())
+                                .collect()
+                        })
+                        .unwrap_or_else(|| vec![rows.clone()]);
                     if !grouped {
                         rows = vec![Row::new("aggregate")];
                     }
