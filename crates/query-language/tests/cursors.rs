@@ -271,3 +271,41 @@ fn cursor_zone_resolution_is_explicit_and_mismatches_are_stale() {
         .unwrap_err();
     assert_eq!(error.kind, ErrorKind::InvalidQuery);
 }
+
+#[test]
+fn authenticated_captured_context_still_requires_question_and_read_authority() {
+    let seal = CursorSeal::new([3; 32]);
+    let data = continuation();
+    let cursor = seal.seal(&data).unwrap();
+    let authenticated = seal.authenticate(&cursor).unwrap();
+    assert_eq!(authenticated.context().versions["grants"], "v3");
+    assert_eq!(authenticated.context().read_positions["sx"], "commit:43");
+    assert_eq!(
+        authenticated
+            .bind(
+                QuestionId([9; 32]),
+                |_| panic!("a different question reached zone resolution"),
+                |_| panic!("a different question reached read authority"),
+            )
+            .unwrap_err()
+            .kind,
+        ErrorKind::InvalidQuery
+    );
+    let refused = seal
+        .authenticate(&cursor)
+        .unwrap()
+        .bind(data.context.question, resolve_zone, |context| {
+            context.versions["grants"] == "revoked"
+        })
+        .unwrap_err();
+    assert_eq!(refused.kind, ErrorKind::StaleCursor);
+    let opened = seal
+        .authenticate(&cursor)
+        .unwrap()
+        .bind(data.context.question, resolve_zone, |context| {
+            context.versions["grants"] == "v3" && context.read_positions["sx"] == "commit:43"
+        })
+        .unwrap();
+    assert_eq!(opened.after, data.after);
+    assert_eq!(opened.context.clock, data.context.clock);
+}

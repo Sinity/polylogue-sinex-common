@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Catalog {
     pub default_unit: String,
+    /// This product's explicit unit namespace, resolved to canonical local names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
     pub units: Vec<Unit>,
     /// Functions the product adds beside the built-in ones (`FUNCTIONS`).
     #[serde(default)]
@@ -35,6 +38,11 @@ pub struct OutputSchema {
     pub unit: Option<String>,
     pub fields: Vec<Field>,
     pub main_time: Option<String>,
+    /// Top-level exists/sequence step units available through a transparent
+    /// saved definition. None means the pattern provenance is not supplied.
+    /// Kept results remain opaque and use their retained matches part instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_units: Option<Vec<String>>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SourceOutput {
@@ -50,9 +58,21 @@ impl Catalog {
         }
     }
     pub fn unit(&self, name: &str) -> Option<&Unit> {
-        self.units
-            .iter()
-            .find(|u| u.name.eq_ignore_ascii_case(name))
+        let name = name
+            .split_once('.')
+            .filter(|(prefix, _)| {
+                self.namespace
+                    .as_ref()
+                    .is_some_and(|namespace| prefix.eq_ignore_ascii_case(namespace))
+            })
+            .map_or(name, |(_, local)| local);
+        self.units.iter().find(|unit| {
+            unit.name.eq_ignore_ascii_case(name)
+                || unit
+                    .singular
+                    .as_ref()
+                    .is_some_and(|singular| singular.eq_ignore_ascii_case(name))
+        })
     }
     pub fn field(&self, unit: &str, name: &str) -> Option<&Field> {
         self.unit(unit)?.fields.iter().find(|f| f.name == name)
@@ -114,6 +134,9 @@ impl Catalog {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Unit {
     pub name: String,
+    /// The unit's declared singular form; it binds to the canonical name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub singular: Option<String>,
     /// The row domain of `seq` steps written on this unit; None means this unit.
     pub sequence_unit: Option<String>,
     /// The order its rows have steps in (for example a session's timeline).
@@ -236,6 +259,10 @@ pub const FUNCTIONS: &[&str] = &[
     "month_day",
     "year",
     "len",
+    "case_eq",
+    "glob",
+    "abs",
+    "text",
 ];
 /// Bucket functions whose groups `fill` can complete.
 pub const TIME_BUCKETS: &[&str] = &["hour", "day", "week", "month", "year"];
@@ -280,10 +307,16 @@ fn builtin_functions() -> Vec<Function> {
         .iter()
         .map(|name| Function {
             name: (*name).into(),
-            arguments: 1,
+            arguments: match *name {
+                "case_eq" => 3,
+                "glob" => 2,
+                _ => 1,
+            },
             result: match *name {
                 "day" | "week" | "month" => FieldKind::Time,
                 "hour" | "year" | "len" => FieldKind::Integer,
+                "case_eq" | "abs" => FieldKind::Json,
+                "glob" => FieldKind::Bool,
                 _ => FieldKind::Text,
             },
             help: String::new(),
@@ -369,6 +402,18 @@ impl ReferenceForm {
 impl Catalog {
     pub fn is_reference(&self, text: &str) -> bool {
         is_language_reference(text) || self.references.iter().any(|form| form.matches(text))
+    }
+    pub(crate) fn reference_overrides_field(&self, text: &str) -> bool {
+        is_language_reference(text)
+            || self.references.iter().any(|form| {
+                matches!(
+                    form,
+                    ReferenceForm::Prefix {
+                        marker: Some(_),
+                        ..
+                    } | ReferenceForm::Word { .. }
+                ) && form.matches(text)
+            })
     }
 }
 /// The answer-relative references every product reads the same way: an

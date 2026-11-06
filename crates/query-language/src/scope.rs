@@ -30,11 +30,11 @@ impl NodePath {
         path
     }
 }
-/// Products can preserve a physical input type only for `Input`. A fixed
+/// Products can preserve the selected physical input type for `Input(index)`. A fixed
 /// result (count, average, a bucket label, etc.) uses the declared output kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeRule {
-    Input,
+    Input(usize),
     Fixed,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +78,8 @@ pub struct Scope {
     /// Actual underlying row domain, not a saved name or a grouped alias.
     pub unit: Option<String>,
     pub fields: Arc<[FieldInfo]>,
+    /// Eligible top-level match patterns, retained with the semantic relation.
+    pub match_units: Option<Vec<String>>,
 }
 impl Scope {
     pub fn field(&self, name: &str) -> Option<&FieldInfo> {
@@ -145,7 +147,10 @@ pub(crate) fn aggregate_kind(
         ),
         AggregateFunction::Correlation => (FieldKind::Number, TypeRule::Fixed),
         AggregateFunction::Histogram => (FieldKind::Json, TypeRule::Fixed),
-        _ => (input.cloned().unwrap_or(FieldKind::Number), TypeRule::Input),
+        _ => (
+            input.cloned().unwrap_or(FieldKind::Number),
+            TypeRule::Input(0),
+        ),
     }
 }
 /// The dimension of arithmetic over two kinds, or None when the dimensions do

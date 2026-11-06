@@ -7,6 +7,7 @@ use crate::{
     OperationTable, RequestOption, RunnableRequest, bad_request, quote_argument,
 };
 use serde_json::{Map, Value};
+use std::fmt::Write as _;
 
 /// How a request field's value is written as words.
 #[derive(Clone, Debug, PartialEq)]
@@ -162,8 +163,7 @@ pub(crate) fn check(description: &OperationDescription) -> Result<(), Failure> {
             ArgumentForm::Words | ArgumentForm::Rest => {
                 matches!(kind, ValueKind::Text | ValueKind::List(_))
             }
-            ArgumentForm::Positional => !matches!(kind, ValueKind::List(_)),
-            ArgumentForm::Named => true,
+            ArgumentForm::Positional | ArgumentForm::Named => true,
         };
         if !fits {
             return refuse(format!(
@@ -248,7 +248,7 @@ impl OperationTable {
         let mut calling_process = Map::new();
         let mut request = None;
         let mut deadline = Deadline::Default;
-        let mut budget_tokens = None;
+        let mut budget_tokens = crate::TokenBudget::Default;
         let mut cursor = None;
         let mut fresh = false;
         let mut id = request_id.into();
@@ -308,11 +308,11 @@ impl OperationTable {
                     .ok_or_else(|| bad_request(format!("unexpected word {word}")))?;
                 match argument.form {
                     ArgumentForm::Positional => {
-                        let value = word_value(
-                            &kind_of(description, &argument.name),
-                            word,
-                            &argument.name,
-                        )?;
+                        let kind = match kind_of(description, &argument.name) {
+                            ValueKind::List(_) => ValueKind::Json,
+                            kind => kind,
+                        };
+                        let value = word_value(&kind, word, &argument.name)?;
                         fields.insert(argument.name.clone(), value);
                         positional += 1;
                     }
@@ -356,11 +356,14 @@ impl OperationTable {
                 "--cursor" => cursor = Some(value()?),
                 "--fresh" if inline.is_none() => fresh = true,
                 "--budget" => {
-                    budget_tokens = Some(
-                        value()?
-                            .parse()
-                            .map_err(|_| bad_request("budget must be a number of tokens"))?,
-                    );
+                    let value = value()?;
+                    budget_tokens = if value == "none" {
+                        crate::TokenBudget::Unlimited
+                    } else {
+                        crate::TokenBudget::Tokens(value.parse().map_err(|_| {
+                            bad_request("budget must be a number of tokens or none")
+                        })?)
+                    };
                 }
                 "--request" => {
                     if request.is_some() {
@@ -513,6 +516,24 @@ pub(crate) fn usage(description: &OperationDescription) -> String {
     parts.join(" ")
 }
 
+// A displayed command must retain its shell meaning after controls become
+// visible. JSON can represent those characters without putting them in shell words.
+fn command_control(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+fn command_json(arguments: &Value) -> String {
+    let mut out = String::new();
+    for c in arguments.to_string().chars() {
+        if command_control(c) {
+            let _ = write!(out, "\\u{:04x}", c as u32);
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 impl Forms {
     /// A runnable command line for `request`: its row's own argument forms
     /// when every field can be written that way, else `--request JSON`.
@@ -525,17 +546,23 @@ impl Forms {
         words.extend(description.spec.command.iter().map(|s| quote_argument(s)));
         // Flags come before positionals: a positional that takes the rest of
         // the line would take any flag after it.
-        let positionals = match natural_words(description, &request.arguments) {
-            Some((flags, positionals)) => {
-                words.extend(flags);
-                positionals
-            }
-            None => {
-                words.push("--request".into());
-                words.push(quote_argument(&request.arguments.to_string()));
-                vec![]
-            }
-        };
+        let positionals =
+            match natural_words(description, &request.arguments).filter(|(flags, words)| {
+                !flags
+                    .iter()
+                    .chain(words)
+                    .any(|word| word.chars().any(command_control))
+            }) {
+                Some((flags, positionals)) => {
+                    words.extend(flags);
+                    positionals
+                }
+                None => {
+                    words.push("--request".into());
+                    words.push(quote_argument(&command_json(&request.arguments)));
+                    vec![]
+                }
+            };
         words.push("--request-id".into());
         words.push(quote_argument(&request.request_id));
         match request.deadline {
@@ -543,8 +570,10 @@ impl Forms {
             Deadline::None => words.extend(["--deadline".into(), "none".into()]),
             Deadline::Milliseconds(ms) => words.extend(["--deadline".into(), ms.to_string()]),
         }
-        if let Some(budget) = request.budget_tokens {
-            words.extend(["--budget".into(), budget.to_string()]);
+        match request.budget_tokens {
+            crate::TokenBudget::Default => {}
+            crate::TokenBudget::Unlimited => words.extend(["--budget".into(), "none".into()]),
+            crate::TokenBudget::Tokens(n) => words.extend(["--budget".into(), n.to_string()]),
         }
         if let Some(cursor) = &request.cursor {
             words.extend(["--cursor".into(), quote_argument(cursor)]);
@@ -629,6 +658,9 @@ fn natural_words(
         }
         let kind = kind_of(description, &argument.name);
         match (&kind, argument.form) {
+            (ValueKind::List(_), ArgumentForm::Positional) => {
+                positional_words.push(value.to_string());
+            }
             (ValueKind::List(item), _) => {
                 let items = value.as_array().filter(|items| !items.is_empty())?;
                 for item_value in items {

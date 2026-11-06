@@ -8,6 +8,7 @@ pub mod cursor;
 pub mod diff;
 pub mod format;
 pub mod fusion;
+pub mod glob;
 pub mod identity;
 pub mod laws;
 pub mod number;

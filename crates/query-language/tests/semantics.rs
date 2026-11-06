@@ -160,11 +160,118 @@ fn reference_catalog() -> query_language::catalog::Catalog {
     });
     catalog
 }
+// This compiler binds one fixture tick to one second before handing the
+// query to the exact-tick oracle. Product compilers perform their own binding.
+fn resolve_fixture_times(query: &mut Query) -> Result<(), Error> {
+    fn distance(distance: &mut Distance) -> Result<(), Error> {
+        if let Distance::Time { duration } = distance {
+            let nanos = duration
+                .text()
+                .and_then(query_language::time::duration)
+                .map(|duration| duration.as_nanos())
+                .filter(|nanos| *nanos > 0 && nanos % 1_000_000_000 == 0)
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::BadValue,
+                        "fixture durations require whole seconds",
+                        0,
+                    )
+                })?;
+            *duration = Value::scalar((nanos / 1_000_000_000).to_string());
+        }
+        Ok(())
+    }
+    fn condition(value: &mut Condition) -> Result<(), Error> {
+        match &mut value.kind {
+            ConditionKind::And { conditions } | ConditionKind::Or { conditions } => {
+                for value in conditions {
+                    condition(value)?;
+                }
+            }
+            ConditionKind::Not { condition: value } => condition(value)?,
+            ConditionKind::Exists {
+                condition: Some(value),
+                ..
+            }
+            | ConditionKind::Count {
+                condition: Some(value),
+                ..
+            } => condition(value)?,
+            ConditionKind::Sequence { steps, gaps, .. } => {
+                for value in steps {
+                    condition(value)?;
+                }
+                for gap in gaps {
+                    if let Gap::Within { distance: value } = gap {
+                        distance(value)?;
+                    }
+                }
+            }
+            ConditionKind::Order { query, within, .. } => {
+                if let Some(value) = within {
+                    distance(value)?;
+                }
+                resolve_fixture_times(query)?;
+            }
+            ConditionKind::In { query, .. } => resolve_fixture_times(query)?,
+            _ => {}
+        }
+        Ok(())
+    }
+    match &mut query.source {
+        Source::Unit {
+            condition: Some(value),
+            ..
+        }
+        | Source::Saved {
+            condition: Some(value),
+            ..
+        }
+        | Source::Result {
+            condition: Some(value),
+            ..
+        } => condition(value)?,
+        _ => {}
+    }
+    for attachment in &mut query.attach {
+        for window in &mut attachment.windows {
+            if let Window::Where(value) = window {
+                condition(value)?;
+            }
+        }
+    }
+    for transform in &mut query.transforms {
+        match &mut transform.kind {
+            TransformKind::Where { condition: value }
+            | TransformKind::Scope {
+                condition: Some(value),
+                ..
+            } => condition(value)?,
+            TransformKind::Join { query, on } => {
+                if let JoinOn::Order {
+                    within: Some(value),
+                    ..
+                } = on
+                {
+                    distance(value)?;
+                }
+                resolve_fixture_times(query)?;
+            }
+            TransformKind::Combine { query, .. } | TransformKind::Diff { query } => {
+                resolve_fixture_times(query)?
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
 struct Reference;
 impl Compiler for Reference {
     type Plan = Query;
     fn compile(&self, query: &Query) -> Result<Query, Error> {
-        Ok(query.clone())
+        let mut query = query.clone();
+        resolve_fixture_times(&mut query)?;
+        Ok(query)
     }
 }
 impl Executor<Query> for Reference {
@@ -204,6 +311,7 @@ fn compiler_laws_run_against_both_product_vocabularies() {
                 outer: "sessions".into(),
                 children: "tool_calls".into(),
                 number: "cost".into(),
+                child_number: "exit_code".into(),
                 end: "tree_cost".into(),
                 category: "origin".into(),
                 text: "title".into(),
@@ -215,6 +323,7 @@ fn compiler_laws_run_against_both_product_vocabularies() {
                 outer: "events".into(),
                 children: "commands".into(),
                 number: "commit_seq".into(),
+                child_number: "exit_code".into(),
                 end: "offset".into(),
                 category: "source".into(),
                 text: "host".into(),
@@ -796,6 +905,7 @@ fn steps_stay_inside_one_scope_instance() {
                 within: Some(Distance::Steps { count }),
                 at: TimePoint::When,
                 scope: None,
+                pick: WitnessChoice::Nearest,
             }),
             vec![],
         )
@@ -969,4 +1079,347 @@ fn union_fuses_once() {
     // b scores 1/62 + 1/64, which is less.
     assert_eq!(ids(&answer), ["a", "e", "b"]);
     assert_eq!(answer.total, 3);
+}
+
+#[test]
+fn containing_obeys_literal_half_open_point_and_span_boundaries() {
+    for (outer, inner, expected) in [
+        ((0, 10), (0, 0), 1),
+        ((0, 10), (5, 5), 1),
+        ((0, 10), (10, 10), 0),
+        ((0, 10), (0, 10), 1),
+        ((5, 5), (5, 5), 1),
+        ((5, 5), (0, 10), 0),
+    ] {
+        // The same half-open boundary applies to precise spans and coarse periods.
+        for coarse in [false, true] {
+            let mut a = Row::new("a");
+            a.time = Some(Extent {
+                start: outer.0,
+                end: outer.1,
+                coarse,
+            });
+            let mut b = Row::new("b");
+            b.time = Some(Extent {
+                start: inner.0,
+                end: inner.1,
+                coarse,
+            });
+            let data = BTreeMap::from([("outer".into(), vec![a]), ("inner".into(), vec![b])]);
+            let q = query(
+                "outer",
+                vec![TransformKind::Join {
+                    query: Box::new(query("inner", vec![])),
+                    on: JoinOn::Order {
+                        relation: OrderRelation::Containing,
+                        within: None,
+                        at: TimePoint::When,
+                        scope: None,
+                    },
+                }],
+            );
+            assert_eq!(
+                ReferenceEvaluator::new(&data).execute(&q).unwrap().total,
+                expected,
+                "outer={outer:?}, inner={inner:?}, coarse={coarse}"
+            );
+        }
+    }
+}
+
+#[test]
+fn matched_time_selectors_keep_declared_spans_separate_from_occurrence_uncertainty() {
+    let point = |tick| Extent {
+        start: tick,
+        end: tick,
+        coarse: false,
+    };
+    let mut outer = Row::new("outer");
+    outer.time = Some(point(10));
+    outer.span = Some(DeclaredSpan {
+        start: 0,
+        end: Some(20),
+        end_inclusive: false,
+    });
+    let mut inner = Row::new("inner");
+    inner.time = Some(point(30));
+    inner.span = Some(DeclaredSpan {
+        start: 5,
+        end: Some(15),
+        end_inclusive: false,
+    });
+    let truth = |outer: &Row, inner: Row, relation, at| {
+        let data = BTreeMap::from([("inner".into(), vec![inner])]);
+        ReferenceEvaluator::new(&data)
+            .condition(
+                outer,
+                &condition(ConditionKind::Order {
+                    relation,
+                    query: Box::new(query("inner", vec![])),
+                    within: None,
+                    at,
+                    scope: None,
+                    pick: WitnessChoice::Nearest,
+                }),
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        truth(
+            &outer,
+            inner.clone(),
+            OrderRelation::Before,
+            TimePoint::MatchWhen
+        ),
+        Truth::True
+    );
+    assert_eq!(
+        truth(
+            &outer,
+            inner.clone(),
+            OrderRelation::Before,
+            TimePoint::MatchStart
+        ),
+        Truth::False
+    );
+    assert_eq!(
+        truth(
+            &outer,
+            inner.clone(),
+            OrderRelation::Before,
+            TimePoint::MatchEnd
+        ),
+        Truth::True
+    );
+    assert_eq!(
+        truth(
+            &outer,
+            inner.clone(),
+            OrderRelation::Containing,
+            TimePoint::MatchWhen
+        ),
+        Truth::False
+    );
+    assert_eq!(
+        truth(
+            &outer,
+            inner.clone(),
+            OrderRelation::Containing,
+            TimePoint::MatchEnd
+        ),
+        Truth::True
+    );
+    // During uses the state lifetime, even though its occurrence is later.
+    assert_eq!(
+        truth(
+            &outer,
+            inner.clone(),
+            OrderRelation::During,
+            TimePoint::MatchWhen
+        ),
+        Truth::True
+    );
+    inner.span.as_mut().unwrap().end = None;
+    assert_eq!(
+        truth(
+            &outer,
+            inner.clone(),
+            OrderRelation::During,
+            TimePoint::MatchEnd
+        ),
+        Truth::True
+    );
+    assert_eq!(
+        truth(
+            &outer,
+            inner.clone(),
+            OrderRelation::Before,
+            TimePoint::MatchEnd
+        ),
+        Truth::Unknown
+    );
+    // An uncertain occurrence's upper bound is not a declared state endpoint.
+    inner.span = None;
+    inner.time = Some(Extent {
+        start: 5,
+        end: 15,
+        coarse: true,
+    });
+    assert_eq!(
+        truth(
+            &outer,
+            inner.clone(),
+            OrderRelation::Before,
+            TimePoint::MatchEnd
+        ),
+        Truth::Unknown
+    );
+    assert_eq!(
+        truth(
+            &outer,
+            inner.clone(),
+            OrderRelation::Containing,
+            TimePoint::MatchWhen
+        ),
+        Truth::True
+    );
+    outer.span.as_mut().unwrap().end = Some(10);
+    assert_eq!(
+        truth(
+            &outer,
+            inner,
+            OrderRelation::Containing,
+            TimePoint::MatchWhen
+        ),
+        Truth::False
+    );
+}
+
+#[test]
+fn declared_span_end_membership_is_explicit_and_unknown_candidates_do_not_hide_matches() {
+    let mut outer = Row::new("outer");
+    outer.time = Some(Extent {
+        start: 0,
+        end: 0,
+        coarse: false,
+    });
+    outer.span = Some(DeclaredSpan {
+        start: 0,
+        end: Some(10),
+        end_inclusive: false,
+    });
+    let mut inner = Row::new("inner");
+    inner.time = Some(Extent {
+        start: 10,
+        end: 10,
+        coarse: false,
+    });
+    let data = BTreeMap::from([("inner".into(), vec![Row::new("unknown"), inner])]);
+    let evaluator = ReferenceEvaluator::new(&data);
+    let condition = condition(ConditionKind::Order {
+        relation: OrderRelation::Containing,
+        query: Box::new(query("inner", vec![])),
+        within: None,
+        at: TimePoint::MatchWhen,
+        scope: None,
+        pick: WitnessChoice::Nearest,
+    });
+    assert_eq!(
+        evaluator.condition(&outer, &condition).unwrap(),
+        Truth::Unknown
+    );
+    outer.span.as_mut().unwrap().end_inclusive = true;
+    assert_eq!(
+        evaluator.condition(&outer, &condition).unwrap(),
+        Truth::True
+    );
+}
+
+#[test]
+fn first_per_group_restores_original_rows_and_global_input_order() {
+    let mut input = vec![];
+    for (id, rank, kind) in [
+        ("a", 5, "A"),
+        ("b", 2, "A"),
+        ("c", 4, "B"),
+        ("d", 1, "B"),
+        ("e", 3, "C"),
+        ("f", 6, "B"),
+    ] {
+        let mut row = Row::new(id)
+            .with("input_order", f64::from(rank))
+            .with("kind", kind);
+        row.parent = Some(format!("parent:{id}"));
+        row.order = i64::from(rank);
+        row.time = Some(Extent {
+            start: i64::from(rank),
+            end: i64::from(rank),
+            coarse: false,
+        });
+        row.span = Some(DeclaredSpan {
+            start: 0,
+            end: None,
+            end_inclusive: false,
+        });
+        row.matches = vec![format!("match:{id}")];
+        input.push(row);
+    }
+    let data = BTreeMap::from([("rows".into(), input.clone())]);
+    let evaluator = ReferenceEvaluator::new(&data);
+    let first = |count| {
+        query(
+            "rows",
+            vec![
+                TransformKind::Sort {
+                    keys: vec![SortKey {
+                        expression: Expression::field("input_order"),
+                        descending: false,
+                    }],
+                },
+                TransformKind::Group {
+                    keys: vec![Column::field("kind")],
+                },
+                TransformKind::First { count },
+            ],
+        )
+    };
+    let mut expected = input;
+    expected.sort_by_key(|row| row.order);
+    assert_eq!(evaluator.execute(&first(2)).unwrap().rows, expected[..5]);
+    assert_eq!(ids(&evaluator.execute(&first(1)).unwrap()), ["d", "b", "e"]);
+    assert!(evaluator.execute(&first(0)).unwrap().rows.is_empty());
+    // Limit ends the group boundary: later First now selects grouped rows.
+    let grouped = evaluator
+        .execute(&query(
+            "rows",
+            vec![
+                TransformKind::Group {
+                    keys: vec![Column::field("kind")],
+                },
+                TransformKind::Limit { count: 2 },
+                TransformKind::First { count: 1 },
+            ],
+        ))
+        .unwrap();
+    assert_eq!(grouped.rows.len(), 1);
+    assert_eq!(grouped.rows[0].value("count"), Scalar::Number(2.));
+    assert!(grouped.rows[0].time.is_none());
+}
+
+#[test]
+fn matches_copy_actual_parent_fields_without_inventing_a_public_id() {
+    let public = Row::new("public").with("id", "public").with("n", 7.);
+    let opaque = Row::new("opaque").with("n", 9.);
+    let mut child_a = Row::new("a");
+    child_a.parent = Some("public".into());
+    let mut child_b = Row::new("b");
+    child_b.parent = Some("opaque".into());
+    let data = BTreeMap::from([
+        ("parents".into(), vec![public, opaque]),
+        ("children".into(), vec![child_a, child_b]),
+    ]);
+    let answer = ReferenceEvaluator::new(&data)
+        .execute(&filtered(
+            "parents",
+            condition(ConditionKind::Exists {
+                unit: "children".into(),
+                condition: None,
+            }),
+            vec![TransformKind::Matches],
+        ))
+        .unwrap();
+    let public = answer
+        .rows
+        .iter()
+        .find(|row| row.parent.as_deref() == Some("public"))
+        .unwrap();
+    let opaque = answer
+        .rows
+        .iter()
+        .find(|row| row.parent.as_deref() == Some("opaque"))
+        .unwrap();
+    assert_eq!(public.value("parent.id"), Scalar::from("public"));
+    assert_eq!(public.value("parent.n"), Scalar::Number(7.));
+    assert_eq!(opaque.value("parent.id"), Scalar::Unknown);
+    assert_eq!(opaque.value("parent.n"), Scalar::Number(9.));
 }

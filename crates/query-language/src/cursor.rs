@@ -96,6 +96,14 @@ impl CursorSeal {
         resolve_zone: impl FnOnce(&str) -> Result<jiff::tz::TimeZone, Error>,
         available: impl FnOnce(&CursorContext) -> bool,
     ) -> Result<Continuation, Error> {
+        self.authenticate(cursor)?
+            .bind(question, resolve_zone, available)
+    }
+
+    /// Authenticate the captured context before resolving a recorded question.
+    /// This proves integrity only: no keyset position is exposed until `bind`
+    /// checks the expected question and the product's current read authority.
+    pub fn authenticate(&self, cursor: &SealedCursor) -> Result<AuthenticatedCursor, Error> {
         let bytes =
             unhex(cursor.as_str()).ok_or_else(|| invalid("the cursor encoding is invalid"))?;
         if bytes.len() < 33 {
@@ -112,6 +120,33 @@ impl CursorSeal {
         }
         let record: Continuation<ClockWire> = serde_json::from_slice(&payload[1..])
             .map_err(|_| invalid("the cursor payload is invalid"))?;
+        Ok(AuthenticatedCursor { record })
+    }
+}
+
+/// An authenticated capture awaiting binding to an authoritative question.
+/// Products may inspect its recorded context to load an immutable run or pack;
+/// that lookup must also validate the current request against its stored
+/// executable representation. Authentication never supplies a grant.
+#[derive(Debug)]
+pub struct AuthenticatedCursor {
+    record: Continuation<ClockWire>,
+}
+impl AuthenticatedCursor {
+    pub fn context(&self) -> &CursorContext<ClockWire> {
+        &self.record.context
+    }
+
+    /// Bind to the question established by the owning stored object, resolve its
+    /// clock, and check current grants, versions and retained read positions.
+    /// A product must not derive `question` solely from this capture itself.
+    pub fn bind(
+        self,
+        question: QuestionId,
+        resolve_zone: impl FnOnce(&str) -> Result<jiff::tz::TimeZone, Error>,
+        available: impl FnOnce(&CursorContext) -> bool,
+    ) -> Result<Continuation, Error> {
+        let record = self.record;
         if record.context.question != question {
             return Err(invalid("the cursor belongs to a different question"));
         }

@@ -29,6 +29,7 @@ fn saved(name: &str, fields: Vec<Field>) -> SourceOutput {
             arguments: vec![],
         },
         schema: OutputSchema {
+            match_units: None,
             unit: Some("sessions".into()),
             fields,
             main_time: None,
@@ -42,6 +43,7 @@ fn result(reference: &str, part: ResultPart, fields: Vec<Field>) -> SourceOutput
             part,
         },
         schema: OutputSchema {
+            match_units: None,
             unit: Some("sessions".into()),
             fields,
             main_time: None,
@@ -279,6 +281,7 @@ fn saved_argument_snapshot_matching_ignores_quoted_spelling_and_parameter_order(
             ],
         },
         schema: OutputSchema {
+            match_units: None,
             unit: Some("sessions".into()),
             fields: vec![field("count", FieldKind::Integer)],
             main_time: None,
@@ -344,6 +347,7 @@ fn nested_implicit_units_inherit_the_row_domain_and_explicit_units_keep_their_ow
             part: ResultPart::Rows,
         },
         schema: OutputSchema {
+            match_units: None,
             unit: Some("commands".into()),
             fields: vec![field("id", FieldKind::Reference)],
             main_time: None,
@@ -414,4 +418,232 @@ fn explicit_units_keep_saved_and_result_predicates_distinct_from_sources() {
             );
         }
     }
+}
+
+#[test]
+fn captured_saved_match_provenance_reuses_the_shared_step_shape() {
+    use query_language::scope::NodePath;
+    let mut catalog = catalog();
+    let definition = bind(
+        &parse("sessions | where exists sessions()", &catalog).unwrap(),
+        &catalog,
+    )
+    .unwrap();
+    let scope = &definition
+        .typing()
+        .query(&NodePath::default())
+        .unwrap()
+        .transforms
+        .last()
+        .unwrap()
+        .after;
+    let schema = OutputSchema {
+        unit: scope.unit.clone(),
+        fields: scope.fields.iter().map(|info| info.field.clone()).collect(),
+        main_time: None,
+        match_units: scope.match_units.clone(),
+    };
+    assert_eq!(schema.match_units, Some(vec!["sessions".into()]));
+    let unresolved = parse(
+        "query:qualified | matches | fields parent, step.id",
+        &catalog,
+    )
+    .unwrap();
+    assert!(bind(&unresolved, &catalog).is_err());
+    catalog.source_outputs.push(SourceOutput {
+        source: OutputSource::Saved {
+            name: "qualified".into(),
+            arguments: vec![],
+        },
+        schema: schema.clone(),
+    });
+    assert!(bind(&unresolved, &catalog).is_ok());
+    let saved = bind(
+        &parse(
+            "query:qualified | matches | fields parent, step.id",
+            &catalog,
+        )
+        .unwrap(),
+        &catalog,
+    )
+    .unwrap();
+    let direct = bind(
+        &parse(
+            "sessions where exists sessions() | matches | fields parent, step.id",
+            &catalog,
+        )
+        .unwrap(),
+        &catalog,
+    )
+    .unwrap();
+    let fields = |bound: &query_language::bind::BoundQuery| {
+        bound
+            .typing()
+            .query(&NodePath::default())
+            .unwrap()
+            .transforms
+            .last()
+            .unwrap()
+            .after
+            .fields
+            .iter()
+            .map(|info| info.field.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(fields(&saved), fields(&direct));
+    // An evaluated result does not gain access to hidden source patterns.
+    catalog.source_outputs.push(SourceOutput {
+        source: OutputSource::Result {
+            reference: "result:held".into(),
+            part: ResultPart::Rows,
+        },
+        schema,
+    });
+    assert!(parse("result:held | matches", &catalog).is_err());
+    catalog.source_outputs[0].schema.match_units = None;
+    assert!(parse("query:qualified | matches", &catalog).is_err());
+    catalog.source_outputs[0].schema.match_units = Some(vec!["sessions".into(), "sessions".into()]);
+    assert_eq!(
+        parse("query:qualified | matches", &catalog)
+            .unwrap_err()
+            .kind,
+        ErrorKind::Ambiguous
+    );
+}
+
+#[test]
+fn grouped_rows_do_not_claim_their_original_row_match_patterns() {
+    let catalog = catalog();
+    for suffix in ["group by default_only", "count"] {
+        let text = format!("sessions where exists sessions() | {suffix} | matches");
+        assert!(parse(&text, &catalog).is_err(), "{text}");
+    }
+}
+
+#[test]
+fn declared_singular_and_local_namespace_have_one_unit_identity() {
+    let mut catalog = catalog();
+    catalog.namespace = Some("pl".into());
+    catalog.units[0].singular = Some("session".into());
+    let canonical = parse("sessions", &catalog).unwrap();
+    let id = question_id(&canonical, &catalog, &BTreeMap::new()).unwrap();
+    for text in ["session", "pl.sessions", "PL.SESSION"] {
+        let parsed = parse(text, &catalog).unwrap();
+        assert_eq!(parsed, canonical, "{text}");
+        assert_eq!(
+            question_id(&parsed, &catalog, &BTreeMap::new()).unwrap(),
+            id
+        );
+    }
+    catalog.units.push(Unit {
+        name: "sx.events".into(),
+        fields: vec![field("id", FieldKind::Reference)],
+        ..Unit::default()
+    });
+    let remote = parse("sx.events", &catalog).unwrap();
+    assert!(matches!(&remote.source, Source::Unit {unit, ..} if unit == "sx.events"));
+    assert_eq!(remote.namespaces().into_iter().collect::<Vec<_>>(), ["sx"]);
+}
+
+#[test]
+fn native_reference_prefixes_preserve_real_fields_in_the_current_scope() {
+    let mut catalog = catalog();
+    catalog.references.push(ReferenceForm::prefix("event:"));
+    let opaque = parse("sessions where event:opaque", &catalog).unwrap();
+    assert!(matches!(
+        opaque.source,
+        Source::Unit {
+            condition: Some(Condition {
+                kind: ConditionKind::Reference { .. },
+                ..
+            }),
+            ..
+        }
+    ));
+    catalog.units[0]
+        .fields
+        .push(field("event", FieldKind::Exact));
+    let scoped = parse("sessions where event:started", &catalog).unwrap();
+    assert!(
+        matches!(scoped.source, Source::Unit {condition:Some(Condition {kind:ConditionKind::Match {field,..},..}),..} if field == "event")
+    );
+    catalog.references.push(ReferenceForm::Prefix {
+        prefix: "event:".into(),
+        marker: Some("#".into()),
+    });
+    let marked = parse("sessions where event:owner#record", &catalog).unwrap();
+    assert!(matches!(
+        marked.source,
+        Source::Unit {
+            condition: Some(Condition {
+                kind: ConditionKind::Reference { .. },
+                ..
+            }),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn quoted_native_references_round_trip_without_stealing_scoped_fields() {
+    let mut catalog = catalog();
+    catalog.references.push(ReferenceForm::prefix("event:"));
+    catalog.references.push(ReferenceForm::Prefix {
+        prefix: "session:".into(),
+        marker: Some(":".into()),
+    });
+    for reference in [
+        "event:record with |,[] and \"quotes\"",
+        "session:origin:native \\ id",
+    ] {
+        let query = Query {
+            source: Source::Unit {
+                unit: "sessions".into(),
+                implicit: false,
+                condition: Some(Condition {
+                    span: Span::default(),
+                    kind: ConditionKind::Reference {
+                        reference: reference.into(),
+                    },
+                }),
+            },
+            attach: vec![],
+            transforms: vec![],
+        };
+        let text = format_query(&query, &catalog).unwrap();
+        let parsed = parse(&text, &catalog).unwrap();
+        assert_eq!(
+            question_id(&parsed, &catalog, &BTreeMap::new()).unwrap(),
+            question_id(&query, &catalog, &BTreeMap::new()).unwrap(),
+            "{text}"
+        );
+    }
+    catalog.units[0]
+        .fields
+        .push(field("event", FieldKind::Exact));
+    let query = parse(r#"sessions where event:"a recorded value""#, &catalog).unwrap();
+    assert!(matches!(
+        query.source,
+        Source::Unit {
+            condition: Some(Condition {
+                kind: ConditionKind::Match { .. },
+                ..
+            }),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn unknown_units_suggest_declared_singular_names() {
+    let mut catalog = catalog();
+    catalog.units[0].singular = Some("session".into());
+    let error = parse("sessin where id:one", &catalog).unwrap_err();
+    let correction = error.suggestion.unwrap();
+    let corrected = parse(&correction, &catalog).unwrap();
+    let expected = parse("sessions where id:one", &catalog).unwrap();
+    assert_eq!(
+        question_id(&corrected, &catalog, &BTreeMap::new()).unwrap(),
+        question_id(&expected, &catalog, &BTreeMap::new()).unwrap()
+    );
 }

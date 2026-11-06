@@ -61,6 +61,7 @@ fn saved_sources_keep_their_own_suffix_schema_outside_boolean_membership() {
                 arguments: Vec::new(),
             },
             schema: OutputSchema {
+                match_units: None,
                 unit: Some(catalog.default_unit.clone()),
                 fields: vec![Field {
                     name: "promoted".into(),
@@ -137,6 +138,7 @@ fn incomplete_saved_boolean_completion_uses_the_enclosing_native_domain() {
                 arguments: Vec::new(),
             },
             schema: OutputSchema {
+                match_units: None,
                 unit: Some(catalog.default_unit.clone()),
                 fields: vec![Field {
                     name: "promoted".into(),

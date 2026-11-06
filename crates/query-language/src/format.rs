@@ -26,6 +26,16 @@ pub(crate) fn render_query(query: &Query, catalog: &Catalog) -> Result<String, E
 fn invalid(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::InvalidQuery, message, 0)
 }
+fn order_bearing(condition: &Condition) -> bool {
+    match &condition.kind {
+        ConditionKind::Order { .. } => true,
+        ConditionKind::And { conditions } | ConditionKind::Or { conditions } => {
+            conditions.iter().any(order_bearing)
+        }
+        ConditionKind::Not { condition } => order_bearing(condition),
+        _ => false,
+    }
+}
 struct Renderer<'a> {
     catalog: &'a Catalog,
 }
@@ -146,11 +156,28 @@ impl Renderer<'_> {
                 };
                 let mut terms = conditions
                     .iter()
-                    .map(|c| self.condition(c))
-                    .collect::<Result<Vec<_>, _>>()?;
-                terms.sort();
-                terms.dedup();
-                format!("({})", terms.join(join))
+                    .map(|condition| Ok((self.condition(condition)?, order_bearing(condition))))
+                    .collect::<Result<Vec<_>, Error>>()?;
+                terms.sort_by(|a, b| a.0.cmp(&b.0));
+                terms.dedup_by(|a, b| {
+                    a.0 == b.0 && (!matches!(condition.kind, ConditionKind::And { .. }) || !a.1)
+                });
+                // A one-term OR still suppresses witness publication. The
+                // surface's binary OR spells that wrapper with the term twice.
+                if matches!(condition.kind, ConditionKind::Or { .. })
+                    && terms.len() == 1
+                    && terms[0].1
+                {
+                    terms.push(terms[0].clone());
+                }
+                format!(
+                    "({})",
+                    terms
+                        .iter()
+                        .map(|(text, _)| text.as_str())
+                        .collect::<Vec<_>>()
+                        .join(join)
+                )
             }
             ConditionKind::Not { condition } => format!("NOT ({})", self.condition(condition)?),
             ConditionKind::Match {
@@ -190,6 +217,14 @@ impl Renderer<'_> {
             ConditionKind::Reference { reference } => {
                 if let Some(id) = reference.strip_prefix("result:") {
                     format!("result:{}", quote(id))
+                } else if reference
+                    .chars()
+                    .any(|c| c.is_whitespace() || "()[]|,\"".contains(c))
+                {
+                    let (prefix, identity) = reference
+                        .split_once(':')
+                        .ok_or_else(|| invalid("a quoted reference needs a declared prefix"))?;
+                    format!("{}:{}", name(prefix)?, quote(identity))
                 } else {
                     literal(reference)?
                 }
@@ -257,12 +292,32 @@ impl Renderer<'_> {
                 within,
                 at,
                 scope,
-            } => format!(
-                "{}({}){}",
-                relation.name(),
-                self.query(query)?,
-                order_options(within.as_ref(), *at, scope.as_deref())?
-            ),
+                pick,
+            } => {
+                let mut text = format!(
+                    "{}({}){}",
+                    relation.name(),
+                    self.query(query)?,
+                    order_options(within.as_ref(), *at, scope.as_deref())?
+                );
+                if let WitnessChoice::FirstBy { keys } = pick {
+                    if keys.is_empty() {
+                        return Err(invalid("pick first needs a sort key"));
+                    }
+                    let keys = keys
+                        .iter()
+                        .map(|key| {
+                            Ok(format!(
+                                "{} {}",
+                                self.expression(&key.expression)?,
+                                if key.descending { "desc" } else { "asc" }
+                            ))
+                        })
+                        .collect::<Result<Vec<_>, Error>>()?;
+                    text.push_str(&format!(" pick first by {}", keys.join(", ")));
+                }
+                text
+            }
             ConditionKind::Extension { name, arguments } => {
                 self.extension(name, arguments, ExtensionPosition::Atom)?
             }
@@ -586,6 +641,9 @@ fn order_options(
         TimePoint::When => {}
         TimePoint::Start => text.push_str(" at start"),
         TimePoint::End => text.push_str(" at end"),
+        TimePoint::MatchWhen => text.push_str(" at match.when"),
+        TimePoint::MatchStart => text.push_str(" at match.start"),
+        TimePoint::MatchEnd => text.push_str(" at match.end"),
     }
     if let Some(scope) = scope {
         text.push_str(&format!(" in {}", name(scope)?));

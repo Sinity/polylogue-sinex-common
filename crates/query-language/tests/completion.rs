@@ -305,6 +305,7 @@ fn saved_output_completion_uses_typed_snapshot_fields_and_every_value_path() {
                 arguments: vec![],
             },
             schema: OutputSchema {
+                match_units: None,
                 unit: Some(unit.into()),
                 main_time: None,
                 fields: vec![
@@ -423,6 +424,7 @@ fn result_rows_and_matches_have_separate_field_and_value_completion_scopes() {
                     part,
                 },
                 schema: OutputSchema {
+                    match_units: None,
                     unit: None,
                     main_time: None,
                     fields: vec![Field {
@@ -476,6 +478,7 @@ fn nested_implicit_completion_uses_saved_actual_row_domain_and_defers_unknown_do
                 arguments: vec![],
             },
             schema: OutputSchema {
+                match_units: None,
                 unit: Some(unit.into()),
                 fields: vec![Field {
                     name: "id".into(),
@@ -521,6 +524,7 @@ fn requirements_load_active_source_schema_before_its_value_section() {
         catalog.source_outputs.push(SourceOutput {
             source: source.clone(),
             schema: OutputSchema {
+                match_units: None,
                 unit: Some(unit.into()),
                 main_time: None,
                 fields: vec![Field {
@@ -558,6 +562,7 @@ fn requirements_decode_quotes_and_stop_at_the_byte_cursor_in_every_value_positio
             arguments: vec![],
         },
         schema: OutputSchema {
+            match_units: None,
             unit: Some("tool_calls".into()),
             main_time: None,
             fields: vec![Field {
@@ -632,6 +637,7 @@ fn requirements_keep_result_parts_and_nested_source_dependencies_typed() {
                 part,
             },
             schema: OutputSchema {
+                match_units: None,
                 unit: Some("tool_calls".into()),
                 main_time: None,
                 fields: vec![Field {
@@ -743,6 +749,7 @@ fn requirements_keep_group_aliases_and_exclude_stage_reference_requests() {
             arguments: vec![],
         },
         schema: OutputSchema {
+            match_units: None,
             unit: Some("commands".into()),
             main_time: None,
             fields: vec![Field {

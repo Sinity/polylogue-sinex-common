@@ -436,8 +436,10 @@ fn transforms_declare_the_fields_they_add() {
     // One top-level order relation exposes its nearest inner row.
     let scope = typed("messages where after(tool_calls) within 2 steps | sort by match.distance");
     assert!(scope.field("match.tool").is_some());
+    // Unresolved sources are syntax; execution requires an immutable declaration.
+    let unresolved = parse("query:saved | matches", &c).unwrap();
+    assert!(bind(&unresolved, &c).is_err());
     for (text, fragment) in [
-        ("query:saved | matches", "hides its own"),
         ("sessions | matches", "one top-level"),
         (
             "sessions where exists tool_calls() exists messages() | matches",
@@ -556,4 +558,19 @@ fn generated_names_never_hide_stored_fields() {
         clashing.hidden_fields(),
         vec![format!("{unit}.distance"), format!("{unit}.change")]
     );
+}
+
+/// More than one primitive correction is completed at the outer boundary.
+#[test]
+fn correction_chains_reach_a_runnable_question() {
+    for catalog in [support::polylogue(), support::sinex()] {
+        assert_eq!(
+            suggestion(&catalog, "rock and roll and jazz"),
+            "rock AND roll AND jazz"
+        );
+        assert_eq!(
+            suggestion(&catalog, "rock or roll and jazz"),
+            "rock OR roll AND jazz"
+        );
+    }
 }

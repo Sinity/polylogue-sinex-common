@@ -30,6 +30,23 @@ impl BoundQuery {
 /// snapshot. Rendering and reparsing reuse the parser's one field/type checker;
 /// output markers supplied by an incoming syntax tree are never trusted.
 pub fn bind(query: &Query, catalog: &Catalog) -> Result<BoundQuery, Error> {
+    check_catalog(catalog)?;
+    let text = crate::format::render_query(query, catalog)?;
+    let parsed = crate::parse::parse_typed(&text, catalog)
+        .map_err(|error| crate::parse::parse(&text, catalog).err().unwrap_or(error))?;
+    check_query(&parsed.query, catalog)?;
+    Ok(BoundQuery {
+        query: parsed.query,
+        typing: parsed.typing,
+    })
+}
+/// Check a tree the parser just constructed without formatting or reparsing it.
+/// Correction chaining owns its intermediate text; only its final tree is checked.
+pub(crate) fn check_parsed(query: &Query, catalog: &Catalog) -> Result<(), Error> {
+    check_catalog(catalog)?;
+    check_query(query, catalog)
+}
+fn check_catalog(catalog: &Catalog) -> Result<(), Error> {
     for (index, output) in catalog.source_outputs.iter().enumerate() {
         if catalog.source_outputs[..index]
             .iter()
@@ -43,20 +60,18 @@ pub fn bind(query: &Query, catalog: &Catalog) -> Result<BoundQuery, Error> {
         }
         check_schema(&output.schema, catalog)?;
     }
-    let text = crate::format::render_query(query, catalog)?;
-    let parsed = crate::parse::parse_typed(&text, catalog)
-        .map_err(|error| crate::parse::parse(&text, catalog).err().unwrap_or(error))?;
-    check_query(&parsed.query, catalog)?;
-    Ok(BoundQuery {
-        query: parsed.query,
-        typing: parsed.typing,
-    })
+    Ok(())
 }
 fn check_schema(output: &crate::catalog::OutputSchema, catalog: &Catalog) -> Result<(), Error> {
     if let Some(unit) = &output.unit
         && catalog.unit(unit).is_none()
     {
         return Err(unbound(format!("output row domain {unit:?}")));
+    }
+    for unit in output.match_units.iter().flatten() {
+        if catalog.unit(unit).is_none() {
+            return Err(unbound(format!("match row domain {unit:?}")));
+        }
     }
     let mut names = BTreeSet::new();
     for field in &output.fields {

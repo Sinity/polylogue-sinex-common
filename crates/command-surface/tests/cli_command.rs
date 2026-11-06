@@ -65,7 +65,7 @@ fn request(operation: &str, text: &str, request_id: &str, deadline: Deadline) ->
         arguments: json!({ "text": text }),
         request_id: request_id.into(),
         deadline,
-        budget_tokens: None,
+        budget_tokens: command_surface::TokenBudget::Default,
         cursor: None,
         fresh: false,
         format: Format::Text,
@@ -114,6 +114,39 @@ fn cli_command_round_trips_through_the_parser() {
         assert_eq!(words[0], "example");
         let parsed = table.parse_cli(&words[1..], "unused").unwrap();
         assert_eq!(parsed.request, request, "{command}");
+    }
+}
+
+#[test]
+fn displayed_cli_commands_keep_controls_in_round_tripping_json() {
+    let table = table();
+    let controls = (0..=0x9f)
+        .filter_map(char::from_u32)
+        .filter(|c| c.is_control())
+        .chain([
+            '\u{061c}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}',
+            '\u{202e}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+        ]);
+    for c in controls {
+        for extra in [false, true] {
+            let mut request = request(
+                "read",
+                &format!("it's {c} literal \\x9b and \\u009b"),
+                "r-1",
+                Deadline::Milliseconds(250),
+            );
+            // An undeclared field already needs the whole-JSON form; controls
+            // in natural flags must choose the same lossless representation.
+            if extra {
+                request.arguments["extra"] = json!(["value", {"control":c.to_string()}]);
+            }
+            let command = table.cli_command(&request).unwrap();
+            assert!(command.contains(" --request "), "{command:?}");
+            assert!(!command.contains(c), "{command:?}");
+            let words = shell_words(&command);
+            let parsed = table.parse_cli(&words[1..], "unused").unwrap();
+            assert_eq!(parsed.request, request, "{command:?}");
+        }
     }
 }
 

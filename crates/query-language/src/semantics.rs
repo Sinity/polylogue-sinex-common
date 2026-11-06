@@ -101,6 +101,29 @@ pub struct Extent {
     pub end: i64,
     pub coarse: bool,
 }
+/// Declared state lifetime, independent of occurrence uncertainty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeclaredSpan {
+    pub start: i64,
+    /// None is a known open end, rather than missing span evidence.
+    pub end: Option<i64>,
+    pub end_inclusive: bool,
+}
+impl DeclaredSpan {
+    fn contains(self, evidence: Extent) -> bool {
+        evidence.start >= self.start
+            && self.end.is_none_or(|end| {
+                if evidence.coarse && evidence.end > evidence.start {
+                    evidence.end <= end
+                        || (self.end_inclusive && evidence.end.saturating_sub(1) <= end)
+                } else if self.end_inclusive {
+                    evidence.start <= end
+                } else {
+                    evidence.start < end
+                }
+            })
+    }
+}
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
     pub id: String,
@@ -111,7 +134,11 @@ pub struct Row {
     /// The row's place in its parent's order. Rows of every relation sharing
     /// a parent interleave in one order; ties go to identity.
     pub order: i64,
+    /// Occurrence evidence; a coarse extent bounds when the occurrence happened.
     pub time: Option<Extent>,
+    /// An independently declared state interval. Its endpoints are not inferred
+    /// from the uncertainty bounds of `time`.
+    pub span: Option<DeclaredSpan>,
     /// Selected relation identities, including sequence steps in occurrence order.
     pub matches: Vec<String>,
 }
@@ -123,6 +150,7 @@ impl Row {
             parent: None,
             order: 0,
             time: None,
+            span: None,
             matches: vec![],
         }
     }
@@ -530,6 +558,58 @@ impl<'a> ReferenceEvaluator<'a> {
                     _ => return Err(bad("len takes text or a list")),
                 })
             }
+            Expression::Function { name, arguments } if name == "text" => {
+                let [argument] = arguments.as_slice() else {
+                    return Err(bad("text takes one argument"));
+                };
+                match self.expression(row, argument)? {
+                    value @ (Scalar::Text(_) | Scalar::Unknown) => Ok(value),
+                    _ => Err(bad("text takes a string value")),
+                }
+            }
+            Expression::Function { name, arguments } if name == "abs" => {
+                let [argument] = arguments.as_slice() else {
+                    return Err(bad("abs takes one argument"));
+                };
+                match self.expression(row, argument)? {
+                    Scalar::Number(value) => Ok(Scalar::Number(value.abs())),
+                    Scalar::Unknown => Ok(Scalar::Unknown),
+                    _ => Err(bad("abs takes a linear number")),
+                }
+            }
+            Expression::Function { name, arguments } if name == "glob" => {
+                let [text, pattern] = arguments.as_slice() else {
+                    return Err(bad("glob takes two arguments"));
+                };
+                match (self.expression(row, text)?, self.expression(row, pattern)?) {
+                    (Scalar::Unknown, _) | (_, Scalar::Unknown) => Ok(Scalar::Unknown),
+                    (Scalar::Text(text), Scalar::Text(pattern)) => {
+                        Ok(Scalar::Bool(crate::glob::matches(&text, &pattern)))
+                    }
+                    _ => Err(bad("glob takes text values")),
+                }
+            }
+            Expression::Function { name, arguments } if name == "case_eq" => {
+                let [left, right, selected] = arguments.as_slice() else {
+                    return Err(bad("case_eq takes three arguments"));
+                };
+                let mut left_value = self.expression(row, left)?;
+                let right_value = match right {
+                    Expression::Value { value } => literal(value, &left_value)?,
+                    other => self.expression(row, other)?,
+                };
+                if let Expression::Value { value } = left {
+                    left_value = literal(value, &right_value)?;
+                }
+                if left_value != Scalar::Unknown
+                    && right_value != Scalar::Unknown
+                    && left_value == right_value
+                {
+                    self.expression(row, selected)
+                } else {
+                    Ok(Scalar::Unknown)
+                }
+            }
             Expression::Function { name, .. } => Err(unsupported(name, 0)),
             Expression::Arithmetic {
                 operator,
@@ -760,6 +840,12 @@ impl<'a> ReferenceEvaluator<'a> {
         window: Option<u64>,
         at: TimePoint,
     ) -> Result<Option<Vec<(&'r Row, i128)>>, Error> {
+        if matches!(
+            at,
+            TimePoint::MatchWhen | TimePoint::MatchStart | TimePoint::MatchEnd
+        ) {
+            return self.related_at_match(row, inner, relation, window, at);
+        }
         let Some(a) = row.time else {
             return Ok(None);
         };
@@ -768,8 +854,12 @@ impl<'a> ReferenceEvaluator<'a> {
             _ => a.start,
         };
         let mut candidates = vec![];
+        let mut unknown = false;
         for other in inner {
-            let Some(b) = other.time else { continue };
+            let Some(b) = other.time else {
+                unknown = true;
+                continue;
+            };
             let offset = i128::from(b.start) - i128::from(point);
             let distance = offset.unsigned_abs();
             let last = |v: Extent| if v.end > v.start { v.end - 1 } else { v.start };
@@ -828,7 +918,15 @@ impl<'a> ReferenceEvaluator<'a> {
                         point >= b.start && point < b.end
                     }
                 }
-                OrderRelation::Containing => b.start >= a.start && b.end <= a.end,
+                OrderRelation::Containing => {
+                    if b.end > b.start {
+                        a.end > a.start && b.start >= a.start && b.end <= a.end
+                    } else if a.end > a.start {
+                        b.start >= a.start && b.start < a.end
+                    } else {
+                        b.start == a.start
+                    }
+                }
             };
             if matches {
                 candidates.push((
@@ -840,11 +938,100 @@ impl<'a> ReferenceEvaluator<'a> {
                 ));
             }
         }
+        if candidates.is_empty() && unknown {
+            return Ok(None);
+        }
         candidates.sort_by(|x, y| (x.0, x.1, &x.2).cmp(&(y.0, y.1, &y.2)));
         Ok(Some(
             candidates
                 .into_iter()
                 .map(|(_, _, _, other, offset)| (other, offset))
+                .collect(),
+        ))
+    }
+    fn related_at_match<'r>(
+        &self,
+        row: &Row,
+        inner: &'r [Row],
+        relation: OrderRelation,
+        window: Option<u64>,
+        at: TimePoint,
+    ) -> Result<Option<Vec<(&'r Row, i128)>>, Error> {
+        let Some(a) = row.time else { return Ok(None) };
+        if relation == OrderRelation::Containing && row.span.is_none() {
+            return Ok(None);
+        }
+        let point = |tick| Extent {
+            start: tick,
+            end: tick,
+            coarse: false,
+        };
+        let last = |v: Extent| {
+            if v.coarse && v.end > v.start {
+                v.end - 1
+            } else {
+                v.start
+            }
+        };
+        let mut pairs = vec![];
+        let mut unknown = false;
+        for other in inner {
+            // During selects a state by its declared lifetime. The occurrence
+            // time may precede its start, and is not its ordering anchor.
+            let selected = if relation == OrderRelation::During {
+                other.span.map(|span| point(span.start))
+            } else {
+                match at {
+                    TimePoint::MatchWhen => other.time,
+                    TimePoint::MatchStart => other.span.map(|span| point(span.start)),
+                    TimePoint::MatchEnd => other.span.and_then(|span| span.end.map(point)),
+                    _ => unreachable!(),
+                }
+            };
+            let Some(b) = selected else {
+                unknown = true;
+                continue;
+            };
+            let offset = i128::from(b.start) - i128::from(a.start);
+            let distance = offset.unsigned_abs();
+            let greatest = [
+                (a.start, b.start),
+                (a.start, last(b)),
+                (last(a), b.start),
+                (last(a), last(b)),
+            ]
+            .into_iter()
+            .map(|(x, y)| (i128::from(y) - i128::from(x)).unsigned_abs())
+            .max()
+            .unwrap();
+            if window.is_some_and(|w| {
+                if a.coarse || b.coarse {
+                    greatest > u128::from(w)
+                } else {
+                    distance > u128::from(w)
+                }
+            }) {
+                continue;
+            }
+            let fits = match relation {
+                OrderRelation::Near => true,
+                OrderRelation::Before => last(a) < b.start,
+                OrderRelation::After => a.start > last(b),
+                OrderRelation::During => other.span.unwrap().contains(a),
+                OrderRelation::Containing => row.span.unwrap().contains(b),
+            };
+            if fits {
+                pairs.push((a.coarse || b.coarse, distance, &other.id, other, offset))
+            }
+        }
+        pairs.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
+        if pairs.is_empty() && unknown {
+            return Ok(None);
+        }
+        Ok(Some(
+            pairs
+                .into_iter()
+                .map(|(_, _, _, row, offset)| (row, offset))
                 .collect(),
         ))
     }
@@ -1003,7 +1190,8 @@ impl<'a> ReferenceEvaluator<'a> {
             rows = self.filter(rows, c)?;
         }
         let mut pattern = condition.clone();
-        let mut groups: Option<Vec<Vec<Row>>> = None;
+        type IndexedRows = Vec<(usize, Row)>;
+        let mut groups: Option<(Vec<IndexedRows>, Option<Condition>)> = None;
         // Ranked lists of one level of fuse and union, fused once.
         let mut lists: Vec<Vec<crate::fusion::Entry<String>>> = Vec::new();
         for (index, transform) in query.transforms.iter().enumerate() {
@@ -1017,8 +1205,16 @@ impl<'a> ReferenceEvaluator<'a> {
                     rows = self.sort(rows, keys, at)?;
                     groups = None;
                 }
-                TransformKind::First { .. } if groups.is_some() => {
-                    return Err(unsupported("per-group first", at));
+                TransformKind::First { count } if groups.is_some() => {
+                    let (members, input_pattern) = groups.take().unwrap();
+                    let count = usize::try_from(*count).unwrap_or(usize::MAX);
+                    let mut selected = members
+                        .into_iter()
+                        .flat_map(|members| members.into_iter().take(count))
+                        .collect::<Vec<_>>();
+                    selected.sort_by_key(|(position, _)| *position);
+                    rows = selected.into_iter().map(|(_, row)| row).collect();
+                    pattern = input_pattern;
                 }
                 TransformKind::Limit { count } | TransformKind::First { count } => {
                     rows.truncate(usize::try_from(*count).unwrap_or(usize::MAX));
@@ -1032,16 +1228,16 @@ impl<'a> ReferenceEvaluator<'a> {
                     groups = None;
                 }
                 TransformKind::Group { keys } => {
-                    let mut grouped: Vec<(Vec<Scalar>, Vec<Row>)> = vec![];
-                    for row in rows {
+                    let mut grouped: Vec<(Vec<Scalar>, IndexedRows)> = vec![];
+                    for (position, row) in rows.into_iter().enumerate() {
                         let values = keys
                             .iter()
                             .map(|k| self.expression(&row, &k.expression))
                             .collect::<Result<Vec<_>, _>>()?;
                         if let Some((_, members)) = grouped.iter_mut().find(|(v, _)| *v == values) {
-                            members.push(row);
+                            members.push((position, row));
                         } else {
-                            grouped.push((values, vec![row]));
+                            grouped.push((values, vec![(position, row)]));
                         }
                     }
                     grouped.sort_by_key(|(v, _)| format!("{v:?}"));
@@ -1057,12 +1253,19 @@ impl<'a> ReferenceEvaluator<'a> {
                         rows.push(row);
                         members.push(items);
                     }
-                    groups = Some(members);
-                    pattern = None;
+                    groups = Some((members, pattern.take()));
                 }
                 TransformKind::Aggregate { aggregates } => {
                     let grouped = groups.is_some();
-                    let members = groups.take().unwrap_or_else(|| vec![rows.clone()]);
+                    let members = groups
+                        .take()
+                        .map(|(groups, _)| {
+                            groups
+                                .into_iter()
+                                .map(|group| group.into_iter().map(|(_, row)| row).collect())
+                                .collect()
+                        })
+                        .unwrap_or_else(|| vec![rows.clone()]);
                     if !grouped {
                         rows = vec![Row::new("aggregate")];
                     }
@@ -1224,21 +1427,92 @@ impl<'a> ReferenceEvaluator<'a> {
         });
         Ok(rows)
     }
+    fn witness<'r>(
+        &self,
+        outer: &Row,
+        mut pairs: Vec<(&'r Row, i128)>,
+        pick: &WitnessChoice,
+        order: (OrderRelation, Option<&Distance>, TimePoint),
+    ) -> Result<Option<(&'r Row, i128)>, Error> {
+        let (relation, within, at) = order;
+        if let WitnessChoice::FirstBy { keys } = pick {
+            if keys.is_empty() {
+                return Err(bad("pick first needs a sort key"));
+            }
+            let mut values = BTreeMap::new();
+            for (inner, offset) in &pairs {
+                let mut candidate = (**inner).clone();
+                candidate
+                    .fields
+                    .insert("match.id".into(), Scalar::Text(inner.id.clone()));
+                candidate
+                    .fields
+                    .insert("match.distance".into(), Scalar::Number(*offset as f64));
+                let coarse = !matches!(within, Some(Distance::Steps { .. }))
+                    && (outer.time.is_some_and(|time| time.coarse)
+                        || (!matches!(at, TimePoint::MatchStart | TimePoint::MatchEnd)
+                            && !(relation == OrderRelation::During && at == TimePoint::MatchWhen)
+                            && inner.time.is_some_and(|time| time.coarse)));
+                candidate
+                    .fields
+                    .insert("match.coarse".into(), Scalar::Bool(coarse));
+                let row_values = keys
+                    .iter()
+                    .map(|key| self.expression(&candidate, &key.expression))
+                    .collect::<Result<Vec<_>, _>>()?;
+                values.insert(inner.id.clone(), row_values);
+            }
+            for index in 0..keys.len() {
+                let known = values
+                    .values()
+                    .map(|row| &row[index])
+                    .filter(|value| !value.is_unknown())
+                    .collect::<Vec<_>>();
+                for pair in known.windows(2) {
+                    if pair[0].order(pair[1]).is_none() {
+                        return Err(bad("sort requires compatible ordered scalars"));
+                    }
+                }
+            }
+            pairs.sort_by(|(a, a_offset), (b, b_offset)| {
+                for (index, key) in keys.iter().enumerate() {
+                    let left = &values[&a.id][index];
+                    let right = &values[&b.id][index];
+                    let known_order = match &key.expression {
+                        Expression::Field { name } if name == "match.distance" => a_offset.cmp(b_offset),
+                        Expression::Function { name, arguments } if name == "abs" && matches!(arguments.as_slice(), [Expression::Field { name }] if name == "match.distance") => a_offset.unsigned_abs().cmp(&b_offset.unsigned_abs()),
+                        _ => left.order(right).unwrap_or(Ordering::Equal),
+                    };
+                    let order = match (left.is_unknown(), right.is_unknown()) {
+                        (true,false) => Ordering::Greater,
+                        (false,true) => Ordering::Less,
+                        (true,true) => Ordering::Equal,
+                        _ if key.descending => known_order.reverse(),
+                        _ => known_order,
+                    };
+                    if order != Ordering::Equal { return order; }
+                }
+                a.id.cmp(&b.id)
+            });
+        }
+        Ok(pairs.into_iter().next())
+    }
     fn filter(&self, rows: Vec<Row>, c: &Condition) -> Result<Vec<Row>, Error> {
-        let mut orders = Vec::new();
-        collect_orders(c, &mut orders);
-        // One top-level order relation exposes its nearest inner row as
-        // `match.F` and, with a distance, the signed `match.distance`.
-        let exposed = match orders.as_slice() {
-            [
-                ConditionKind::Order {
-                    relation,
-                    query,
-                    within,
-                    at,
-                    ..
-                },
-            ] => Some((self.execute(query)?.rows, *relation, within.as_ref(), *at)),
+        let exposed = match c.exposed_order().map(|order| &order.kind) {
+            Some(ConditionKind::Order {
+                relation,
+                query,
+                within,
+                at,
+                pick,
+                ..
+            }) => Some((
+                self.execute(query)?.rows,
+                *relation,
+                within.as_ref(),
+                *at,
+                pick,
+            )),
             _ => None,
         };
         let mut selected = vec![];
@@ -1246,10 +1520,10 @@ impl<'a> ReferenceEvaluator<'a> {
             if !self.condition(&row, c)?.matches() {
                 continue;
             }
-            if let Some((inner, relation, within, at)) = &exposed
-                && let Some((nearest, offset)) = self
-                    .related(&row, inner, *relation, *within, *at)?
-                    .and_then(|pairs| pairs.into_iter().next())
+            if let Some((inner, relation, within, at, pick)) = &exposed
+                && let Some(pairs) = self.related(&row, inner, *relation, *within, *at)?
+                && let Some((nearest, offset)) =
+                    self.witness(&row, pairs, pick, (*relation, *within, *at))?
             {
                 row.fields
                     .insert("match.id".into(), Scalar::Text(nearest.id.clone()));
@@ -1363,6 +1637,11 @@ impl<'a> ReferenceEvaluator<'a> {
                     let mut result =
                         Row::new(format!("{}:match:{}:{}", row.id, number + 1, position + 1));
                     result.parent = Some(row.id.clone());
+                    for (name, value) in &row.fields {
+                        result
+                            .fields
+                            .insert(format!("parent.{name}"), value.clone());
+                    }
                     result
                         .fields
                         .insert("parent".into(), Scalar::Text(row.id.clone()));
@@ -1532,14 +1811,6 @@ fn apply_fusion(rows: Vec<Row>, lists: Vec<Vec<crate::fusion::Entry<String>>>) -
         .chain(unranked)
         .collect()
 }
-/// The order relations standing in a condition's top-level AND.
-fn collect_orders<'a>(condition: &'a Condition, out: &mut Vec<&'a ConditionKind>) {
-    match &condition.kind {
-        ConditionKind::And { conditions } => conditions.iter().for_each(|c| collect_orders(c, out)),
-        kind @ ConditionKind::Order { .. } => out.push(kind),
-        _ => {}
-    }
-}
 fn collect_patterns<'a>(condition: &'a Condition, out: &mut Vec<&'a Condition>) {
     match &condition.kind {
         ConditionKind::And { conditions } => {
@@ -1562,8 +1833,19 @@ fn validate_expression(e: &Expression, at: usize) -> Result<(), Error> {
     match e {
         Expression::Field { .. } => Ok(()),
         Expression::Value { value } => validate_value(value),
-        Expression::Function { name, arguments } if name == "len" && arguments.len() == 1 => {
+        Expression::Function { name, arguments }
+            if matches!(name.as_str(), "len" | "abs" | "text") && arguments.len() == 1 =>
+        {
             validate_expression(&arguments[0], at)
+        }
+        Expression::Function { name, arguments }
+            if (name == "case_eq" && arguments.len() == 3)
+                || (name == "glob" && arguments.len() == 2) =>
+        {
+            for argument in arguments {
+                validate_expression(argument, at)?;
+            }
+            Ok(())
         }
         Expression::Function { name, .. } if name == "random" => Ok(()),
         Expression::Function { name, .. } => Err(unsupported(name, at)),
@@ -1608,7 +1890,17 @@ fn validate_condition(c: &Condition) -> Result<(), Error> {
             validate_expression(left, at)?;
             validate_query(query)?;
         }
-        ConditionKind::Order { query, .. } => validate_query(query)?,
+        ConditionKind::Order { query, pick, .. } => {
+            validate_query(query)?;
+            if let WitnessChoice::FirstBy { keys } = pick {
+                if keys.is_empty() {
+                    return Err(bad("pick first needs a sort key"));
+                }
+                for key in keys {
+                    validate_expression(&key.expression, at)?;
+                }
+            }
+        }
         ConditionKind::Exists { condition, .. } | ConditionKind::Count { condition, .. } => {
             if let Some(c) = condition {
                 validate_condition(c)?;

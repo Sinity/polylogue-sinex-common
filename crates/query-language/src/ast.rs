@@ -147,11 +147,28 @@ pub enum ConditionKind {
         within: Option<Distance>,
         at: TimePoint,
         scope: Option<String>,
+        #[serde(default, skip_serializing_if = "WitnessChoice::is_nearest")]
+        pick: WitnessChoice,
     },
     Extension {
         name: String,
         arguments: Vec<ExtensionArgument>,
     },
+}
+/// How an order semijoin chooses the one exposed matching row.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WitnessChoice {
+    #[default]
+    Nearest,
+    FirstBy {
+        keys: Vec<SortKey>,
+    },
+}
+impl WitnessChoice {
+    pub fn is_nearest(&self) -> bool {
+        matches!(self, Self::Nearest)
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -530,6 +547,12 @@ pub enum TimePoint {
     When,
     Start,
     End,
+    /// The matched row's occurrence time, independent of its actual span.
+    MatchWhen,
+    /// The start of the matched row's explicitly declared actual span.
+    MatchStart,
+    /// The end of the matched row's explicitly declared actual span.
+    MatchEnd,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Aggregate {
@@ -685,6 +708,29 @@ impl Query {
     }
 }
 impl Condition {
+    /// One positive order relation exposes its selected witness after the
+    /// complete condition. All predicates read the same incoming row.
+    /// Multiple orders and orders beneath OR or NOT expose no new namespace.
+    pub fn exposed_order(&self) -> Option<&Condition> {
+        fn collect<'a>(condition: &'a Condition, orders: &mut Vec<&'a Condition>) {
+            match &condition.kind {
+                ConditionKind::And { conditions } => {
+                    for condition in conditions {
+                        collect(condition, orders);
+                    }
+                }
+                ConditionKind::Order { .. } => orders.push(condition),
+                _ => {}
+            }
+        }
+        let mut orders = Vec::new();
+        collect(self, &mut orders);
+        if orders.len() == 1 {
+            orders.pop()
+        } else {
+            None
+        }
+    }
     pub fn visit_units(&self, visitor: &mut impl FnMut(&str)) {
         match &self.kind {
             ConditionKind::And { conditions } | ConditionKind::Or { conditions } => {

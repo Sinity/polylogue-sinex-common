@@ -71,7 +71,8 @@ fn group_scopes_keep_types_closed_values_lineage_and_raw_text() {
         let bound = checked(&text, &catalog);
         let scopes = &bound.typing().queries[0];
         let grouped = &scopes.transforms[0].after;
-        assert_eq!(grouped.unit.as_deref(), Some(unit));
+        assert_eq!(scopes.source.unit.as_deref(), Some(unit));
+        assert!(grouped.unit.is_none());
         assert_eq!(
             grouped
                 .fields
@@ -106,7 +107,7 @@ fn group_scopes_keep_types_closed_values_lineage_and_raw_text() {
             FieldKind::Integer
         );
         assert!(matches!(&final_scope.field("sum_count").unwrap().origin,
-            Origin::Aggregate { inputs, rule: TypeRule::Input, .. }
+            Origin::Aggregate { inputs, rule: TypeRule::Input(0), .. }
                 if inputs[0].field.name == "count" && inputs[0].field.kind == FieldKind::Integer));
         let tree = serde_json::to_value(bound.query()).unwrap();
         assert_eq!(
@@ -149,7 +150,7 @@ fn repeated_groups_have_distinct_structural_origins_and_json_stays_json() {
         panic!("aggregate origin")
     };
     assert_eq!(at, &transform(1).field("aggregates").index(0));
-    assert_eq!(*rule, TypeRule::Input);
+    assert_eq!(*rule, TypeRule::Input(0));
     assert_eq!(inputs[0].field.name, "payload.key");
     assert!(
         matches!(&inputs[0].origin, Origin::Catalog { unit, field } if unit == "events" && field == "payload.key")
@@ -217,6 +218,7 @@ fn nested_and_related_uses_have_their_actual_unit_and_distinct_addresses() {
 fn saved_and_result_scopes_retain_snapshot_fields_and_closed_values() {
     let mut catalog = catalog("events");
     let schema = OutputSchema {
+        match_units: None,
         unit: Some("children".into()),
         fields: vec![Field {
             name: "promoted".into(),
@@ -247,6 +249,7 @@ fn saved_and_result_scopes_retain_snapshot_fields_and_closed_values() {
                 part: ResultPart::Matches,
             },
             schema: OutputSchema {
+                match_units: None,
                 fields: vec![field("match_only", FieldKind::Integer)],
                 ..schema
             },
@@ -443,4 +446,82 @@ fn both_catalogs_keep_calendar_labels_and_hour_numbers_through_binding() {
             );
         }
     }
+}
+
+#[test]
+fn grouped_row_domain_is_separate_from_native_field_provenance() {
+    let c = catalog("events");
+    let q = parse(
+        "events | group by cwd | agg sum(cost) | fields cwd,sum_cost",
+        &c,
+    )
+    .unwrap();
+    let bound = bind(&q, &c).unwrap();
+    let root = bound.typing().query(&NodePath::default()).unwrap();
+    assert_eq!(root.source.unit.as_deref(), Some("events"));
+    for stage in &root.transforms {
+        assert!(stage.after.unit.is_none());
+    }
+    let Origin::Group { input, .. } = &root.transforms[0].after.field("cwd").unwrap().origin else {
+        panic!("missing group origin")
+    };
+    assert!(matches!(&input.origin,Origin::Catalog {unit,field} if unit=="events"&&field=="cwd"));
+    let q = parse("events | group by cwd | events", &c).unwrap();
+    let bound = bind(&q, &c).unwrap();
+    assert_eq!(
+        bound
+            .typing()
+            .query(&NodePath::default())
+            .unwrap()
+            .transforms[1]
+            .after
+            .unit
+            .as_deref(),
+        Some("events")
+    );
+}
+
+#[test]
+fn matches_parent_fields_preserve_only_actual_outer_types_and_origins() {
+    for declares_id in [true, false] {
+        let mut catalog = catalog("parents");
+        if !declares_id {
+            catalog.units[0].fields.retain(|field| field.name != "id");
+        }
+        let bound = checked("parents where exists children() | matches", &catalog);
+        let scope = &bound.typing().queries[0].transforms[0].after;
+        let parent = scope.field("parent.cwd").unwrap();
+        assert_eq!(parent.field.kind, FieldKind::Text);
+        assert!(
+            matches!(&parent.origin,Origin::Catalog {unit,field} if unit=="parents" && field=="cwd")
+        );
+        assert_eq!(scope.field("parent.id").is_some(), declares_id);
+        assert_eq!(
+            parse(
+                "parents where exists children() | matches | fields parent.id",
+                &catalog
+            )
+            .is_ok(),
+            declares_id
+        );
+        assert_eq!(
+            scope.field("parent.cost").unwrap().field.kind,
+            FieldKind::Money
+        );
+    }
+    let catalog = catalog("parents");
+    let projected = checked(
+        "parents | fields cwd | where exists children() | matches",
+        &catalog,
+    );
+    let transform = &projected.typing().queries[0].transforms[2];
+    for absent in ["parent.id", "parent.n", "parent.cost", "parent.count"] {
+        assert!(transform.after.field(absent).is_none(), "{absent}");
+    }
+    let before = transform.before.field("cwd").unwrap();
+    let parent = transform.after.field("parent.cwd").unwrap();
+    let mut expected = before.field.clone();
+    expected.name = "parent.cwd".into();
+    assert_eq!(parent.field, expected);
+    assert_eq!(parent.origin, before.origin);
 }

@@ -17,7 +17,7 @@ fn action(name: &str, write: bool) -> Action {
         arguments: json!({"target": "session:a"}),
         request_id: format!("{name}-1"),
         deadline: Deadline::Default,
-        budget_tokens: None,
+        budget_tokens: command_surface::TokenBudget::Default,
         cursor: None,
         fresh: false,
         format: command_surface::Format::Text,

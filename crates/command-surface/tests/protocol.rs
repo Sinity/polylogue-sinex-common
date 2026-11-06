@@ -25,7 +25,7 @@ proptest! {
     }
     #[test]
     fn envelope_serialization_preserves_unicode_and_identity(text in ".*",id in ".+"){
-        let request=RunnableRequest{operation:"read".into(),arguments:json!({"text":text}),request_id:id,deadline:Deadline::None,budget_tokens:Some(4000),cursor:Some("c-1".into()),fresh:true,format:Format::Json};
+        let request=RunnableRequest{operation:"read".into(),arguments:json!({"text":text}),request_id:id,deadline:Deadline::None,budget_tokens: command_surface::TokenBudget::Tokens(4000),cursor:Some("c-1".into()),fresh:true,format:Format::Json};
         let bytes=serde_json::to_vec(&request).unwrap();prop_assert_eq!(serde_json::from_slice::<RunnableRequest>(&bytes).unwrap(),request);
         let answer=Answer::ok(json!({"text":text}));let bytes=serde_json::to_vec(&answer).unwrap();prop_assert_eq!(serde_json::from_slice::<Answer<Value>>(&bytes).unwrap(),answer);
     }
@@ -187,4 +187,83 @@ fn cli_quote_is_interpreted_as_one_exact_argument() {
         assert!(output.status.success());
         assert_eq!(output.stdout, text.as_bytes());
     }
+}
+
+#[test]
+fn token_budget_distinguishes_absent_null_and_a_count() {
+    for (wire, expected) in [
+        (json!({}), command_surface::TokenBudget::Default),
+        (
+            json!({"budget_tokens":null}),
+            command_surface::TokenBudget::Unlimited,
+        ),
+        (
+            json!({"budget_tokens":0}),
+            command_surface::TokenBudget::Tokens(0),
+        ),
+        (
+            json!({"budget_tokens":80}),
+            command_surface::TokenBudget::Tokens(80),
+        ),
+    ] {
+        let mut request = json!({"operation":"read","arguments":{},"request_id":"r-budget"});
+        for (key, value) in wire.as_object().unwrap() {
+            request[key] = value.clone();
+        }
+        let parsed: command_surface::RunnableRequest =
+            serde_json::from_value(request.clone()).unwrap();
+        assert_eq!(parsed.budget_tokens, expected);
+        assert_eq!(serde_json::to_value(parsed).unwrap(), request);
+    }
+}
+
+/// Payload numbers are read directly into their declared type, including when
+/// a product unifies serde_json's arbitrary_precision feature into this crate.
+#[test]
+fn typed_numeric_answers_deserialize_without_a_value_round_trip() {
+    #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct Pass {
+        seconds: f64,
+    }
+    #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct Report {
+        pass: Pass,
+    }
+    for seconds in [0.0, 0.125, 4096.5, 16777216.25] {
+        for answer in [
+            Answer::ok(Report {
+                pass: Pass { seconds },
+            }),
+            Answer::empty(Report {
+                pass: Pass { seconds },
+            }),
+            Answer::degraded(
+                Report {
+                    pass: Pass { seconds },
+                },
+                vec!["synthetic source".into()],
+            ),
+        ] {
+            let bytes = serde_json::to_vec(&answer).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Answer<Report>>(&bytes).unwrap(),
+                answer
+            );
+            let value = serde_json::to_value(&answer).unwrap();
+            assert_eq!(
+                serde_json::from_value::<Answer<Report>>(value).unwrap(),
+                answer
+            );
+        }
+    }
+    let value_first = br#"{"value":{"pass":{"seconds":0.125}},"outcome":"ok"}"#;
+    assert_eq!(
+        serde_json::from_slice::<Answer<Report>>(value_first)
+            .unwrap()
+            .value()
+            .unwrap()
+            .pass
+            .seconds,
+        0.125
+    );
 }

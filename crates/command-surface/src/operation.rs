@@ -1,7 +1,7 @@
 //! Typed operations and one dispatch boundary shared by every adapter.
 use crate::{
-    Answer, Authorship, Budget, Deadline, Envelope, Failure, FailureKind, Fitted, LatencyClass,
-    LeftOut, Outcome, RunnableRequest, Section, Via, approximate_tokens, bad_request,
+    Answer, Authorship, Budget, Deadline, Failure, FailureKind, LatencyClass, LeftOut, Outcome,
+    RunnableRequest, Section, Via, approximate_tokens, bad_request,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -74,7 +74,8 @@ pub enum OperationKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ArgumentForm {
-    /// One word by position. Required when the request type requires it.
+    /// One word by position, with lists and objects written as JSON.
+    /// Required when the request type requires it.
     Positional,
     /// The remaining words by position, flags between them still read as
     /// flags: joined by spaces for a string field, a list for an array field.
@@ -234,6 +235,10 @@ pub trait Operation: Send + Sync + 'static {
     type Request: Serialize + DeserializeOwned + JsonSchema + Send + 'static;
     type Response: Serialize + DeserializeOwned + JsonSchema + Send + 'static;
     fn spec(&self) -> OperationSpec;
+    /// Access for this typed request. The declaration advertises the row's maximum.
+    fn required_access(&self, _request: &Self::Request) -> Access {
+        self.spec().access
+    }
     fn execute(
         &self,
         request: Self::Request,
@@ -288,7 +293,7 @@ pub struct RequestContext {
     pub request_id: String,
     pub cancellation: CancellationToken,
     caller: Caller,
-    budget_tokens: Option<u32>,
+    budget_tokens: crate::TokenBudget,
     default_budget_tokens: Option<u32>,
     cursor: Option<String>,
     fresh: bool,
@@ -417,37 +422,46 @@ impl RequestContext {
     pub fn follow_up(&self, request: &RunnableRequest) -> String {
         self.forms.follow_up(self.via, request)
     }
-    /// Fit `sections` to `budget` for this request's surface. `envelope` is
-    /// the answer's envelope without its left-out items (its notes, next
-    /// steps, coverage and facets): its lines are held back from the budget,
-    /// and left-out lines are counted as the surface prints them, so the
-    /// answer's whole text fits. Tokens are counted as the transports
-    /// measure them (`approximate_tokens`). The answer carries the result's
-    /// `text` as its value's rendering and its `left_out` in the envelope.
-    pub fn fit(&self, sections: Vec<Section>, budget: Budget, envelope: &Envelope) -> Fitted {
-        let mut rest = envelope.clone();
-        rest.left_out.clear();
-        // Lines the answer will carry once dispatch and the fit are done:
-        // the count's line in its longest form ("shown N of at least N").
+    /// Fit a typed answer's logical entries once. Its outcome is preserved;
+    /// this owner updates the shown count, omissions and cap note together.
+    /// JSON carries the value as data, so a text budget does not cut its rows.
+    pub fn fit(&self, mut answer: Answer<Vec<Section>>, budget: Budget) -> Answer<Vec<Section>> {
+        if answer.is_error() {
+            return answer;
+        }
+        let budget = if self.format == crate::Format::Json {
+            Budget::new(crate::TokenBudget::Unlimited, 0, None)
+        } else {
+            budget
+        };
+        if let Some(note) = budget.note() {
+            answer.envelope.notes.push(note);
+        }
+        let mut rest = answer.envelope.clone();
+        // Reserve the count line in its longest form, including lower bounds
+        // that dispatch can establish after fitting.
         rest.mark_lower_bounds(true);
         if let Some(count) = rest.count {
             rest.shown = Some(count.value);
         }
-        let footer = self.forms.footer(
-            self.via,
-            &Answer {
-                outcome: Outcome::Ok(Value::Null),
-                envelope: rest,
-            },
-        );
-        let held = approximate_tokens(&footer);
-        let budget = Budget {
-            tokens: budget.tokens.saturating_sub(held),
-            clamped_from: budget.clamped_from,
-        };
-        crate::fit(sections, budget, &approximate_tokens, &|item: &LeftOut| {
-            self.forms.left_out_line(self.via, item)
-        })
+        let held = approximate_tokens(&self.forms.footer(self.via, &answer.outcome, &rest));
+        let budget = budget.reserve(held);
+        let mut left_out = Vec::new();
+        answer.outcome = answer.outcome.map(|sections| {
+            let fitted = crate::fit(sections, budget, &approximate_tokens, &|item: &LeftOut| {
+                self.forms.left_out_line(self.via, item)
+            });
+            left_out = fitted.left_out;
+            fitted.sections
+        });
+        answer.envelope.shown = answer.value().map(|sections| {
+            sections
+                .iter()
+                .map(|section| section.entries.len() as u64)
+                .sum()
+        });
+        answer.envelope.left_out.extend(left_out);
+        answer
     }
     /// Called between bounded work units. Also supplies the timeout diagnostic.
     pub fn progress(
@@ -525,7 +539,7 @@ trait ErasedOperation: Send + Sync {
         &self,
         arguments: Value,
         context: RequestContext,
-    ) -> OperationFuture<'_, Answer<Value>>;
+    ) -> OperationFuture<'_, Result<Answer<Value>, Failure>>;
     fn render_text(&self, value: Value) -> Result<String, Failure>;
 }
 impl<O: Operation> ErasedOperation for O {
@@ -533,12 +547,19 @@ impl<O: Operation> ErasedOperation for O {
         &self,
         arguments: Value,
         context: RequestContext,
-    ) -> OperationFuture<'_, Answer<Value>> {
+    ) -> OperationFuture<'_, Result<Answer<Value>, Failure>> {
         Box::pin(async move {
             let request = match serde_json::from_value(arguments) {
                 Ok(request) => request,
-                Err(error) => return Answer::error(bad_request(error.to_string())),
+                Err(error) => return Err(bad_request(error.to_string())),
             };
+            let access = Operation::required_access(self, &request);
+            if access > context.caller().access() {
+                return Err(Failure::new(
+                    FailureKind::Refused,
+                    format!("{} needs {} access", self.spec().name, access.name()),
+                ));
+            }
             let answer = Operation::execute(self, request, context).await;
             let Answer { outcome, envelope } = answer;
             let outcome = match outcome.map(serde_json::to_value) {
@@ -555,7 +576,7 @@ impl<O: Operation> ErasedOperation for O {
                     value: Err(error), ..
                 } => Outcome::Error(Failure::new(FailureKind::Io, error.to_string())),
             };
-            Answer { outcome, envelope }
+            Ok(Answer { outcome, envelope })
         })
     }
     fn render_text(&self, value: Value) -> Result<String, Failure> {
@@ -937,7 +958,7 @@ impl OperationTable {
         {
             return Err(bad_request(format!("unknown argument {key}")));
         }
-        if description.spec.access > caller.access {
+        if !matches!(row, Row::Request(_)) && description.spec.access > caller.access {
             return Err(Failure::new(
                 FailureKind::Refused,
                 format!(
@@ -1006,12 +1027,15 @@ impl OperationTable {
         };
         let answer = tokio::select! {
             biased;
-            _ = cancellation.cancelled() => Answer::error(Failure::new(FailureKind::Cancelled, "request cancelled")),
-            _ = wait_deadline => timeout_answer(&request, &progress),
+            _ = cancellation.cancelled() => Err(Failure::new(FailureKind::Cancelled, "request cancelled")),
+            _ = wait_deadline => Ok(timeout_answer(&request, &progress)),
             answer = operation.execute(request.arguments.clone(), context) => answer,
         };
         drop(guard);
-        self.checked_answer(answer, &description.spec)
+        match answer {
+            Ok(answer) => self.checked_answer(answer, &description.spec),
+            Err(failure) => Answer::error(failure),
+        }
     }
     /// Open a stream row. Its events arrive until the stream ends, the
     /// caller drops `Events`, or `cancellation` fires; streams have no

@@ -1,0 +1,16 @@
+[package]
+name = "historical-query-format-v1"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Frozen authored query format 1 decoding and original identity"
+
+[dependencies]
+blake3 = "1"
+jiff = { version = "0.2", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"

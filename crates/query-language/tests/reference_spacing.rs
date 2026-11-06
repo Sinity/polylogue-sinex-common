@@ -94,9 +94,16 @@ fn reference_colon_spacing_preserves_identity_and_canonical_format() {
 fn declared_builtin_names_are_case_insensitive_but_fields_and_text_are_exact() {
     let catalog = catalog();
     for name in FUNCTIONS {
-        let lower = parse(&format!("events | group by {name}(when)"), &catalog).unwrap();
+        let arguments = match *name {
+            "case_eq" => "when,when,when",
+            "glob" => "source,source",
+            "text" => "source",
+            "abs" => "10",
+            _ => "when",
+        };
+        let lower = parse(&format!("events | group by {name}({arguments})"), &catalog).unwrap();
         let upper = parse(
-            &format!("events | group by {}(when)", name.to_uppercase()),
+            &format!("events | group by {}({arguments})", name.to_uppercase()),
             &catalog,
         )
         .unwrap();

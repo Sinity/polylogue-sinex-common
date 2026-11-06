@@ -196,8 +196,10 @@ pub fn parse(text: &str, catalog: &Catalog) -> Result<Query, Error> {
                     break;
                 }
                 match parse_once(&corrected, catalog) {
-                    Ok(_) => {
-                        error.suggestion = Some(corrected);
+                    Ok(query) => {
+                        if crate::bind::check_parsed(&query, catalog).is_ok() {
+                            error.suggestion = Some(corrected);
+                        }
                         break;
                     }
                     Err(next) => candidate = next.suggestion,
@@ -243,6 +245,8 @@ fn parse_internal(text: &str, catalog: &Catalog, capture_types: bool) -> Result<
 #[derive(Clone, PartialEq, Eq)]
 struct Scope {
     unit: String,
+    // Native field ownership survives grouping; the resulting row domain does not.
+    row_domain: Option<String>,
     /// The visible columns after a grouping, projection or aggregate; None
     /// means every field of the unit or output, plus `extra`.
     columns: Option<BTreeSet<String>>,
@@ -263,6 +267,7 @@ struct Scope {
 impl Scope {
     fn new(unit: String) -> Self {
         Self {
+            row_domain: Some(unit.clone()),
             unit,
             columns: None,
             extra: BTreeSet::new(),
@@ -381,7 +386,12 @@ impl Parser<'_> {
             .ok_or_else(|| self.unknown_unit(&t))
     }
     fn unknown_unit(&self, t: &Token) -> Error {
-        let names: Vec<&str> = self.catalog.units.iter().map(|u| u.name.as_str()).collect();
+        let names: Vec<&str> = self
+            .catalog
+            .units
+            .iter()
+            .flat_map(|unit| std::iter::once(unit.name.as_str()).chain(unit.singular.as_deref()))
+            .collect();
         self.near_miss(
             t,
             format!("`{}` is not a unit", t.text),
@@ -607,7 +617,15 @@ impl Parser<'_> {
         }
         scope.patterns = match &source {
             Source::Unit { condition, .. } => Some(patterns(condition.as_ref())),
-            Source::Saved { .. } | Source::Result { .. } => None,
+            Source::Saved { condition, .. } => self
+                .catalog
+                .source_output(&source)
+                .and_then(|output| output.match_units.clone())
+                .map(|mut inherited| {
+                    inherited.extend(patterns(condition.as_ref()));
+                    inherited
+                }),
+            Source::Result { .. } => None,
         };
         match &source {
             Source::Unit {
@@ -676,6 +694,7 @@ impl Parser<'_> {
             _ => None,
         };
         scope.output = self.catalog.source_output(source).cloned().map(Arc::new);
+        scope.row_domain = scope.output.as_ref().and_then(|output| output.unit.clone());
         if let Some(unit) = scope
             .output
             .as_ref()
@@ -716,6 +735,8 @@ impl Parser<'_> {
             output.main_time.clone()
         } else if scope.columns_unknown {
             Some("$unknown_main_time".into())
+        } else if scope.row_domain.is_none() {
+            None
         } else {
             self.catalog
                 .unit(&scope.unit)
@@ -777,18 +798,6 @@ impl Parser<'_> {
         }
         Ok(join_conditions(conditions, true))
     }
-    /// Attach a corrected query only when it parses and binds as given; a
-    /// refusal without a runnable correction carries none.
-    fn suggest(&self, error: Error, corrected: String) -> Error {
-        if parse(&corrected, self.catalog)
-            .and_then(|query| crate::bind::bind(&query, self.catalog))
-            .is_ok()
-        {
-            error.suggestion(corrected)
-        } else {
-            error
-        }
-    }
     /// A lowercase `and`, `or` or `not` between two conditions would silently
     /// become a search word; the capitalised operator is the suggestion.
     fn refuse_lowercase_boolean(&self) -> Result<(), Error> {
@@ -814,8 +823,7 @@ impl Parser<'_> {
         )
         .length(t.text.len())
         .hint("quote the word to search for it");
-        // Suggest the capitalised query only when it is itself a query.
-        Err(self.suggest(error, self.replace(t.span, &t.text.to_uppercase())))
+        Err(error.suggestion(self.replace(t.span, &t.text.to_uppercase())))
     }
     fn atom(&mut self, scope: &Scope) -> Result<Condition, Error> {
         let start = self.pos();
@@ -976,7 +984,7 @@ impl Parser<'_> {
                     start,
                 )
                 .length(end - start);
-                return Err(self.suggest(error, self.replace(Span { start, end }, &joined)));
+                return Err(error.suggestion(self.replace(Span { start, end }, &joined)));
             }
             self.at = resume;
         }
@@ -1122,13 +1130,22 @@ impl Parser<'_> {
                 },
             ));
         }
-        if self.catalog.is_reference(&token.text) {
-            return Ok(self.cond(
-                start,
-                ConditionKind::Reference {
-                    reference: token.text.clone(),
-                },
-            ));
+        let quoted_reference = raw
+            .is_empty()
+            .then(|| self.peek())
+            .flatten()
+            .filter(|value| value.quoted)
+            .map(|value| format!("{field}:{}", value.text));
+        let reference = quoted_reference.as_deref().unwrap_or(&token.text);
+        if self.catalog.is_reference(reference)
+            && (self.scope_field(scope, field).is_none()
+                || self.catalog.reference_overrides_field(reference))
+        {
+            let reference = reference.to_owned();
+            if quoted_reference.is_some() {
+                self.at += 1;
+            }
+            return Ok(self.cond(start, ConditionKind::Reference { reference }));
         }
         let list = RankList::ALL
             .into_iter()
@@ -1247,13 +1264,10 @@ impl Parser<'_> {
                 "a set is written (a|b) and matched with `:`",
                 open.span.start,
             );
-            return Err(self.suggest(
-                error,
-                self.replace(
-                    Span { start, end },
-                    &format!("{name}:{}", value_surface(&set)),
-                ),
-            ));
+            return Err(error.suggestion(self.replace(
+                Span { start, end },
+                &format!("{name}:{}", value_surface(&set)),
+            )));
         }
         let right = if let Some(t) = self.peek()
             && !t.quoted
@@ -1403,6 +1417,92 @@ impl Parser<'_> {
                     ),
                     t.span.start,
                 ));
+            }
+            if function.name == "abs"
+                && !matches!(
+                    self.expression_info(scope, &arguments[0]).field.kind,
+                    FieldKind::Integer
+                        | FieldKind::Number
+                        | FieldKind::Money
+                        | FieldKind::Duration
+                        | FieldKind::Json
+                )
+                && !matches!(
+                    &arguments[0],
+                    Expression::Value {
+                        value: Value::Unknown
+                    }
+                )
+            {
+                return Err(Error::new(
+                    ErrorKind::BadValue,
+                    "abs takes a linear number, money or duration",
+                    t.span.start,
+                ));
+            }
+            if matches!(function.name.as_str(), "glob" | "text") {
+                for argument in &arguments {
+                    if !matches!(
+                        self.expression_info(scope, argument).field.kind,
+                        FieldKind::Text
+                            | FieldKind::Exact
+                            | FieldKind::Substring
+                            | FieldKind::Words
+                            | FieldKind::Subtree
+                            | FieldKind::Reference
+                            | FieldKind::Json
+                    ) {
+                        return Err(Error::new(
+                            ErrorKind::BadValue,
+                            format!("{} takes text values", function.name),
+                            t.span.start,
+                        ));
+                    }
+                }
+            }
+            if function.name == "case_eq" {
+                let (first, rest) = arguments.split_at_mut(1);
+                let (left, right) = (&mut first[0], &mut rest[0]);
+                match (left, right) {
+                    (left, Expression::Value { value }) => {
+                        self.normalize_expression_value(scope, left, value);
+                        self.check_expression_value(scope, left, value, t.span.start)?;
+                    }
+                    (Expression::Value { value }, right) => {
+                        self.normalize_expression_value(scope, right, value);
+                        self.check_expression_value(scope, right, value, t.span.start)?;
+                    }
+                    _ => {}
+                }
+                let left = &arguments[0];
+                let right = &arguments[1];
+                let left_kind = self.expression_info(scope, left).field.kind;
+                let right_kind = self.expression_info(scope, right).field.kind;
+                let contextual = |expression: &Expression, own: &FieldKind, other: &FieldKind| {
+                    if let Expression::Value { value } = expression {
+                        if matches!(value, Value::Unknown) {
+                            FieldKind::Json
+                        } else if matches!(
+                            other,
+                            FieldKind::Text
+                                | FieldKind::Reference
+                                | FieldKind::Bool
+                                | FieldKind::Json
+                                | FieldKind::List(_)
+                        ) {
+                            other.clone()
+                        } else {
+                            typing::operand_kind(expression, other)
+                        }
+                    } else {
+                        own.clone()
+                    }
+                };
+                self.check_comparable(
+                    &contextual(left, &left_kind, &right_kind),
+                    &contextual(right, &right_kind, &left_kind),
+                    t.span.start,
+                )?;
             }
             return Ok(Expression::Function {
                 name: function.name,
@@ -1674,6 +1774,29 @@ impl Parser<'_> {
         let relation = OrderRelation::parse(&word.text).expect("checked by the caller");
         let (query, inner) = self.query_in(scope)?;
         let (within, at, order_scope) = self.order_options(relation, scope, &inner, start)?;
+        let pick = if self.take("pick") {
+            self.expect("first")?;
+            self.expect("by")?;
+            let candidate = self.witness_scope(&inner, within.as_ref());
+            let mut keys = Vec::new();
+            loop {
+                let expression = self.expression(&candidate, Place::Condition)?;
+                let descending = self.take("desc");
+                if !descending {
+                    self.take("asc");
+                }
+                keys.push(SortKey {
+                    expression,
+                    descending,
+                });
+                if !self.take(",") {
+                    break;
+                }
+            }
+            WitnessChoice::FirstBy { keys }
+        } else {
+            WitnessChoice::Nearest
+        };
         self.inner_scopes.insert(start, inner);
         Ok(self.cond(
             start,
@@ -1683,8 +1806,35 @@ impl Parser<'_> {
                 within,
                 at,
                 scope: order_scope,
+                pick,
             },
         ))
+    }
+    fn witness_scope(&self, inner: &Scope, within: Option<&Distance>) -> Scope {
+        let mut candidate = inner.clone();
+        for (name, kind) in [
+            ("match.id", FieldKind::Reference),
+            ("match.coarse", FieldKind::Bool),
+            (
+                crate::catalog::MATCH_DISTANCE,
+                if matches!(within, Some(Distance::Steps { .. })) {
+                    FieldKind::Integer
+                } else {
+                    FieldKind::Duration
+                },
+            ),
+        ] {
+            self.add_generated(
+                &mut candidate,
+                Field {
+                    name: name.into(),
+                    kind,
+                    ..Field::default()
+                },
+                Origin::Generated,
+            );
+        }
+        candidate
     }
     /// `[within DISTANCE] [at when|start|end] [in SCOPE]` after an order relation.
     fn order_options(
@@ -1701,20 +1851,30 @@ impl Parser<'_> {
         };
         // `at` is a time point only when one follows; otherwise it may be a
         // field named `at` in the next condition.
-        let point_follows = ["when", "start", "end"]
-            .iter()
-            .any(|point| self.next_is(1, point));
+        let point_follows = [
+            "when",
+            "start",
+            "end",
+            "match.when",
+            "match.start",
+            "match.end",
+        ]
+        .iter()
+        .any(|point| self.next_is(1, point));
         let at = if self.is("at") && point_follows {
             self.at += 1;
             let point = self.next()?;
-            match point.text.as_str() {
+            match point.text.to_ascii_lowercase().as_str() {
                 "when" => TimePoint::When,
                 "start" => TimePoint::Start,
                 "end" => TimePoint::End,
+                "match.when" => TimePoint::MatchWhen,
+                "match.start" => TimePoint::MatchStart,
+                "match.end" => TimePoint::MatchEnd,
                 _ => {
                     return Err(Error::new(
                         ErrorKind::BadValue,
-                        "at takes when, start or end",
+                        "at takes when, start, end, match.when, match.start or match.end",
                         point.span.start,
                     ));
                 }
@@ -1785,14 +1945,9 @@ impl Parser<'_> {
     /// One top-level order relation in a relation's condition exposes its
     /// nearest inner row as `match.F` and the signed distance as `match.distance`.
     fn expose_order_match(&mut self, scope: &mut Scope, condition: &Condition) {
-        let mut orders = Vec::new();
-        top_level(condition, &mut |c| {
-            if let ConditionKind::Order { within, .. } = &c.kind {
-                orders.push((c.span.start, within.clone()));
-            }
-        });
-        if let [(start, within)] = orders.as_slice()
-            && let Some(inner) = self.inner_scopes.get(start).cloned()
+        if let Some(order) = condition.exposed_order()
+            && let ConditionKind::Order { within, .. } = &order.kind
+            && let Some(inner) = self.inner_scopes.get(&order.span.start).cloned()
         {
             self.expose_inner(scope, &inner, within.as_ref());
         }
@@ -2099,6 +2254,9 @@ impl Parser<'_> {
         let kind = match word.as_str() {
             "where" => {
                 let condition = self.condition(scope)?;
+                if let Some(known) = &mut scope.patterns {
+                    known.extend(patterns(Some(&condition)));
+                }
                 self.expose_order_match(scope, &condition);
                 TransformKind::Where { condition }
             }
@@ -2121,10 +2279,7 @@ impl Parser<'_> {
                                 end: next.span.end,
                             };
                             let value = &self.text[next.span.start..next.span.end];
-                            self.suggest(
-                                error,
-                                self.replace(bound, &format!("where {word}:{value}")),
-                            )
+                            error.suggestion(self.replace(bound, &format!("where {word}:{value}")))
                         }
                         None => error,
                     },
@@ -2228,6 +2383,7 @@ impl Parser<'_> {
                     matches!(&key.expression, Expression::Function { name, .. }
                         if crate::catalog::TIME_BUCKETS.contains(&name.as_str()))
                 });
+                scope.patterns = Some(Vec::new());
                 TransformKind::Group { keys }
             }
             "agg" => TransformKind::Aggregate {
@@ -2256,9 +2412,13 @@ impl Parser<'_> {
                     count: self.number()?,
                 }
             }
-            "first" => TransformKind::First {
-                count: self.number()?,
-            },
+            "first" => {
+                let count = self.number()?;
+                if let Some(input) = scope.group_input.take() {
+                    *scope = (*input).clone();
+                }
+                TransformKind::First { count }
+            }
             "distinct" => TransformKind::Distinct,
             "matches" => {
                 self.matches(scope, start)?;
@@ -2453,6 +2613,12 @@ impl Parser<'_> {
         };
         if matches!(
             kind,
+            TransformKind::Group { .. } | TransformKind::Aggregate { .. }
+        ) {
+            scope.row_domain = None;
+        }
+        if matches!(
+            kind,
             TransformKind::Group { .. }
                 | TransformKind::Aggregate { .. }
                 | TransformKind::Fields { .. }
@@ -2548,6 +2714,14 @@ impl Parser<'_> {
     /// and the step row's fields as `step.F`.
     fn matches(&mut self, scope: &mut Scope, start: usize) -> Result<(), Error> {
         let Some(patterns) = scope.patterns.clone() else {
+            // Unknown saved outputs are syntax until the caller supplies their
+            // immutable schema. Binding reparses and validates the actual steps.
+            if scope.columns_unknown {
+                *scope = Scope::new("$matches".into());
+                scope.columns_unknown = true;
+                scope.patterns = None;
+                return Ok(());
+            }
             return Err(Error::new(
                 ErrorKind::InvalidQuery,
                 "matches expands an exists or seq written in this query; a saved or kept source hides its own",
@@ -2575,6 +2749,7 @@ impl Parser<'_> {
             }
         };
         let parent = scope.unit.clone();
+        let parent_fields = self.visible(scope);
         let step_fields: Vec<Field> = self
             .catalog
             .unit(&unit)
@@ -2598,6 +2773,10 @@ impl Parser<'_> {
                 },
                 Origin::Generated,
             );
+        }
+        for mut info in parent_fields {
+            info.field.name = format!("parent.{}", info.field.name);
+            self.add_generated(scope, info.field, info.origin);
         }
         for mut field in step_fields {
             let origin = Origin::Catalog {
@@ -2728,6 +2907,7 @@ impl Parser<'_> {
                 break;
             }
         }
+        scope.patterns = Some(Vec::new());
         Ok(aggregates)
     }
     fn extension_arguments(

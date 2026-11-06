@@ -58,6 +58,10 @@ meaning in the other.
 - Percentiles are nearest-rank.
 - Cursors are sealed keyset cursors.
 
+Correction paths produce edits to the original question. The outer parser chains
+those edits until the whole question parses, then checks the resulting tree
+against the catalog once. An intermediate correction need not be runnable.
+
 There is no command-name typo guessing. Ruling, 2026-07-05: "typo hint is
 actually unnecessary given we do not want bare query support anyway"
 (cc:900c6128-99a3-4986-8ed4-d5d7aacb38fe:e5f52f29-85e8-4cfc-9088-b5ea79b7bccc).
@@ -87,6 +91,7 @@ atom      := field ":" value | field cmp value | field "~" text | field "^" text
 value     := word | "quoted" | "(" v "|" v … ")" | "*" | "unknown" | "known" | "$" param
 cmp       := "=" | "!=" | "<" | "<=" | ">" | ">="
 order     := "near" | "before" | "after" | "during" | "containing"
+point     := "when" | "start" | "end" | "match.when" | "match.start" | "match.end"
 distance  := duration | N "steps"
 attach    := "with" child "(" fields ")" ["[" cond ["," ("first:"|"last:") N] "]"] { "," … }
 transform := "where" cond | "sort by" keys | "limit" N | "offset" N | "first" N ["by" keys]
@@ -108,7 +113,9 @@ recursion, not on the size of a query.
   `field >= N` as the suggestion.
 - **Default unit.** Without a unit, the unit is the product's default
   (Polylogue `sessions`, Sinex `events`). A mixed query names every unit.
-- **Namespaces.** Inside a product its own units are unprefixed; the other
+- **Namespaces.** Each catalog declares its product namespace and may declare
+  a unit's singular form. Both resolve to the canonical unit name, preserving
+  question identity. Inside a product its own units are unprefixed; the other
   product's units carry `pl.` or `sx.`.
 
 ### Match operators
@@ -140,11 +147,22 @@ Four operators, each with one meaning in both products:
   `fields`, with dimensions checked at bind time: duration − duration is a
   duration, money / count is money, time − time is a duration, money +
   duration is refused. An unknown input makes the result unknown. Built-in
-  functions are the time buckets `hour`, `day`, `week`, `weekday`, `month`,
-  `month_day` and `year` on the logical day, and `len()`; a product adds its
+  `text(X)` reads an existing string as ordinary text, clearing reference,
+  path and closed-set meaning; unknown stays unknown. It never stringifies
+  numbers, booleans, times, lists or objects. `abs(X)` preserves a number, money or duration's dimension and propagates
+  unknown; affine time is refused. Other built-in functions are the time buckets `hour`, `day`, `week`, `weekday`, `month`,
+  `month_day` and `year` on the logical day, `len()`, and
+  `case_eq(a, b, value)` and `glob(text, pattern)`; a product adds its
   own functions as catalog extensions. Built-in function names are
   case-insensitive at their call position and stored under their declared
-  spelling (`DAY(when)` becomes `day(when)`).
+  spelling (`DAY(when)` becomes `day(when)`). `case_eq` returns `value` when
+  both comparison inputs are known and exactly equal, otherwise unknown. Its
+  result retains the third argument's kind and physical lineage, including
+  reference identity, time precision and discrete values. It composes with
+  aggregates, for example `min(case_eq(position, 1, step.command))`.
+  `glob` matches the whole text case-sensitively; `*` matches any sequence of
+  characters. Every other character is literal, including `%`, `_` and
+  backslash. Missing text or pattern produces unknown.
 
 ## Meaning
 
@@ -183,13 +201,14 @@ Four operators, each with one meaning in both products:
 | `sort by K [asc\|desc], …` | total order; unknowns last; the row identity is the final key. `sort by random[(seed)]`; `sort by rank` names the fused rank |
 | `limit N`, `offset N` | selection; part of the question; no maximum |
 | `first N [by K]` | per-group selection after `group by` |
+| `group by K, … \| first N` | the first N original input rows of each group in their input order; their original fields and provenance remain available |
 | `distinct [by F]` | deduplication over the declared identity or a field |
 | `group by K, …` | grouped relation; keys are fields, expressions or time buckets |
 | `agg A, …`, `count` | `count`, `sum(F)`, `avg(F)`, `min(F)`, `max(F)`, `pNN(F)`, `count_distinct(F)`, `histogram(F)`, `corr(F, G)` and `covered(start, end)`, the length of the union of the intervals, so overlapping intervals are not counted twice. Each reports `unknown_F` and `partial_F` |
 | `fill` | after a time-bucketed group: every bucket of a finite range, each with the product's coverage state for it (below) |
 | `fields F [as N], E as N, …` | projection and computed columns |
 | `with CHILD(fields)[cond, first:k\|last:k]` | attached child lists; never changes the parents |
-| `matches` | one row per step of each match of the relation's one top-level `exists` or `seq`: `parent` (the row that matched), `match` (its number within the parent), `position` (the step's place in the match), `step` (a reference to the matched row) and the step row's fields as `step.F`. A relation without such a pattern is refused, and one with two is ambiguous; a saved or kept source hides its own, so `matches` follows the `exists` or `seq` it expands |
+| `matches` | one row per step of each match of the relation's one top-level `exists` or `seq`: `parent` (the row that matched), `match` (its number within the parent), `position` (the step's place in the match), `step` (a reference to the matched row) and the step row's fields as `step.F`. A relation without such a pattern is refused, and one with two is ambiguous; a saved definition can carry its captured top-level match units in its declared semantic output; without that provenance it is refused. A kept result remains opaque and reads its retained `.matches` part |
 | `UNIT [where C]` | switch to the related rows of another unit (`messages … \| sessions` lifts to the containing sessions) |
 | `union (Q)`, `intersect (Q)`, `except (Q)` | set algebra over one unit, or over identical projected schemas |
 | `fuse (Q)` | adds Q's order as one more ranked list without adding rows |
@@ -220,10 +239,12 @@ DISTANCE := DURATION | N steps
 
 - **As a condition** it is a semijoin: an outer row is kept when at least one
   inner row stands in the relation, so matches never multiply rows. It
-  exposes `match.` (the nearest inner row, ties broken by the inner row's
-  identity) and `match.distance`, the signed distance in the distance's unit. An outer row whose
+  exposes the selected witness as `match.` and `match.distance`, the signed distance in the distance's unit. An outer row whose
   time or position is unknown is unknown. It composes with `NOT` and `OR`
-  like any condition.
+  like any condition. Every operand reads the immutable incoming row. After
+  the whole predicate, exactly one positive order under top-level `AND`
+  exposes its witness. Multiple orders, and orders under `OR` or `NOT`,
+  retain any prior match namespace instead of replacing it.
 - **As a transform,** `| join REL (QUERY) within D` returns one row per
   matching pair; the change of grain shows in the query and in its reading.
 - **Steps** count positions in a unit's declared **order scope**: the
@@ -237,9 +258,32 @@ DISTANCE := DURATION | N steps
   are refused, as is a unit without an order scope. `near` needs a distance.
 - **Time** distance crosses scopes, units and products. Spans are
   half-open; a point inside a span is distinct from two spans overlapping.
+  `at when` and `at start` select the outer row’s start; `at end` selects
+  its end. The inner row retains its native period and start. The signed
+  distance is the inner start minus that outer anchor. Choosing an anchor
+  does not turn a coarse period into a point or bypass the whole-period
+  window requirement.
 - `seq` stays for an ordered pattern of three or more steps; its steps may be
   any units in the scope's order, and a step may carry `within N steps` or
   `within D`.
+
+An order condition can append `pick first by EXPR [asc|desc], ...` to choose
+its exposed witness. Without a pick clause it chooses the nearest witness
+(precise before coarse, distance, then identity). Explicit keys use the inner
+query's actual output; unknown keys sort last in either direction, and identity
+breaks ties. Inner query ordering does not change witness selection. This
+choice changes neither semijoin membership nor outer identity and ordering;
+order joins still return all matching pairs.
+
+Within a pick clause, `match.id`, `match.distance` and `match.coarse` describe
+the current candidate, shadowing any prior match metadata on the inner row.
+Distance is the signed selected-anchor offset (a duration, or a step count);
+it is available to pick keys even without an explicit window. These local
+metadata fields do not expand the ordinary selected output schema.
+
+`matches` retains the actual outer relation's declared fields under `parent.`
+with their original types and provenance. It adds no public `parent.id` when
+the input declares none; a projected parent offers only its actual declared output.
 
 ## Ranking
 
@@ -285,6 +329,13 @@ product supplies its lists.
   scalars canonicalised by field type, commutative operands sorted, spans
   and spelling dropped, and relative times kept as written (`since:7d`, not
   the instant). Numeric-looking text stays text.
+The normal form has an explicit semantic encoding, independent of Rust AST
+serialization. Constructs with unchanged meanings retain their original identity
+encoding. New meanings, including one row per matched step and projections at an
+intermediate relation boundary, have distinct encodings. Source spans, known-output
+markers and display spellings are absent; parameter declarations remain part of
+the question.
+
 - **`query:<hash>`** is the BLAKE3 of the normal form and its declared
   parameter types. One algorithm serves both products, and a mixed query has
   one hash. A name or a transport option is never part of the question.
@@ -488,6 +539,11 @@ does not encrypt.
 
 - Only the page size may change between pages. The count is computed once
   per question and read position and carried in the cursor.
+- A product resolving an immutable recorded run may authenticate the token
+  before lookup with `CursorSeal::authenticate`. The resulting proof exposes
+  only captured context. It must then bind to the question established by the
+  stored object and validate the current request, grants, versions and read
+  positions before obtaining a continuation. Captured context grants no authority.
 - A cursor from a different question is `invalid_query`. A cursor whose read
   context the product no longer serves (a rebuilt index, a ranked cursor
   after the ranking data changed) is `stale_cursor`, never a silent restart.
@@ -521,7 +577,7 @@ own.
 ## Laws
 
 The crate's suite runs against both catalogs, through each product's real
-compiler; each product also runs its own laws. The reference evaluator, a
+compiler; each product also runs its own laws. The reusable fixtures name outer and child numeric fields separately and put their source order in the query explicitly, so a product retains its own ordinary listing order. The reusable fixture time ticks are seconds, matching the explicit duration units in their queries; an adapter converts those ticks to its native timestamp representation. The reference evaluator, a
 synthetic-row oracle, is the independent answer for relational mechanics,
 order relations, ranking and federation; it refuses storage, time-bucket and
 extension mechanics that need a product.
@@ -635,3 +691,13 @@ Cross-system, run by Polylogue's executor against a devkit Sinex:
   as `polylogue` given it.
 - **mixed-typed-binds**: bind values cross only as typed parameters; a value
   containing query punctuation stays one value.
+
+`at match.when` selects the matched row's occurrence evidence, retaining any
+uncertainty. `at match.start` and `at match.end` select independently declared
+state endpoints; an occurrence's uncertainty bounds are not state endpoints.
+An open state has no selected end. With matched selectors, `during` tests the
+outer occurrence against the inner declared lifetime and orders states by their
+start; `containing` tests the selected inner evidence against the outer declared
+lifetime. State ends carry their declared inclusion rule. Products refuse a
+selector when their source has no such capability; missing evidence in an
+otherwise capable source remains unknown.

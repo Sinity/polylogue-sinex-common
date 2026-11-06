@@ -177,7 +177,9 @@ pub(crate) fn tool_input(forms: &Forms, tool: &str) -> Result<Value, Failure> {
     );
     for option in &forms.options {
         let schema = match option {
-            RequestOption::BudgetTokens => json!({"type": "integer"}),
+            RequestOption::BudgetTokens => {
+                json!({"type": ["integer", "null"], "description": "tokens; null: unlimited"})
+            }
             RequestOption::Cursor => json!({"type": "string"}),
             RequestOption::Fresh => json!({"type": "boolean"}),
             RequestOption::Format => json!({"enum": ["text", "json"]}),
@@ -202,7 +204,7 @@ struct ToolCall {
     #[serde(default)]
     deadline: Deadline,
     #[serde(default)]
-    budget_tokens: Option<u32>,
+    budget_tokens: crate::TokenBudget,
     #[serde(default)]
     cursor: Option<String>,
     #[serde(default)]
@@ -240,8 +242,14 @@ impl Forms {
                 call.insert("deadline".into(), ms.into());
             }
         }
-        if let Some(budget) = request.budget_tokens {
-            call.insert("budget_tokens".into(), budget.into());
+        match request.budget_tokens {
+            crate::TokenBudget::Default => {}
+            crate::TokenBudget::Unlimited => {
+                call.insert("budget_tokens".into(), Value::Null);
+            }
+            crate::TokenBudget::Tokens(n) => {
+                call.insert("budget_tokens".into(), n.into());
+            }
         }
         if let Some(cursor) = &request.cursor {
             call.insert("cursor".into(), cursor.clone().into());
@@ -285,10 +293,14 @@ impl Forms {
     /// The lines after an answer's value: how much was shown, facets,
     /// coverage that is not complete, what was left out, notes and next
     /// steps. Each fact appears once; rows are never repeated here.
-    pub(crate) fn footer(&self, via: Via, answer: &Answer<Value>) -> String {
-        let envelope = &answer.envelope;
+    pub(crate) fn footer<T>(
+        &self,
+        via: Via,
+        outcome: &Outcome<T>,
+        envelope: &crate::Envelope,
+    ) -> String {
         let mut text = String::new();
-        if let Outcome::Error(error) = &answer.outcome {
+        if let Outcome::Error(error) = outcome {
             match (error.caret(), error.position) {
                 (Some(caret), _) => {
                     text.push_str(&terminal_text(caret));
@@ -321,7 +333,7 @@ impl Forms {
                 ));
             }
         }
-        if let Outcome::Degraded { missing, .. } = &answer.outcome {
+        if let Outcome::Degraded { missing, .. } = outcome {
             text.push_str(&format!(
                 "missing: {}\n",
                 terminal_text(&missing.join("; "))
@@ -346,22 +358,16 @@ impl Forms {
             ));
         }
         for source in envelope.coverage.iter().filter(|s| !s.is_complete()) {
-            let state = serde_json::to_value(&source.state).expect("coverage serializes");
-            let mut words = vec![state["state"].as_str().unwrap_or_default().to_owned()];
-            if let Some(why) = state
-                .get("reason")
-                .or(state.get("cause"))
-                .and_then(Value::as_str)
-            {
+            let mut words = vec![source.state.state().to_owned()];
+            if let Some(why) = source.state.detail() {
                 words.push(format!("({why})"));
             }
             for interval in &source.not_complete {
-                let state = serde_json::to_value(&interval.state).expect("coverage serializes");
                 words.push(format!(
                     "{}–{} {}",
                     interval.start,
                     interval.end,
-                    state["state"].as_str().unwrap_or_default()
+                    interval.state.state()
                 ));
             }
             text.push_str(&format!(
@@ -569,14 +575,6 @@ impl OperationTable {
             format: call.format,
         })
     }
-    /// The token budget a request's answer text is held to: its own, else its
-    /// row's default; none when neither says.
-    pub fn request_budget(&self, request: &RunnableRequest) -> Option<u32> {
-        request.budget_tokens.or_else(|| {
-            self.spec_named(&request.operation)
-                .and_then(|spec| spec.default_budget_tokens)
-        })
-    }
     /// An answer as text for a person or model: the value's rendering
     /// (nothing with `format: json`, whose rows travel as data, or for
     /// `operation` empty) and the envelope's lines, measured after the
@@ -584,12 +582,9 @@ impl OperationTable {
     /// this, the command line and MCP here and a product's client for an
     /// answer it read from the socket.
     ///
-    /// Text over the request's budget is fitted, never failed: whole lines
-    /// are dropped from the end of the value's text and named in the
-    /// envelope as left out, with the request that reads them all (its
-    /// budget lifted), until the text fits or no value line is left. The
-    /// outcome never changes, so a committed write still reads as done.
-    /// `used_tokens` is what the text measures.
+    /// Budget fitting belongs to the operation while its logical entries are
+    /// still typed (`RequestContext::fit`). Rendering preserves those entries
+    /// and measures the final text; it never cuts the rendered value again.
     pub fn render_answer(
         &self,
         via: Via,
@@ -608,35 +603,9 @@ impl OperationTable {
                 .render_text(operation, &answer)
                 .unwrap_or_else(|failure| format!("error (io): {}\n", failure.message)),
         };
-        let lines: Vec<&str> = full.split_inclusive('\n').collect();
-        let budget = request.and_then(|request| self.request_budget(request));
-        let measure = |answer: &Answer<Value>, kept: usize| {
-            let value: String = lines[..kept].concat();
-            let footer = self.forms().footer(via, answer);
-            let used = approximate_tokens(&format!("{value}{footer}"));
-            (value, footer, used)
-        };
-        let (mut value_text, mut footer, mut used) = measure(&answer, lines.len());
-        if let (Some(budget), Some(request)) = (budget, request)
-            && used > budget
-            && !answer.is_error()
-        {
-            let mut lifted = request.clone();
-            lifted.budget_tokens = None;
-            let at = answer.envelope.left_out.len();
-            for kept in (0..lines.len()).rev() {
-                answer.envelope.left_out.truncate(at);
-                answer.envelope.left_out.push(LeftOut {
-                    what: "lines of this answer".into(),
-                    count: (lines.len() - kept) as u64,
-                    expand: Some(lifted.clone()),
-                });
-                (value_text, footer, used) = measure(&answer, kept);
-                if used <= budget {
-                    break;
-                }
-            }
-        }
+        let value_text = full;
+        let footer = self.forms().footer(via, &answer.outcome, &answer.envelope);
+        let used = approximate_tokens(&format!("{value_text}{footer}"));
         answer.envelope.used_tokens = Some(used);
         RenderedAnswer {
             answer,

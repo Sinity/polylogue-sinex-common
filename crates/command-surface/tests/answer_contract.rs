@@ -33,7 +33,11 @@ impl Operation for Search {
             )
         }
     }
-    fn execute(&self, request: Find, context: RequestContext) -> OperationFuture<'_, Answer<Rows>> {
+    fn execute(
+        &self,
+        request: Find,
+        _context: RequestContext,
+    ) -> OperationFuture<'_, Answer<Rows>> {
         Box::pin(async move {
             let rows = Rows {
                 rows: vec!["row-one-unique".into()],
@@ -71,46 +75,6 @@ impl Operation for Search {
                         .map(|n| format!("row {n} of a long answer"))
                         .collect(),
                 }),
-                "packed" => {
-                    // A pack fitted the way an operation should: through the
-                    // context, with its envelope as it stands.
-                    let mut envelope = Envelope {
-                        count: Some(Count::exact(40)),
-                        coverage: vec![SourceCoverage {
-                            source: "shell".into(),
-                            state: CoverageState::Gap {
-                                reason: "overflow".into(),
-                            },
-                            not_complete: vec![],
-                        }],
-                        ..Envelope::default()
-                    };
-                    let section = Section {
-                        title: "rows".into(),
-                        status: SectionStatus::Complete,
-                        pending: false,
-                        entries: (0..40)
-                            .map(|n| {
-                                Entry::new(format!("row {n} with a few words"), format!("ref:{n}"))
-                            })
-                            .collect(),
-                        expand: Some(RunnableRequest::new(
-                            "find",
-                            json!({"query": "packed"}),
-                            "more",
-                        )),
-                    };
-                    let fitted = context.fit(vec![section], context.budget(60, None), &envelope);
-                    envelope.shown =
-                        Some(fitted.sections.iter().map(|s| s.entries.len() as u64).sum());
-                    envelope.left_out = fitted.left_out;
-                    Answer {
-                        outcome: Outcome::Ok(Rows {
-                            rows: fitted.text.lines().map(str::to_owned).collect(),
-                        }),
-                        envelope,
-                    }
-                }
                 "unknown" => {
                     let query = "sessions where reop:sinex";
                     let error = query_language::Error::new(
@@ -146,7 +110,74 @@ impl Operation for Search {
     }
 }
 
+/// An operation fits its typed logical entries before the transport renders them.
+struct PackingSearch;
+impl Operation for PackingSearch {
+    type Request = Find;
+    type Response = Vec<Section>;
+    fn spec(&self) -> OperationSpec {
+        let mut spec = Search.spec();
+        spec.default_budget_tokens = Some(120);
+        spec
+    }
+    fn execute(
+        &self,
+        request: Find,
+        context: RequestContext,
+    ) -> OperationFuture<'_, Answer<Vec<Section>>> {
+        Box::pin(async move {
+            let count = if request.query == "long" { 100 } else { 40 };
+            let degraded = request.query == "degraded";
+            let cap = (request.query == "capped").then_some(180);
+            let envelope = Envelope {
+                count: Some(Count::exact(count)),
+                coverage: vec![SourceCoverage {
+                    source: "shell".into(),
+                    state: CoverageState::Gap {
+                        reason: "overflow".into(),
+                    },
+                    not_complete: vec![],
+                }],
+                ..Envelope::default()
+            };
+            let section = Section {
+                title: "rows".into(),
+                status: SectionStatus::Complete,
+                pending: false,
+                entries: (0..count)
+                    .map(|n| {
+                        let mut lines = vec![format!("row {n} of a long answer")];
+                        if request.query == "long" {
+                            lines.push(format!("  detail {n} belongs to that row"));
+                        }
+                        Entry::with_lines(lines, vec![format!("ref:{n}")]).unwrap()
+                    })
+                    .collect(),
+                expand: Some(RunnableRequest::new(
+                    "find",
+                    json!({"query":request.query}),
+                    "more",
+                )),
+            };
+            let outcome = if degraded {
+                Outcome::Degraded {
+                    value: vec![section],
+                    missing: vec!["mail is offline".into()],
+                }
+            } else {
+                Outcome::Ok(vec![section])
+            };
+            context.fit(Answer { outcome, envelope }, context.budget(60, cap))
+        })
+    }
+    fn render_text(&self, sections: &Vec<Section>) -> String {
+        render_sections(sections)
+    }
+}
 fn table() -> OperationTable {
+    table_with(Search)
+}
+fn table_with(operation: impl Operation<Request = Find> + 'static) -> OperationTable {
     let mut table = OperationTable::new("example", Deadlines::default());
     for option in RequestOption::ALL {
         table.accept(option);
@@ -159,7 +190,7 @@ fn table() -> OperationTable {
             idempotent: true,
         })
         .unwrap();
-    table.register(Search).unwrap();
+    table.register(operation).unwrap();
     table
 }
 fn find(query: &str) -> RunnableRequest {
@@ -233,7 +264,7 @@ async fn text_answers_read_back() {
 
 #[tokio::test]
 async fn text_within_budget() {
-    let table = table();
+    let table = table_with(PackingSearch);
     let call = |query: &str, budget: u32| {
         table.mcp(
             json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
@@ -253,18 +284,30 @@ async fn text_within_budget() {
     assert!(text.contains("of at least 40"), "{text}");
     assert!(!text.contains("lines of this answer"), "{text}");
     assert_eq!(packed["structuredContent"]["left_out"][0]["what"], "rows");
-    // Text over its budget is fitted by whole lines and named as left out,
-    // never turned into a failure.
+    // The operation fits complete two-line entries. Rendering never cuts one
+    // of those entries or changes the structured shown count afterward.
     let over = call("long", 100).await["result"].clone();
     assert_eq!(over["isError"], false);
     assert_eq!(over["structuredContent"]["outcome"], "ok");
     let text = over["content"][0]["text"].as_str().unwrap();
     assert!(approximate_tokens(text) <= 100, "{text}");
-    assert!(text.starts_with("row 0 of a long answer\n"));
+    assert!(text.starts_with("## rows\nrow 0 of a long answer\n  detail 0 belongs to that row\n"));
     let left = &over["structuredContent"]["left_out"][0];
-    assert_eq!(left["what"], "lines of this answer");
+    assert_eq!(left["what"], "rows");
     assert!(left["count"].as_u64().unwrap() > 0);
-    assert!(left["expand"].get("budget_tokens").is_none());
+    assert_eq!(left["expand"]["budget_tokens"], Value::Null);
+    let shown = over["structuredContent"]["shown"].as_u64().unwrap();
+    assert_eq!(left["count"].as_u64().unwrap(), 100 - shown);
+    assert_eq!(
+        text.lines().filter(|line| line.starts_with("row ")).count() as u64,
+        shown
+    );
+    assert_eq!(
+        text.lines()
+            .filter(|line| line.starts_with("  detail "))
+            .count() as u64,
+        shown
+    );
     assert_eq!(
         over["structuredContent"]["used_tokens"],
         json!(approximate_tokens(text))
@@ -278,13 +321,16 @@ async fn text_within_budget() {
         )
         .await;
     assert_eq!(cli.exit_code, 0);
-    assert!(cli.stdout.starts_with("row 0 of a long answer\n"));
+    assert!(
+        cli.stdout
+            .starts_with("## rows\nrow 0 of a long answer\n  detail 0 belongs to that row\n")
+    );
     assert!(cli.stderr.contains("left out: "), "{}", cli.stderr);
     assert!(approximate_tokens(&cli.stdout) + approximate_tokens(&cli.stderr) <= 100);
     // A product's client renders an answer it read from the socket the
     // same way.
     let request = RunnableRequest {
-        budget_tokens: Some(100),
+        budget_tokens: command_surface::TokenBudget::Tokens(100),
         ..find("long")
     };
     let read = table
@@ -565,4 +611,142 @@ fn coverage_states_round_trip() {
         );
         assert_eq!(source.is_complete(), state.is_complete());
     }
+}
+
+#[test]
+fn coverage_footer_uses_the_typed_state_and_detail() {
+    let mut answer = Answer::ok(Value::Null);
+    answer.envelope.coverage = vec![SourceCoverage {
+        source: "terminal".into(),
+        state: CoverageState::Unavailable {
+            cause: "offline".into(),
+        },
+        not_complete: vec![CoverageInterval {
+            start: "2026-11-01T10:00:00Z".parse().unwrap(),
+            end: "2026-11-01T11:00:00Z".parse().unwrap(),
+            state: CoverageState::Gap {
+                reason: "overflow".into(),
+            },
+        }],
+    }];
+    let rendered = table().render_answer(Via::Cli, None, answer);
+    assert!(
+        rendered
+            .footer
+            .contains("coverage: terminal unavailable (offline)"),
+        "{}",
+        rendered.footer
+    );
+    assert!(rendered.footer.contains("gap"), "{}", rendered.footer);
+    assert!(!rendered.footer.contains("complete"), "{}", rendered.footer);
+}
+
+#[tokio::test]
+async fn expanding_a_default_budget_reads_the_whole_logical_entries() {
+    let table = table_with(PackingSearch);
+    let first = table
+        .call(find("long"), Via::Mcp, CancellationToken::new())
+        .await;
+    assert!(first.envelope.shown.unwrap() < 100);
+    let expand = first.envelope.left_out[0].expand.clone().unwrap();
+    assert_eq!(expand.budget_tokens, TokenBudget::Unlimited);
+    let follow = table
+        .call(expand.clone(), Via::Mcp, CancellationToken::new())
+        .await;
+    assert_eq!(follow.envelope.shown, Some(100));
+    assert!(follow.envelope.left_out.is_empty());
+    let rendered = table.render_answer(Via::Mcp, Some(&expand), follow);
+    assert!(
+        rendered
+            .value_text
+            .contains("row 99 of a long answer\n  detail 99 belongs to that row\n")
+    );
+    let wire = table
+        .mcp(
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                "name":"example_query","arguments":serde_json::to_value(&expand).unwrap()
+            }}),
+            CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(wire["result"]["structuredContent"]["shown"], 100);
+    assert!(
+        wire["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("detail 99 belongs to that row")
+    );
+    let cli = table
+        .cli(
+            &["find", "--query", "long", "--budget", "none"].map(str::to_owned),
+            "r-cli",
+            CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(cli.exit_code, 0, "{}", cli.stderr);
+    assert!(cli.stdout.contains("detail 99 belongs to that row"));
+}
+
+#[test]
+fn rendering_preserves_an_operations_complete_response() {
+    let mut request = find("long");
+    request.budget_tokens = TokenBudget::Tokens(1);
+    let rows = Rows {
+        rows: vec!["a whole entry\nwith its detail".into()],
+    };
+    let answer = Answer::ok(serde_json::to_value(rows).unwrap());
+    let rendered = table().render_answer(Via::Cli, Some(&request), answer);
+    assert_eq!(rendered.value_text, "a whole entry\nwith its detail\n");
+    assert!(rendered.answer.envelope.left_out.is_empty());
+}
+
+#[tokio::test]
+async fn a_text_budget_does_not_cut_json_rows() {
+    let table = table_with(PackingSearch);
+    let mut request = find("long");
+    request.budget_tokens = TokenBudget::Tokens(1);
+    request.format = Format::Json;
+    let answer = table
+        .call(request.clone(), Via::Mcp, CancellationToken::new())
+        .await;
+    let sections: Vec<Section> = serde_json::from_value(answer.value().unwrap().clone()).unwrap();
+    assert_eq!(
+        sections
+            .iter()
+            .map(|section| section.entries.len())
+            .sum::<usize>(),
+        100
+    );
+    assert_eq!(answer.envelope.shown, Some(100));
+    assert!(answer.envelope.left_out.is_empty());
+    let rendered = table.render_answer(Via::Mcp, Some(&request), answer);
+    assert!(rendered.value_text.is_empty());
+}
+
+#[tokio::test]
+async fn fitting_preserves_degradation_and_reserves_the_cap_note() {
+    let table = table_with(PackingSearch);
+    let degraded = table
+        .call(find("degraded"), Via::Mcp, CancellationToken::new())
+        .await;
+    assert!(
+        matches!(degraded.outcome,Outcome::Degraded {ref missing,..} if missing==&["mail is offline"])
+    );
+    let rendered = table.render_answer(Via::Mcp, Some(&find("degraded")), degraded);
+    assert!(approximate_tokens(&format!("{}{}", rendered.value_text, rendered.footer)) <= 120);
+    let mut capped = find("capped");
+    capped.budget_tokens = TokenBudget::Unlimited;
+    let answer = table
+        .call(capped.clone(), Via::Mcp, CancellationToken::new())
+        .await;
+    assert!(
+        answer
+            .envelope
+            .notes
+            .iter()
+            .any(|note| note.contains("unlimited to 180"))
+    );
+    assert!(answer.envelope.shown.unwrap() < 40);
+    let rendered = table.render_answer(Via::Mcp, Some(&capped), answer);
+    assert!(approximate_tokens(&format!("{}{}", rendered.value_text, rendered.footer)) <= 180);
 }

@@ -58,16 +58,7 @@ impl Parser<'_> {
                 origin: Origin::Generated,
             },
             Expression::Function { name, arguments } => {
-                let kind = if name == "random" {
-                    FieldKind::Number
-                } else {
-                    self.catalog
-                        .function(name)
-                        .ok()
-                        .flatten()
-                        .map_or(FieldKind::Json, |function| function.result)
-                };
-                let arguments = if name == "random" {
+                let arguments: Vec<_> = if name == "random" {
                     Vec::new()
                 } else {
                     arguments
@@ -75,16 +66,38 @@ impl Parser<'_> {
                         .map(|argument| self.expression_info(scope, argument))
                         .collect()
                 };
+                let rule = if name == "case_eq" {
+                    TypeRule::Input(2)
+                } else if name == "abs" {
+                    TypeRule::Input(0)
+                } else {
+                    TypeRule::Fixed
+                };
+                let mut field = match rule {
+                    TypeRule::Input(index) => arguments
+                        .get(index)
+                        .map(|input| input.field.clone())
+                        .unwrap_or_default(),
+                    TypeRule::Fixed => Field::default(),
+                };
+                field.name = expression.column();
+                if rule == TypeRule::Fixed {
+                    field.kind = if name == "random" {
+                        FieldKind::Number
+                    } else {
+                        self.catalog
+                            .function(name)
+                            .ok()
+                            .flatten()
+                            .map_or(FieldKind::Json, |function| function.result)
+                    };
+                }
                 FieldInfo {
-                    field: Field {
-                        name: expression.column(),
-                        kind,
-                        ..Field::default()
-                    },
+                    field,
                     origin: Origin::Function {
                         name: name.clone(),
                         arguments,
-                        rule: TypeRule::Fixed,
+                        rule,
                     },
                 }
             }
@@ -138,9 +151,9 @@ impl Parser<'_> {
             &aggregate.function,
             inputs.first().map(|input| &input.field.kind),
         );
-        let mut field = if rule == TypeRule::Input {
+        let mut field = if let TypeRule::Input(index) = rule {
             inputs
-                .first()
+                .get(index)
                 .map(|input| input.field.clone())
                 .unwrap_or_default()
         } else {
@@ -195,8 +208,13 @@ impl Parser<'_> {
     }
     fn snapshot(&self, scope: &Scope) -> crate::scope::Scope {
         crate::scope::Scope {
-            unit: self.catalog.unit(&scope.unit).map(|unit| unit.name.clone()),
+            unit: scope
+                .row_domain
+                .as_deref()
+                .and_then(|unit| self.catalog.unit(unit))
+                .map(|unit| unit.name.clone()),
             fields: self.visible(scope).into(),
+            match_units: scope.patterns.clone(),
         }
     }
 }
@@ -516,7 +534,28 @@ impl Walker<'_, '_> {
                 self.expression(left, scope, at.field("left"));
                 self.query(query, at.field("query"));
             }
-            ConditionKind::Order { query, .. } => self.query(query, at.field("query")),
+            ConditionKind::Order {
+                query,
+                within,
+                pick,
+                ..
+            } => {
+                self.query(query, at.field("query"));
+                if let WitnessChoice::FirstBy { keys } = pick {
+                    let inner = &self.parser.inner_scopes[&condition.span.start];
+                    let candidate = self.parser.witness_scope(inner, within.as_ref());
+                    for (index, key) in keys.iter().enumerate() {
+                        self.expression(
+                            &key.expression,
+                            &candidate,
+                            at.field("pick")
+                                .field("keys")
+                                .index(index)
+                                .field("expression"),
+                        );
+                    }
+                }
+            }
             ConditionKind::Exists {
                 unit,
                 condition: Some(condition),

@@ -1,5 +1,6 @@
 //! Canonical question identity. Paging and resolved clocks never enter this form.
 use crate::{Error, ErrorKind, ast::Query, catalog::Catalog};
+mod encoding;
 mod scalars;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -20,8 +21,8 @@ impl std::fmt::Display for QuestionId {
 /// Relative time expressions deliberately remain expressions.
 pub fn normal_form(query: &Query, catalog: &Catalog) -> Result<Value, Error> {
     let mut query = query.clone();
-    scalars::canonicalize(&mut query, catalog);
-    let mut value = serde_json::to_value(query).map_err(serialization)?;
+    let canonical = scalars::canonicalize(&mut query, catalog);
+    let mut value = encoding::query(&canonical);
     normalize(&mut value);
     Ok(value)
 }
@@ -61,6 +62,24 @@ fn serialization(error: serde_json::Error) -> Error {
         format!("question cannot be serialized: {error}"),
         0,
     )
+}
+
+/// Only boolean nodes in this condition can change its witness exposure.
+/// An order inside a nested query is not an order producer in its caller.
+fn order_bearing(node: &Value) -> bool {
+    let kind = node.get("kind");
+    if let Some(kind) = kind.filter(|kind| kind.is_object()) {
+        return order_bearing(kind);
+    }
+    match kind.and_then(Value::as_str) {
+        Some("order") => true,
+        Some("and" | "or") => node
+            .get("conditions")
+            .and_then(Value::as_array)
+            .is_some_and(|conditions| conditions.iter().any(order_bearing)),
+        Some("not") => node.get("condition").is_some_and(order_bearing),
+        _ => false,
+    }
 }
 
 fn normalize(value: &mut Value) {
@@ -122,12 +141,13 @@ fn normalize(value: &mut Value) {
                     if let Some(Value::Array(values)) = fields.get_mut(key) {
                         // Child serialization is infallible for a JSON value.
                         values.sort_by_cached_key(|value| value.to_string());
-                        values.dedup();
+                        values.dedup_by(|a, b| a == b && (kind != "and" || !order_bearing(a)));
                     }
                 }
                 if matches!(kind.as_str(), "and" | "or")
                     && let Some(Value::Array(conditions)) = fields.get("conditions")
                     && conditions.len() == 1
+                    && !(kind == "or" && order_bearing(&conditions[0]))
                     && let Some(inner) = conditions[0].get("kind")
                 {
                     *value = inner.clone();
