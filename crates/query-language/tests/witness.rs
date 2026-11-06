@@ -225,3 +225,49 @@ fn absolute_candidate_distance_sort_retains_exact_ticks_beyond_f64_integer_preci
         .unwrap();
     assert_eq!(answer.rows[0].value("match.id"), Scalar::from("z"));
 }
+
+#[test]
+fn absolute_payload_values_defer_json_narrowing_to_the_product() {
+    use query_language::catalog::{Catalog, Field, FieldKind, Unit};
+    let mut catalog = Catalog::new("events");
+    catalog.units.push(Unit {
+        name: "events".into(),
+        fields: vec![Field {
+            name: "payload.exit_code".into(),
+            kind: FieldKind::Json,
+            ..Field::default()
+        }],
+        ..Unit::default()
+    });
+    let query = parse("events | fields abs(payload.exit_code)", &catalog).unwrap();
+    bind(&query, &catalog).unwrap();
+    let expression = Expression::Function {
+        name: "abs".into(),
+        arguments: vec![Expression::field("payload.exit_code")],
+    };
+    let data = BTreeMap::new();
+    let evaluator = ReferenceEvaluator::new(&data);
+    assert_eq!(
+        evaluator
+            .expression(&Row::new("unknown"), &expression)
+            .unwrap(),
+        Scalar::Unknown
+    );
+    assert_eq!(
+        evaluator
+            .expression(
+                &Row::new("number").with("payload.exit_code", -7.),
+                &expression
+            )
+            .unwrap(),
+        Scalar::Number(7.)
+    );
+    assert!(
+        evaluator
+            .expression(
+                &Row::new("text").with("payload.exit_code", "text"),
+                &expression
+            )
+            .is_err()
+    );
+}

@@ -1421,7 +1421,11 @@ impl Parser<'_> {
             if function.name == "abs"
                 && !matches!(
                     self.expression_info(scope, &arguments[0]).field.kind,
-                    FieldKind::Integer | FieldKind::Number | FieldKind::Money | FieldKind::Duration
+                    FieldKind::Integer
+                        | FieldKind::Number
+                        | FieldKind::Money
+                        | FieldKind::Duration
+                        | FieldKind::Json
                 )
                 && !matches!(
                     &arguments[0],
