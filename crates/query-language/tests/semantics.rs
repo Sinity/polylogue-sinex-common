@@ -1079,3 +1079,49 @@ fn union_fuses_once() {
     assert_eq!(ids(&answer), ["a", "e", "b"]);
     assert_eq!(answer.total, 3);
 }
+
+#[test]
+fn containing_obeys_literal_half_open_point_and_span_boundaries() {
+    for (outer, inner, expected) in [
+        ((0, 10), (0, 0), 1),
+        ((0, 10), (5, 5), 1),
+        ((0, 10), (10, 10), 0),
+        ((0, 10), (0, 10), 1),
+        ((5, 5), (5, 5), 1),
+        ((5, 5), (0, 10), 0),
+    ] {
+        // The same half-open boundary applies to precise spans and coarse periods.
+        for coarse in [false, true] {
+            let mut a = Row::new("a");
+            a.time = Some(Extent {
+                start: outer.0,
+                end: outer.1,
+                coarse,
+            });
+            let mut b = Row::new("b");
+            b.time = Some(Extent {
+                start: inner.0,
+                end: inner.1,
+                coarse,
+            });
+            let data = BTreeMap::from([("outer".into(), vec![a]), ("inner".into(), vec![b])]);
+            let q = query(
+                "outer",
+                vec![TransformKind::Join {
+                    query: Box::new(query("inner", vec![])),
+                    on: JoinOn::Order {
+                        relation: OrderRelation::Containing,
+                        within: None,
+                        at: TimePoint::When,
+                        scope: None,
+                    },
+                }],
+            );
+            assert_eq!(
+                ReferenceEvaluator::new(&data).execute(&q).unwrap().total,
+                expected,
+                "outer={outer:?}, inner={inner:?}, coarse={coarse}"
+            );
+        }
+    }
+}

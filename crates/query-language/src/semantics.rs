@@ -849,7 +849,15 @@ impl<'a> ReferenceEvaluator<'a> {
                         point >= b.start && point < b.end
                     }
                 }
-                OrderRelation::Containing => b.start >= a.start && b.end <= a.end,
+                OrderRelation::Containing => {
+                    if b.end > b.start {
+                        a.end > a.start && b.start >= a.start && b.end <= a.end
+                    } else if a.end > a.start {
+                        b.start >= a.start && b.start < a.end
+                    } else {
+                        b.start == a.start
+                    }
+                }
             };
             if matches {
                 candidates.push((
