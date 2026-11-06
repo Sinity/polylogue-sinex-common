@@ -149,7 +149,7 @@ Four operators, each with one meaning in both products:
   duration is refused. An unknown input makes the result unknown. Built-in
   functions are the time buckets `hour`, `day`, `week`, `weekday`, `month`,
   `month_day` and `year` on the logical day, `len()`, and
-  `case_eq(a, b, value)`; a product adds its
+  `case_eq(a, b, value)` and `glob(text, pattern)`; a product adds its
   own functions as catalog extensions. Built-in function names are
   case-insensitive at their call position and stored under their declared
   spelling (`DAY(when)` becomes `day(when)`). `case_eq` returns `value` when
@@ -157,6 +157,9 @@ Four operators, each with one meaning in both products:
   result retains the third argument's kind and physical lineage, including
   reference identity, time precision and discrete values. It composes with
   aggregates, for example `min(case_eq(position, 1, step.command))`.
+  `glob` matches the whole text case-sensitively; `*` matches any sequence of
+  characters. Every other character is literal, including `%`, `_` and
+  backslash. Missing text or pattern produces unknown.
 
 ## Meaning
 

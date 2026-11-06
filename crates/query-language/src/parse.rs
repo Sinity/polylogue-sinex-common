@@ -1412,6 +1412,26 @@ impl Parser<'_> {
                     t.span.start,
                 ));
             }
+            if function.name == "glob" {
+                for argument in &arguments {
+                    if !matches!(
+                        self.expression_info(scope, argument).field.kind,
+                        FieldKind::Text
+                            | FieldKind::Exact
+                            | FieldKind::Substring
+                            | FieldKind::Words
+                            | FieldKind::Subtree
+                            | FieldKind::Reference
+                            | FieldKind::Json
+                    ) {
+                        return Err(Error::new(
+                            ErrorKind::BadValue,
+                            "glob takes text values",
+                            t.span.start,
+                        ));
+                    }
+                }
+            }
             if function.name == "case_eq" {
                 let (first, rest) = arguments.split_at_mut(1);
                 let (left, right) = (&mut first[0], &mut rest[0]);

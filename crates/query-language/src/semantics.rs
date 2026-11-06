@@ -558,6 +558,18 @@ impl<'a> ReferenceEvaluator<'a> {
                     _ => return Err(bad("len takes text or a list")),
                 })
             }
+            Expression::Function { name, arguments } if name == "glob" => {
+                let [text, pattern] = arguments.as_slice() else {
+                    return Err(bad("glob takes two arguments"));
+                };
+                match (self.expression(row, text)?, self.expression(row, pattern)?) {
+                    (Scalar::Unknown, _) | (_, Scalar::Unknown) => Ok(Scalar::Unknown),
+                    (Scalar::Text(text), Scalar::Text(pattern)) => {
+                        Ok(Scalar::Bool(crate::glob::matches(&text, &pattern)))
+                    }
+                    _ => Err(bad("glob takes text values")),
+                }
+            }
             Expression::Function { name, arguments } if name == "case_eq" => {
                 let [left, right, selected] = arguments.as_slice() else {
                     return Err(bad("case_eq takes three arguments"));
@@ -1714,7 +1726,10 @@ fn validate_expression(e: &Expression, at: usize) -> Result<(), Error> {
         Expression::Function { name, arguments } if name == "len" && arguments.len() == 1 => {
             validate_expression(&arguments[0], at)
         }
-        Expression::Function { name, arguments } if name == "case_eq" && arguments.len() == 3 => {
+        Expression::Function { name, arguments }
+            if (name == "case_eq" && arguments.len() == 3)
+                || (name == "glob" && arguments.len() == 2) =>
+        {
             for argument in arguments {
                 validate_expression(argument, at)?;
             }
