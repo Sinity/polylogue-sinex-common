@@ -2749,6 +2749,7 @@ impl Parser<'_> {
             }
         };
         let parent = scope.unit.clone();
+        let parent_fields = self.visible(scope);
         let step_fields: Vec<Field> = self
             .catalog
             .unit(&unit)
@@ -2772,6 +2773,10 @@ impl Parser<'_> {
                 },
                 Origin::Generated,
             );
+        }
+        for mut info in parent_fields {
+            info.field.name = format!("parent.{}", info.field.name);
+            self.add_generated(scope, info.field, info.origin);
         }
         for mut field in step_fields {
             let origin = Origin::Catalog {

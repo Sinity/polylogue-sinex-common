@@ -424,7 +424,10 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
             .with("match", 1.)
             .with("position", position as f64)
             .with("step", id)
-            .with(format!("step.{}", v.child_number), n);
+            .with(format!("step.{}", v.child_number), n)
+            .with(format!("parent.{}", v.number), 1.)
+            .with(format!("parent.{}", v.end), 4.)
+            .with(format!("parent.{}", v.category), "east");
         row.parent = Some("a".into());
         row.matches = vec![id.into()];
         row

@@ -480,3 +480,49 @@ fn grouped_row_domain_is_separate_from_native_field_provenance() {
         Some("events")
     );
 }
+
+#[test]
+fn matches_parent_fields_preserve_only_actual_outer_types_and_origins() {
+    for declares_id in [true, false] {
+        let mut catalog = catalog("parents");
+        if !declares_id {
+            catalog.units[0].fields.retain(|field| field.name != "id");
+        }
+        let bound = checked("parents where exists(children) | matches", &catalog);
+        let scope = &bound.typing().queries[0].transforms[0].after;
+        let parent = scope.field("parent.cwd").unwrap();
+        assert_eq!(parent.field.kind, FieldKind::Text);
+        assert!(
+            matches!(&parent.origin,Origin::Catalog {unit,field} if unit=="parents" && field=="cwd")
+        );
+        assert_eq!(scope.field("parent.id").is_some(), declares_id);
+        assert_eq!(
+            parse(
+                "parents where exists(children) | matches | fields parent.id",
+                &catalog
+            )
+            .is_ok(),
+            declares_id
+        );
+        assert_eq!(
+            scope.field("parent.cost").unwrap().field.kind,
+            FieldKind::Money
+        );
+    }
+    let catalog = catalog("parents");
+    let grouped = checked(
+        "parents | group by cwd | where exists(children) | matches",
+        &catalog,
+    );
+    let scope = &grouped.typing().queries[0].transforms[2].after;
+    assert!(scope.field("parent.id").is_none());
+    assert!(scope.field("parent.n").is_none());
+    assert_eq!(
+        scope.field("parent.count").unwrap().field.kind,
+        FieldKind::Integer
+    );
+    assert!(
+        matches!(&scope.field("parent.cwd").unwrap().origin, Origin::Group {input,..}
+        if matches!(&input.origin,Origin::Catalog {unit,field} if unit=="parents" && field=="cwd"))
+    );
+}

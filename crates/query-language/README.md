@@ -279,6 +279,10 @@ Distance is the signed selected-anchor offset (a duration, or a step count);
 it is available to pick keys even without an explicit window. These local
 metadata fields do not expand the ordinary selected output schema.
 
+`matches` retains the actual outer relation's declared fields under `parent.`
+with their original types and provenance. It adds no public `parent.id` when
+the input declares none; a grouped parent offers only its actual group output.
+
 ## Ranking
 
 Conditions select and ranking orders; ranking never changes membership or

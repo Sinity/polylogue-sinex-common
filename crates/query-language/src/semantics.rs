@@ -1628,6 +1628,11 @@ impl<'a> ReferenceEvaluator<'a> {
                     let mut result =
                         Row::new(format!("{}:match:{}:{}", row.id, number + 1, position + 1));
                     result.parent = Some(row.id.clone());
+                    for (name, value) in &row.fields {
+                        result
+                            .fields
+                            .insert(format!("parent.{name}"), value.clone());
+                    }
                     result
                         .fields
                         .insert("parent".into(), Scalar::Text(row.id.clone()));

@@ -1385,3 +1385,41 @@ fn first_per_group_restores_original_rows_and_global_input_order() {
     assert_eq!(grouped.rows[0].value("count"), Scalar::Number(2.));
     assert!(grouped.rows[0].time.is_none());
 }
+
+#[test]
+fn matches_copy_actual_parent_fields_without_inventing_a_public_id() {
+    let public = Row::new("public").with("id", "public").with("n", 7.);
+    let opaque = Row::new("opaque").with("n", 9.);
+    let mut child_a = Row::new("a");
+    child_a.parent = Some("public".into());
+    let mut child_b = Row::new("b");
+    child_b.parent = Some("opaque".into());
+    let data = BTreeMap::from([
+        ("parents".into(), vec![public, opaque]),
+        ("children".into(), vec![child_a, child_b]),
+    ]);
+    let answer = ReferenceEvaluator::new(&data)
+        .execute(&filtered(
+            "parents",
+            condition(ConditionKind::Exists {
+                unit: "children".into(),
+                condition: None,
+            }),
+            vec![TransformKind::Matches],
+        ))
+        .unwrap();
+    let public = answer
+        .rows
+        .iter()
+        .find(|row| row.parent.as_deref() == Some("public"))
+        .unwrap();
+    let opaque = answer
+        .rows
+        .iter()
+        .find(|row| row.parent.as_deref() == Some("opaque"))
+        .unwrap();
+    assert_eq!(public.value("parent.id"), Scalar::from("public"));
+    assert_eq!(public.value("parent.n"), Scalar::Number(7.));
+    assert_eq!(opaque.value("parent.id"), Scalar::Unknown);
+    assert_eq!(opaque.value("parent.n"), Scalar::Number(9.));
+}
