@@ -238,6 +238,81 @@ fn failed_first_link_preserves_original_locks_and_absent_overrides() {
     assert!(fixture.with_link(|link| link.unlink()).unwrap().is_empty());
 }
 
+fn add_format_package(checkout: &Path, version: &str) {
+    let manifest = checkout.join("Cargo.toml");
+    let text = fs::read_to_string(&manifest).unwrap().replace(
+        "[workspace]",
+        "[workspace]\nmembers = [\"historical-format-v1\", \"unused-format\"]",
+    );
+    fs::write(manifest, text).unwrap();
+    for name in ["historical-format-v1", "unused-format"] {
+        let directory = checkout.join(name);
+        package(&directory, name, version, "");
+        let manifest = directory.join("Cargo.toml");
+        let text = fs::read_to_string(&manifest)
+            .unwrap()
+            .replace("[workspace]\n", "");
+        fs::write(manifest, text).unwrap();
+    }
+}
+
+fn require_format(fixture: &Fixture, directory: &Path, requirement: &str) {
+    let manifest = directory.join("Cargo.toml");
+    let mut text = fs::read_to_string(&manifest).unwrap();
+    text.push_str(&format!(
+        "historical-format-v1 = {{ git = {}, branch = \"master\", version = {} }}\n",
+        serde_json::to_string(&fixture.repository).unwrap(),
+        serde_json::to_string(requirement).unwrap()
+    ));
+    fs::write(manifest, text).unwrap();
+}
+
+#[test]
+fn a_new_shared_package_links_before_it_exists_in_the_git_source() {
+    let fixture = Fixture::new();
+    add_format_package(&fixture.first, "1.0.0");
+    require_format(&fixture, &fixture.root(), "1.0.0");
+    require_format(&fixture, &fixture.root().join("fuzz"), "1.0.0");
+    let original = fixture.state();
+    let names = fixture.with_link(|link| link.link(&fixture.first)).unwrap();
+    assert_eq!(names, ["historical-format-v1", "shared"]);
+    let patch = fs::read_to_string(&fixture.paths()[0]).unwrap();
+    assert!(patch.contains("historical-format-v1"));
+    assert!(!patch.contains("unused-format"));
+    for directory in [fixture.root(), fixture.root().join("fuzz")] {
+        let graph = super::metadata(&directory, false).unwrap();
+        let package = graph["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|package| package["name"] == "historical-format-v1")
+            .unwrap();
+        assert!(package["source"].is_null());
+    }
+    fixture.with_link(|link| link.unlink()).unwrap();
+    assert_eq!(fixture.state(), original);
+}
+
+#[test]
+fn unpublished_package_failure_restores_an_active_link_and_both_original_locks() {
+    let fixture = Fixture::new();
+    add_format_package(&fixture.first, "1.0.0");
+    add_format_package(&fixture.second, "2.0.0");
+    require_format(&fixture, &fixture.root(), ">=1, <3");
+    require_format(&fixture, &fixture.root().join("fuzz"), "=1.0.0");
+    let original = fixture.state();
+    fixture.with_link(|link| link.link(&fixture.first)).unwrap();
+    let linked = fixture.state();
+    assert!(
+        fixture
+            .with_link(|link| link.link(&fixture.second))
+            .is_err()
+    );
+    assert_eq!(fixture.state(), linked);
+    fixture.with_link(|link| link.unlink()).unwrap();
+    assert_eq!(fixture.state(), original);
+}
+
 fn package(root: &Path, name: &str, version: &str, dependencies: &str) {
     fs::create_dir_all(root.join("src")).unwrap();
     fs::write(root.join("src/lib.rs"), "pub fn value() -> u8 { 1 }\n").unwrap();

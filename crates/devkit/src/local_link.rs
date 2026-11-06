@@ -38,11 +38,14 @@ impl LocalLink<'_> {
                     write(backup, &original)?;
                 }
             }
-            remove(self.patch)?;
+            // A new package may exist only in this checkout. Seed candidate
+            // patches before asking Cargo to resolve the product's Git graph.
+            let candidates = available.keys().cloned().collect();
+            write(self.patch, patch_config(self.repository, &candidates, &available)?.as_bytes())?;
             let mut used = BTreeSet::new();
             for (lock, _) in self.locks {
-                // Discover transitive crates in the Git graph without changing
-                // which versions the caller had locked before installing the override.
+                // Preserve the caller's lock while discovering declarations in
+                // the candidate graph, then retain only patches it actually uses.
                 let before = read(lock)?;
                 let graph = metadata(workspace(lock)?, false)?;
                 write(lock, &before)?;
