@@ -341,6 +341,7 @@ fn resolve_test_durations(query: &mut Query) {
                     resolve_condition(child);
                 }
             }
+            ConditionKind::Not { condition } => resolve_condition(condition),
             ConditionKind::Order { query, within, .. } => {
                 if let Some(Distance::Time { duration }) = within {
                     *duration = Value::scalar(

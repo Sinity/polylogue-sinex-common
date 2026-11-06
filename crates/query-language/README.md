@@ -283,7 +283,7 @@ metadata fields do not expand the ordinary selected output schema.
 
 `matches` retains the actual outer relation's declared fields under `parent.`
 with their original types and provenance. It adds no public `parent.id` when
-the input declares none; a grouped parent offers only its actual group output.
+the input declares none; a projected parent offers only its actual declared output.
 
 ## Ranking
 

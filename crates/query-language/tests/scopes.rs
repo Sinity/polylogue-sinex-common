@@ -510,19 +510,18 @@ fn matches_parent_fields_preserve_only_actual_outer_types_and_origins() {
         );
     }
     let catalog = catalog("parents");
-    let grouped = checked(
-        "parents | group by cwd | where exists(children) | matches",
+    let projected = checked(
+        "parents where exists(children) | fields cwd | matches",
         &catalog,
     );
-    let scope = &grouped.typing().queries[0].transforms[2].after;
-    assert!(scope.field("parent.id").is_none());
-    assert!(scope.field("parent.n").is_none());
-    assert_eq!(
-        scope.field("parent.count").unwrap().field.kind,
-        FieldKind::Integer
-    );
-    assert!(
-        matches!(&scope.field("parent.cwd").unwrap().origin, Origin::Group {input,..}
-        if matches!(&input.origin,Origin::Catalog {unit,field} if unit=="parents" && field=="cwd"))
-    );
+    let transform = &projected.typing().queries[0].transforms[1];
+    for absent in ["parent.id", "parent.n", "parent.cost", "parent.count"] {
+        assert!(transform.after.field(absent).is_none(), "{absent}");
+    }
+    let before = transform.before.field("cwd").unwrap();
+    let parent = transform.after.field("parent.cwd").unwrap();
+    let mut expected = before.field.clone();
+    expected.name = "parent.cwd".into();
+    assert_eq!(parent.field, expected);
+    assert_eq!(parent.origin, before.origin);
 }
