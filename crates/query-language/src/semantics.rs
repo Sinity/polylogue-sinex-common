@@ -1310,27 +1310,34 @@ impl<'a> ReferenceEvaluator<'a> {
                     rows.retain(|r| seen.insert(r.id.clone()));
                     groups = None;
                 }
-                TransformKind::Combine { how, query } => {
-                    let other = self.execute(query)?.rows;
+                TransformKind::Combine {
+                    how,
+                    query: operand,
+                } => {
+                    let other = self.execute(operand)?.rows;
                     let ids: BTreeSet<_> = other.iter().map(|r| r.id.clone()).collect();
+                    let fusion_chain =
+                        !lists.is_empty() || query_contains_fuse(&query.transforms[index..]);
+                    if fusion_chain && matches!(how, Combination::Union | Combination::Fuse) {
+                        // The left relation is the first operand of this chain;
+                        // later stages add operands, never a fused intermediate.
+                        if lists.is_empty() {
+                            lists.push(ranked_rows(&rows));
+                        }
+                        lists.push(ranked_rows(&other));
+                    }
                     match how {
                         Combination::Union => {
                             rows.extend(other);
                             let mut seen = BTreeSet::new();
                             rows.retain(|r| seen.insert(r.id.clone()));
-                            rows.sort_by(|a, b| a.id.cmp(&b.id));
+                            if !fusion_chain {
+                                rows.sort_by(|a, b| a.id.cmp(&b.id));
+                            }
                         }
                         Combination::Intersect => rows.retain(|r| ids.contains(&r.id)),
                         Combination::Except => rows.retain(|r| !ids.contains(&r.id)),
-                        Combination::Fuse => lists.push(
-                            other
-                                .iter()
-                                .map(|row| crate::fusion::Entry {
-                                    key: row.id.clone(),
-                                    recency: row.time.map(|t| t.start),
-                                })
-                                .collect(),
-                        ),
+                        Combination::Fuse => {}
                     }
                     groups = None;
                 }
@@ -1783,6 +1790,36 @@ fn diff_rows(before: &[Row], after: Vec<Row>) -> Vec<Row> {
             row.fields.insert("old_rank".into(), rank(change.old_rank));
             row.fields.insert("new_rank".into(), rank(change.new_rank));
             row
+        })
+        .collect()
+}
+fn query_contains_fuse(transforms: &[Transform]) -> bool {
+    transforms
+        .iter()
+        .take_while(|transform| {
+            matches!(
+                transform.kind,
+                TransformKind::Combine {
+                    how: Combination::Union | Combination::Fuse,
+                    ..
+                }
+            )
+        })
+        .any(|transform| {
+            matches!(
+                transform.kind,
+                TransformKind::Combine {
+                    how: Combination::Fuse,
+                    ..
+                }
+            )
+        })
+}
+fn ranked_rows(rows: &[Row]) -> Vec<crate::fusion::Entry<String>> {
+    rows.iter()
+        .map(|row| crate::fusion::Entry {
+            key: row.id.clone(),
+            recency: row.time.map(|time| time.start),
         })
         .collect()
 }

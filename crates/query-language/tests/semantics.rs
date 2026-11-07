@@ -1034,6 +1034,54 @@ fn fill_labels_every_bucket_and_never_reads_missing_as_zero() {
     }
 }
 
+#[test]
+fn fusion_chain_ranks_each_original_union_operand_in_its_own_order() {
+    let data = BTreeMap::from([(
+        "rows".to_string(),
+        vec![
+            Row::new("a").with("n", 0.),
+            Row::new("b").with("n", 1.),
+            Row::new("c").with("n", 2.),
+        ],
+    )]);
+    let sort = |descending| TransformKind::Sort {
+        keys: vec![SortKey {
+            expression: Expression::field("n"),
+            descending,
+        }],
+    };
+    let mut combined = filtered(
+        "rows",
+        comparison("n", Op::Lt, "2"),
+        vec![
+            sort(false),
+            TransformKind::Combine {
+                how: Combination::Union,
+                query: Box::new(filtered(
+                    "rows",
+                    comparison("n", Op::Gt, "0"),
+                    vec![sort(true)],
+                )),
+            },
+        ],
+    );
+    let ordinary = ReferenceEvaluator::new(&data).execute(&combined).unwrap();
+    assert_eq!(ids(&ordinary), ["a", "b", "c"]);
+    combined.transforms.push(Transform {
+        span: Span::default(),
+        kind: TransformKind::Combine {
+            how: Combination::Fuse,
+            query: Box::new(filtered("rows", comparison("n", Op::Gt, "9"), vec![])),
+        },
+    });
+    let answer = ReferenceEvaluator::new(&data).execute(&combined).unwrap();
+    // Original operands [a,b] and [c,b]: b scores 2/62; a and c score
+    // 1/61 each, so their identity breaks the tie. Right-only fusion would
+    // instead yield c,b,a, and set membership alone would yield a,b,c.
+    assert_eq!(ids(&answer), ["b", "a", "c"]);
+    assert_eq!(answer.total, 3);
+}
+
 /// Law `ql.union.fuses-once`: a chain of fuse and union at one level is one
 /// fusion of every list, not a fusion of fusions.
 #[test]
@@ -1074,9 +1122,10 @@ fn union_fuses_once() {
         ],
     );
     let answer = ReferenceEvaluator::new(&data).execute(&chain).unwrap();
-    // One fusion of [e d c b a] and [a b c d e] over the rows {a, b, e}:
-    // a and e tie on score (1/61 + 1/65), and the smaller identity wins;
-    // b scores 1/62 + 1/64, which is less.
+    // One fusion of the original operands [a b], [e d c b a], [e] and
+    // [a b c d e] over the rows {a, b, e}. a and e tie on score
+    // (2/61 + 1/65), so identity wins; b scores 2/62 + 1/64, which is less.
+    // The union operand contributes its own order, including its singleton.
     assert_eq!(ids(&answer), ["a", "e", "b"]);
     assert_eq!(answer.total, 3);
 }

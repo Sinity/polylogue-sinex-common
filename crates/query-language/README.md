@@ -295,7 +295,15 @@ scoring criteria, to rank order items"
 - **Ranked lists.** A query's lists are `relevance` when text terms are
   present; each ranking atom (`similar:"text"`, `similar:REF`,
   `similar:(Q)`, `related:REF`, `around:T`) in a top-level `AND` position;
-  each `fuse (Q)` operand; and each ranked operand of a `union` chain. A
+  each ranked operand of a `union` chain; and every operand of a fusion
+  chain containing `fuse`, including its
+  initial left relation and any `union` operands. An operand without a
+  ranking contributes its own row order. Ordinary unranked `union` remains
+  set algebra and does not introduce a ranking itself. A fusion chain is
+  fused once over these original operand lists; an intermediate
+  fused order never becomes another list. `fuse` adds no members, while
+  `union` adds its operand's members. Ranks retain their positions in each
+  operand's full list, including rows outside the final membership. A
   ranking atom anywhere else (under `OR` or `NOT`, inside `exists`) is
   `invalid_query` with the reason.
 - **Fusion.** One n-ary reciprocal-rank fusion: a row's score is the sum,

@@ -627,9 +627,17 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
         query(v, &v.outer, east(), vec![]),
         vec![rows[0].clone(), rows[1].clone()],
     ));
-    for (descending, expected) in [
-        (true, vec![rows[1].clone(), rows[0].clone()]),
-        (false, vec![rows[0].clone(), rows[1].clone()]),
+    // Extra rows in the right operand contribute ranks without entering the
+    // answer. Descending ranks are c,b,a,u: a scores 1/61 + 1/63, just above
+    // b's 2/62. Ascending orders reinforce a,b.
+    // Separate same-members operands make the opposite-order tie exact; no
+    // occurrence times exist, so identity breaks it. Aligned descending ranks
+    // demonstrate that both operand orders can change the resulting order.
+    for (left_descending, right_descending, same_members, expected) in [
+        (false, true, false, vec![rows[0].clone(), rows[1].clone()]),
+        (false, false, false, vec![rows[0].clone(), rows[1].clone()]),
+        (false, true, true, vec![rows[0].clone(), rows[1].clone()]),
+        (true, true, true, vec![rows[1].clone(), rows[0].clone()]),
     ] {
         output.push(case(
             "ql.rank.membership",
@@ -637,10 +645,18 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
                 v,
                 &v.outer,
                 east(),
-                vec![t(TransformKind::Combine {
-                    how: Combination::Fuse,
-                    query: Box::new(query(v, &v.outer, None, vec![sort(&v.number, descending)])),
-                })],
+                vec![
+                    sort(&v.number, left_descending),
+                    t(TransformKind::Combine {
+                        how: Combination::Fuse,
+                        query: Box::new(query(
+                            v,
+                            &v.outer,
+                            if same_members { east() } else { None },
+                            vec![sort(&v.number, right_descending)],
+                        )),
+                    }),
+                ],
             ),
             expected,
         ));
