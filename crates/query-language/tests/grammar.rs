@@ -119,15 +119,23 @@ fn namespace_binding_ignores_literal_text() {
 #[test]
 fn first_words_are_never_guessed_as_commands_and_closed_sets_refuse() {
     let c = support::sinex();
-    // No command words: a bare word is a search, and a near-miss of a unit
-    // name standing alone is a search too.
-    for text in ["related reference", "comands", "\"related\""] {
+    // Command words remain searches. Quoting also preserves a word that
+    // would otherwise be corrected as a catalog unit source.
+    for text in ["related reference", "\"comands\"", "\"related\""] {
         parse(text, &c).unwrap_or_else(|e| panic!("{text}: {e}"));
     }
     assert!(matches!(
-        condition("comands", &c).kind,
+        condition("\"comands\"", &c).kind,
         ConditionKind::Text { .. }
     ));
+    assert!(matches!(
+        condition("events where comands", &c).kind,
+        ConditionKind::Text { .. }
+    ));
+    let correction = parse("comands", &c).unwrap_err();
+    assert_eq!(correction.kind, ErrorKind::NotAQuery);
+    assert_eq!(correction.suggestion.as_deref(), Some("commands"));
+    parse(correction.suggestion.as_deref().unwrap(), &c).unwrap();
     assert!(parse("source", &c).unwrap_err().message.contains("field"));
     let e = parse("runs where status = hide", &c).unwrap_err();
     assert_eq!(e.kind, ErrorKind::BadValue);

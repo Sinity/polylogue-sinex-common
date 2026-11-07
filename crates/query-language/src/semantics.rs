@@ -1303,7 +1303,6 @@ impl<'a> ReferenceEvaluator<'a> {
                         row.fields = fields;
                     }
                     groups = None;
-                    pattern = None;
                 }
                 TransformKind::Distinct => {
                     let mut seen = BTreeSet::new();

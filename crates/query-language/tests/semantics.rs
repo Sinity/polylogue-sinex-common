@@ -1472,3 +1472,39 @@ fn matches_copy_actual_parent_fields_without_inventing_a_public_id() {
     assert_eq!(opaque.value("parent.id"), Scalar::Unknown);
     assert_eq!(opaque.value("parent.n"), Scalar::Number(9.));
 }
+
+#[test]
+fn projected_parent_aliases_keep_their_match_witnesses() {
+    let mut child = Row::new("child").with("n", 3.);
+    child.parent = Some("parent".into());
+    let data = BTreeMap::from([
+        ("parents".into(), vec![Row::new("parent").with("n", 7.)]),
+        ("children".into(), vec![child]),
+    ]);
+    let query = filtered(
+        "parents",
+        condition(ConditionKind::Exists {
+            unit: "children".into(),
+            condition: None,
+        }),
+        vec![
+            TransformKind::Fields {
+                columns: vec![Column {
+                    expression: Expression::field("n"),
+                    name: Some("value".into()),
+                }],
+            },
+            TransformKind::Matches,
+        ],
+    );
+    let answer = ReferenceEvaluator::new(&data).execute(&query).unwrap();
+    assert_eq!(answer.total, 1);
+    let matched = &answer.rows[0];
+    assert_eq!(
+        matched.fields.get("parent.value"),
+        Some(&Scalar::Number(7.))
+    );
+    assert!(!matched.fields.contains_key("parent.n"));
+    assert_eq!(matched.fields.get("step.n"), Some(&Scalar::Number(3.)));
+    assert_eq!(matched.parent.as_deref(), Some("parent"));
+}

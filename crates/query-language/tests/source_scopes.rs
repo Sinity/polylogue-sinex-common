@@ -647,3 +647,39 @@ fn unknown_units_suggest_declared_singular_names() {
         question_id(&expected, &catalog, &BTreeMap::new()).unwrap()
     );
 }
+
+#[test]
+fn source_unit_typos_offer_runnable_canonical_corrections_without_changing_literals() {
+    let mut catalog = catalog();
+    catalog.units[0].singular = Some("session".into());
+    catalog.units.push(Unit {
+        name: "messages".into(),
+        fields: vec![field("text", FieldKind::Text)],
+        ..Unit::default()
+    });
+    for (text, expected) in [
+        ("messges cargo", "messages where cargo"),
+        ("sessin where id:one", "sessions where id:one"),
+        ("messges", "messages"),
+        ("messges | count", "messages | count"),
+    ] {
+        let error = parse(text, &catalog).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::NotAQuery, "{text}: {error:?}");
+        assert_eq!(error.position, 0);
+        assert_eq!(error.suggestion.as_deref(), Some(expected));
+        bind(&parse(expected, &catalog).unwrap(), &catalog).unwrap();
+    }
+    for text in [
+        "\"messges\" cargo",
+        "cargo messges",
+        "brief yesterday",
+        "status",
+        "statsu",
+    ] {
+        let parsed = parse(text, &catalog).unwrap();
+        assert!(
+            matches!(parsed.source, Source::Unit { implicit: true, .. }),
+            "{text}"
+        );
+    }
+}

@@ -399,6 +399,31 @@ impl Parser<'_> {
             names,
         )
     }
+    fn source_unit_correction(&self, token: &Token) -> Option<Error> {
+        // Functions, references and grammar punctuation already own these
+        // positions. Only an unquoted source word can be a misspelled unit.
+        if is_symbol(&token.text)
+            || token.text.contains(':')
+            || self.next_is(1, "(")
+            || self.catalog.is_reference(&token.text)
+        {
+            return None;
+        }
+        let mut error = self.unknown_unit(token);
+        let nearest = error.candidates.first()?;
+        let unit = self.catalog.unit(nearest)?;
+        let has_condition = self.tokens.get(self.at + 1).is_some_and(|next| {
+            next.quoted || !matches!(next.text.as_str(), "where" | "with" | "|" | ")")
+        });
+        let replacement = if has_condition {
+            format!("{} where", unit.name)
+        } else {
+            unit.name.clone()
+        };
+        error.kind = ErrorKind::NotAQuery;
+        error.suggestion = Some(self.replace(token.span, &replacement));
+        Some(error)
+    }
     /// A refusal naming the known names nearest to an unknown one; the nearest
     /// becomes the suggestion.
     fn near_miss(&self, t: &Token, message: String, kind: ErrorKind, names: Vec<&str>) -> Error {
@@ -532,6 +557,8 @@ impl Parser<'_> {
                 && !matches!(lower.as_str(), "since" | "until")
             {
                 return Err(self.bare_field(&first));
+            } else if let Some(error) = self.source_unit_correction(&first) {
+                return Err(error);
             } else if self.next_is(1, "where") {
                 return Err(self.unknown_unit(&first));
             }
@@ -2621,7 +2648,6 @@ impl Parser<'_> {
             kind,
             TransformKind::Group { .. }
                 | TransformKind::Aggregate { .. }
-                | TransformKind::Fields { .. }
                 | TransformKind::Join { .. }
                 | TransformKind::Diff { .. }
         ) {
