@@ -525,3 +525,44 @@ fn matches_parent_fields_preserve_only_actual_outer_types_and_origins() {
     assert_eq!(parent.field, expected);
     assert_eq!(parent.origin, before.origin);
 }
+
+#[test]
+fn projected_aliases_keep_match_patterns_and_actual_parent_lineage() {
+    let catalog = catalog("parents");
+    let bound = checked(
+        "parents where exists children() | fields id as source, cwd as location | matches",
+        &catalog,
+    );
+    let stages = &bound.typing().queries[0].transforms;
+    assert_eq!(stages[0].after.match_units, Some(vec!["children".into()]));
+    let matched = &stages[1].after;
+    let parent = matched.field("parent.source").unwrap();
+    assert_eq!(parent.field.kind, FieldKind::Reference);
+    assert!(matches!(&parent.origin, Origin::Catalog { unit, field }
+        if unit == "parents" && field == "id"));
+    assert_eq!(
+        matched.field("parent.location").unwrap().field.kind,
+        FieldKind::Text
+    );
+    assert!(matched.field("parent.id").is_none());
+    assert!(matched.field("parent.cwd").is_none());
+    assert_eq!(
+        matched.field("step.command").unwrap().field.kind,
+        FieldKind::Integer
+    );
+    let text = "parents where exists children() | fields id as source | matches | fields parent.source, step.command";
+    checked(text, &catalog);
+}
+
+#[test]
+fn sequence_patterns_survive_parent_projection() {
+    let catalog = support::polylogue();
+    let bound = checked(
+        "sessions where seq(tool:bash -> tool:read) | fields id as source | matches",
+        &catalog,
+    );
+    let matched = &bound.typing().queries[0].transforms[1].after;
+    assert!(matched.field("parent.source").is_some());
+    assert!(matched.field("parent.id").is_none());
+    assert!(matched.field("step.tool").is_some());
+}

@@ -66,7 +66,9 @@ There is no command-name typo guessing. Ruling, 2026-07-05: "typo hint is
 actually unnecessary given we do not want bare query support anyway"
 (cc:900c6128-99a3-4986-8ed4-d5d7aacb38fe:e5f52f29-85e8-4cfc-9088-b5ea79b7bccc).
 Near-miss suggestions for fields, units and transforms inside a query
-remain.
+remain. A misspelled unquoted source unit returns `not_a_query` with a
+runnable catalog-derived correction, inserting `where` before its conditions.
+Quoted words remain literal search terms.
 
 ## Shape
 
@@ -284,6 +286,8 @@ metadata fields do not expand the ordinary selected output schema.
 `matches` retains the actual outer relation's declared fields under `parent.`
 with their original types and provenance. It adds no public `parent.id` when
 the input declares none; a projected parent offers only its actual declared output.
+Projection retains the relation's match pattern, so `fields id as source |
+matches` exposes the alias as `parent.source` with its original type and provenance.
 
 ## Ranking
 
