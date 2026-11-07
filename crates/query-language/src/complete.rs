@@ -600,8 +600,15 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
                         ..
                     }
             );
-            if matches!(transform.kind, TransformKind::Scope { .. }) {
-                scope.sources.clear();
+            // Value discovery keeps the underlying domain through grouping;
+            // the typed output's unit instead describes the grouped relation.
+            match &transform.kind {
+                TransformKind::Scope { unit, .. } => {
+                    scope.unit = Some(unit.clone());
+                    scope.sources.clear();
+                }
+                TransformKind::Matches => scope.unit = None,
+                _ => {}
             }
             // Binding owns every transform's output schema, including matched
             // fields, aliases, restored group inputs and closed-set values.
@@ -612,7 +619,6 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
                     .iter()
                     .map(|info| info.field.clone())
                     .collect();
-                scope.unit = stage.after.unit.clone();
             }
         }
     }
