@@ -627,9 +627,13 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
         query(v, &v.outer, east(), vec![]),
         vec![rows[0].clone(), rows[1].clone()],
     ));
-    for (descending, expected) in [
-        (true, vec![rows[1].clone(), rows[0].clone()]),
-        (false, vec![rows[0].clone(), rows[1].clone()]),
+    // Both operands contribute ranks. With opposite orders each member has
+    // 1/61 + 1/62 and no occurrence times, so identity breaks the tie.
+    // Aligned operands reinforce their shared order.
+    for (left_descending, right_descending, expected) in [
+        (false, true, vec![rows[0].clone(), rows[1].clone()]),
+        (false, false, vec![rows[0].clone(), rows[1].clone()]),
+        (true, true, vec![rows[1].clone(), rows[0].clone()]),
     ] {
         output.push(case(
             "ql.rank.membership",
@@ -637,10 +641,18 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
                 v,
                 &v.outer,
                 east(),
-                vec![t(TransformKind::Combine {
-                    how: Combination::Fuse,
-                    query: Box::new(query(v, &v.outer, None, vec![sort(&v.number, descending)])),
-                })],
+                vec![
+                    sort(&v.number, left_descending),
+                    t(TransformKind::Combine {
+                        how: Combination::Fuse,
+                        query: Box::new(query(
+                            v,
+                            &v.outer,
+                            None,
+                            vec![sort(&v.number, right_descending)],
+                        )),
+                    }),
+                ],
             ),
             expected,
         ));

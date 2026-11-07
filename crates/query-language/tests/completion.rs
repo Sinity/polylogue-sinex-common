@@ -786,3 +786,59 @@ fn requirements_keep_group_aliases_and_exclude_stage_reference_requests() {
         );
     }
 }
+
+#[test]
+fn matches_completion_uses_bound_fields_and_values_for_native_and_saved_patterns() {
+    use query_language::catalog::{OutputSchema, OutputSource, SourceOutput};
+    for (mut catalog, parent, child, field, prefix, expected) in [
+        (
+            support::polylogue(),
+            "sessions",
+            "tool_calls",
+            "outcome",
+            "er",
+            "error",
+        ),
+        (
+            support::sinex(),
+            "events",
+            "runs",
+            "status",
+            "ru",
+            "running",
+        ),
+    ] {
+        let parent_fields = catalog.unit(parent).unwrap().fields.clone();
+        catalog.source_outputs.push(SourceOutput {
+            source: OutputSource::Saved {
+                name: "pattern".into(),
+                arguments: vec![],
+            },
+            schema: OutputSchema {
+                unit: Some(parent.into()),
+                fields: parent_fields,
+                main_time: None,
+                match_units: Some(vec![child.into()]),
+            },
+        });
+        for source in [
+            format!("{parent} where exists {child}()"),
+            "query:pattern".into(),
+        ] {
+            let stage = format!("{source} | matches");
+            let fields = values(&format!("{stage} | where step."), &catalog);
+            assert!(fields.contains(&format!("step.{field}")), "{fields:?}");
+            assert!(
+                values(&format!("{stage} | where parent.i"), &catalog)
+                    .contains(&"parent.id".into())
+            );
+            let closed = values(&format!("{stage} | where step.{field}:{prefix}"), &catalog);
+            assert!(closed.contains(&expected.into()), "{closed:?}");
+            let projected = format!("{stage} | fields step.{field} as selected");
+            assert!(
+                values(&format!("{projected} | where selected:{prefix}"), &catalog)
+                    .contains(&expected.into())
+            );
+        }
+    }
+}

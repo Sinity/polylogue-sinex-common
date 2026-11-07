@@ -1,6 +1,6 @@
 //! Pure grammar-position completion against a product catalog.
 use crate::ast::Span;
-use crate::catalog::{Catalog, Field, FieldKind, OutputSource};
+use crate::catalog::{Catalog, Field, OutputSource};
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Completion {
@@ -555,9 +555,10 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
     } else {
         CompletionScope::unit(&unit, catalog)
     };
-    let mut group_input = None;
     let mut condition_scope = true;
-    if let Some(q) = parsed {
+    if let Some(parsed) = parsed {
+        let q = parsed.query;
+        let typed = parsed.typing.query(&crate::scope::NodePath::default());
         match &q.source {
             Source::Unit {
                 unit: source,
@@ -590,7 +591,7 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
             }
             _ => {}
         }
-        for transform in q.transforms {
+        for (index, transform) in q.transforms.into_iter().enumerate() {
             condition_scope = matches!(
                 &transform.kind,
                 TransformKind::Where { .. }
@@ -599,100 +600,19 @@ fn context(text: &str, catalog: &Catalog) -> CompletionScope {
                         ..
                     }
             );
-            match transform.kind {
-                TransformKind::Scope { unit: source, .. } => {
-                    unit = source;
-                    scope = CompletionScope::unit(&unit, catalog);
-                    group_input = None;
-                }
-                TransformKind::Matches => {
-                    scope.fields = ["parent", "match", "position", "step"]
-                        .into_iter()
-                        .map(|name| Field {
-                            name: name.into(),
-                            ..Field::default()
-                        })
-                        .collect();
-                    scope.unit = None;
-                    group_input = None;
-                }
-                TransformKind::Group { keys } => {
-                    let fields = keys
-                        .iter()
-                        .map(|key| {
-                            let mut field = match &key.expression {
-                                crate::ast::Expression::Field { name } => {
-                                    scope.field(name).cloned().unwrap_or_default()
-                                }
-                                _ => Field::default(),
-                            };
-                            field.name = key.column();
-                            field
-                        })
-                        .chain(std::iter::once(Field {
-                            name: "count".into(),
-                            kind: FieldKind::Integer,
-                            ..Field::default()
-                        }))
-                        .collect();
-                    group_input = Some(std::mem::replace(&mut scope.fields, fields));
-                }
-                TransformKind::Aggregate { aggregates } => {
-                    let grouped = group_input.is_some();
-                    let input = group_input.take().unwrap_or_else(|| scope.fields.clone());
-                    if !grouped {
-                        scope.fields.clear();
-                    }
-                    for aggregate in aggregates {
-                        let kind = match aggregate.function {
-                            crate::ast::AggregateFunction::Count
-                            | crate::ast::AggregateFunction::CountDistinct => FieldKind::Integer,
-                            _ => aggregate
-                                .arguments
-                                .first()
-                                .and_then(|argument| match argument {
-                                    crate::ast::Expression::Field { name } => {
-                                        input.iter().find(|field| &field.name == name)
-                                    }
-                                    _ => None,
-                                })
-                                .map(|field| field.kind.clone())
-                                .unwrap_or(FieldKind::Number),
-                        };
-                        let name = aggregate.column();
-                        scope.fields.retain(|field| field.name != name);
-                        scope.fields.push(Field {
-                            name,
-                            kind,
-                            ..Field::default()
-                        });
-                    }
-                }
-                TransformKind::Fill => {
-                    for name in [crate::coverage::STATE_FIELD, crate::coverage::DETAIL_FIELD] {
-                        scope.fields.push(Field {
-                            name: name.into(),
-                            ..Field::default()
-                        })
-                    }
-                }
-                TransformKind::Fields { columns } => {
-                    let fields = columns
-                        .iter()
-                        .map(|column| {
-                            let mut field = match &column.expression {
-                                crate::ast::Expression::Field { name } => {
-                                    scope.field(name).cloned().unwrap_or_default()
-                                }
-                                _ => Field::default(),
-                            };
-                            field.name = column.column();
-                            field
-                        })
-                        .collect();
-                    scope.fields = fields;
-                }
-                _ => {}
+            if matches!(transform.kind, TransformKind::Scope { .. }) {
+                scope.sources.clear();
+            }
+            // Binding owns every transform's output schema, including matched
+            // fields, aliases, restored group inputs and closed-set values.
+            if let Some(stage) = typed.and_then(|query| query.transforms.get(index)) {
+                scope.fields = stage
+                    .after
+                    .fields
+                    .iter()
+                    .map(|info| info.field.clone())
+                    .collect();
+                scope.unit = stage.after.unit.clone();
             }
         }
     }
@@ -734,22 +654,22 @@ fn source_prefix(first: &str) -> bool {
         prefix.eq_ignore_ascii_case("query") || prefix.eq_ignore_ascii_case("result")
     })
 }
-fn parse_prefix(text: &str, catalog: &Catalog) -> Option<crate::ast::Query> {
+fn parse_prefix(text: &str, catalog: &Catalog) -> Option<crate::parse::Parsed> {
     use crate::ast::Source;
     let mut candidate = text.trim_end();
     loop {
         if let Some(left) = candidate.strip_suffix(" OR")
-            && let Ok(mut query) = crate::parse::parse(left, catalog)
-            && query.transforms.is_empty()
-            && query.attach.is_empty()
+            && let Ok(mut parsed) = crate::parse::parse_typed(left, catalog)
+            && parsed.query.transforms.is_empty()
+            && parsed.query.attach.is_empty()
             && let Source::Saved {
                 name,
                 arguments,
                 condition: None,
                 ..
-            } = query.source
+            } = parsed.query.source
         {
-            query.source = Source::Unit {
+            parsed.query.source = Source::Unit {
                 unit: catalog.default_unit.clone(),
                 implicit: true,
                 condition: Some(crate::ast::Condition {
@@ -757,10 +677,10 @@ fn parse_prefix(text: &str, catalog: &Catalog) -> Option<crate::ast::Query> {
                     kind: crate::ast::ConditionKind::Saved { name, arguments },
                 }),
             };
-            return Some(query);
+            return Some(parsed);
         }
-        if let Ok(query) = crate::parse::parse(candidate, catalog) {
-            return Some(query);
+        if let Ok(parsed) = crate::parse::parse_typed(candidate, catalog) {
+            return Some(parsed);
         }
         let (at, _) = candidate
             .char_indices()
@@ -771,9 +691,10 @@ fn parse_prefix(text: &str, catalog: &Catalog) -> Option<crate::ast::Query> {
 }
 fn row_scope(text: &str, catalog: &Catalog) -> (Option<String>, Vec<OutputSource>) {
     use crate::ast::{Source, TransformKind};
-    let Some(query) = parse_prefix(text, catalog) else {
+    let Some(parsed) = parse_prefix(text, catalog) else {
         return (None, Vec::new());
     };
+    let query = parsed.query;
     let mut sources = output_source(&query.source).into_iter().collect::<Vec<_>>();
     let mut unit = match &query.source {
         Source::Unit { unit, .. } => Some(unit.clone()),
