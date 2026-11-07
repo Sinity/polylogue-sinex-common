@@ -229,6 +229,14 @@ shows the gap, never `0`. The states are `coverage::CoverageState`, which
 command-surface's answer envelope uses for its coverage facet; any state but
 `complete` makes a count over the interval a lower bound.
 
+Projected set operands, and projected operands of `diff`, require the same
+column names and declared semantic types: field kinds (including list elements),
+reference targets, closed-value sets and unknown policies. Reference targets
+use the catalog's canonical unit name. Descriptive phrases and field origins
+do not affect compatibility. `text(E)` explicitly clears reference and closed-set
+meaning, so both operands must project ordinary text when that is the intended
+shared schema. `fuse` contributes order without inserting its operand's fields.
+
 ## Order relations
 
 One form covers time and steps:

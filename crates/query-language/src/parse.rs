@@ -2667,7 +2667,7 @@ impl Parser<'_> {
             kind,
         })
     }
-    /// Set algebra and diff need rows of one unit, or identical projected columns.
+    /// Set algebra and diff need rows of one unit, or identical projected types.
     fn check_same_rows(
         &self,
         outer: &Scope,
@@ -2679,7 +2679,14 @@ impl Parser<'_> {
             return Ok(());
         }
         let same = match (&outer.columns, &inner.columns) {
-            (Some(a), Some(b)) => a == b,
+            (Some(a), Some(b)) => {
+                a == b
+                    && a.iter().all(|name| {
+                        let left = self.field_info(outer, name).field;
+                        let right = self.field_info(inner, name).field;
+                        self.same_projected_type(&left, &right)
+                    })
+            }
             (None, None) => {
                 self.catalog.unit(&outer.unit).map(|u| &u.name)
                     == self.catalog.unit(&inner.unit).map(|u| &u.name)
@@ -2692,10 +2699,42 @@ impl Parser<'_> {
         Err(Error::new(
             ErrorKind::InvalidQuery,
             format!(
-                "{word} needs rows of one unit or the same projected fields; project both sides with `| fields …`"
+                "{word} needs rows of one unit or the same projected fields and types; project both sides with `| fields …`"
             ),
             at,
         ))
+    }
+    fn same_projected_type(&self, left: &Field, right: &Field) -> bool {
+        if left.kind != right.kind
+            || left.values.iter().collect::<BTreeSet<_>>()
+                != right.values.iter().collect::<BTreeSet<_>>()
+        {
+            return false;
+        }
+        let same_unknown = match (&left.unknown, &right.unknown) {
+            (crate::catalog::UnknownRule::Word(left), crate::catalog::UnknownRule::Word(right)) => {
+                left.eq_ignore_ascii_case(right)
+            }
+            (left, right) => left == right,
+        };
+        if !same_unknown {
+            return false;
+        }
+        let mut kind = &left.kind;
+        while let FieldKind::List(element) = kind {
+            kind = element;
+        }
+        if *kind == FieldKind::Reference {
+            let target = |field: &Field| {
+                field.unit.as_deref().map(|name| {
+                    self.catalog
+                        .unit(name)
+                        .map_or_else(|| name.to_string(), |unit| unit.name.clone())
+                })
+            };
+            return target(left) == target(right);
+        }
+        true
     }
     fn join(&mut self, scope: &mut Scope, start: usize) -> Result<TransformKind, Error> {
         if self.is("(") {
