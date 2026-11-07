@@ -285,7 +285,7 @@ fn former_command_sources_are_search_words() {
         "recall last",
         "trace sinex:ev/0190",
         "related sinex:ev/0190",
-        "comands since:7d",
+        "\"comands\" since:7d",
         "sort algorithm",
     ] {
         let query = parse(text, &c).unwrap_or_else(|e| panic!("{text}: {e}"));
@@ -306,6 +306,13 @@ fn former_command_sources_are_search_words() {
             "{text}: {first:?}"
         );
     }
+    let correction = parse("comands since:7d", &c).unwrap_err();
+    assert_eq!(correction.kind, query_language::ErrorKind::NotAQuery);
+    assert_eq!(
+        correction.suggestion.as_deref(),
+        Some("commands where since:7d")
+    );
+    parse(correction.suggestion.as_deref().unwrap(), &c).unwrap();
 }
 
 #[test]
