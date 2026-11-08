@@ -854,9 +854,10 @@ pub struct OperationCatalog {
     renderers: Vec<Presentation>,
     deadlines: Deadlines,
     failure_codes: BTreeMap<String, FailureKind>,
-    default_operation: Option<String>,
+    default_operation: Option<(String, fn(&str) -> bool)>,
 }
-type Renderer = Box<dyn Fn(Value, TextStyle) -> Result<String, Failure> + Send + Sync>;
+type Renderer =
+    Box<dyn Fn(Value, Option<TextStyle>) -> Result<Option<String>, Failure> + Send + Sync>;
 #[derive(Default)]
 struct Presentation {
     answer: Option<Renderer>,
@@ -912,8 +913,13 @@ impl OperationCatalog {
     }
     pub(crate) fn default_operation(&self) -> Option<&OperationDescription> {
         self.default_operation
-            .as_deref()
-            .and_then(|name| self.forms.description(name))
+            .as_ref()
+            .and_then(|(name, _)| self.forms.description(name))
+    }
+    pub(crate) fn accepts_default_first(&self, word: &str) -> bool {
+        self.default_operation
+            .as_ref()
+            .is_some_and(|(_, accepts)| accepts(word))
     }
     fn index(&self, name: &str) -> Option<usize> {
         self.forms
@@ -950,7 +956,32 @@ impl OperationCatalog {
         self.renderers[index]
             .event
             .as_ref()
-            .expect("stream declaration has a renderer")(event, style)
+            .expect("stream declaration has a renderer")(event, Some(style))
+        .map(|text| text.expect("text style requests rendering"))
+    }
+    fn answer_renderer(&self, operation: &str) -> Result<&Renderer, Failure> {
+        let index = self
+            .index(operation)
+            .ok_or_else(|| bad_request(format!("{operation} has no answer to render")))?;
+        if !matches!(
+            self.descriptions()[index].spec.kind,
+            OperationKind::Request { .. }
+        ) {
+            return Err(bad_request(format!("{operation} has no answer to render")));
+        }
+        Ok(self.renderers[index]
+            .answer
+            .as_ref()
+            .expect("request declaration has a renderer"))
+    }
+    /// Decode a response through its declared type without rendering text or
+    /// modifying the original answer or envelope. Failures carry no response value.
+    pub fn validate_answer(&self, operation: &str, answer: &Answer<Value>) -> Result<(), Failure> {
+        let renderer = self.answer_renderer(operation)?;
+        if let Some(value) = answer.value() {
+            renderer(value.clone(), None)?;
+        }
+        Ok(())
     }
     /// Render an answer without constructing or binding a handler.
     pub fn render_text(
@@ -966,21 +997,8 @@ impl OperationCatalog {
                 terminal_text(&error.message)
             )),
             Outcome::Ok(value) | Outcome::Empty(value) | Outcome::Degraded { value, .. } => {
-                let index = self
-                    .index(operation)
-                    .ok_or_else(|| bad_request(format!("{operation} has no answer to render")))?;
-                if !matches!(
-                    self.descriptions()[index].spec.kind,
-                    OperationKind::Request { .. }
-                ) {
-                    return Err(bad_request(format!("{operation} has no answer to render")));
-                }
-                self.renderers[index]
-                    .answer
-                    .as_ref()
-                    .expect("request declaration has a renderer")(
-                    value.clone(), style
-                )
+                self.answer_renderer(operation)?(value.clone(), Some(style))
+                    .map(|text| text.expect("text style requests rendering"))
             }
         }
     }
@@ -1074,8 +1092,14 @@ impl CatalogBuilder {
         }
     }
     /// The row a command line runs when its first words name no command
-    /// (`polylogue QUERY`).
-    pub fn set_default_operation(&mut self, name: impl Into<String>) -> Result<(), Failure> {
+    /// (`polylogue QUERY`). The product predicate checks the first lexical
+    /// operand before positional words are joined. Empty input and explicit
+    /// structured `--request` input have no first operand to check.
+    pub fn set_default_operation(
+        &mut self,
+        name: impl Into<String>,
+        accepts_first: fn(&str) -> bool,
+    ) -> Result<(), Failure> {
         let name = name.into();
         let spec = self
             .spec_named(&name)
@@ -1088,7 +1112,7 @@ impl CatalogBuilder {
                 "the default operation needs a command-line surface",
             ));
         }
-        self.catalog.default_operation = Some(name);
+        self.catalog.default_operation = Some((name, accepts_first));
         Ok(())
     }
     /// Register each precise product code once, at table construction.
@@ -1283,8 +1307,8 @@ impl CatalogBuilder {
 }
 fn renderer<R: DeserializeOwned + 'static>(render: fn(&R, TextStyle) -> String) -> Renderer {
     Box::new(move |value, style| {
-        serde_json::from_value(value)
-            .map(|typed| render(&typed, style))
+        serde_json::from_value::<R>(value)
+            .map(|typed| style.map(|style| render(&typed, style)))
             .map_err(|error| Failure::new(FailureKind::Io, error.to_string()))
     })
 }

@@ -584,6 +584,10 @@ impl OperationCatalog {
             format: call.format,
         })
     }
+    /// The envelope's presentation, without decoding or rendering the response value.
+    pub fn render_footer(&self, via: Via, answer: &Answer<Value>) -> String {
+        self.forms().footer(via, &answer.outcome, &answer.envelope)
+    }
     /// An answer as text for a person or model: the value's rendering
     /// (nothing with `format: json`, whose rows travel as data, or for
     /// `operation` empty) and the envelope's lines, measured after the
@@ -614,7 +618,7 @@ impl OperationCatalog {
                 .unwrap_or_else(|failure| format!("error (io): {}\n", failure.message)),
         };
         let value_text = full;
-        let footer = self.forms().footer(via, &answer.outcome, &answer.envelope);
+        let footer = self.render_footer(via, &answer);
         let used = approximate_tokens(&format!("{value_text}{footer}"));
         answer.envelope.used_tokens = Some(used);
         RenderedAnswer {

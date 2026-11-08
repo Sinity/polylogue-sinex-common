@@ -47,7 +47,7 @@ fn catalog() -> std::sync::Arc<OperationCatalog> {
         ArgumentSpec::new("message", ArgumentForm::Rest, "Message"),
     ];
     builder.declare_local::<Ping>(ping).unwrap();
-    builder.set_default_operation("ping").unwrap();
+    builder.set_default_operation("ping", |_| true).unwrap();
     builder.finish()
 }
 #[test]

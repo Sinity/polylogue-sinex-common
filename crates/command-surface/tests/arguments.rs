@@ -83,7 +83,7 @@ fn table() -> CatalogBuilder {
     table
         .declare::<ExecRequest, Value>(exec_spec(), |value, _style| format!("{value}\n"))
         .unwrap();
-    table.set_default_operation("read").unwrap();
+    table.set_default_operation("read", |_| true).unwrap();
     table
 }
 fn words(line: &str) -> Vec<String> {

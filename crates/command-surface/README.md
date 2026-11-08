@@ -56,6 +56,13 @@ lists, fallible follow-up requests, read deadlines, connection budgets and
 answer/event rendering with an explicit style. A client can use all of them
 without constructing a daemon, operation or runtime table.
 
+A socket client checks a generic `Answer<Value>` against the declared response
+with `validate_answer(operation, &answer)` before printing JSON. This uses the
+same typed decode as `render_text`, invokes no text renderer and preserves the
+original answer and envelope. Human clients use fallible `render_text` once,
+then `render_footer(via, &answer)` for the shared envelope presentation, so they
+can report a malformed daemon response through their protocol error handling.
+
 `cli_arguments(operation)` projects the existing argument declarations and
 typed schema into owned `CliArgument` values: `spec`, `kind`, `required` and
 closed textual `choices`. It includes implicit named fields and calling-process
@@ -110,12 +117,18 @@ A field without a declaration is written `--name VALUE`. A flag that acts on
 the calling process (`--out FILE`) is read by the command line and kept out
 of the request. Known global options may precede a command (`--json status`,
 `--deadline 100 read REF`) or follow it. Longest command selection normalizes
-recognized globals before and between its command words; `--` and Rest arguments retain their literal
-meaning. `--` ends the flags. Every row also takes `--json`,
+recognized globals before and between its command words; `--` and Rest
+arguments retain their literal meaning. `--` ends the flags. Every row also takes `--json`,
 `--deadline MS|none`, `--request-id ID`, `--budget N|none`, `--cursor C`,
 `--fresh` and `--request JSON` (the whole value, for any request type). A
-product may name one **default operation**, run when a command line's first
-words name no command (`polylogue QUERY`).
+product may name one **default operation** with
+`set_default_operation(name, accepts_first)`, run when a command line's first
+words name no command (`polylogue QUERY`). The product's pure `accepts_first`
+predicate receives the first lexical operand before Words or Rest joins it
+with later words. Known options and `--` are handled by the same parser.
+Explicit command words bypass this default-selection predicate; empty input
+and `--request JSON` have no first operand to check. A product that accepts
+any default operand supplies `|_| true`.
 
 A repeated list argument may explicitly declare `delimiter(',')`, stored as
 `value_delimiter`, to split one CLI flag value into several items. This does

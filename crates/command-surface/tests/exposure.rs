@@ -155,7 +155,7 @@ fn leading_globals_leave_rest_arguments_and_literal_separator_untouched() {
     catalog
         .declare::<Script, String>(spec, |text, _| text.clone())
         .unwrap();
-    catalog.set_default_operation("exec").unwrap();
+    catalog.set_default_operation("exec", |_| true).unwrap();
     let catalog = catalog.finish();
     let explicit = catalog
         .parse_cli(
@@ -255,7 +255,7 @@ fn surfaces() -> (OperationTable, Arc<AtomicUsize>) {
             .declare::<Text, String>(spec, |text, style| styled(text, style))
             .unwrap();
     }
-    assert!(catalog.set_default_operation("endpoint").is_err());
+    assert!(catalog.set_default_operation("endpoint", |_| true).is_err());
     let mut table = OperationTable::new(catalog.finish());
     let effects = Arc::new(AtomicUsize::new(0));
     for name in ["endpoint", "native", "mcp", "cli", "hidden"] {

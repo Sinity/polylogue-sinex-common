@@ -579,6 +579,7 @@ impl OperationCatalog {
         let mut options_done = false;
         let mut rest = false;
         let mut index = start;
+        let mut first_operand = true;
         let argument_named = |flag: &str| -> Option<ArgumentSpec> {
             if let Some(argument) = spec
                 .arguments
@@ -624,6 +625,14 @@ impl OperationCatalog {
                     .map(ArgumentSpec::flag)
             };
             let Some(flag) = flag else {
+                if start == 0 && first_operand && !self.accepts_default_first(word) {
+                    return Err(bad_request(format!(
+                        "unknown command {word:?}; use {} {} ...",
+                        self.product(),
+                        spec.command.join(" ")
+                    )));
+                }
+                first_operand = false;
                 let argument = positionals
                     .get(positional)
                     .ok_or_else(|| bad_request(format!("unexpected word {word}")))?;
