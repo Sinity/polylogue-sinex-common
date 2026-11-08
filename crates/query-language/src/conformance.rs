@@ -991,9 +991,9 @@ impl<'a> ReferenceEvaluator<'a> {
                 .collect(),
         ))
     }
-    /// Select a witness independently of input enumeration. Unknown children do
-    /// not become witnesses; existence itself still preserves their truth value.
-    pub fn exists_witness(
+    /// Select a matched row independently of input enumeration. Unknown children do
+    /// not become matched rows; existence itself still preserves their truth value.
+    pub fn exists_match(
         &self,
         row: &Row,
         unit: &str,
@@ -1389,15 +1389,15 @@ impl<'a> ReferenceEvaluator<'a> {
         });
         Ok(rows)
     }
-    fn witness<'r>(
+    fn matched_row<'r>(
         &self,
         outer: &Row,
         mut pairs: Vec<(&'r Row, i128)>,
-        pick: &WitnessChoice,
+        pick: &MatchChoice,
         order: (OrderRelation, Option<&Distance>, TimePoint),
     ) -> Result<Option<(&'r Row, i128)>, Error> {
         let (relation, within, at) = order;
-        if let WitnessChoice::FirstBy { keys } = pick {
+        if let MatchChoice::FirstBy { keys } = pick {
             if keys.is_empty() {
                 return Err(bad("pick first needs a sort key"));
             }
@@ -1485,7 +1485,7 @@ impl<'a> ReferenceEvaluator<'a> {
             if let Some((inner, relation, within, at, pick)) = &exposed
                 && let Some(pairs) = self.related(&row, inner, *relation, *within, *at)?
                 && let Some((nearest, offset)) =
-                    self.witness(&row, pairs, pick, (*relation, *within, *at))?
+                    self.matched_row(&row, pairs, pick, (*relation, *within, *at))?
             {
                 row.fields
                     .insert("match.id".into(), Scalar::Text(nearest.id.clone()));
@@ -1884,7 +1884,7 @@ fn validate_condition(c: &Condition) -> Result<(), Error> {
         }
         ConditionKind::Order { query, pick, .. } => {
             validate_query(query)?;
-            if let WitnessChoice::FirstBy { keys } = pick {
+            if let MatchChoice::FirstBy { keys } = pick {
                 if keys.is_empty() {
                     return Err(bad("pick first needs a sort key"));
                 }

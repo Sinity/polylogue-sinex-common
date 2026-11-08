@@ -62,8 +62,8 @@ struct Fixture {
 fn fixture(ordinary_stream: bool) -> Fixture {
     let mut deadlines = Deadlines::default();
     deadlines.set(LatencyClass::Read, Some(Duration::from_millis(250)));
-    let mut catalog = OperationCatalog::builder("example", deadlines);
-    catalog
+    let mut declarations = OperationDeclarations::builder("example", deadlines);
+    declarations
         .declare_tool(ToolFamily {
             name: "query".into(),
             description: "Read values".into(),
@@ -82,11 +82,11 @@ fn fixture(ordinary_stream: bool) -> Fixture {
     spec.latency = LatencyClass::Read;
     if ordinary_stream {
         spec.kind = OperationKind::Stream;
-        catalog
+        declarations
             .declare_stream::<Input, u64>(spec, |event, _| event.to_string())
             .unwrap();
     } else {
-        catalog
+        declarations
             .declare_transfer::<Input, bool, u64>(
                 spec,
                 |value, _| value.to_string(),
@@ -94,7 +94,7 @@ fn fixture(ordinary_stream: bool) -> Fixture {
             )
             .unwrap();
     }
-    let mut table = OperationTable::new(catalog.finish());
+    let mut table = OperationTable::new(declarations.finish());
     let (contexts, receive) = mpsc::unbounded_channel();
     let sender = Arc::new(Mutex::new(None));
     let probe = Probe {
@@ -143,11 +143,7 @@ async fn finite_page_keeps_declared_default_and_timeout_names_the_operation() {
     let answer = running.await.unwrap();
     assert_eq!(failure(&answer).kind, FailureKind::Timeout);
     assert!(failure(&answer).retryable);
-    assert!(
-        failure(&answer)
-            .message
-            .contains("during admission for read")
-    );
+    assert!(failure(&answer).message.contains("during setup for read"));
     assert!(failure(&answer).message.contains("rows scanned unknown"));
     assert_eq!(
         answer.envelope.next.last().unwrap().request.deadline,
@@ -200,7 +196,7 @@ async fn typed_stream_still_honors_explicit_zero_and_absolute_deadlines() {
         Err(error) => error,
     };
     assert_eq!(error.kind, FailureKind::Timeout);
-    assert!(error.message.contains("admission for read"));
+    assert!(error.message.contains("setup for read"));
     assert!(fixture.contexts.try_recv().is_err());
     let started = tokio::time::Instant::now();
     let mut events = fixture
@@ -221,7 +217,7 @@ async fn typed_stream_still_honors_explicit_zero_and_absolute_deadlines() {
     tokio::time::advance(Duration::from_millis(50)).await;
     let error = events.next().await.unwrap().unwrap_err();
     assert_eq!(error.kind, FailureKind::Timeout);
-    assert!(error.message.contains("admission for read"));
+    assert!(error.message.contains("setup for read"));
     assert!(events.next().await.is_none());
 }
 #[tokio::test(start_paused = true)]
@@ -246,7 +242,7 @@ async fn ordinary_stream_keeps_its_declared_default_and_explicit_null_still_lift
     tokio::time::advance(Duration::from_millis(250)).await;
     let error = events.next().await.unwrap().unwrap_err();
     assert_eq!(error.kind, FailureKind::Timeout);
-    assert!(error.message.contains("admission for follow"));
+    assert!(error.message.contains("setup for follow"));
     let mut page = fixture(false);
     let table = page.table.clone();
     let parent = CancellationToken::new();

@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 mod support;
 
 #[test]
-fn explicit_witness_keys_bind_inner_output_and_local_candidate_metadata() {
+fn explicit_pick_keys_bind_inner_output_and_local_candidate_metadata() {
     for (catalog, unit, time) in [
         (support::polylogue(), "tool_calls", "at"),
         (support::sinex(), "events", "when"),
@@ -28,7 +28,7 @@ fn explicit_witness_keys_bind_inner_output_and_local_candidate_metadata() {
         let ConditionKind::Order { pick, .. } = &mut condition.kind else {
             panic!()
         };
-        *pick = WitnessChoice::FirstBy {
+        *pick = MatchChoice::FirstBy {
             keys: vec![key("match.id", false)],
         };
         assert_ne!(
@@ -78,7 +78,7 @@ fn point(tick: i64) -> Extent {
         coarse: false,
     }
 }
-fn ordered(pick: WitnessChoice) -> Condition {
+fn ordered(pick: MatchChoice) -> Condition {
     Condition {
         span: Span::default(),
         kind: ConditionKind::Order {
@@ -119,7 +119,7 @@ fn outer_query(condition: Condition) -> Query {
     }
 }
 #[test]
-fn witness_choice_keeps_outer_grain_and_truth_while_changing_only_selected_match() {
+fn match_choice_keeps_outer_grain_and_truth_while_changing_only_selected_match() {
     let mut first = Row::new("outer:a");
     first.time = Some(point(10));
     first.parent = Some("scope".into());
@@ -144,7 +144,7 @@ fn witness_choice_keeps_outer_grain_and_truth_while_changing_only_selected_match
     ]);
     let evaluator = ReferenceEvaluator::new(&data);
     let nearest = evaluator
-        .execute(&outer_query(ordered(WitnessChoice::Nearest)))
+        .execute(&outer_query(ordered(MatchChoice::Nearest)))
         .unwrap();
     assert_eq!(
         nearest
@@ -155,7 +155,7 @@ fn witness_choice_keeps_outer_grain_and_truth_while_changing_only_selected_match
         [Scalar::from("a"), Scalar::from("a")]
     );
     let selected = evaluator
-        .execute(&outer_query(ordered(WitnessChoice::FirstBy {
+        .execute(&outer_query(ordered(MatchChoice::FirstBy {
             keys: vec![key("score", false)],
         })))
         .unwrap();
@@ -177,7 +177,7 @@ fn witness_choice_keeps_outer_grain_and_truth_while_changing_only_selected_match
     assert_eq!(selected.rows[0].parent, first.parent);
     // Missing score sorts last in both directions; a real candidate outranks an unknown relation.
     let descending = evaluator
-        .execute(&outer_query(ordered(WitnessChoice::FirstBy {
+        .execute(&outer_query(ordered(MatchChoice::FirstBy {
             keys: vec![key("score", true)],
         })))
         .unwrap();
@@ -188,7 +188,7 @@ fn witness_choice_keeps_outer_grain_and_truth_while_changing_only_selected_match
             .all(|row| row.value("match.id") == Scalar::from("a"))
     );
     let unknowns = BTreeMap::from([("inner".into(), vec![Row::new("unknown")])]);
-    let condition = ordered(WitnessChoice::FirstBy {
+    let condition = ordered(MatchChoice::FirstBy {
         keys: vec![key("match.id", false)],
     });
     assert_eq!(
@@ -197,7 +197,7 @@ fn witness_choice_keeps_outer_grain_and_truth_while_changing_only_selected_match
             .unwrap(),
         Truth::Unknown
     );
-    let empty = ordered(WitnessChoice::FirstBy { keys: vec![] });
+    let empty = ordered(MatchChoice::FirstBy { keys: vec![] });
     assert!(evaluator.execute(&outer_query(empty)).is_err());
 }
 #[test]
@@ -212,7 +212,7 @@ fn absolute_candidate_distance_sort_retains_exact_ticks_beyond_f64_integer_preci
         ("outer".into(), vec![outer]),
         ("inner".into(), vec![farther, closest]),
     ]);
-    let choice = WitnessChoice::FirstBy {
+    let choice = MatchChoice::FirstBy {
         keys: vec![SortKey {
             expression: Expression::Function {
                 name: "abs".into(),
@@ -274,7 +274,7 @@ fn absolute_payload_values_defer_json_narrowing_to_the_product() {
 }
 
 #[test]
-fn condition_order_is_commutative_and_witness_publication_happens_after_its_predicate() {
+fn condition_order_is_commutative_and_match_exposure_happens_after_its_predicate() {
     let catalog = support::sinex();
     let mut rows = vec![];
     for (id, source, at) in [
@@ -295,7 +295,7 @@ fn condition_order_is_commutative_and_witness_publication_happens_after_its_pred
         "events where source = outer AND near(events where source = prior) within 5m | where ";
     let a = "near(events where source = A) within 5m";
     let b = "near(events where source = B) within 5m";
-    for (first, second, witness) in [
+    for (first, second, matched) in [
         (format!("{a} AND {b}"), format!("{b} AND {a}"), "prior"),
         (format!("{a} OR {b}"), format!("{b} OR {a}"), "prior"),
         (
@@ -305,12 +305,12 @@ fn condition_order_is_commutative_and_witness_publication_happens_after_its_pred
         ),
     ] {
         let left = parse(
-            &format!("{prefix}{first} | fields id, match.id as witness"),
+            &format!("{prefix}{first} | fields id, match.id as matched"),
             &catalog,
         )
         .unwrap();
         let right = parse(
-            &format!("{prefix}{second} | fields id, match.id as witness"),
+            &format!("{prefix}{second} | fields id, match.id as matched"),
             &catalog,
         )
         .unwrap();
@@ -327,11 +327,11 @@ fn condition_order_is_commutative_and_witness_publication_happens_after_its_pred
         let answer = evaluator.execute(&left).unwrap();
         assert_eq!(answer.rows, evaluator.execute(&right).unwrap().rows);
         assert_eq!(answer.rows.len(), 1);
-        assert_eq!(answer.rows[0].value("witness"), Scalar::from(witness));
+        assert_eq!(answer.rows[0].value("matched"), Scalar::from(matched));
         let TransformKind::Where { condition } = &left.transforms[0].kind else {
             panic!()
         };
-        assert_eq!(condition.exposed_order().is_some(), witness == "a");
+        assert_eq!(condition.exposed_order().is_some(), matched == "a");
     }
 }
 fn resolve_test_durations(query: &mut Query) {
@@ -389,14 +389,14 @@ fn question_identity_keeps_order_occurrences_and_nonpublishing_boolean_wrappers(
         "events where source = outer AND near(events where source = prior) within 5m | where ";
     let order = "near(events where source = chosen) within 5m";
     let mut single_id = None;
-    for (predicate, witness) in [
+    for (predicate, matched) in [
         (order.into(), "chosen"),
         (format!("{order} AND {order}"), "prior"),
         (format!("{order} OR {order}"), "prior"),
         (format!("NOT (NOT ({order}))"), "prior"),
     ] {
         let query = parse(
-            &format!("{prefix}{predicate} | fields id, match.id as witness"),
+            &format!("{prefix}{predicate} | fields id, match.id as matched"),
             &catalog,
         )
         .unwrap();
@@ -418,10 +418,10 @@ fn question_identity_keeps_order_occurrences_and_nonpublishing_boolean_wrappers(
         resolve_test_durations(&mut resolved);
         let answer = evaluator.execute(&resolved).unwrap();
         assert_eq!(answer.rows.len(), 1);
-        assert_eq!(answer.rows[0].value("witness"), Scalar::from(witness));
+        assert_eq!(answer.rows[0].value("matched"), Scalar::from(matched));
     }
     let mut singleton = parse(
-        &format!("{prefix}{order} | fields id, match.id as witness"),
+        &format!("{prefix}{order} | fields id, match.id as matched"),
         &catalog,
     )
     .unwrap();
@@ -443,7 +443,7 @@ fn question_identity_keeps_order_occurrences_and_nonpublishing_boolean_wrappers(
     let mut resolved = bind(&singleton, &catalog).unwrap().into_query();
     resolve_test_durations(&mut resolved);
     assert_eq!(
-        evaluator.execute(&resolved).unwrap().rows[0].value("witness"),
+        evaluator.execute(&resolved).unwrap().rows[0].value("matched"),
         Scalar::from("prior")
     );
     // An order inside a membership query does not produce its caller's match.

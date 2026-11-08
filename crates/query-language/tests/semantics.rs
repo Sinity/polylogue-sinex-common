@@ -423,7 +423,7 @@ fn exists_has_three_values_while_count_is_always_known() {
     });
     assert_eq!(evaluator.condition(&parent, &count).unwrap(), Truth::True);
     assert_eq!(
-        evaluator.exists_witness(&parent, "children", None).unwrap(),
+        evaluator.exists_match(&parent, "children", None).unwrap(),
         Some("u".into())
     );
 }
@@ -883,7 +883,7 @@ fn steps_stay_inside_one_scope_instance() {
                 within: Some(Distance::Steps { count }),
                 at: TimePoint::When,
                 scope: None,
-                pick: WitnessChoice::Nearest,
+                pick: MatchChoice::Nearest,
             }),
             vec![],
         )
@@ -1186,7 +1186,7 @@ fn matched_time_selectors_keep_declared_spans_separate_from_occurrence_uncertain
                     within: None,
                     at,
                     scope: None,
-                    pick: WitnessChoice::Nearest,
+                    pick: MatchChoice::Nearest,
                 }),
             )
             .unwrap()
@@ -1329,7 +1329,7 @@ fn declared_span_end_membership_is_explicit_and_unknown_candidates_do_not_hide_m
         within: None,
         at: TimePoint::MatchWhen,
         scope: None,
-        pick: WitnessChoice::Nearest,
+        pick: MatchChoice::Nearest,
     });
     assert_eq!(
         evaluator.condition(&outer, &condition).unwrap(),
@@ -1452,7 +1452,7 @@ fn matches_copy_actual_parent_fields_without_inventing_a_public_id() {
 }
 
 #[test]
-fn projected_parent_aliases_keep_their_match_witnesses() {
+fn projected_parent_aliases_keep_their_matched_rows() {
     let mut child = Row::new("child").with("n", 3.);
     child.parent = Some("parent".into());
     let data = BTreeMap::from([

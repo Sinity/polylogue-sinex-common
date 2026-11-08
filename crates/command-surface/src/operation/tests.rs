@@ -205,8 +205,8 @@ impl Operation for DurableWrite {
     }
 }
 fn make_table(store: &Arc<Store>, gate: Option<Arc<Gate>>) -> OperationTable {
-    let mut catalog = OperationCatalog::builder("fixture", Deadlines::default());
-    catalog
+    let mut declarations = OperationDeclarations::builder("fixture", Deadlines::default());
+    declarations
         .declare_tool(ToolFamily {
             name: "write".into(),
             description: "Write".into(),
@@ -214,10 +214,10 @@ fn make_table(store: &Arc<Store>, gate: Option<Arc<Gate>>) -> OperationTable {
             idempotent: true,
         })
         .unwrap();
-    catalog
+    declarations
         .declare::<Write, Committed>(durable_write_spec(), durable_write_render_text)
         .unwrap();
-    let mut table = OperationTable::new(catalog.finish());
+    let mut table = OperationTable::new(declarations.finish());
     table
         .bind(
             "write",
@@ -584,8 +584,8 @@ async fn mixed_rows_authorize_the_typed_request_before_any_write() {
     }
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("records.db"));
-    let mut catalog = OperationCatalog::builder("example", Deadlines::default());
-    catalog
+    let mut declarations = OperationDeclarations::builder("example", Deadlines::default());
+    declarations
         .declare_tool(crate::ToolFamily {
             name: "settings".into(),
             description: "settings".into(),
@@ -593,10 +593,10 @@ async fn mixed_rows_authorize_the_typed_request_before_any_write() {
             idempotent: true,
         })
         .unwrap();
-    catalog
+    declarations
         .declare::<Arguments, Value>(mixed_spec(), mixed_render_text)
         .unwrap();
-    let mut table = OperationTable::new(catalog.finish());
+    let mut table = OperationTable::new(declarations.finish());
     table
         .bind(
             "setting",
@@ -607,7 +607,7 @@ async fn mixed_rows_authorize_the_typed_request_before_any_write() {
         .unwrap();
     let read = table
         .call_as(
-            RunnableRequest::new("setting", json!({}), "catalog"),
+            RunnableRequest::new("setting", json!({}), "declarations"),
             Via::Cli,
             Caller::default(),
             Default::default(),

@@ -1,6 +1,6 @@
 //! Transport adapters contain framing only. None builds an answer of its own.
 use crate::{
-    Answer, Caller, CancellationToken, Failure, FailureKind, Format, OperationCatalog,
+    Answer, Caller, CancellationToken, Failure, FailureKind, Format, OperationDeclarations,
     OperationKind, OperationTable, RunnableRequest, TextStyle, Via, bad_request,
 };
 use http::{Request as HttpRequest, Response as HttpResponse, StatusCode};
@@ -36,7 +36,7 @@ impl StreamLine {
     }
 }
 
-impl OperationCatalog {
+impl OperationDeclarations {
     /// Generated help: one line per listed row, with its usage.
     pub fn help(&self) -> String {
         self.descriptions()

@@ -55,6 +55,7 @@ are renames the operator may still change (default; open operator question).
 | coverage state | how completely a source covers an interval: `complete`, `gap`, `unknown`, `outside_span`, `not_yet`, `excluded`, `unavailable` |
 | expression | a field, literal, function call or arithmetic, with checked dimensions |
 | step | one position in an order scope; `within 1 step` is adjacent |
+| matched row | the one inner row an order condition exposes as `match.`; `pick first by` chooses it, otherwise the nearest (`MatchChoice`) |
 | pattern | a top-level `exists` or `seq` condition; `\| matches` lists one row per step of each of its matches |
 | exact text | a field kind for identifiers and closed words, whose `field:value` is equality |
 | generated field | a field the language adds to a relation (`match.distance`, `change`, `coverage`); it never hides a stored field |
@@ -107,7 +108,8 @@ are renames the operator may still change (default; open operator question).
 | access level | what a row needs from its caller: `read`, `write` (attributed, undoable) or `permanent` (cannot be undone) |
 | argument form | how a request field is written on the command line: positional, words, rest, named, repeated, flag |
 | default operation | the row a command line runs when its first words name no command |
-| operation table | the typed list of a product's operations from which the CLI, socket, HTTP and MCP are generated |
+| operation declarations | the typed list of a product's operations, their schemas, surfaces and rendering, from which the CLI, socket, HTTP and MCP are generated; usable without handlers (`OperationDeclarations`) |
+| operation table | a product's operation declarations bound to the handlers that run them (`OperationTable`) |
 | request, answer | what a caller sends, and what it gets back: an outcome and an envelope |
 | outcome | what kind of answer came back: `ok`, `empty`, `degraded` (with what is missing) or `error` (a failure and no value) |
 | failure, failure kind | a typed error, and its stable name on the wire |

@@ -13,6 +13,56 @@ pub fn is_integer(text: &str) -> bool {
     Decimal::parse(text).is_some_and(|value| !value.scale.starts_with('-'))
 }
 
+/// Multiply an exact decimal by `10^places`, then round to the nearest i64.
+/// Half ties round away from zero. The target range is checked after rounding;
+/// an invalid decimal or an out-of-range rounded result returns `None`.
+/// Work and allocation depend on the input spelling, never its exponent value.
+/// This physical conversion does not change decimal identity or comparison.
+pub fn round_scaled_i64(text: &str, places: i64) -> Option<i64> {
+    let value = Decimal::parse(text)?;
+    if value.digits == "0" {
+        return Some(0);
+    }
+    let scale = add_integer(&value.scale, &places.to_string());
+    let width = add_integer(&scale, &value.digits.len().to_string());
+    let magnitude = match integer_cmp(&width, "0") {
+        Ordering::Less => 0,
+        Ordering::Equal => u64::from(value.digits.as_bytes()[0] >= b'5'),
+        Ordering::Greater => {
+            if integer_cmp(&width, "19") == Ordering::Greater {
+                return None;
+            }
+            let width: usize = width.parse().ok()?;
+            let mut integer = 0u64;
+            for digit in value
+                .digits
+                .bytes()
+                .chain(std::iter::repeat(b'0'))
+                .take(width)
+            {
+                integer = integer
+                    .checked_mul(10)?
+                    .checked_add(u64::from(digit - b'0'))?;
+            }
+            if value
+                .digits
+                .as_bytes()
+                .get(width)
+                .is_some_and(|digit| *digit >= b'5')
+            {
+                integer = integer.checked_add(1)?;
+            }
+            integer
+        }
+    };
+    let signed = if value.negative {
+        -i128::from(magnitude)
+    } else {
+        i128::from(magnitude)
+    };
+    signed.try_into().ok()
+}
+
 // One lexical rule is shared by validation, identity and key comparison. The
 // scale stays symbolic, so the accepted lexeme also has an exact canonical key.
 fn parts(text: &str) -> Option<(bool, &str, &str, &str)> {

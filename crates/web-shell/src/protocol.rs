@@ -100,7 +100,7 @@ pub struct Action {
 impl Action {
     /// Build directly from the registered row and its request, including the CLI.
     pub fn from_table(
-        table: &command_surface::OperationCatalog,
+        table: &command_surface::OperationDeclarations,
         availability: &command_surface::Availability,
         request: &command_surface::RunnableRequest,
         key: Option<String>,

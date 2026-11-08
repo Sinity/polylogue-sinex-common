@@ -3,7 +3,7 @@
 //! A product adapter installs each synthetic Dataset through its fixture API,
 //! compiles the supplied shared AST with its real compiler, and executes pages
 //! through its real query path. The runner compares independently specified
-//! row identities, values, witnesses and totals, not the reference interpreter.
+//! row identities, values, matched rows and totals, not the reference interpreter.
 //! Fixture unit/field names are caller supplied so both product catalogs can
 //! run the same laws. Product-specific transport parity and refusals add cases.
 use crate::Error;
@@ -509,7 +509,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
         }),
         at: TimePoint::When,
         scope: None,
-        pick: WitnessChoice::Nearest,
+        pick: MatchChoice::Nearest,
     });
     // The semijoin keeps each outer row once; an untimed row is unknown, so
     // neither the relation nor its negation keeps it.
@@ -542,7 +542,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
         within: Some(Distance::Steps { count: 1 }),
         at: TimePoint::When,
         scope: None,
-        pick: WitnessChoice::Nearest,
+        pick: MatchChoice::Nearest,
     });
     output.push(case(
         "ql.order.steps",
@@ -578,7 +578,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
             }),
             at: TimePoint::When,
             scope: None,
-            pick: WitnessChoice::Nearest,
+            pick: MatchChoice::Nearest,
         })
     };
     let matched = |row: &Row, inner: &str, offset: Option<f64>| {
@@ -765,7 +765,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
 }
 /// Run input rotations and reversals, and independently page
 /// every case with page sizes one, two and larger than the answer. An absent or
-/// repeated continuation, a wrong count, values or witnesses is a violation.
+/// repeated continuation, a wrong count, values or matched rows is a violation.
 pub fn check<C, E>(compiler: &C, executor: &mut E, cases: &[Case]) -> Vec<Violation>
 where
     C: Compiler,

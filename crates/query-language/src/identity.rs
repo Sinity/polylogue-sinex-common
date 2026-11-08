@@ -21,8 +21,8 @@ impl std::fmt::Display for QuestionId {
 /// Relative time expressions deliberately remain expressions.
 pub fn normal_form(query: &Query, catalog: &Catalog) -> Result<Value, Error> {
     let mut query = query.clone();
-    let canonical = scalars::canonicalize(&mut query, catalog);
-    let mut value = encoding::query(&canonical);
+    scalars::canonicalize(&mut query, catalog);
+    let mut value = encoding::query(&query);
     normalize(&mut value);
     Ok(value)
 }
@@ -64,7 +64,7 @@ fn serialization(error: serde_json::Error) -> Error {
     )
 }
 
-/// Only boolean nodes in this condition can change its witness exposure.
+/// Only boolean nodes in this condition can change its match exposure.
 /// An order inside a nested query is not an order producer in its caller.
 fn order_bearing(node: &Value) -> bool {
     let kind = node.get("kind");

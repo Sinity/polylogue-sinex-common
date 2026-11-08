@@ -3,8 +3,9 @@
 //! request back as a command line, and its usage line.
 use crate::operation::{Forms, GLOBAL_FLAGS, valid_word};
 use crate::{
-    ArgumentForm, ArgumentSpec, Deadline, Failure, Format, OperationCatalog, OperationDescription,
-    OperationKind, RequestOption, RunnableRequest, bad_request, quote_argument,
+    ArgumentForm, ArgumentSpec, Deadline, Failure, Format, OperationDeclarations,
+    OperationDescription, OperationKind, RequestOption, RunnableRequest, bad_request,
+    quote_argument,
 };
 use serde_json::{Map, Value};
 use std::{borrow::Cow, fmt::Write as _};
@@ -367,7 +368,7 @@ fn word_value(kind: &ValueKind, word: &str, flag: &str) -> Result<Value, Failure
     }
 }
 
-impl OperationCatalog {
+impl OperationDeclarations {
     /// The row a command line names: the longest matching command, else the
     /// default operation with every word its own.
     fn command_row(&self, args: &[String]) -> Option<(&OperationDescription, usize)> {

@@ -128,9 +128,9 @@ recursion, not on the size of a query.
   `field >= N` as the suggestion.
 - **Default unit.** Without a unit, the unit is the product's default
   (Polylogue `sessions`, Sinex `events`). A mixed query names every unit.
-- **Namespaces.** Each catalog declares its product namespace and may declare
-  a unit's singular form. Both resolve to the canonical unit name, preserving
-  question identity. Inside a product its own units are unprefixed; the other
+- **Namespaces.** Each catalog declares its product namespace; a prefixed
+  unit resolves to the canonical unit name, preserving question identity.
+  Inside a product its own units are unprefixed; the other
   product's units carry `pl.` or `sx.`.
 
 ### Match operators
@@ -242,8 +242,14 @@ shows the gap, never `0`. The states are `coverage::CoverageState`, which
 command-surface's answer envelope uses for its coverage facet; any state but
 `complete` makes a count over the interval a lower bound.
 
-Projected set operands, and projected operands of `diff`, require the same
-column names and declared semantic types: field kinds (including list elements),
+`intersect` and `except` keep the left operand's values and columns. When both
+operands have the same explicit native row domain, they compare native row
+identities even when either side projects different columns. Projection does
+not reopen fields hidden on the left.
+
+Projected `union` operands, projected operands of `diff`, and `intersect` or
+`except` operands without the same native row domain require the same column
+names and declared semantic types: field kinds (including list elements),
 reference targets, closed-value sets and unknown policies. Reference targets
 use the catalog's canonical unit name. Descriptive phrases and field origins
 do not affect compatibility. `text(E)` explicitly clears reference and closed-set
@@ -262,11 +268,11 @@ DISTANCE := DURATION | N steps
 
 - **As a condition** it is a semijoin: an outer row is kept when at least one
   inner row stands in the relation, so matches never multiply rows. It
-  exposes the selected witness as `match.` and `match.distance`, the signed distance in the distance's unit. An outer row whose
+  exposes the selected matched row as `match.` and `match.distance`, the signed distance in the distance's unit. An outer row whose
   time or position is unknown is unknown. It composes with `NOT` and `OR`
   like any condition. Every operand reads the immutable incoming row. After
   the whole predicate, exactly one positive order under top-level `AND`
-  exposes its witness. Multiple orders, and orders under `OR` or `NOT`,
+  exposes its matched row. Multiple orders, and orders under `OR` or `NOT`,
   retain any prior match namespace instead of replacing it.
 - **As a transform,** `| join REL (QUERY) within D` returns one row per
   matching pair; the change of grain shows in the query and in its reading.
@@ -291,10 +297,10 @@ DISTANCE := DURATION | N steps
   `within D`.
 
 An order condition can append `pick first by EXPR [asc|desc], ...` to choose
-its exposed witness. Without a pick clause it chooses the nearest witness
+its exposed matched row. Without a pick clause it chooses the nearest matched row
 (precise before coarse, distance, then identity). Explicit keys use the inner
 query's actual output; unknown keys sort last in either direction, and identity
-breaks ties. Inner query ordering does not change witness selection. This
+breaks ties. Inner query ordering does not change match selection. This
 choice changes neither semijoin membership nor outer identity and ordering;
 order joins still return all matching pairs.
 
@@ -363,11 +369,9 @@ product supplies its lists.
   and spelling dropped, and relative times kept as written (`since:7d`, not
   the instant). Numeric-looking text stays text.
 The normal form has an explicit semantic encoding, independent of Rust AST
-serialization. Constructs with unchanged meanings retain their original identity
-encoding. New meanings, including one row per matched step and projections at an
-intermediate relation boundary, have distinct encodings. Source spans, known-output
-markers and display spellings are absent; parameter declarations remain part of
-the question.
+serialization: each construct has one tag and one shape. Source spans,
+known-output markers and display spellings are absent; parameter declarations
+remain part of the question.
 
 - **`query:<hash>`** is the BLAKE3 of the normal form and its declared
   parameter types. One algorithm serves both products, and a mixed query has
@@ -573,7 +577,7 @@ does not encrypt.
 - Only the page size may change between pages. The count is computed once
   per question and read position and carried in the cursor.
 - A product resolving an immutable recorded run may authenticate the token
-  before lookup with `CursorSeal::authenticate`. The resulting proof exposes
+  before lookup with `CursorSeal::authenticate`. The checked cursor exposes
   only captured context. It must then bind to the question established by the
   stored object and validate the current request, grants, versions and read
   positions before obtaining a continuation. Captured context grants no authority.

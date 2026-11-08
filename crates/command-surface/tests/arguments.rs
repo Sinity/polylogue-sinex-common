@@ -62,8 +62,8 @@ fn exec_spec() -> OperationSpec {
     }
 }
 
-fn table() -> CatalogBuilder {
-    let mut table = OperationCatalog::builder("example", Deadlines::default());
+fn table() -> DeclarationsBuilder {
+    let mut table = OperationDeclarations::builder("example", Deadlines::default());
     for option in RequestOption::ALL {
         table.accept(option);
     }
@@ -192,7 +192,7 @@ fn declarations_the_request_cannot_hold_are_refused() {
     ] {
         spec.arguments = vec![argument];
 
-        let mut table = OperationCatalog::builder("example", Deadlines::default());
+        let mut table = OperationDeclarations::builder("example", Deadlines::default());
         table
             .declare_tool(ToolFamily {
                 name: "read".into(),
@@ -370,7 +370,7 @@ fn request_fields_cannot_take_a_flag_of_every_row() {
         OperationSpec::request("page", &["page"], "read", "Page", "Pages")
     }
 
-    let mut table = OperationCatalog::builder("example", Deadlines::default());
+    let mut table = OperationDeclarations::builder("example", Deadlines::default());
     table
         .declare_tool(ToolFamily {
             name: "read".into(),
@@ -403,7 +403,7 @@ fn a_positional_field_may_share_a_flags_name() {
         }
     }
 
-    let mut table = OperationCatalog::builder("example", Deadlines::default());
+    let mut table = OperationDeclarations::builder("example", Deadlines::default());
     table
         .declare_tool(ToolFamily {
             name: "read".into(),

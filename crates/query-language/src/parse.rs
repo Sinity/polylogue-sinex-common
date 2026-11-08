@@ -390,7 +390,7 @@ impl Parser<'_> {
             .catalog
             .units
             .iter()
-            .flat_map(|unit| std::iter::once(unit.name.as_str()).chain(unit.singular.as_deref()))
+            .map(|unit| unit.name.as_str())
             .collect();
         self.near_miss(
             t,
@@ -1804,7 +1804,7 @@ impl Parser<'_> {
         let pick = if self.take("pick") {
             self.expect("first")?;
             self.expect("by")?;
-            let candidate = self.witness_scope(&inner, within.as_ref());
+            let candidate = self.match_scope(&inner, within.as_ref());
             let mut keys = Vec::new();
             loop {
                 let expression = self.expression(&candidate, Place::Condition)?;
@@ -1820,9 +1820,9 @@ impl Parser<'_> {
                     break;
                 }
             }
-            WitnessChoice::FirstBy { keys }
+            MatchChoice::FirstBy { keys }
         } else {
-            WitnessChoice::Nearest
+            MatchChoice::Nearest
         };
         self.inner_scopes.insert(start, inner);
         Ok(self.cond(
@@ -1837,7 +1837,7 @@ impl Parser<'_> {
             },
         ))
     }
-    fn witness_scope(&self, inner: &Scope, within: Option<&Distance>) -> Scope {
+    fn match_scope(&self, inner: &Scope, within: Option<&Distance>) -> Scope {
         let mut candidate = inner.clone();
         for (name, kind) in [
             ("match.id", FieldKind::Reference),
@@ -2529,7 +2529,25 @@ impl Parser<'_> {
                     "except" => Combination::Except,
                     _ => Combination::Fuse,
                 };
-                if how != Combination::Fuse {
+                // Membership-only operations keep the left values. Native
+                // identity survives projection, so visible columns need not match.
+                let same_native_domain = match (&scope.row_domain, &inner.row_domain) {
+                    (Some(left), Some(right)) => {
+                        let left = self
+                            .catalog
+                            .unit(left)
+                            .map_or(left.as_str(), |unit| unit.name.as_str());
+                        let right = self
+                            .catalog
+                            .unit(right)
+                            .map_or(right.as_str(), |unit| unit.name.as_str());
+                        left == right
+                    }
+                    _ => false,
+                };
+                let native_membership = matches!(how, Combination::Intersect | Combination::Except)
+                    && same_native_domain;
+                if how != Combination::Fuse && !native_membership {
                     self.check_same_rows(scope, &inner, &word, start)?;
                 }
                 TransformKind::Combine {

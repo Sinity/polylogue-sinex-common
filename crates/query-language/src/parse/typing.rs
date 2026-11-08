@@ -541,9 +541,9 @@ impl Walker<'_, '_> {
                 ..
             } => {
                 self.query(query, at.field("query"));
-                if let WitnessChoice::FirstBy { keys } = pick {
+                if let MatchChoice::FirstBy { keys } = pick {
                     let inner = &self.parser.inner_scopes[&condition.span.start];
-                    let candidate = self.parser.witness_scope(inner, within.as_ref());
+                    let candidate = self.parser.match_scope(inner, within.as_ref());
                     for (index, key) in keys.iter().enumerate() {
                         self.expression(
                             &key.expression,

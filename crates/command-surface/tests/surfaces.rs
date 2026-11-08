@@ -105,15 +105,15 @@ impl Operation for Sample {
         })
     }
 }
-fn catalog() -> CatalogBuilder {
+fn declarations() -> DeclarationsBuilder {
     let mut deadlines = Deadlines::default();
     deadlines.set(LatencyClass::Read, Some(Duration::from_millis(10)));
-    let mut catalog = OperationCatalog::builder("example", deadlines);
+    let mut declarations = OperationDeclarations::builder("example", deadlines);
     for option in RequestOption::ALL {
-        catalog.accept(option);
+        declarations.accept(option);
     }
     for (name, description) in [("rows", "Read synthetic rows"), ("write", "Record rows")] {
-        catalog
+        declarations
             .declare_tool(ToolFamily {
                 name: name.into(),
                 description: description.into(),
@@ -123,16 +123,18 @@ fn catalog() -> CatalogBuilder {
             .unwrap();
     }
     for write in [false, true] {
-        catalog
+        declarations
             .declare::<Read, Rows>(sample_spec(write), sample_render_text)
             .unwrap();
     }
-    catalog
+    declarations
 }
-fn table_with_catalog(catalog: CatalogBuilder) -> (OperationTable, Arc<AtomicU64>, Arc<AtomicU64>) {
+fn table_with_declarations(
+    declarations: DeclarationsBuilder,
+) -> (OperationTable, Arc<AtomicU64>, Arc<AtomicU64>) {
     let writes = Arc::new(AtomicU64::new(0));
     let active = Arc::new(AtomicU64::new(0));
-    let mut table = OperationTable::new(catalog.finish());
+    let mut table = OperationTable::new(declarations.finish());
     for write in [false, true] {
         table
             .bind(
@@ -148,7 +150,7 @@ fn table_with_catalog(catalog: CatalogBuilder) -> (OperationTable, Arc<AtomicU64
     (table, writes, active)
 }
 fn table() -> (OperationTable, Arc<AtomicU64>, Arc<AtomicU64>) {
-    table_with_catalog(catalog())
+    table_with_declarations(declarations())
 }
 
 fn request(text: &str) -> RunnableRequest {
@@ -489,16 +491,16 @@ async fn product_failure_codes_have_one_registered_classification() {
         .call(request.clone(), Via::Cli, CancellationToken::new())
         .await;
     assert_eq!(unregistered.failure().unwrap().kind, FailureKind::Io);
-    let mut catalog = catalog();
-    catalog
+    let mut declarations = declarations();
+    declarations
         .register_failure_code("invalid_sample", FailureKind::BadValue)
         .unwrap();
     assert!(
-        catalog
+        declarations
             .register_failure_code("invalid_sample", FailureKind::Refused)
             .is_err()
     );
-    let (table, _, _) = table_with_catalog(catalog);
+    let (table, _, _) = table_with_declarations(declarations);
     let registered = table
         .call(request, Via::Cli, CancellationToken::new())
         .await;
@@ -530,8 +532,8 @@ impl Operation for Echo {
 }
 #[tokio::test]
 async fn arbitrary_typed_requests_are_reachable_and_string_flags_do_not_change_mode() {
-    let mut catalog = catalog();
-    catalog
+    let mut declarations = declarations();
+    declarations
         .declare_tool(ToolFamily {
             name: "echo".into(),
             description: "Echo".into(),
@@ -539,10 +541,10 @@ async fn arbitrary_typed_requests_are_reachable_and_string_flags_do_not_change_m
             idempotent: true,
         })
         .unwrap();
-    catalog
+    declarations
         .declare::<Value, Value>(echo_spec(), echo_render_text)
         .unwrap();
-    let (mut table, _, _) = table_with_catalog(catalog);
+    let (mut table, _, _) = table_with_declarations(declarations);
     table.bind("echo", Echo).unwrap();
     for value in [
         json!(true),

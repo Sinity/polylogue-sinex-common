@@ -11,7 +11,7 @@ use std::{
 fn a_durable_prepared_inode_is_adopted_and_appended_without_a_plaintext_copy() {
     let dir = tempfile::tempdir().unwrap();
     let input = b"{\"records\":[{\"body\":\"synthetic retained input\"}]}\n".repeat(40_000);
-    let path = dir.path().join("custody");
+    let path = dir.path().join("prepared");
     let temporary = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
     let inode = temporary.as_file().metadata().unwrap().ino();
     let preparation = Preparation::new(dir.path()).unwrap();
@@ -77,7 +77,7 @@ fn a_durable_prepared_inode_is_adopted_and_appended_without_a_plaintext_copy() {
 #[test]
 fn independent_owned_encoded_transfers_reject_tampering_and_allow_a_seekable_reader() {
     let dir = tempfile::tempdir().unwrap();
-    let input = b"synthetic body repeated for framed custody\n".repeat(1000);
+    let input = b"synthetic body repeated for framed storage\n".repeat(1000);
     let p = Preparation::new(dir.path())
         .unwrap()
         .with_frame_size(256)
@@ -120,7 +120,7 @@ fn independent_owned_encoded_transfers_reject_tampering_and_allow_a_seekable_rea
 }
 
 #[test]
-fn owner_sealing_reads_encoded_custody_without_writing_decoded_bytes() {
+fn owner_sealing_reads_encoded_bytes_without_writing_decoded_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let input = b"synthetic owner sealed input\n".repeat(20_000);
     let p = Preparation::new(dir.path()).unwrap();
@@ -169,11 +169,7 @@ fn mutation_after_adoption_leaves_only_an_uncommitted_tail_and_retry_uses_the_sa
     let p = Preparation::new(dir.path()).unwrap();
     let staged = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
     let prepared = p
-        .plain_into(
-            staged.reopen().unwrap(),
-            &b"durable synthetic custody"[..],
-            3,
-        )
+        .plain_into(staged.reopen().unwrap(), &b"durable synthetic body"[..], 3)
         .unwrap();
     let descriptor = prepared.descriptor();
     let mut original = Vec::new();
@@ -247,12 +243,12 @@ fn mutation_after_adoption_leaves_only_an_uncommitted_tail_and_retry_uses_the_sa
         Reader::new(dir.path())
             .read(&committed.extents, None)
             .unwrap(),
-        b"durable synthetic custody"
+        b"durable synthetic body"
     );
 }
 
 #[test]
-fn serializers_write_directly_to_bounded_encoded_custody() {
+fn serializers_write_directly_to_bounded_encoded_storage() {
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
     let target = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
@@ -320,7 +316,7 @@ fn a_single_encoded_journal_reopens_without_a_second_metadata_commit() {
 }
 
 #[test]
-fn a_mid_group_preparation_failure_cannot_make_partial_custody_committable() {
+fn a_mid_group_preparation_failure_cannot_make_partial_writes_committable() {
     let dir = tempfile::tempdir().unwrap();
     let preparation = Preparation::new(dir.path()).unwrap();
     let mut writer = SegmentWriter::open(dir.path(), "segment", 0, &[], 0o600).unwrap();

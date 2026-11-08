@@ -14,7 +14,7 @@ fn catalog() -> Catalog {
         unit: Some(target.into()),
         ..Field::default()
     };
-    let mut same_owner = reference("same_owner", "person");
+    let mut same_owner = reference("same_owner", "people");
     same_owner.help = "another source's explanation".into();
     same_owner.read_as = "another phrase".into();
     let mut owners = reference("owners", "people");
@@ -71,7 +71,6 @@ fn catalog() -> Catalog {
     });
     catalog.units.push(Unit {
         name: "people".into(),
-        singular: Some("person".into()),
         ..Unit::default()
     });
     catalog.units.push(Unit {
@@ -82,7 +81,7 @@ fn catalog() -> Catalog {
 }
 
 #[test]
-fn projected_set_operators_refuse_incompatible_semantic_types() {
+fn projected_sets_keep_native_membership_and_validate_value_shapes() {
     let catalog = catalog();
     for operator in ["union", "intersect", "except", "diff"] {
         for (left, right) in [
@@ -98,6 +97,21 @@ fn projected_set_operators_refuse_incompatible_semantic_types() {
             let query = format!(
                 "records | fields {left} as value | {operator} (records | fields {right} as value)"
             );
+            if matches!(operator, "intersect" | "except") {
+                let bound = bind(&parse(&query, &catalog).unwrap(), &catalog).unwrap();
+                let scope = bound
+                    .typing()
+                    .queries
+                    .iter()
+                    .find(|query| query.path.0.is_empty())
+                    .unwrap();
+                assert_eq!(
+                    scope.transforms[1].before.field("value"),
+                    scope.transforms[1].after.field("value"),
+                    "{query}"
+                );
+                continue;
+            }
             let error = parse(&query, &catalog).unwrap_err();
             assert_eq!(error.kind, ErrorKind::InvalidQuery, "{query}");
             assert!(
@@ -133,7 +147,7 @@ fn projected_set_operators_accept_matching_types_from_different_origins() {
 }
 
 #[test]
-fn both_product_catalogs_require_matching_projected_reference_and_text_types() {
+fn both_product_catalogs_distinguish_membership_from_projected_value_types() {
     for (catalog, unit) in [
         (support::polylogue(), "sessions"),
         (support::sinex(), "events"),
@@ -141,10 +155,25 @@ fn both_product_catalogs_require_matching_projected_reference_and_text_types() {
         for operator in ["union", "intersect", "except", "diff"] {
             let incompatible =
                 format!("{unit} | fields id | {operator} ({unit} | fields text(id) as id)");
-            assert_eq!(
-                parse(&incompatible, &catalog).unwrap_err().kind,
-                ErrorKind::InvalidQuery
-            );
+            if matches!(operator, "intersect" | "except") {
+                let bound = bind(&parse(&incompatible, &catalog).unwrap(), &catalog).unwrap();
+                let scope = bound
+                    .typing()
+                    .queries
+                    .iter()
+                    .find(|query| query.path.0.is_empty())
+                    .unwrap();
+                assert_eq!(
+                    scope.transforms[1].before.field("id"),
+                    scope.transforms[1].after.field("id"),
+                    "{incompatible}"
+                );
+            } else {
+                assert_eq!(
+                    parse(&incompatible, &catalog).unwrap_err().kind,
+                    ErrorKind::InvalidQuery
+                );
+            }
             let compatible = format!(
                 "{unit} | fields text(id) as id | {operator} ({unit} | fields text(id) as id)"
             );

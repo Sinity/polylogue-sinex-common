@@ -66,13 +66,9 @@ impl Catalog {
                     .is_some_and(|namespace| prefix.eq_ignore_ascii_case(namespace))
             })
             .map_or(name, |(_, local)| local);
-        self.units.iter().find(|unit| {
-            unit.name.eq_ignore_ascii_case(name)
-                || unit
-                    .singular
-                    .as_ref()
-                    .is_some_and(|singular| singular.eq_ignore_ascii_case(name))
-        })
+        self.units
+            .iter()
+            .find(|unit| unit.name.eq_ignore_ascii_case(name))
     }
     pub fn field(&self, unit: &str, name: &str) -> Option<&Field> {
         self.unit(unit)?.fields.iter().find(|f| f.name == name)
@@ -134,9 +130,6 @@ impl Catalog {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Unit {
     pub name: String,
-    /// The unit's declared singular form; it binds to the canonical name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub singular: Option<String>,
     /// The row domain of `seq` steps written on this unit; None means this unit.
     pub sequence_unit: Option<String>,
     /// The order its rows have steps in (for example a session's timeline).

@@ -1,4 +1,4 @@
-//! A prepared encoding can cross a custody boundary without acquiring a segment location.
+//! A prepared encoding can be handed to another owner before it has a segment location.
 use crate::{codec, BlobReader, DataKey, Error, Extent, Hash, Kind, ReadLimits, Result};
 use std::{fs::File, os::unix::fs::FileExt};
 

@@ -30,10 +30,10 @@ fn tool() -> ToolFamily {
         idempotent: true,
     }
 }
-fn options() -> CatalogBuilder {
-    let mut catalog = OperationCatalog::builder("example", Deadlines::default());
-    catalog.declare_tool(tool()).unwrap();
-    catalog.accept(RequestOption::Format);
+fn options() -> DeclarationsBuilder {
+    let mut declarations = OperationDeclarations::builder("example", Deadlines::default());
+    declarations.declare_tool(tool()).unwrap();
+    declarations.accept(RequestOption::Format);
     for (name, words) in [("read", &["read"][..]), ("add", &["sink", "add"][..])] {
         let mut spec = OperationSpec::request(
             name,
@@ -49,11 +49,11 @@ fn options() -> CatalogBuilder {
             ArgumentSpec::new("tags", ArgumentForm::Repeated, "tags"),
             ArgumentSpec::new("out", ArgumentForm::Named, "local output").calling_process(),
         ];
-        catalog
+        declarations
             .declare::<Options, String>(spec, |text, _| text.clone())
             .unwrap();
     }
-    catalog
+    declarations
 }
 fn words(input: &[&str]) -> Vec<String> {
     input.iter().map(|word| (*word).to_owned()).collect()
@@ -61,8 +61,8 @@ fn words(input: &[&str]) -> Vec<String> {
 
 #[test]
 fn cli_projection_owns_required_kinds_choices_and_local_flags() {
-    let catalog = options().finish();
-    let arguments = catalog.cli_arguments("read").unwrap();
+    let declarations = options().finish();
+    let arguments = declarations.cli_arguments("read").unwrap();
     let argument = |name| {
         arguments
             .iter()
@@ -85,7 +85,7 @@ fn cli_projection_owns_required_kinds_choices_and_local_flags() {
     assert!(argument("out").spec.calling_process);
     assert!(!argument("out").required);
     assert_eq!(argument("out").kind, ValueKind::Text);
-    let parsed = catalog
+    let parsed = declarations
         .parse_cli(
             &words(&[
                 "read",
@@ -112,7 +112,7 @@ fn cli_projection_owns_required_kinds_choices_and_local_flags() {
 
 #[test]
 fn leading_globals_match_trailing_globals_for_longest_command() {
-    let catalog = options().finish();
+    let declarations = options().finish();
     for command in [&["read"][..], &["sink", "add"][..]] {
         let mut before = words(&["--json", "--deadline", "100", "--request-id", "chosen"]);
         before.extend(words(command));
@@ -129,8 +129,8 @@ fn leading_globals_match_trailing_globals_for_longest_command() {
             "detail",
         ]));
         assert_eq!(
-            catalog.parse_cli(&before, "unused").unwrap(),
-            catalog.parse_cli(&after, "unused").unwrap()
+            declarations.parse_cli(&before, "unused").unwrap(),
+            declarations.parse_cli(&after, "unused").unwrap()
         );
     }
 }
@@ -141,8 +141,8 @@ struct Script {
 }
 #[test]
 fn leading_globals_leave_rest_arguments_and_literal_separator_untouched() {
-    let mut catalog = OperationCatalog::builder("example", Deadlines::default());
-    catalog.declare_tool(tool()).unwrap();
+    let mut declarations = OperationDeclarations::builder("example", Deadlines::default());
+    declarations.declare_tool(tool()).unwrap();
     let mut spec = OperationSpec::request(
         "exec",
         &["exec"],
@@ -152,12 +152,14 @@ fn leading_globals_leave_rest_arguments_and_literal_separator_untouched() {
     );
     spec.arguments
         .push(ArgumentSpec::new("command", ArgumentForm::Rest, "script"));
-    catalog
+    declarations
         .declare::<Script, String>(spec, |text, _| text.clone())
         .unwrap();
-    catalog.set_default_operation("exec", |_| true).unwrap();
-    let catalog = catalog.finish();
-    let explicit = catalog
+    declarations
+        .set_default_operation("exec", |_| true)
+        .unwrap();
+    let declarations = declarations.finish();
+    let explicit = declarations
         .parse_cli(
             &words(&["--json", "exec", "echo", "--json", "--deadline", "100"]),
             "r",
@@ -169,7 +171,7 @@ fn leading_globals_leave_rest_arguments_and_literal_separator_untouched() {
         json!({"command":"echo --json --deadline 100"})
     );
     assert_eq!(explicit.request.deadline, Deadline::Default);
-    let literal = catalog
+    let literal = declarations
         .parse_cli(&words(&["--json", "--", "--deadline", "100", "exec"]), "r")
         .unwrap();
     assert!(literal.json);
@@ -228,8 +230,8 @@ impl Operation for Echo {
     }
 }
 fn surfaces() -> (OperationTable, Arc<AtomicUsize>) {
-    let mut catalog = OperationCatalog::builder("example", Deadlines::default());
-    catalog.declare_tool(tool()).unwrap();
+    let mut declarations = OperationDeclarations::builder("example", Deadlines::default());
+    declarations.declare_tool(tool()).unwrap();
     for spec in [
         declaration(
             "endpoint",
@@ -251,12 +253,16 @@ fn surfaces() -> (OperationTable, Arc<AtomicUsize>) {
             false,
         ),
     ] {
-        catalog
+        declarations
             .declare::<Text, String>(spec, |text, style| styled(text, style))
             .unwrap();
     }
-    assert!(catalog.set_default_operation("endpoint", |_| true).is_err());
-    let mut table = OperationTable::new(catalog.finish());
+    assert!(
+        declarations
+            .set_default_operation("endpoint", |_| true)
+            .is_err()
+    );
+    let mut table = OperationTable::new(declarations.finish());
     let effects = Arc::new(AtomicUsize::new(0));
     for name in ["endpoint", "native", "mcp", "cli", "hidden"] {
         table.bind(name, Echo(effects.clone())).unwrap();
@@ -422,9 +428,9 @@ struct QueryArgs {
     ready: Option<bool>,
     assertions: Option<Vec<Value>>,
 }
-fn query_catalog() -> std::sync::Arc<OperationCatalog> {
-    let mut catalog = OperationCatalog::builder("example", Deadlines::default());
-    catalog.declare_tool(tool()).unwrap();
+fn query_declarations() -> std::sync::Arc<OperationDeclarations> {
+    let mut declarations = OperationDeclarations::builder("example", Deadlines::default());
+    declarations.declare_tool(tool()).unwrap();
     let mut spec = OperationSpec::request(
         "query",
         &["query"],
@@ -434,10 +440,10 @@ fn query_catalog() -> std::sync::Arc<OperationCatalog> {
     );
     spec.arguments
         .push(ArgumentSpec::new("show", ArgumentForm::Repeated, "shown fields").delimiter(','));
-    catalog
+    declarations
         .declare::<QueryArgs, String>(spec, |text, _| text.clone())
         .unwrap();
-    catalog.finish()
+    declarations.finish()
 }
 fn pairs(input: &[(&str, &str)]) -> Vec<(String, String)> {
     input
@@ -448,8 +454,8 @@ fn pairs(input: &[(&str, &str)]) -> Vec<(String, String)> {
 
 #[test]
 fn declared_cli_delimiter_splits_flags_but_preserves_canonical_items() {
-    let catalog = query_catalog();
-    let parsed = catalog
+    let declarations = query_declarations();
+    let parsed = declarations
         .parse_cli(
             &words(&[
                 "query", "--target", "x", "--show", "id,cost", "--show", "text",
@@ -462,7 +468,7 @@ fn declared_cli_delimiter_splits_flags_but_preserves_canonical_items() {
         json!(["id", "cost", "text"])
     );
     assert_eq!(
-        catalog
+        declarations
             .cli_arguments("query")
             .unwrap()
             .iter()
@@ -474,9 +480,9 @@ fn declared_cli_delimiter_splits_flags_but_preserves_canonical_items() {
     );
     let request =
         RunnableRequest::new("query", json!({"target":"x","show":["literal,comma"]}), "r");
-    let command = catalog.cli_command(&request).unwrap();
+    let command = declarations.cli_command(&request).unwrap();
     assert!(command.contains("--request "));
-    let raw = catalog
+    let raw = declarations
         .parse_cli(
             &words(&[
                 "query",
@@ -495,8 +501,8 @@ struct Paths {
 }
 #[test]
 fn words_lists_preserve_literal_commas_without_a_declared_delimiter() {
-    let mut catalog = OperationCatalog::builder("example", Deadlines::default());
-    catalog.declare_tool(tool()).unwrap();
+    let mut declarations = OperationDeclarations::builder("example", Deadlines::default());
+    declarations.declare_tool(tool()).unwrap();
     let mut spec = OperationSpec::request(
         "paths",
         &["paths"],
@@ -506,11 +512,11 @@ fn words_lists_preserve_literal_commas_without_a_declared_delimiter() {
     );
     spec.arguments
         .push(ArgumentSpec::new("paths", ArgumentForm::Words, "paths"));
-    catalog
+    declarations
         .declare::<Paths, String>(spec, |text, _| text.clone())
         .unwrap();
     assert_eq!(
-        catalog
+        declarations
             .parse_cli(&words(&["paths", "a,b", "c"]), "r")
             .unwrap()
             .request
@@ -521,8 +527,8 @@ fn words_lists_preserve_literal_commas_without_a_declared_delimiter() {
 
 #[test]
 fn flat_http_uses_typed_fields_and_envelope_identity_without_cli_delimiters() {
-    let catalog = query_catalog();
-    let request = catalog
+    let declarations = query_declarations();
+    let request = declarations
         .parse_http_query(
             "query",
             &pairs(&[
@@ -552,7 +558,7 @@ fn flat_http_uses_typed_fields_and_envelope_identity_without_cli_delimiters() {
     assert_eq!(request.budget_tokens, TokenBudget::Unlimited);
     assert!(request.fresh);
     assert_eq!(request.format, Format::Text);
-    let false_value = catalog
+    let false_value = declarations
         .parse_http_query("query", &pairs(&[("target", "x"), ("ready", "other")]), "r")
         .unwrap();
     assert_eq!(false_value.arguments["ready"], false);
@@ -560,9 +566,9 @@ fn flat_http_uses_typed_fields_and_envelope_identity_without_cli_delimiters() {
 
 #[test]
 fn canonical_http_preserves_raw_arguments_and_refuses_identity_or_duplicate_conflicts() {
-    let catalog = query_catalog();
+    let declarations = query_declarations();
     let raw = "{\"target\":\"x\",\"unknown_for_handler\":{\"deep\":[1]}}";
-    let request = catalog
+    let request = declarations
         .parse_http_query(
             "query",
             &pairs(&[("operation", "query"), ("arguments", raw)]),
@@ -583,7 +589,11 @@ fn canonical_http_preserves_raw_arguments_and_refuses_identity_or_duplicate_conf
         pairs(&[("arguments", "{}"), ("fresh", "1")]),
         pairs(&[("target", "x"), ("assertions", "[]"), ("assertions", "[]")]),
     ] {
-        assert!(catalog.parse_http_query("query", &invalid, "r").is_err());
+        assert!(
+            declarations
+                .parse_http_query("query", &invalid, "r")
+                .is_err()
+        );
     }
 }
 
@@ -593,12 +603,12 @@ struct Reserved {
 }
 #[test]
 fn native_only_schema_does_not_acquire_cli_reserved_word_restrictions() {
-    let mut catalog = OperationCatalog::builder("example", Deadlines::default());
-    catalog
+    let mut declarations = OperationDeclarations::builder("example", Deadlines::default());
+    declarations
         .declare::<Reserved, bool>(
             declaration("native", &[], None, None, Access::Read, true),
             |value, _| value.to_string(),
         )
         .unwrap();
-    assert!(catalog.finish().cli_arguments("native").is_err());
+    assert!(declarations.finish().cli_arguments("native").is_err());
 }
