@@ -1,6 +1,5 @@
 //! Tests of the fit, checked against independent oracles in `common`.
 
-#[allow(dead_code)]
 use crate::common;
 
 use common::*;

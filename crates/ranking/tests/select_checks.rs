@@ -1,8 +1,5 @@
 //! Tests of next-set selection, against the fit's public numbers.
 
-#[allow(dead_code)]
-use crate::common;
-
 use ranking::{Fit, FitOptions, Judgment, RankError, SeatWhy, SelectionRule, fit, next_set};
 
 fn names(items: &[&str]) -> Vec<String> {
