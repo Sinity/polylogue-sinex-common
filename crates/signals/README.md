@@ -378,10 +378,3 @@ never through a writer lock; desktop acts come back as receipts, which
 `NotificationReceipt::outcomes` turns into outcomes, and the product applies
 snooze, acknowledge and rule actions through its operation table as the
 operator's acts with `via: desktop`.
-
-The `web` feature renders the **Inbox** (`/notices`: interrupted, held and
-passive notices, unseen first, with the attention line), the **Why** panel
-(rule, matched rows, route decision and its inputs, outcomes) and the
-**Signals** view (rules with author, channel, last firing, deliveries in
-seven days and usefulness) as maud functions, so both products show the same
-view for the same data. Products supply titles, links and their time format.

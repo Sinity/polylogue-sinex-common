@@ -11,47 +11,16 @@ agent read it.
 
 ## The design of record
 
-The design of this repository is its documentation: each crate's
-`README.md`, and for a crate not yet in the workspace its page under `docs/`
-(which becomes the crate's README when the crate is created).
+Each crate's `README.md` describes what the crate does, and module
+documentation (`//!`) describes each module. Planned behaviour lives in Beads,
+not in the pages; when a change ships, its page changes in the same commit.
 [README.md](README.md) holds the crate table, what is shared and what each
-product keeps as its own. Each page describes the design, not the current
-code; module documentation (`//!`) describes each module as it is, and the
-difference between the two is work tracked outside the repository.
+product keeps as its own.
 
 Product behaviour is described in the products' own docs. Read the consumers
 in both products before changing a shared interface.
 
-- [`hashed-blobs`](crates/hashed-blobs/README.md): blobs in append-only
-  segments; one sync per group; extents committed with the rows that cite
-  them; a segment opens at its last committed extent, so a crash never needs a
-  repair step; a stream rewritten whole is stored as content-defined chunks,
-  so a revision appends only what changed.
-- [`authored`](crates/authored/README.md): one header and one set of rules
-  for every record a person or agent writes: currency by the descendant
-  rule, requests placed together or not at all, one uniqueness function for
-  every cardinality, order keys with no precision limit.
-- [`query-language`](crates/query-language/README.md): one surface language, two
-  catalogs and two compilers; the language owns the tests of its own semantics
-  and runs them against both catalogs.
-- [`command-surface`](crates/command-surface/README.md): one operation table per
-  product, from which every transport is generated; one answer contract and
-  one failure table for every surface of both products.
-- [`web-shell`](crates/web-shell/README.md): server-rendered HTML from typed answers,
-  one TypeScript shell, one visual language.
-- [`references`](crates/references/README.md): one reference grammar,
-  `<product>:<kind>/<id>[@<revision>][#<selector>]` stored and `<kind>:<id>`
-  inside its product; shared selectors; locators canonicalized byte-identically
-  for both products; a web address that follows from the reference.
-- [`signals`](crates/signals/README.md): one rule schema and evaluator, one host
-  policy with a pure route function and one interrupt budget; every delivery
-  records its decision and reason.
-- [`signal-delivery`](crates/signal-delivery/README.md): one task that shows
-  committed notices on the desktop or sends them to the away command.
-- [`devkit`](crates/devkit/README.md): the core of each product's `xtask`. It
-  starts what a run needs and stops it on drop, and names its interfaces
-  neutrally (`DEVKIT_JOB_ID`, `DEVKIT_SCRATCH`) so that any job runner can
-  set them; nothing in it knows a particular runner or host.
+The crate table in [README.md](README.md) says what each crate holds.
 
 ## Building and testing
 

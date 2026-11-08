@@ -10,8 +10,6 @@ pub mod notifications;
 mod outcome;
 mod route;
 mod schema;
-#[cfg(feature = "web")]
-pub mod web;
 pub use calendar::DayCalendar;
 pub use evaluator::*;
 pub use follow::*;

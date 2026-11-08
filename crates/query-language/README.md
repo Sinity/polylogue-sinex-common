@@ -5,8 +5,8 @@ the same text with the same meaning; only the units differ. The crate holds
 the grammar, the syntax tree and its meaning, the parser and formatter, the
 binder and typing, the normal form and its hash, time expressions, the
 logical day, the cursor type, the fusion of ranked lists, the federation
-planner's types, the completer and the conformance cases every product compiler
-runs. It is pure: no I/O, no clock and no configuration of its own; the
+planner's types, the completer, and an optional reference evaluator with
+compiler cases. It is pure: no I/O, no clock and no configuration of its own; the
 caller passes the time, the day setting and the catalog.
 
 Each product keeps its own **catalog** (its units, their fields, closed-set
@@ -21,8 +21,9 @@ Sinex in [its query page](https://github.com/Sinity/sinex/blob/master/docs/query
 Runtime builds keep parsing, binding, identity, time and `semantics::Truth`.
 The optional `conformance` feature adds `conformance` (fixture rows and the
 reference evaluator) and `compiler_cases` (independent compiler/executor cases).
-Products enable it in their development dependency when running those cases;
-production execution does not depend on the fixture representation.
+No product enables it yet; Polylogue is planned to check its query lowering
+against the reference evaluator. Production
+execution does not depend on the fixture representation.
 Run `cargo xtask test -p query-language` for the full language suite. The
 common test command enables every selected package feature unless the caller
 passes explicit feature options. `cargo xtask check` enables every feature and
@@ -52,7 +53,7 @@ assemblies of queries that print the queries they ran.
 
 ## Spelling
 
-One spelling in both products (default; open operator question): there is
+One spelling in both products: there is
 no dialect switch, and a query written for one product parses with the same
 meaning in the other.
 
