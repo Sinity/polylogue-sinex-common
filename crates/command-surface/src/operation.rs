@@ -271,6 +271,15 @@ pub trait Operation: Send + Sync + 'static {
     fn has_read_phase(&self, _request: &Self::Request) -> bool {
         true
     }
+    /// Default read deadline for this typed request. Explicit request deadlines
+    /// still override this default; `None` leaves only caller cancellation.
+    fn default_read_deadline(
+        &self,
+        _request: &Self::Request,
+        declared: Option<Duration>,
+    ) -> Option<Duration> {
+        declared
+    }
     fn execute(
         &self,
         request: Self::Request,
@@ -499,7 +508,7 @@ impl RequestContext {
             .deadline
             .is_some_and(|deadline| Instant::now() >= deadline)
         {
-            Some(timeout_failure(&self.progress))
+            Some(timeout_failure(&self.request.operation, &self.progress))
         } else {
             None
         };
@@ -683,12 +692,14 @@ enum Row {
 struct Policy {
     access: Access,
     read_phase: bool,
+    default_read_deadline: Option<Duration>,
 }
 trait ErasedOperation: Send + Sync {
     fn policy(
         &self,
         arguments: &Value,
         declared: Access,
+        default_read_deadline: Option<Duration>,
         caller: &Caller,
     ) -> Result<Policy, Failure>;
     fn streaming(&self, arguments: &Value) -> Result<bool, Failure>;
@@ -711,6 +722,7 @@ fn policy<O: Operation>(
     operation: &O,
     arguments: &Value,
     declared: Access,
+    default_read_deadline: Option<Duration>,
     caller: &Caller,
 ) -> Result<Policy, Failure> {
     let request = serde_json::from_value(arguments.clone())
@@ -718,6 +730,7 @@ fn policy<O: Operation>(
     Ok(Policy {
         access: operation.required_access(&request, declared, caller),
         read_phase: operation.has_read_phase(&request),
+        default_read_deadline: operation.default_read_deadline(&request, default_read_deadline),
     })
 }
 fn execute_operation<O: Operation>(
@@ -752,9 +765,10 @@ impl<O: Operation> ErasedOperation for RequestHandler<O> {
         &self,
         arguments: &Value,
         declared: Access,
+        default_read_deadline: Option<Duration>,
         caller: &Caller,
     ) -> Result<Policy, Failure> {
-        policy(&self.0, arguments, declared, caller)
+        policy(&self.0, arguments, declared, default_read_deadline, caller)
     }
     fn streaming(&self, _arguments: &Value) -> Result<bool, Failure> {
         Ok(false)
@@ -772,9 +786,10 @@ impl<O: TransferOperation> ErasedOperation for TransferHandler<O> {
         &self,
         arguments: &Value,
         declared: Access,
+        default_read_deadline: Option<Duration>,
         caller: &Caller,
     ) -> Result<Policy, Failure> {
-        policy(&self.0, arguments, declared, caller)
+        policy(&self.0, arguments, declared, default_read_deadline, caller)
     }
     fn streaming(&self, arguments: &Value) -> Result<bool, Failure> {
         let request = serde_json::from_value(arguments.clone())
@@ -927,6 +942,8 @@ impl OperationCatalog {
             .iter()
             .position(|d| d.spec.name == name)
     }
+    /// Declared timing metadata for connection admission. Runtime read policy
+    /// may choose a different default after decoding the typed request.
     pub fn deadline(&self, request: &RunnableRequest) -> Option<Duration> {
         self.spec_named(&request.operation)
             .and_then(|spec| request.deadline.duration(self.deadlines.get(spec.latency)))
@@ -1531,7 +1548,7 @@ impl OperationTable {
         caller: Caller,
         metadata: Option<Value>,
         cancellation: CancellationToken,
-        read_phase: bool,
+        policy: &Policy,
     ) -> RequestContext {
         RequestContext {
             via,
@@ -1540,13 +1557,15 @@ impl OperationTable {
             caller,
             request: Arc::new(request.clone()),
             lifetime: Arc::new(Mutex::new(ReadLifetime {
-                phase: if read_phase {
+                phase: if policy.read_phase {
                     Phase::Reading
                 } else {
                     Phase::OwnedWrite
                 },
-                deadline: if read_phase {
-                    self.deadline(request)
+                deadline: if policy.read_phase {
+                    request
+                        .deadline
+                        .duration(policy.default_read_deadline)
                         .map(|duration| Instant::now() + duration)
                 } else {
                     None
@@ -1583,7 +1602,12 @@ impl OperationTable {
                 _ => format!("{} runs in the calling process", request.operation),
             }));
         };
-        let policy = match operation.policy(&request.arguments, description.spec.access, &caller) {
+        let policy = match operation.policy(
+            &request.arguments,
+            description.spec.access,
+            self.deadlines.get(description.spec.latency),
+            &caller,
+        ) {
             Ok(policy) => policy,
             Err(failure) => return Answer::error(failure),
         };
@@ -1598,14 +1622,7 @@ impl OperationTable {
         if cancellation.is_cancelled() {
             return Answer::error(Failure::new(FailureKind::Cancelled, "request cancelled"));
         }
-        let context = self.context(
-            &request,
-            via,
-            caller,
-            metadata,
-            cancellation,
-            policy.read_phase,
-        );
+        let context = self.context(&request, via, caller, metadata, cancellation, &policy);
         let guard = context.cancellation.clone().drop_guard();
         let answer = tokio::select! {
             biased;
@@ -1634,10 +1651,15 @@ impl OperationTable {
             Row::Stream(_) => Policy {
                 access: description.spec.access,
                 read_phase: true,
+                default_read_deadline: self.deadlines.get(description.spec.latency),
             },
-            Row::Request(operation) if operation.streaming(&request.arguments)? => {
-                operation.policy(&request.arguments, description.spec.access, &caller)?
-            }
+            Row::Request(operation) if operation.streaming(&request.arguments)? => operation
+                .policy(
+                    &request.arguments,
+                    description.spec.access,
+                    self.deadlines.get(description.spec.latency),
+                    &caller,
+                )?,
             _ => {
                 return Err(bad_request(format!(
                     "{} does not select event delivery",
@@ -1651,7 +1673,7 @@ impl OperationTable {
         if cancellation.is_cancelled() {
             return Err(Failure::new(FailureKind::Cancelled, "request cancelled"));
         }
-        let context = self.context(&request, via, caller, None, cancellation, policy.read_phase);
+        let context = self.context(&request, via, caller, None, cancellation, &policy);
         let guard = context.cancellation.clone().drop_guard();
         let open = match row {
             Row::Stream(stream) => stream.open(request.arguments.clone(), context.clone()),
@@ -1704,7 +1726,7 @@ fn stream_transport_required() -> Failure {
     )
 }
 
-fn timeout_failure(progress: &Mutex<Progress>) -> Failure {
+fn timeout_failure(operation: &str, progress: &Mutex<Progress>) -> Failure {
     let progress = progress.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let scanned = progress.rows_scanned.map_or_else(
         || "with rows scanned unknown".into(),
@@ -1717,13 +1739,13 @@ fn timeout_failure(progress: &Mutex<Progress>) -> Failure {
     };
     Failure::new(
         FailureKind::Timeout,
-        format!("deadline passed during {stage} {scanned}"),
+        format!("deadline passed during {stage} for {operation} {scanned}"),
     )
     .with_hint("narrow the request or lift its deadline")
 }
 
 fn timeout_answer(request: &RunnableRequest, progress: &Mutex<Progress>) -> Answer<Value> {
-    let failure = timeout_failure(progress);
+    let failure = timeout_failure(&request.operation, progress);
     let progress = progress
         .lock()
         .unwrap_or_else(|error| error.into_inner())

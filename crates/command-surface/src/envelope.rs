@@ -39,7 +39,8 @@ impl LatencyClass {
 }
 
 /// Milliseconds from admission. A JSON null lifts the deadline; absence uses
-/// the operation's class default. All surfaces use this same representation.
+/// the operation's typed read default (its class default unless overridden).
+/// All surfaces use this same representation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum Deadline {

@@ -429,7 +429,8 @@ and default deadlines on its interfaces page.
   `--deadline none` on the CLI, `deadline: null` over MCP and HTTP. A deadline
   is a default for interactive display, not a limit on what may be asked, so
   no valid request is refused for its size.
-- A timeout answer names the stage that was running and the rows scanned, and
+- A timeout answer names the canonical operation, the stage that was running
+  (admission before progress is reported) and the rows scanned, and
   carries as `next` a narrower request the daemon can serve in time and the
   same request with the deadline lifted.
 
@@ -549,8 +550,14 @@ transport choose delivery without inspecting JSON fields. Direct calls and
 MCP accept bounded answers and refuse event delivery with a request to use a
 streaming transport or a bounded page.
 
-`Operation::has_read_phase(request)` is evaluated before the read timer
-starts. A request with a read phase receives its absolute `read_deadline()`
+`Operation::has_read_phase(request)` and
+`Operation::default_read_deadline(request, declared)` are evaluated from the
+typed request before the read timer starts. The latter preserves the declared
+class default unless the operation overrides it for that delivery. A transfer
+can leave its selected event delivery unbounded by default while keeping the
+finite page's class default. Explicit millisecond deadlines and explicit null
+still override this choice; ordinary `StreamOperation` rows retain their class
+default. A request with a read phase receives its absolute `read_deadline()`
 and exact accepted envelope through `RequestContext::request()`. Before a
 mutation is handed to its writer, `finish_read_phase()` arbitrates against
 the timer and cancellation under one mutex. Expiry or cancellation winning
