@@ -31,31 +31,31 @@ impl Drop for Active {
         self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
+fn sample_spec(write: bool) -> OperationSpec {
+    let (name, tool) = if write {
+        ("record", "write")
+    } else {
+        ("read", "rows")
+    };
+    OperationSpec {
+        failures: vec![FailureKind::BadValue],
+        access: if write { Access::Write } else { Access::Read },
+        ..OperationSpec::request(
+            name,
+            &[name],
+            tool,
+            "Read synthetic rows",
+            "Read a reference's typed rows",
+        )
+    }
+}
+fn sample_render_text(response: &Rows, _style: TextStyle) -> String {
+    format!("{}\n", response.rows.join("\n"))
+}
 impl Operation for Sample {
     type Request = Read;
     type Response = Rows;
-    fn spec(&self) -> OperationSpec {
-        let (name, tool) = if self.write {
-            ("record", "write")
-        } else {
-            ("read", "rows")
-        };
-        OperationSpec {
-            failures: vec![FailureKind::BadValue],
-            access: if self.write {
-                Access::Write
-            } else {
-                Access::Read
-            },
-            ..OperationSpec::request(
-                name,
-                &[name],
-                tool,
-                "Read synthetic rows",
-                "Read a reference's typed rows",
-            )
-        }
-    }
+
     fn execute(&self, request: Read, context: RequestContext) -> OperationFuture<'_, Answer<Rows>> {
         Box::pin(async move {
             self.active.fetch_add(1, Ordering::SeqCst);
@@ -104,21 +104,16 @@ impl Operation for Sample {
             }
         })
     }
-    fn render_text(&self, response: &Rows) -> String {
-        format!("{}\n", response.rows.join("\n"))
-    }
 }
-fn table() -> (OperationTable, Arc<AtomicU64>, Arc<AtomicU64>) {
-    let writes = Arc::new(AtomicU64::new(0));
-    let active = Arc::new(AtomicU64::new(0));
+fn catalog() -> CatalogBuilder {
     let mut deadlines = Deadlines::default();
     deadlines.set(LatencyClass::Read, Some(Duration::from_millis(10)));
-    let mut table = OperationTable::new("example", deadlines);
+    let mut catalog = OperationCatalog::builder("example", deadlines);
     for option in RequestOption::ALL {
-        table.accept(option);
+        catalog.accept(option);
     }
     for (name, description) in [("rows", "Read synthetic rows"), ("write", "Record rows")] {
-        table
+        catalog
             .declare_tool(ToolFamily {
                 name: name.into(),
                 description: description.into(),
@@ -128,16 +123,34 @@ fn table() -> (OperationTable, Arc<AtomicU64>, Arc<AtomicU64>) {
             .unwrap();
     }
     for write in [false, true] {
+        catalog
+            .declare::<Read, Rows>(sample_spec(write), sample_render_text)
+            .unwrap();
+    }
+    catalog
+}
+fn table_with_catalog(catalog: CatalogBuilder) -> (OperationTable, Arc<AtomicU64>, Arc<AtomicU64>) {
+    let writes = Arc::new(AtomicU64::new(0));
+    let active = Arc::new(AtomicU64::new(0));
+    let mut table = OperationTable::new(catalog.finish());
+    for write in [false, true] {
         table
-            .register(Sample {
-                writes: writes.clone(),
-                active: active.clone(),
-                write,
-            })
+            .bind(
+                if write { "record" } else { "read" },
+                Sample {
+                    writes: writes.clone(),
+                    active: active.clone(),
+                    write,
+                },
+            )
             .unwrap();
     }
     (table, writes, active)
 }
+fn table() -> (OperationTable, Arc<AtomicU64>, Arc<AtomicU64>) {
+    table_with_catalog(catalog())
+}
+
 fn request(text: &str) -> RunnableRequest {
     RunnableRequest {
         operation: "read".into(),
@@ -258,10 +271,10 @@ async fn timeout_never_partial_and_any_caller_lifts_deadline() {
     let answer = call.await;
     assert_eq!(answer.exit_code(), 7);
     assert_eq!(active.load(Ordering::SeqCst), 0);
-    assert_eq!(table.socket_timeout(&request), None);
+    assert_eq!(table.connection_timeout(&request), None);
     request.deadline = Deadline::Milliseconds(11);
     assert_eq!(
-        table.socket_timeout(&request),
+        table.connection_timeout(&request),
         Some(Duration::from_millis(61))
     );
 }
@@ -470,20 +483,22 @@ async fn trusted_identity_is_typed() {
 
 #[tokio::test]
 async fn product_failure_codes_have_one_registered_classification() {
-    let (mut table, _, _) = table();
+    let (table, _, _) = table();
     let request = request("product-error");
     let unregistered = table
         .call(request.clone(), Via::Cli, CancellationToken::new())
         .await;
     assert_eq!(unregistered.failure().unwrap().kind, FailureKind::Io);
-    table
+    let mut catalog = catalog();
+    catalog
         .register_failure_code("invalid_sample", FailureKind::BadValue)
         .unwrap();
     assert!(
-        table
+        catalog
             .register_failure_code("invalid_sample", FailureKind::Refused)
             .is_err()
     );
+    let (table, _, _) = table_with_catalog(catalog);
     let registered = table
         .call(request, Via::Cli, CancellationToken::new())
         .await;
@@ -493,29 +508,30 @@ async fn product_failure_codes_have_one_registered_classification() {
 }
 
 struct Echo;
+fn echo_spec() -> OperationSpec {
+    OperationSpec::request(
+        "echo",
+        &["echo"],
+        "echo",
+        "Echo typed JSON",
+        "Exercise arbitrary JSON arguments",
+    )
+}
+fn echo_render_text(value: &Value, _style: TextStyle) -> String {
+    value.to_string()
+}
 impl Operation for Echo {
     type Request = Value;
     type Response = Value;
-    fn spec(&self) -> OperationSpec {
-        OperationSpec::request(
-            "echo",
-            &["echo"],
-            "echo",
-            "Echo typed JSON",
-            "Exercise arbitrary JSON arguments",
-        )
-    }
+
     fn execute(&self, value: Value, _: RequestContext) -> OperationFuture<'_, Answer<Value>> {
         Box::pin(async move { Answer::ok(value) })
-    }
-    fn render_text(&self, value: &Value) -> String {
-        value.to_string()
     }
 }
 #[tokio::test]
 async fn arbitrary_typed_requests_are_reachable_and_string_flags_do_not_change_mode() {
-    let (mut table, _, _) = table();
-    table
+    let mut catalog = catalog();
+    catalog
         .declare_tool(ToolFamily {
             name: "echo".into(),
             description: "Echo".into(),
@@ -523,7 +539,11 @@ async fn arbitrary_typed_requests_are_reachable_and_string_flags_do_not_change_m
             idempotent: true,
         })
         .unwrap();
-    table.register(Echo).unwrap();
+    catalog
+        .declare::<Value, Value>(echo_spec(), echo_render_text)
+        .unwrap();
+    let (mut table, _, _) = table_with_catalog(catalog);
+    table.bind("echo", Echo).unwrap();
     for value in [
         json!(true),
         json!(null),

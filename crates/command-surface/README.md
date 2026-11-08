@@ -1,9 +1,9 @@
 # command-surface
 
 How an operation travels between a caller and a product daemon, and what
-comes back. Each product declares one typed operation table; the CLI, the
-socket, HTTP and MCP are generated from it, so every operation is reachable
-the same way from every surface and none exists on one surface only. This
+comes back. Each product declares one typed catalog with the actual CLI,
+HTTP and MCP exposure of every operation. Transport adapters share that
+catalog and the same authenticated execution handlers. This
 crate holds the mechanics both products share: the `Operation` trait, the
 answer contract every surface of both products uses, the `Failure` type with
 its exit and HTTP table, who the caller is and who authored a write, the
@@ -14,28 +14,82 @@ status format of measurements and a verdict.
 
 An operation is one row of a product's table. Its `OperationSpec` declares:
 
-- its name and command words;
+- its name and command words; an empty command means no CLI surface;
 - its **kind**: a **request** the daemon answers once, a **stream** of events
   the daemon sends until it ends or the caller leaves (a change feed,
   `follow`), or a **local** row the calling process runs without the daemon
   (help, installers, the MCP server and hook entry points);
-- for a request, the tool family it belongs to over MCP;
-- its HTTP route (none for a local row);
+- for a request, its optional MCP tool family; `None` means no MCP exposure;
+- its optional HTTP route (always absent for a local row);
 - its latency class, declared failure kinds, access level and default token
   budget;
 - how each request field is written on the command line;
 - whether help lists it.
 
-Its request type supplies its fields of the MCP tool's `inputSchema` and
-its own row's schema in `GET /v1/commands`, with its answer type (or a
-stream's event type). A request row implements
+The catalog keeps every request and answer schema (or a stream's event
+schema). A request naming a tool family also supplies that tool's
+`inputSchema`; `GET /v1/commands` describes all rows and their explicit
+surface capabilities. A request row implements
 `Operation`, a stream row `StreamOperation`; a local row registers its
 request type only, and the product runs it after `parse_cli` says it is
 local.
 
 Answers are typed values. Each surface renders them from the type: text for
-the terminal and for a model, JSON for programs, HTML for the web. No surface
+the terminal and for a model, JSON for programs, HTML for the web. The one
+pure text renderer accepts an explicit `TextStyle` (`Plain` or `Ansi`). MCP
+and the shared transport helpers use Plain; a product CLI passes its captured
+output style. The shared renderer reads no process environment. No surface
 assembles an answer of its own.
+
+### Declaration and execution
+
+`OperationCatalog::builder(product, deadlines)` creates a `CatalogBuilder`.
+It declares tool families, request options, precise failure codes and typed
+rows. `declare::<Request, Response>(spec, render)` and
+`declare_stream::<Request, Event>(spec, render)` take a pure
+`fn(&ValueType, TextStyle) -> String` rendering function.
+`declare_local::<Request>(spec)` declares a caller-local row.
+`finish()` returns an immutable `Arc<OperationCatalog>`.
+
+The catalog alone supplies CLI parsing, help, completion, schemas, MCP tool
+lists, fallible follow-up requests, read deadlines, connection budgets and
+answer/event rendering with an explicit style. A client can use all of them
+without constructing a daemon, operation or runtime table.
+
+A socket client checks a generic `Answer<Value>` against the declared response
+with `validate_answer(operation, &answer)` before printing JSON. This uses the
+same typed decode as `render_text`, invokes no text renderer and preserves the
+original answer and envelope. Human clients use fallible `render_text` once,
+then `render_footer(via, &answer)` for the shared envelope presentation, so they
+can report a malformed daemon response through their protocol error handling.
+
+`cli_arguments(operation)` projects the existing argument declarations and
+typed schema into owned `CliArgument` values: `spec`, `kind`, `required` and
+closed textual `choices`. It includes implicit named fields and calling-process
+flags, including catalog-wide calling-process text options declared once with
+`declare_cli_global(name, help)`. `cli_globals()` exposes those `ArgumentSpec`s;
+underscore names use hyphenated flags. Their values appear only in
+`ParsedCommand.calling_process`. A product may build help and completion from
+this projection; actual argument parsing remains in the common parser.
+
+A request with `tool: None` has no tools/list entry and cannot be selected by
+tools/call, including a forged operation name in another family. Empty CLI
+commands are absent from parsing, help, completion and ready command lines.
+An absent HTTP route excludes HTTP dispatch. The HTTP command listing is
+the full catalog, with each surface explicitly present or absent. Native
+execution remains subject to product authentication and access policy.
+`listed` controls human help/completion visibility, not transport access.
+`follow_up` fails when its requested ready-call surface is absent; MCP never
+falls back to a CLI invocation. Answer footers display that absence explicitly.
+
+`OperationTable::new(catalog)` binds execution separately.
+`bind(name, operation)` and `bind_stream(name, stream)` require an existing
+declaration with the matching row kind and request/response or event schemas;
+a second binding is refused. Operations own only execution and typed access
+policy. `required_access(request, declared, caller)` defaults to the declaration's
+access; an override may use the authenticated caller to classify the typed request. The table borrows
+all pure views from that same catalog. Product transactions, retry identity,
+cancellation and transport execution retain their existing owners.
 
 ### Access
 
@@ -47,7 +101,7 @@ refuses a row above it before the row runs.
 
 ### The command line
 
-Every surface but the command line uses the request's own field names. The
+Every exposed surface but the command line uses the request's own field names. The
 command line writes each field in its row's declared form:
 
 | Form | Written | Value |
@@ -61,11 +115,26 @@ command line writes each field in its row's declared form:
 
 A field without a declaration is written `--name VALUE`. A flag that acts on
 the calling process (`--out FILE`) is read by the command line and kept out
-of the request. `--` ends the flags. Every row also takes `--json`,
+of the request. Known global options may precede a command (`--json status`,
+`--deadline 100 read REF`) or follow it. Longest command selection normalizes
+recognized globals before and between its command words; `--` and Rest
+arguments retain their literal meaning. `--` ends the flags. Every row also takes `--json`,
 `--deadline MS|none`, `--request-id ID`, `--budget N|none`, `--cursor C`,
 `--fresh` and `--request JSON` (the whole value, for any request type). A
-product may name one **default operation**, run when a command line's first
-words name no command (`polylogue QUERY`).
+product may name one **default operation** with
+`set_default_operation(name, accepts_first)`, run when a command line's first
+words name no command (`polylogue QUERY`). The product's pure `accepts_first`
+predicate receives the first lexical operand before Words or Rest joins it
+with later words. Known options and `--` are handled by the same parser.
+Explicit command words bypass this default-selection predicate; empty input
+and `--request JSON` have no first operand to check. A product that accepts
+any default operand supplies `|_| true`.
+
+A repeated list argument may explicitly declare `delimiter(',')`, stored as
+`value_delimiter`, to split one CLI flag value into several items. This does
+not split Words/path lists, HTTP query values or canonical `--request` JSON.
+A ready CLI call containing a literal delimiter inside one item uses the
+canonical request form so its identity survives parsing.
 
 A request written back as a command line uses the row's own forms whenever
 every field can be written that way, and `--request JSON` otherwise; flags
@@ -100,7 +169,7 @@ schema checks the arguments at dispatch, so a field of another row or a
 mistyped value is refused there. Tools carry no `outputSchema`: results keep
 `structuredContent`, and a product serves the answer's schema
 (`OperationTable::answer_schema`) and each family's full row schemas
-(`OperationTable::family_schemas`) once, from its explain or capabilities
+(`OperationCatalog::family_schemas`) once, from its explain or capabilities
 answer. `laws::tools_list_within` holds a product's whole tool list to the
 byte budget it passes. Hints come from the
 family: read-only for read access, destructive for permanent, and
@@ -346,17 +415,22 @@ daemon: help, grammar-only completion, refusals of malformed input),
 gives the request's default deadline; each product sets its classes' budgets
 and default deadlines on its interfaces page.
 
-- Every request carries its deadline. The CLI's socket timeout is the
-  deadline plus 50 ms, so a hung daemon never hangs a shell.
-- A request whose deadline passes ends `timeout`, never `ok` with a partial
-  page. The daemon stops the work within 100 ms of the deadline, of a
-  cancellation (MCP cancellation, Ctrl-C) or of the caller disconnecting; no
-  abandoned work keeps running.
+- Every request carries its read deadline. `connection_timeout` adds 50 ms
+  for connection/readiness admission. After admission, the server owns the
+  read timer and a client awaits its typed terminal result or an explicit
+  outer caller cancellation.
+- A read whose deadline passes ends `timeout`, never `ok` with a partial
+  page. The daemon stops read work within 100 ms of the deadline, of a
+  cancellation (MCP cancellation, Ctrl-C) or of the caller disconnecting.
+  A writer that already won `finish_read_phase` returns its actual
+  acknowledgement; the read timer cannot turn an accepted mutation into a
+  timeout.
 - **Any caller can lift the deadline**, agents included: `--deadline MS` or
   `--deadline none` on the CLI, `deadline: null` over MCP and HTTP. A deadline
   is a default for interactive display, not a limit on what may be asked, so
   no valid request is refused for its size.
-- A timeout answer names the stage that was running and the rows scanned, and
+- A timeout answer names the canonical operation, the stage that was running
+  (admission before progress is reported) and the rows scanned, and
   carries as `next` a narrower request the daemon can serve in time and the
   same request with the deadline lifted.
 
@@ -413,11 +487,11 @@ request state of its own.
 
 ## Using the crate
 
-Implement `Operation` (or `StreamOperation`) with typed values that
-implement serde and `JsonSchema`, declare the tool families, and register
-each row in `OperationTable`; `register_local` takes a local row's request
-type. Registration rejects duplicate names, commands and routes, a request
-row in an undeclared family or in a family of another access level, rows of
+Declare typed values implementing serde and `JsonSchema` in a
+`CatalogBuilder`, finish the catalog, and bind real `Operation` or
+`StreamOperation` handlers in `OperationTable`. `declare_local` needs only
+the local row's request type. Declaration rejects duplicate names, commands and routes, a request
+row naming an undeclared family or a family of another access level, rows of
 one family that define one schema name two ways, and argument declarations
 the request type cannot hold or the command line cannot read back.
 
@@ -435,18 +509,63 @@ notifications are taken, and lines are read whole without holding up the
 call), HTTP dispatch at `POST
 /v1` or each row's route (JSON, or a URL-encoded form with one `request`
 field, so a form works without JavaScript; `GET /v1/commands` lists the
-rows), `open_stream` for a product's server-sent events, and MCP
+full catalog with explicit surface capabilities), `open_stream` for a product's server-sent events, and MCP
 `tools/list` and `tools/call`. MCP hosts keep initialization,
 authentication, transport lifetime and cancellation notifications. Request
 IDs are mandatory on every wire transport.
 
+A product's GET routes use `parse_http_query(operation, pairs, request_id)`
+on already decoded query pairs. Flat fields use the same typed field kinds
+as the CLI: repeated text-list keys remain whole items, structured values
+are JSON, and the existing flat HTTP boolean spellings (``, `true`, `1`)
+mean true. `request_id`, `cursor`, `deadline`, `budget_tokens` and `fresh`
+are envelope fields; a declared argument called `format` remains an argument.
+Repeated non-list keys are refused.
+
+An `operation` or `arguments` query key selects canonical envelope mode.
+It deserializes one envelope, preserves the original argument JSON and
+omitted argument defaults, rejects duplicate keys and requires the operation
+to match its route. The route and supplied request identity fill missing
+envelope identity fields; typed payload validation stays with the handler.
+Canonical JSON booleans retain strict JSON typing. CLI delimiters never
+apply to HTTP query pairs.
+
 `Deadline::Default` is omitted on the wire, using the product's `Deadlines`;
-`Deadline::None` is JSON null. Dispatch owns the operation future and drops
+`Deadline::None` is JSON null. Dispatch owns each read future and drops
 it on timeout, cancellation or socket disconnect. `RequestContext::progress`
 records the stage, the measured scan count and an optional narrower request
 for the timeout answer, and checks cancellation; `progress_unknown` reports
 a stage without inventing a count. Blocking work checks its token within
-100 ms and stays owned by its request. Streams have no deadline.
+100 ms and stays owned by its request. Opening a stream and receiving all its
+events use the same absolute read deadline and cancellation token. A
+`Receiver<Result<Event, Failure>>` carries late typed failures directly;
+those terminate the stream with a failure rather than a successful end.
+
+`TransferOperation` implements both `Operation` and `StreamOperation` for one
+request type. Its pure typed `streaming(request)` method chooses a bounded
+answer or finite event delivery. `declare_transfer::<Request, Response, Event>`
+declares the answer and event renderers and separate schemas in one row;
+`bind_transfer` binds its real handler. `OperationTable::streaming` lets a
+transport choose delivery without inspecting JSON fields. Direct calls and
+MCP accept bounded answers and refuse event delivery with a request to use a
+streaming transport or a bounded page.
+
+`Operation::has_read_phase(request)` and
+`Operation::default_read_deadline(request, declared)` are evaluated from the
+typed request before the read timer starts. The latter preserves the declared
+class default unless the operation overrides it for that delivery. A transfer
+can leave its selected event delivery unbounded by default while keeping the
+finite page's class default. Explicit millisecond deadlines and explicit null
+still override this choice; ordinary `StreamOperation` rows retain their class
+default. A request with a read phase receives its absolute `read_deadline()`
+and exact accepted envelope through `RequestContext::request()`. Before a
+mutation is handed to its writer, `finish_read_phase()` arbitrates against
+the timer and cancellation under one mutex. Expiry or cancellation winning
+first refuses the handoff. Ownership winning first makes dispatch await the
+writer's actual acknowledgement, even if the read deadline later passes or
+its caller cancels. Product writer admission and publication fences remain
+product-owned. Pure writes may declare that they have no read phase;
+authentication and pre-admission cancellation still apply.
 
 `FailureKind` is closed; `register_failure_code` records each product code's
 kind once, and dispatch reports an unregistered or differently classified
@@ -495,10 +614,12 @@ the serialization, command-line and fitter boundaries. Run
 
 - **surface-parity**: the CLI, socket, HTTP and MCP return the same answer, or
   the same failure, for the same request.
-- **timeout-never-partial**: a request past its deadline ends `timeout` with
-  no rows reported as an `ok` answer.
-- **cancel-stops-work**: a cancelled or disconnected request leaves no work
-  running in the daemon.
+- **timeout-never-partial**: a read phase past its deadline ends `timeout`
+  with no rows reported as an `ok` answer. A writer that won ownership first
+  returns its actual acknowledgement.
+- **cancel-stops-work**: a cancelled or disconnected read leaves no read work
+  running in the daemon. An already-owned writer finishes through its own
+  transaction and admission policy.
 - **any-caller-lifts-deadline**: a lifted deadline is honoured for every
   caller, and the request runs until done or cancelled.
 - **retry-applies-once**: a write sent twice with one `request_id`, one after

@@ -1,9 +1,10 @@
-//! One typed operation table drives the command line, socket, HTTP and MCP,
+//! One typed operation catalog drives the command line, socket, HTTP and MCP,
 //! and one answer contract travels on all of them.
 //!
 //! Products own operations, authentication, durable transactions and rendered
-//! views. The table owns dispatch, schemas and the MCP grouping; every
-//! transport calls it. The answer envelope, failures, value states, section
+//! views. The catalog owns declarations, schemas, rendering and MCP grouping.
+//! A runtime table binds real handlers to that catalog; every
+//! transport calls the same bound handlers. The answer envelope, failures, value states, section
 //! status, the budget fitter, caller identity and seen marks are the shared
 //! vocabulary both products answer in.
 
@@ -21,7 +22,7 @@ mod tools;
 mod transport;
 mod values;
 
-pub use arguments::ParsedCommand;
+pub use arguments::{CliArgument, ParsedCommand, ValueKind};
 pub use authorship::*;
 pub use envelope::*;
 pub use event::*;

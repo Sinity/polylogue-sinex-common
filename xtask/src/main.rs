@@ -25,6 +25,7 @@ fn main() -> ExitCode {
             run.finish()
         }
         Cli::Test { args } => {
+            let args = test_features(args);
             let mut run = Run::start("polylogue-sinex-common", "test", &args);
             let _ = run.nextest(
                 "test",
@@ -43,6 +44,47 @@ fn check(run: &mut Run) -> devkit::Result {
     run.command(
         "fmt",
         devkit::cargo_command().args(["fmt", "--all", "--", "--check"]),
+    )?;
+    // Compile runtime and fixture surfaces without the workspace's all-feature
+    // unification, then retain the complete clippy and law-suite run below.
+    for package in ["query-language", "web-shell", "devkit"] {
+        run.cargo(
+            &format!("minimal-{package}"),
+            &[
+                "check",
+                "--locked",
+                "-p",
+                package,
+                "--all-targets",
+                "--no-default-features",
+            ],
+        )?;
+    }
+    run.cargo(
+        "devkit-service-fixtures",
+        &[
+            "check",
+            "--locked",
+            "-p",
+            "devkit",
+            "--all-targets",
+            "--no-default-features",
+            "--features",
+            "pg,nats",
+        ],
+    )?;
+    run.cargo(
+        "devkit-runner",
+        &[
+            "check",
+            "--locked",
+            "-p",
+            "devkit",
+            "--all-targets",
+            "--no-default-features",
+            "--features",
+            "runner",
+        ],
     )?;
     run.command(
         "web-shell",
@@ -69,3 +111,25 @@ fn check(run: &mut Run) -> devkit::Result {
         },
     )
 }
+
+/// Focused test runs include the selected packages' laws and generators unless
+/// the caller explicitly chooses a feature configuration.
+fn test_features(mut args: Vec<String>) -> Vec<String> {
+    let explicit = args
+        .iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| {
+            matches!(
+                arg.as_str(),
+                "--all-features" | "--no-default-features" | "--features"
+            ) || arg.starts_with("--features=")
+                || arg.starts_with("-F")
+        });
+    if !explicit {
+        args.insert(0, "--all-features".into());
+    }
+    args
+}
+
+#[cfg(test)]
+mod tests;

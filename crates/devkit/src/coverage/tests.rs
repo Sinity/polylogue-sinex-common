@@ -93,13 +93,19 @@ fn fake_report(
                 [ "$argument" = --no-tests=fail ] && no_tests=yes
                 if [ "$argument" = -- ]; then [ "$no_tests" = yes ] || exit 8; break; fi
             done
-            mkdir -p "$CARGO_TARGET_DIR/nextest/default"
-            printf '%s' '<testsuites tests="1"><testsuite name="coverage"><testcase name="chosen" classname="selected" time="0"/></testsuite></testsuites>' > "$CARGO_TARGET_DIR/nextest/default/devkit-junit.xml"
-            exit 0
+            config=''
+            for argument in "$@"; do
+                if [ "$config" = next ]; then export DEVKIT_REPORT_CONFIG="${{argument#devkit:}}"; break; fi
+                [ "$argument" = --tool-config-file ] && config=next
+            done
+            "$DEVKIT_REPORT_FIXTURE" --exact coverage::tests::nextest_report --nocapture
+            exit $?
         fi
         {script}"#
         );
-        command.args(["-c", &script, "fake-cargo"]);
+        command
+            .args(["-c", &script, "fake-cargo"])
+            .env("DEVKIT_REPORT_FIXTURE", std::env::current_exe().unwrap());
         command
     });
     (dir, result, run)
@@ -156,5 +162,80 @@ fn threshold_and_output_checks_use_actual_report() {
             .1
             .unwrap_err()
             .contains("report missing")
+    );
+}
+
+#[test]
+fn nextest_report() {
+    let Some(config) = std::env::var_os("DEVKIT_REPORT_CONFIG") else {
+        return;
+    };
+    let config = fs::read_to_string(config).unwrap();
+    let path: PathBuf = serde_json::from_str(
+        config
+            .lines()
+            .find_map(|line| line.strip_prefix("path = "))
+            .unwrap(),
+    )
+    .unwrap();
+    fs::write(path, r#"<testsuites tests="1"><testsuite name="coverage"><testcase name="chosen" classname="selected" time="0"/></testsuite></testsuites>"#).unwrap();
+}
+
+#[test]
+fn concurrent_coverage_reserves_its_real_build_directory_before_starting_a_tool() {
+    use std::sync::{
+        Arc, Barrier,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let output = directory.path().join("output");
+    fs::create_dir(&output).unwrap();
+    fs::write(output.join("keep"), "caller-owned").unwrap();
+    let gate = Arc::new(Barrier::new(2));
+    let started = Arc::new(AtomicUsize::new(0));
+    let results = std::thread::scope(|threads| {
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let output = output.clone();
+                let gate = gate.clone();
+                let started = started.clone();
+                threads.spawn(move || {
+                    let mut run = Run::unrecorded("demo", "coverage", &[]);
+                    let options = Coverage {
+                        output,
+                        format: "json".into(),
+                        threshold: None,
+                        args: vec![],
+                    };
+                    gate.wait();
+                    execute_with(&mut run, &options, &[], || {
+                        started.fetch_add(1, Ordering::SeqCst);
+                        std::process::Command::new("/synthetic/missing-coverage-command")
+                    })
+                    .unwrap_err()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        results
+            .iter()
+            .filter(|error| error.contains("already used"))
+            .count(),
+        1
+    );
+    assert_eq!(started.load(Ordering::SeqCst), 1);
+    assert!(
+        output.join("build").is_dir(),
+        "a spawn failure retains its owned output"
+    );
+    assert!(!output.join("coverage.json").exists());
+    assert_eq!(
+        fs::read_to_string(output.join("keep")).unwrap(),
+        "caller-owned"
     );
 }

@@ -18,8 +18,9 @@ pub struct RenderedAnswer {
 }
 use crate::operation::{Forms, terminal_text};
 use crate::{
-    Access, Answer, Caller, CancellationToken, Deadline, Failure, Format, LeftOut, OperationTable,
-    Outcome, RunnableRequest, Suggestion, Via, approximate_tokens, bad_request,
+    Access, Answer, Caller, CancellationToken, Deadline, Failure, Format, LeftOut,
+    OperationCatalog, OperationTable, Outcome, RunnableRequest, Suggestion, TextStyle, Via,
+    approximate_tokens, bad_request,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -27,7 +28,7 @@ use serde_json::{Map, Value, json};
 /// The type of one request field as a tool list states it: a scalar keeps
 /// its type and its enum values; an object, a list or a choice among
 /// them is only its bare type. The full schema of each row is
-/// `OperationTable::family_schemas`, for a product's explain answer.
+/// `OperationCatalog::family_schemas`, for a product's explain answer.
 fn shallow(schema: &Value, definitions: &Map<String, Value>) -> Value {
     let schema = match schema
         .get("$ref")
@@ -262,16 +263,18 @@ impl Forms {
         }
         Some(format!("{} {}", self.tool_name(tool), Value::Object(call)))
     }
-    /// A follow-up as the surface writes it: an MCP tool call, or a command
-    /// line everywhere else (and for a row no tool holds).
-    pub(crate) fn follow_up(&self, via: Via, request: &RunnableRequest) -> String {
-        if via == Via::Mcp
-            && let Some(call) = self.tool_call(request)
-        {
-            return call;
+    /// A surface-ready call; absence never falls back to a different surface.
+    pub(crate) fn follow_up(&self, via: Via, request: &RunnableRequest) -> Result<String, Failure> {
+        if via == Via::Mcp {
+            return self
+                .tool_call(request)
+                .ok_or_else(|| bad_request(format!("{} has no MCP surface", request.operation)));
         }
         self.cli_command(request)
-            .unwrap_or_else(|_| format!("{} (unknown operation)", request.operation))
+    }
+    fn display_follow_up(&self, via: Via, request: &RunnableRequest) -> String {
+        self.follow_up(via, request)
+            .unwrap_or_else(|error| format!("unavailable: {}", terminal_text(&error.message)))
     }
     /// The one line an answer prints for something it left out.
     pub(crate) fn left_out_line(&self, via: Via, item: &LeftOut) -> String {
@@ -281,7 +284,7 @@ impl Forms {
                 "left out: {} {unit} of {}; read them: {}\n",
                 item.count,
                 terminal_text(&item.what),
-                self.follow_up(via, expand)
+                self.display_follow_up(via, expand)
             ),
             None => format!(
                 "left out: {} {unit} of {}\n",
@@ -322,7 +325,7 @@ impl Forms {
                     text.push_str(&format!("did you mean: {}\n", terminal_text(query)));
                 }
                 Some(Suggestion::Request(request)) => {
-                    text.push_str(&format!("try: {}\n", self.follow_up(via, request)));
+                    text.push_str(&format!("try: {}\n", self.display_follow_up(via, request)));
                 }
                 None => {}
             }
@@ -386,14 +389,14 @@ impl Forms {
             text.push_str(&format!(
                 "next: {}: {}\n",
                 terminal_text(&next.label),
-                self.follow_up(via, &next.request)
+                self.display_follow_up(via, &next.request)
             ));
         }
         text
     }
 }
 
-impl OperationTable {
+impl OperationCatalog {
     /// Every row of a tool family with its full request schema, for a
     /// product's explain or capabilities answer: the tool list states only
     /// each field's shallow type.
@@ -418,7 +421,7 @@ impl OperationTable {
         self.forms().cli_command(request)
     }
     /// A follow-up as the surface of `via` writes it.
-    pub fn follow_up(&self, via: Via, request: &RunnableRequest) -> String {
+    pub fn follow_up(&self, via: Via, request: &RunnableRequest) -> Result<String, Failure> {
         self.forms().follow_up(via, request)
     }
     /// The MCP `tools/list` entries: one per declared tool that holds a row.
@@ -448,6 +451,9 @@ impl OperationTable {
             })
             .collect()
     }
+}
+
+impl OperationTable {
     /// The complete MCP JSON-RPC adapter for `tools/list` and `tools/call`,
     /// suitable for stdio or streamable HTTP. The host owns initialization,
     /// authentication and cancellation notifications.
@@ -525,7 +531,7 @@ impl OperationTable {
             mut answer,
             value_text,
             footer,
-        } = self.render_answer(Via::Mcp, request.as_ref(), answer);
+        } = self.render_answer(Via::Mcp, request.as_ref(), answer, TextStyle::Plain);
         if format == Format::Text && !answer.is_error() {
             // The rows are in the text part; the structured part says so
             // instead of sending them twice.
@@ -543,6 +549,9 @@ impl OperationTable {
             "content": [{"type": "text", "text": format!("{value_text}{footer}")}],
         })
     }
+}
+
+impl OperationCatalog {
     /// The request a tool call makes: its row (named by `operation` when the
     /// tool has several) and the call's options. The row's own schema checks
     /// the arguments at dispatch.
@@ -575,6 +584,10 @@ impl OperationTable {
             format: call.format,
         })
     }
+    /// The envelope's presentation, without decoding or rendering the response value.
+    pub fn render_footer(&self, via: Via, answer: &Answer<Value>) -> String {
+        self.forms().footer(via, &answer.outcome, &answer.envelope)
+    }
     /// An answer as text for a person or model: the value's rendering
     /// (nothing with `format: json`, whose rows travel as data, or for
     /// `operation` empty) and the envelope's lines, measured after the
@@ -590,6 +603,7 @@ impl OperationTable {
         via: Via,
         request: Option<&RunnableRequest>,
         mut answer: Answer<Value>,
+        style: TextStyle,
     ) -> RenderedAnswer {
         let operation = request.map_or("", |request| request.operation.as_str());
         let streamed = self
@@ -597,14 +611,14 @@ impl OperationTable {
             .is_some_and(|spec| spec.kind == crate::OperationKind::Stream);
         let json = request.is_some_and(|request| request.format == Format::Json);
         let full = match &answer.outcome {
-            Outcome::Error(_) => self.render_text("", &answer).unwrap_or_default(),
+            Outcome::Error(_) => self.render_text("", &answer, style).unwrap_or_default(),
             _ if json || streamed || operation.is_empty() => String::new(),
             _ => self
-                .render_text(operation, &answer)
+                .render_text(operation, &answer, style)
                 .unwrap_or_else(|failure| format!("error (io): {}\n", failure.message)),
         };
         let value_text = full;
-        let footer = self.forms().footer(via, &answer.outcome, &answer.envelope);
+        let footer = self.render_footer(via, &answer);
         let used = approximate_tokens(&format!("{value_text}{footer}"));
         answer.envelope.used_tokens = Some(used);
         RenderedAnswer {

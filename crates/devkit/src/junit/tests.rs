@@ -60,6 +60,8 @@ fn absent_truncated_and_inconsistent_reports_are_not_empty_successes() {
         "",
         "<testsuites tests=\"0\">",
         "<testsuites tests=\"1\"></testsuites>",
+        r#"<testsuites><testsuite name="probe"><testcase name="passes"/></testsuite></testsuites>"#,
+        r#"<testsuites tests="2"><testsuite name="probe"><testcase name="passes"/></testsuite></testsuites>"#,
         "<testsuites tests=\"1\"><testsuite><testcase name=\"unfinished\">",
     ] {
         assert!(outcomes(xml).is_err(), "{xml}");

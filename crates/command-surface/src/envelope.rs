@@ -39,7 +39,8 @@ impl LatencyClass {
 }
 
 /// Milliseconds from admission. A JSON null lifts the deadline; absence uses
-/// the operation's class default. All surfaces use this same representation.
+/// the operation's typed read default (its class default unless overridden).
+/// All surfaces use this same representation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum Deadline {
@@ -57,8 +58,9 @@ impl Deadline {
             Self::Milliseconds(ms) => Some(Duration::from_millis(ms)),
         }
     }
-    /// The client waits 50 ms beyond the server deadline for its typed answer.
-    pub fn socket_timeout(self, default: Option<Duration>) -> Option<Duration> {
+    /// Connection/readiness admission budget, including the protocol's 50 ms grace.
+    /// Accepted requests await the server's typed terminal result.
+    pub fn connection_timeout(self, default: Option<Duration>) -> Option<Duration> {
         self.duration(default)
             .and_then(|d| d.checked_add(Duration::from_millis(50)))
     }

@@ -18,21 +18,25 @@ struct Rows {
 /// blank` is degraded naming nothing, `unknown` fails with a field the
 /// catalog does not have.
 struct Search;
+fn search_spec() -> OperationSpec {
+    OperationSpec {
+        failures: vec![FailureKind::UnknownField],
+        ..OperationSpec::request(
+            "find",
+            &["find"],
+            "query",
+            "Search synthetic rows",
+            "The query language's one read",
+        )
+    }
+}
+fn search_render_text(rows: &Rows, _style: TextStyle) -> String {
+    rows.rows.iter().map(|row| format!("{row}\n")).collect()
+}
 impl Operation for Search {
     type Request = Find;
     type Response = Rows;
-    fn spec(&self) -> OperationSpec {
-        OperationSpec {
-            failures: vec![FailureKind::UnknownField],
-            ..OperationSpec::request(
-                "find",
-                &["find"],
-                "query",
-                "Search synthetic rows",
-                "The query language's one read",
-            )
-        }
-    }
+
     fn execute(
         &self,
         request: Find,
@@ -105,21 +109,19 @@ impl Operation for Search {
             }
         })
     }
-    fn render_text(&self, rows: &Rows) -> String {
-        rows.rows.iter().map(|row| format!("{row}\n")).collect()
-    }
 }
 
 /// An operation fits its typed logical entries before the transport renders them.
 struct PackingSearch;
+fn packing_search_spec() -> OperationSpec {
+    let mut spec = search_spec();
+    spec.default_budget_tokens = Some(120);
+    spec
+}
 impl Operation for PackingSearch {
     type Request = Find;
     type Response = Vec<Section>;
-    fn spec(&self) -> OperationSpec {
-        let mut spec = Search.spec();
-        spec.default_budget_tokens = Some(120);
-        spec
-    }
+
     fn execute(
         &self,
         request: Find,
@@ -170,19 +172,20 @@ impl Operation for PackingSearch {
             context.fit(Answer { outcome, envelope }, context.budget(60, cap))
         })
     }
-    fn render_text(&self, sections: &Vec<Section>) -> String {
-        render_sections(sections)
-    }
 }
 fn table() -> OperationTable {
-    table_with(Search)
+    table_with(Search, search_spec(), search_render_text)
 }
-fn table_with(operation: impl Operation<Request = Find> + 'static) -> OperationTable {
-    let mut table = OperationTable::new("example", Deadlines::default());
+fn table_with<O: Operation<Request = Find>>(
+    operation: O,
+    spec: OperationSpec,
+    render: fn(&O::Response, TextStyle) -> String,
+) -> OperationTable {
+    let mut catalog = OperationCatalog::builder("example", Deadlines::default());
     for option in RequestOption::ALL {
-        table.accept(option);
+        catalog.accept(option);
     }
-    table
+    catalog
         .declare_tool(ToolFamily {
             name: "query".into(),
             description: "Search rows".into(),
@@ -190,9 +193,17 @@ fn table_with(operation: impl Operation<Request = Find> + 'static) -> OperationT
             idempotent: true,
         })
         .unwrap();
-    table.register(operation).unwrap();
+    catalog.declare::<Find, O::Response>(spec, render).unwrap();
+    let mut table = OperationTable::new(catalog.finish());
+    table.bind("find", operation).unwrap();
     table
 }
+fn packing_table() -> OperationTable {
+    table_with(PackingSearch, packing_search_spec(), |sections, _style| {
+        render_sections(sections)
+    })
+}
+
 fn find(query: &str) -> RunnableRequest {
     RunnableRequest::new("find", json!({ "query": query }), "r-1")
 }
@@ -264,7 +275,7 @@ async fn text_answers_read_back() {
 
 #[tokio::test]
 async fn text_within_budget() {
-    let table = table_with(PackingSearch);
+    let table = packing_table();
     let call = |query: &str, budget: u32| {
         table.mcp(
             json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
@@ -336,7 +347,7 @@ async fn text_within_budget() {
     let read = table
         .call(request.clone(), Via::Cli, CancellationToken::new())
         .await;
-    let rendered = table.render_answer(Via::Cli, Some(&request), read);
+    let rendered = table.render_answer(Via::Cli, Some(&request), read, TextStyle::Plain);
     assert_eq!(rendered.value_text, cli.stdout);
     assert_eq!(rendered.footer, cli.stderr);
 }
@@ -629,7 +640,7 @@ fn coverage_footer_uses_the_typed_state_and_detail() {
             },
         }],
     }];
-    let rendered = table().render_answer(Via::Cli, None, answer);
+    let rendered = table().render_answer(Via::Cli, None, answer, TextStyle::Plain);
     assert!(
         rendered
             .footer
@@ -643,7 +654,7 @@ fn coverage_footer_uses_the_typed_state_and_detail() {
 
 #[tokio::test]
 async fn expanding_a_default_budget_reads_the_whole_logical_entries() {
-    let table = table_with(PackingSearch);
+    let table = packing_table();
     let first = table
         .call(find("long"), Via::Mcp, CancellationToken::new())
         .await;
@@ -655,7 +666,7 @@ async fn expanding_a_default_budget_reads_the_whole_logical_entries() {
         .await;
     assert_eq!(follow.envelope.shown, Some(100));
     assert!(follow.envelope.left_out.is_empty());
-    let rendered = table.render_answer(Via::Mcp, Some(&expand), follow);
+    let rendered = table.render_answer(Via::Mcp, Some(&expand), follow, TextStyle::Plain);
     assert!(
         rendered
             .value_text
@@ -695,14 +706,14 @@ fn rendering_preserves_an_operations_complete_response() {
         rows: vec!["a whole entry\nwith its detail".into()],
     };
     let answer = Answer::ok(serde_json::to_value(rows).unwrap());
-    let rendered = table().render_answer(Via::Cli, Some(&request), answer);
+    let rendered = table().render_answer(Via::Cli, Some(&request), answer, TextStyle::Plain);
     assert_eq!(rendered.value_text, "a whole entry\nwith its detail\n");
     assert!(rendered.answer.envelope.left_out.is_empty());
 }
 
 #[tokio::test]
 async fn a_text_budget_does_not_cut_json_rows() {
-    let table = table_with(PackingSearch);
+    let table = packing_table();
     let mut request = find("long");
     request.budget_tokens = TokenBudget::Tokens(1);
     request.format = Format::Json;
@@ -719,20 +730,25 @@ async fn a_text_budget_does_not_cut_json_rows() {
     );
     assert_eq!(answer.envelope.shown, Some(100));
     assert!(answer.envelope.left_out.is_empty());
-    let rendered = table.render_answer(Via::Mcp, Some(&request), answer);
+    let rendered = table.render_answer(Via::Mcp, Some(&request), answer, TextStyle::Plain);
     assert!(rendered.value_text.is_empty());
 }
 
 #[tokio::test]
 async fn fitting_preserves_degradation_and_reserves_the_cap_note() {
-    let table = table_with(PackingSearch);
+    let table = packing_table();
     let degraded = table
         .call(find("degraded"), Via::Mcp, CancellationToken::new())
         .await;
     assert!(
         matches!(degraded.outcome,Outcome::Degraded {ref missing,..} if missing==&["mail is offline"])
     );
-    let rendered = table.render_answer(Via::Mcp, Some(&find("degraded")), degraded);
+    let rendered = table.render_answer(
+        Via::Mcp,
+        Some(&find("degraded")),
+        degraded,
+        TextStyle::Plain,
+    );
     assert!(approximate_tokens(&format!("{}{}", rendered.value_text, rendered.footer)) <= 120);
     let mut capped = find("capped");
     capped.budget_tokens = TokenBudget::Unlimited;
@@ -747,6 +763,6 @@ async fn fitting_preserves_degradation_and_reserves_the_cap_note() {
             .any(|note| note.contains("unlimited to 180"))
     );
     assert!(answer.envelope.shown.unwrap() < 40);
-    let rendered = table.render_answer(Via::Mcp, Some(&capped), answer);
+    let rendered = table.render_answer(Via::Mcp, Some(&capped), answer, TextStyle::Plain);
     assert!(approximate_tokens(&format!("{}{}", rendered.value_text, rendered.footer)) <= 180);
 }

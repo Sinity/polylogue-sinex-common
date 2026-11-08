@@ -387,22 +387,13 @@ impl Run {
             run.capture_cargo_json(&mut build)
         })?;
 
-        let target = env
-            .iter()
-            .rev()
-            .find(|(name, _)| name == "CARGO_TARGET_DIR")
-            .map(|(_, value)| self.root.join(value))
-            .map(Ok)
-            .unwrap_or_else(|| self.target_dir())?;
-        fs::create_dir_all(&target).map_err(|e| e.to_string())?;
-        let junit = target
-            .join("nextest")
-            .join("default")
-            .join("devkit-junit.xml");
-        let _ = fs::remove_file(&junit);
-        let config = target.join("devkit-nextest.toml");
-        // Nextest's default store is workspace-relative, independent of
-        // CARGO_TARGET_DIR. Give it the exact absolute report path we read.
+        // The invocation already owns this exclusive scratch child. Cargo's
+        // target lock ends before tests run, so reports and configuration must
+        // never live at shared target-directory paths.
+        let junit = temp.path().join("junit.xml");
+        let config = temp.path().join("nextest.toml");
+        // Nextest's default store is workspace-relative. Name our own absolute
+        // report path, independently of the shared compiler cache.
         let report_path = serde_json::to_string(&junit).map_err(|e| format!("JUnit path: {e}"))?;
         fs::write(
             &config,
@@ -420,8 +411,8 @@ impl Run {
             .arg("--tool-config-file")
             .arg(format!("devkit:{}", config.display()))
             .args(&args)
-            .env("XDG_STATE_HOME", &state)
-            .envs(env.iter().cloned());
+            .envs(env.iter().cloned())
+            .env("XDG_STATE_HOME", &state);
         let result = self.step(name, |run| {
             test.current_dir(&run.root);
             status(&mut test)

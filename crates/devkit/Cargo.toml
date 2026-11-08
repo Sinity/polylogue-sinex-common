@@ -12,6 +12,8 @@ publish.workspace = true
 default = ["cli"]
 # The clap commands each project's xtask flattens into its own.
 cli = ["dep:clap", "history"]
+# Runs, source-aware test selection and local dependency linking.
+runner = ["dep:quick-xml", "dep:syn", "dep:proc-macro2"]
 # PostgreSQL schema databases and per-test clones, through the PostgreSQL
 # client tools; links no database library.
 pg = []
@@ -19,7 +21,7 @@ pg = []
 # test; links no NATS client.
 nats = []
 # The machine-wide SQLite history of runs, tests and diagnostics.
-history = ["dep:rusqlite", "dep:zstd"]
+history = ["runner", "dep:rusqlite", "dep:zstd"]
 # Representative benchmarks: a stratified sample of a corpus drawn once, runs
 # recorded with the host's load, comparison and explicitly assumed linear estimates.
 bench = ["history"]
@@ -30,11 +32,11 @@ libc = "0.2"
 signal-hook = "0.3"
 devkit-macros = { path = "../devkit-macros", version = "0.1.0" }
 clap = { version = "4", features = ["derive"], optional = true }
-quick-xml = "0.38"
+quick-xml = { version = "0.38", optional = true }
 rusqlite = { version = ">=0.32, <0.41", features = ["bundled"], optional = true }
 serde_json = "1"
-syn = { version = "2", features = ["full", "parsing"] }
-proc-macro2 = { version = "1", features = ["span-locations"] }
+syn = { version = "2", optional = true, features = ["full", "parsing"] }
+proc-macro2 = { version = "1", optional = true, features = ["span-locations"] }
 zstd = { version = "0.13", optional = true }
 
 [dev-dependencies]

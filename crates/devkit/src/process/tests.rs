@@ -161,6 +161,7 @@ fn interrupt_and_termination_reach_all_service_groups() {
     }
 }
 
+#[cfg(feature = "runner")]
 #[test]
 fn ordinary_run_steps_inherit_the_callers_group() {
     let directory = tempfile::tempdir().unwrap();

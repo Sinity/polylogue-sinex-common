@@ -38,7 +38,8 @@ fn overridden_target_records_this_runs_outcomes_and_leaves_stale_xml_alone() {
     assert_eq!(outcomes.get("fresh_failure"), Some(&&TestStatus::Failed));
     assert_eq!(outcomes.get("ignored_case"), Some(&&TestStatus::Ignored));
     assert_eq!(fs::read_to_string(stale_path).unwrap(), stale);
-    assert!(target.join("nextest/default/devkit-junit.xml").is_file());
+    assert!(!target.join("nextest/default/devkit-junit.xml").exists());
+    assert!(!target.join("devkit-nextest.toml").exists());
 }
 
 #[test]
@@ -63,7 +64,6 @@ fn selected_report_keeps_skip_reasons() {
         },
     )
     .unwrap();
-    let report = target.join("nextest/default/devkit-junit.xml");
     assert!(
         target.join("debug").is_dir(),
         "the fixture compiles in its own selected cache"
@@ -71,10 +71,15 @@ fn selected_report_keeps_skip_reasons() {
     // Nextest may create workspace-relative store metadata, but Cargo's build
     // artifacts must stay under this fixture's selected target.
     assert!(!root.join("target/debug").exists());
-    assert!(
-        fs::read_to_string(report)
-            .unwrap()
-            .contains("skipped=\"2\"")
+    assert_eq!(
+        run.tests
+            .iter()
+            .filter(|test| matches!(
+                test.status,
+                TestStatus::Ignored | TestStatus::Filtered | TestStatus::Skipped
+            ))
+            .count(),
+        2
     );
     assert_eq!(run.tests.len(), 3, "{:?}", run.tests);
     let status = |run: &Run, name: &str| {
@@ -306,6 +311,9 @@ fn tests_keep_state_in_a_directory_of_their_own() {
     .unwrap();
     let target = root.join("target");
     let probe = root.join("state-home");
+    let foreign = root.join("caller-state");
+    fs::create_dir(&foreign).unwrap();
+    fs::write(foreign.join("keep"), "caller-owned").unwrap();
     let mut run = Run::unrecorded("devkit-state-probe", "test", &[]);
     run.root = root.into();
     run.target = Some(target.clone());
@@ -316,6 +324,7 @@ fn tests_keep_state_in_a_directory_of_their_own() {
             env: vec![
                 ("CARGO_TARGET_DIR".into(), target.display().to_string()),
                 ("STATE_PROBE".into(), probe.display().to_string()),
+                ("XDG_STATE_HOME".into(), foreign.display().to_string()),
             ],
             ..Nextest::default()
         },
@@ -326,5 +335,122 @@ fn tests_keep_state_in_a_directory_of_their_own() {
         Some(home.as_os_str()),
         env::var_os("XDG_STATE_HOME").as_deref()
     );
+    assert_ne!(home, foreign);
     assert!(!home.exists(), "the run removes its tests' state directory");
+    assert_eq!(
+        fs::read_to_string(foreign.join("keep")).unwrap(),
+        "caller-owned"
+    );
+}
+
+#[test]
+fn concurrent_runs_share_build_artifacts_but_never_reports_or_configuration() {
+    use std::sync::{
+        Arc, Barrier,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let fixture = tempfile::tempdir().unwrap();
+    let target = fixture.path().join("shared-target");
+    let shared = fixture.path().join("coordination");
+    fs::create_dir_all(target.join("nextest/default")).unwrap();
+    fs::create_dir(&shared).unwrap();
+    let old_report = target.join("nextest/default/devkit-junit.xml");
+    let old_config = target.join("devkit-nextest.toml");
+    fs::write(&old_report, "preceding report").unwrap();
+    fs::write(&old_config, "preceding configuration").unwrap();
+    let gate = Arc::new(Barrier::new(2));
+    let runs = std::thread::scope(|threads| {
+        let handles: Vec<_> = ["one", "two"].into_iter().map(|label| {
+            let root = fixture.path().to_path_buf();
+            let target = target.clone();
+            let shared = shared.clone();
+            let gate = gate.clone();
+            threads.spawn(move || {
+                let mut run = Run::unrecorded("report-fixture", "test", &[]);
+                run.root = root;
+                let calls = AtomicUsize::new(0);
+                run.nextest_with("test", &Nextest {
+                    env: vec![("CARGO_TARGET_DIR".into(), target.display().to_string())],
+                    ..Nextest::default()
+                }, || {
+                    // Both configurations exist before either peer reads one.
+                    if calls.fetch_add(1, Ordering::SeqCst) == 1 { gate.wait(); }
+                    let mut command = Command::new("sh");
+                    command.args(["-c", r#"for argument in "$@"; do [ "$argument" = --no-run ] && exit 0; done
+config=''
+for argument in "$@"; do
+    if [ "$config" = next ]; then export DEVKIT_REPORT_CONFIG="${argument#devkit:}"; break; fi
+    [ "$argument" = --tool-config-file ] && config=next
+done
+exec "$DEVKIT_REPORT_FIXTURE" --exact run::nextest_tests::concurrent_report_child --nocapture"#, "fake-cargo"])
+                        .env("DEVKIT_REPORT_FIXTURE", env::current_exe().unwrap())
+                        .env("DEVKIT_REPORT_LABEL", label)
+                        .env("DEVKIT_REPORT_SHARED", &shared);
+                    command
+                }, &["nextest", "run"]).unwrap();
+                (label, run)
+            })
+        }).collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    for (label, run) in runs {
+        assert_eq!(run.tests.len(), 1);
+        assert_eq!(run.tests[0].name, label);
+        assert_eq!(run.tests[0].status, TestStatus::Passed);
+        assert!(run.stages.iter().all(|stage| stage.ok));
+    }
+    let assigned = |label: &str| -> PathBuf {
+        serde_json::from_slice(&fs::read(shared.join(format!("{label}.path"))).unwrap()).unwrap()
+    };
+    let one = assigned("one");
+    let two = assigned("two");
+    assert_ne!(one, two);
+    assert!(
+        !one.parent().unwrap().exists(),
+        "imported report scratch is removed"
+    );
+    assert!(!two.parent().unwrap().exists());
+    assert_eq!(fs::read_to_string(old_report).unwrap(), "preceding report");
+    assert_eq!(
+        fs::read_to_string(old_config).unwrap(),
+        "preceding configuration"
+    );
+}
+
+#[test]
+fn concurrent_report_child() {
+    let Some(label) = env::var_os("DEVKIT_REPORT_LABEL") else {
+        return;
+    };
+    let label = label.to_str().unwrap();
+    let shared = PathBuf::from(env::var_os("DEVKIT_REPORT_SHARED").unwrap());
+    let config = fs::read_to_string(env::var_os("DEVKIT_REPORT_CONFIG").unwrap()).unwrap();
+    let path: PathBuf = serde_json::from_str(
+        config
+            .lines()
+            .find_map(|line| line.strip_prefix("path = "))
+            .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        shared.join(format!("{label}.path")),
+        serde_json::to_vec(&path).unwrap(),
+    )
+    .unwrap();
+    let wait = |name: &str| {
+        while !shared.join(name).exists() {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    if label == "two" {
+        wait("one.written");
+    }
+    fs::write(path, format!(r#"<testsuites tests="1"><testsuite name="isolated"><testcase name="{label}" classname="synthetic" time="0"/></testsuite></testsuites>"#)).unwrap();
+    fs::write(shared.join(format!("{label}.written")), "ready").unwrap();
+    if label == "one" {
+        wait("two.written");
+    }
 }

@@ -65,6 +65,15 @@ fn execute_with(
     };
     let selected = select(&requested, &exported)?;
     fs::create_dir_all(&options.output).map_err(|e| e.to_string())?;
+    // One results document describes this invocation's whole scenario set.
+    // Reserve that actual output before opening any per-scenario logs, even
+    // when another invocation selects a disjoint set of scenarios.
+    let report_path = options.output.join("results.json");
+    let report = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&report_path)
+        .map_err(|error| format!("{}: {error}", report_path.display()))?;
     let mut failures = Vec::new();
     let mut results = Vec::new();
     for scenario in selected {
@@ -112,11 +121,7 @@ fn execute_with(
         }
         results.push(serde_json::json!({"scenario":scenario,"passed":result.is_ok(),"log":log,"build_log":build_log}));
     }
-    fs::write(
-        options.output.join("results.json"),
-        serde_json::to_vec_pretty(&results).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
+    serde_json::to_writer_pretty(report, &results).map_err(|e| e.to_string())?;
     if failures.is_empty() {
         Ok(())
     } else {

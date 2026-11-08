@@ -16,6 +16,13 @@ cargo xtask test -p devkit --all-features
 and compiler wrappers. Cargo's default output directory is `target/`; a
 caller may set `CARGO_TARGET_DIR` explicitly.
 
+Declared AgentCTL operations clear an ambient `CARGO_TARGET_DIR` before entering
+the actual workspace's shell. The shell selects that checkout's isolated host
+target when `sinnix-cargo-target` is available, with dependency artifacts seeded
+by the host helper. For an explicit target experiment, pass
+`exec -- env CARGO_TARGET_DIR=... cargo ...`; this assignment runs after shell
+selection. Keep the experimental target exclusive to the same checkout.
+
 `nix flake check` builds sealed formatting, Clippy, nextest and browser-shell
 checks. Clippy and nextest reuse one Crane dependency artifact build with the
 same Rust toolchain and all workspace features. The source includes fixture
@@ -46,3 +53,10 @@ A host may queue these commands through its own job runner.
 
 For a change spanning common and a product, use the explicit
 [local linking command](../README.md#depending-on-this-repository).
+
+The common `cargo xtask test` command enables all features of the selected
+packages by default, including focused runs such as `-p query-language`, so
+compiler laws and generators stay in scope. Explicit `--features`, `-F`,
+`--all-features` or `--no-default-features` options are passed through unchanged
+and suppress that default. `cargo xtask check` retains the complete feature
+suite and separately compiles runtime and fixture feature combinations.

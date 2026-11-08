@@ -1,11 +1,11 @@
 use query_language::{
     bind::bind,
     catalog::*,
+    conformance::{Dataset, ReferenceEvaluator, Row, Scalar},
     format::format_query,
     identity::question_id,
     parse::parse,
     scope::{Origin, TypeRule},
-    semantics::{Dataset, ReferenceEvaluator, Row, Scalar},
 };
 use std::collections::BTreeMap;
 

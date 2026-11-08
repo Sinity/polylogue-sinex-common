@@ -147,3 +147,55 @@ fn cached_scenarios_record_the_derivation_log() {
             .contains("cached result")
     );
 }
+
+#[test]
+fn concurrent_disjoint_scenarios_cannot_share_one_results_document() {
+    use std::sync::{
+        Arc, Barrier,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let source = checkout();
+    let output = tempfile::tempdir().unwrap();
+    let gate = Arc::new(Barrier::new(2));
+    let results = std::thread::scope(|threads| {
+        let handles: Vec<_> = ["vm-one", "vm-two"].into_iter().map(|scenario| {
+            let root = source.path().to_path_buf();
+            let output = output.path().to_path_buf();
+            let gate = gate.clone();
+            threads.spawn(move || {
+                let mut run = Run::unrecorded("demo", "vm", &[]);
+                run.root = root;
+                let options = Vm { scenarios: vec![scenario.into()], system: "x86_64-linux".into(), output };
+                let calls = AtomicUsize::new(0);
+                let result = execute_with(&mut run, &options, &[], || {
+                    if calls.fetch_add(1, Ordering::SeqCst) == 0 { gate.wait(); }
+                    let mut command = Command::new("sh");
+                    command.args(["-c", r#"if [ "$1" = eval ]; then printf '%s' '["vm-one","vm-two"]'; else printf '%s\n' 'synthetic scenario passed'; fi"#, "fake-nix"]);
+                    command
+                });
+                (scenario, result)
+            })
+        }).collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    let passed: Vec<_> = results
+        .iter()
+        .filter(|(_, result)| result.is_ok())
+        .collect();
+    assert_eq!(passed.len(), 1, "{results:?}");
+    let (winner, _) = passed[0];
+    let (loser, failed) = results.iter().find(|(_, result)| result.is_err()).unwrap();
+    assert!(failed.as_ref().unwrap_err().contains("results.json"));
+    let report: serde_json::Value =
+        serde_json::from_slice(&fs::read(output.path().join("results.json")).unwrap()).unwrap();
+    assert_eq!(report.as_array().unwrap().len(), 1);
+    assert_eq!(report[0]["scenario"], *winner);
+    assert_eq!(report[0]["passed"], true);
+    assert!(output.path().join(format!("{winner}.log")).is_file());
+    assert!(output.path().join(format!("{winner}.build.log")).is_file());
+    assert!(!output.path().join(format!("{loser}.log")).exists());
+    assert!(!output.path().join(format!("{loser}.build.log")).exists());
+}

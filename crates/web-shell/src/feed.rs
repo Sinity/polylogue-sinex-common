@@ -12,6 +12,7 @@ use command_surface::{
 use maud::{Markup, html};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+#[cfg(feature = "typescript")]
 use ts_rs::TS;
 
 /// The query parameter of the union stream route holding the JSON subscriptions.
@@ -20,7 +21,8 @@ pub const SUBSCRIPTIONS_PARAMETER: &str = "subscriptions";
 pub const FRAGMENT_EVENT: &str = "fragment";
 
 /// One followed reference, resumed strictly after `since` (an event ID).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
 #[serde(deny_unknown_fields)]
 pub struct Subscription {
     pub id: String,
@@ -54,7 +56,8 @@ pub fn subscriptions(parameter: &str) -> Result<Vec<Subscription>, Failure> {
 }
 
 /// A fragment for one subscription.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
 #[serde(deny_unknown_fields)]
 pub struct FeedEvent {
     pub subscription: String,
@@ -63,7 +66,8 @@ pub struct FeedEvent {
 
 /// The shared `reload` event: one subscription, or the whole stream when
 /// `subscription` is absent. The tabs concerned stop following and say why.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
 #[serde(deny_unknown_fields)]
 pub struct FeedReload {
     #[serde(default, skip_serializing_if = "Option::is_none")]

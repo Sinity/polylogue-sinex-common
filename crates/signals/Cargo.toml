@@ -21,5 +21,6 @@ maud = { version = "0.27", optional = true }
 web = ["dep:maud"]
 
 [dev-dependencies]
+query-language = { path = "../query-language", features = ["conformance"] }
 tempfile = "3"
 rusqlite = { version = ">=0.32, <0.41", features = ["bundled"] }

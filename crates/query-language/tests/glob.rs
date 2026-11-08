@@ -1,6 +1,6 @@
 mod support;
 use query_language::ast::Expression;
-use query_language::semantics::{Dataset, ReferenceEvaluator, Row, Scalar};
+use query_language::conformance::{Dataset, ReferenceEvaluator, Row, Scalar};
 
 #[test]
 fn star_patterns_preserve_literal_case_unicode_and_sql_metacharacters() {

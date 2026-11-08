@@ -1,7 +1,7 @@
 //! Transport adapters contain framing only. None builds an answer of its own.
 use crate::{
-    Answer, Caller, CancellationToken, Failure, FailureKind, Format, OperationKind, OperationTable,
-    RunnableRequest, Via, bad_request,
+    Answer, Caller, CancellationToken, Failure, FailureKind, Format, OperationCatalog,
+    OperationKind, OperationTable, RunnableRequest, TextStyle, Via, bad_request,
 };
 use http::{Request as HttpRequest, Response as HttpResponse, StatusCode};
 use serde::Serialize;
@@ -36,17 +36,17 @@ impl StreamLine {
     }
 }
 
-impl OperationTable {
+impl OperationCatalog {
     /// Generated help: one line per listed row, with its usage.
     pub fn help(&self) -> String {
         self.descriptions()
             .iter()
-            .filter(|d| d.spec.listed)
+            .filter(|d| d.spec.listed && !d.spec.command.is_empty())
             .map(|d| {
                 format!(
                     "{} {}  {}\n",
                     self.product(),
-                    crate::arguments::usage(d),
+                    crate::arguments::usage(d, self.cli_globals()),
                     d.spec.summary
                 )
             })
@@ -57,14 +57,15 @@ impl OperationTable {
         let description = self
             .descriptions()
             .iter()
-            .find(|d| d.spec.name == operation)?;
+            .find(|d| d.spec.name == operation && !d.spec.command.is_empty())?;
         let mut text = format!(
             "{} {}\n{}\n",
             self.product(),
-            crate::arguments::usage(description),
+            crate::arguments::usage(description, self.cli_globals()),
             description.spec.summary
         );
-        for argument in &description.spec.arguments {
+        for argument in self.cli_arguments(operation).ok()? {
+            let argument = &argument.spec;
             text.push_str(&format!(
                 "  {}  {}\n",
                 match argument.form {
@@ -82,11 +83,14 @@ impl OperationTable {
     pub fn complete(&self, prefix: &str) -> Vec<String> {
         self.descriptions()
             .iter()
-            .filter(|d| d.spec.listed)
+            .filter(|d| d.spec.listed && !d.spec.command.is_empty())
             .map(|d| d.spec.command.join(" "))
             .filter(|command| command.starts_with(prefix))
             .collect()
     }
+}
+
+impl OperationTable {
     pub async fn cli(
         &self,
         args: &[String],
@@ -154,20 +158,25 @@ impl OperationTable {
             Ok(parsed) => {
                 let request = parsed.request.clone();
                 let operation = request.operation.clone();
-                let answer = match parsed.kind {
-                    OperationKind::Request { .. } => {
-                        self.call_as(parsed.request, Via::Cli, caller, cancellation)
-                            .await
-                    }
-                    OperationKind::Stream => {
+                match self.streaming(&request) {
+                    Err(failure) => (Some(request), Answer::error(failure)),
+                    Ok(true) => (
+                        None,
                         self.write_stream(parsed.request, caller, cancellation, json, stdout)
-                            .await?
+                            .await?,
+                    ),
+                    Ok(false) => {
+                        let answer = if parsed.kind == OperationKind::Local {
+                            Answer::error(bad_request(format!(
+                                "{operation} runs in the calling process"
+                            )))
+                        } else {
+                            self.call_as(parsed.request, Via::Cli, caller, cancellation)
+                                .await
+                        };
+                        (Some(request), answer)
                     }
-                    OperationKind::Local => Answer::error(bad_request(format!(
-                        "{operation} runs in the calling process"
-                    ))),
-                };
-                (Some(request), answer)
+                }
             }
         };
         if json {
@@ -188,7 +197,7 @@ impl OperationTable {
             answer,
             value_text,
             footer,
-        } = self.render_answer(Via::Cli, request.as_ref(), answer);
+        } = self.render_answer(Via::Cli, request.as_ref(), answer, TextStyle::Plain);
         if answer.is_error() {
             stderr
                 .write_all(format!("{value_text}{footer}").as_bytes())
@@ -224,7 +233,7 @@ impl OperationTable {
             let line = match event {
                 Err(failure) => return Ok(Answer::error(failure)),
                 Ok(event) if json => format!("{}\n", json!({ "event": event })),
-                Ok(event) => match self.render_event(&operation, event) {
+                Ok(event) => match self.render_event(&operation, event, TextStyle::Plain) {
                     Ok(line) => line,
                     Err(failure) => return Ok(Answer::error(failure)),
                 },
@@ -317,15 +326,16 @@ impl OperationTable {
                 }
                 continue;
             }
-            let request = serde_json::from_str::<RunnableRequest>(&line);
+            let request = serde_json::from_str::<RunnableRequest>(&line)
+                .map_err(|error| bad_request(error.to_string()))
+                .and_then(|request| {
+                    self.streaming(&request)
+                        .map(|streaming| (request, streaming))
+                });
             let mut close_after_reply = false;
             let answer = match request {
-                Err(error) => Answer::error(bad_request(error.to_string())),
-                Ok(request)
-                    if self
-                        .spec_named(&request.operation)
-                        .is_some_and(|spec| spec.kind == OperationKind::Stream) =>
-                {
+                Err(error) => Answer::error(error),
+                Ok((request, true)) => {
                     let cancellation = CancellationToken::new();
                     let opened = self
                         .open_stream(request, socket_via, caller.clone(), cancellation.clone())
@@ -359,7 +369,7 @@ impl OperationTable {
                         },
                     }
                 }
-                Ok(request) => {
+                Ok((request, false)) => {
                     let cancellation = CancellationToken::new();
                     let call =
                         self.call_as(request, socket_via, caller.clone(), cancellation.clone());
@@ -387,7 +397,8 @@ impl OperationTable {
         }
         Ok(())
     }
-    /// A socket client uses the class deadline plus the protocol's 50 ms grace.
+    /// An already-connected client awaits the server's terminal result.
+    /// Only explicit caller cancellation ends this wait; the server owns read deadlines.
     pub async fn socket_call<S: AsyncRead + AsyncWrite + Unpin>(
         &self,
         mut stream: S,
@@ -408,15 +419,8 @@ impl OperationTable {
             serde_json::from_str(&response)
                 .map_err(|e| Failure::new(FailureKind::Io, e.to_string()))
         };
-        let timeout = async {
-            match self.socket_timeout(request) {
-                Some(d) => tokio::time::sleep(d).await,
-                None => std::future::pending().await,
-            }
-        };
         tokio::select! {biased;
             _=cancellation.cancelled()=>Answer::error(Failure::new(FailureKind::Cancelled,"request cancelled")),
-            _=timeout=>Answer::error(Failure::new(FailureKind::Timeout,"daemon socket deadline passed")),
             answer=exchange=>answer.unwrap_or_else(Answer::error),
         }
     }
@@ -463,8 +467,11 @@ impl OperationTable {
                 Err(error) => Answer::error(error),
                 Ok(envelope) => {
                     let spec = self.spec_named(&envelope.operation);
-                    let matches = path == "/v1"
-                        || spec.is_some_and(|spec| spec.http_route.as_deref() == Some(&path));
+                    let matches = spec.is_some_and(|spec| {
+                        spec.http_route
+                            .as_deref()
+                            .is_some_and(|route| path == "/v1" || route == path)
+                    });
                     match spec.map(|spec| &spec.kind) {
                         _ if !matches => Answer::error(Failure::new(
                             FailureKind::NotFound,

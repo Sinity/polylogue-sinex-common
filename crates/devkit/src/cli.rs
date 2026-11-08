@@ -427,8 +427,10 @@ fn resolve(
         None => store.last_run(project, &root.display().to_string()),
     }
     .map_err(|e| e.to_string())?;
-    if row.is_none() {
-        println!("no such run");
+    match &row {
+        Some(row) if row.project != project => return Err("run is not in this project".into()),
+        None => println!("no such run"),
+        Some(_) => {}
     }
     Ok(row)
 }

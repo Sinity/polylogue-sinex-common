@@ -11,42 +11,44 @@ struct Text {
 }
 
 /// A row that echoes its text, declared with any spec.
-struct Echo(OperationSpec);
+struct Echo(String);
+fn echo_render_text(text: &Text, _style: TextStyle) -> String {
+    format!("{}\n", text.text)
+}
 impl Operation for Echo {
     type Request = Text;
     type Response = Text;
-    fn spec(&self) -> OperationSpec {
-        self.0.clone()
-    }
+
     fn execute(&self, request: Text, _: RequestContext) -> OperationFuture<'_, Answer<Text>> {
-        let name = self.0.name.clone();
+        let name = self.0.clone();
         Box::pin(async move {
             Answer::ok(Text {
                 text: format!("{name}: {}", request.text),
             })
         })
     }
-    fn render_text(&self, text: &Text) -> String {
-        format!("{}\n", text.text)
-    }
 }
 
 /// Counts to the number in its text, one event each.
 struct Follow;
+fn follow_spec() -> OperationSpec {
+    OperationSpec {
+        kind: OperationKind::Stream,
+        ..OperationSpec::request("follow", &["follow"], "", "Follow changes", "A live stream")
+    }
+}
+fn follow_render_event(event: &u64, _style: TextStyle) -> String {
+    format!("event {event}\n")
+}
 impl StreamOperation for Follow {
     type Request = Text;
     type Event = u64;
-    fn spec(&self) -> OperationSpec {
-        OperationSpec {
-            kind: OperationKind::Stream,
-            ..OperationSpec::request("follow", &["follow"], "", "Follow changes", "A live stream")
-        }
-    }
+
     fn open(
         &self,
         request: Text,
         _: RequestContext,
-    ) -> OperationFuture<'_, Result<tokio::sync::mpsc::Receiver<u64>, Failure>> {
+    ) -> OperationFuture<'_, Result<EventReceiver<u64>, Failure>> {
         Box::pin(async move {
             let count: u64 = request
                 .text
@@ -54,31 +56,32 @@ impl StreamOperation for Follow {
                 .map_err(|_| Failure::new(FailureKind::BadValue, "not a count"))?;
             let (sender, receiver) = tokio::sync::mpsc::channel(8);
             for n in 1..=count {
-                sender.try_send(n).unwrap();
+                sender.try_send(Ok(n)).unwrap();
             }
             Ok(receiver)
         })
-    }
-    fn render_event(&self, event: &u64) -> String {
-        format!("event {event}\n")
     }
 }
 
 /// Says how its call arrived: the transport's channel and the MCP call's
 /// own metadata, with a follow-up written for that channel.
 struct WhoAmI;
+fn who_am_i_spec() -> OperationSpec {
+    OperationSpec::request(
+        "whoami",
+        &["whoami"],
+        "inspect",
+        "Say how this call came",
+        "Shows the channel",
+    )
+}
+fn who_am_i_render_text(text: &Text, _style: TextStyle) -> String {
+    format!("{}\n", text.text)
+}
 impl Operation for WhoAmI {
     type Request = Text;
     type Response = Text;
-    fn spec(&self) -> OperationSpec {
-        OperationSpec::request(
-            "whoami",
-            &["whoami"],
-            "inspect",
-            "Say how this call came",
-            "Shows the channel",
-        )
-    }
+
     fn execute(&self, _: Text, context: RequestContext) -> OperationFuture<'_, Answer<Text>> {
         Box::pin(async move {
             Answer::ok(Text {
@@ -98,55 +101,54 @@ impl Operation for WhoAmI {
             )
         })
     }
-    fn render_text(&self, text: &Text) -> String {
-        format!("{}\n", text.text)
-    }
 }
 
 /// Runs until it is cancelled.
 struct Wait;
+fn wait_spec() -> OperationSpec {
+    OperationSpec::request("wait", &["wait"], "inspect", "Wait", "Never finishes")
+}
+fn wait_render_text(text: &Text, _style: TextStyle) -> String {
+    text.text.clone()
+}
 impl Operation for Wait {
     type Request = Text;
     type Response = Text;
-    fn spec(&self) -> OperationSpec {
-        OperationSpec::request("wait", &["wait"], "inspect", "Wait", "Never finishes")
-    }
+
     fn execute(&self, _: Text, _: RequestContext) -> OperationFuture<'_, Answer<Text>> {
         Box::pin(std::future::pending())
-    }
-    fn render_text(&self, text: &Text) -> String {
-        text.text.clone()
     }
 }
 
 /// Sends what the test gives it, as it gives it.
-struct Ticks(std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<u64>>>);
+struct Ticks(std::sync::Mutex<Option<EventReceiver<u64>>>);
+fn ticks_spec() -> OperationSpec {
+    OperationSpec {
+        kind: OperationKind::Stream,
+        ..OperationSpec::request("ticks", &["ticks"], "", "Live ticks", "A live stream")
+    }
+}
+fn ticks_render_event(event: &u64, _style: TextStyle) -> String {
+    format!("tick {event}\n")
+}
 impl StreamOperation for Ticks {
     type Request = Text;
     type Event = u64;
-    fn spec(&self) -> OperationSpec {
-        OperationSpec {
-            kind: OperationKind::Stream,
-            ..OperationSpec::request("ticks", &["ticks"], "", "Live ticks", "A live stream")
-        }
-    }
+
     fn open(
         &self,
         _: Text,
         _: RequestContext,
-    ) -> OperationFuture<'_, Result<tokio::sync::mpsc::Receiver<u64>, Failure>> {
+    ) -> OperationFuture<'_, Result<EventReceiver<u64>, Failure>> {
         let receiver = self.0.lock().unwrap().take();
         Box::pin(
             async move { receiver.ok_or_else(|| Failure::new(FailureKind::Io, "opened twice")) },
         )
     }
-    fn render_event(&self, event: &u64) -> String {
-        format!("tick {event}\n")
-    }
 }
 
-fn row(name: &str, tool: &str, access: Access) -> Echo {
-    Echo(OperationSpec {
+fn row(name: &str, tool: &str, access: Access) -> OperationSpec {
+    OperationSpec {
         access,
         ..OperationSpec::request(
             name,
@@ -155,8 +157,16 @@ fn row(name: &str, tool: &str, access: Access) -> Echo {
             format!("Run {name}"),
             "A synthetic row",
         )
-    })
+    }
 }
+const ECHO_ROWS: &[(&str, &str, Access)] = &[
+    ("status", "status", Access::Read),
+    ("find", "query", Access::Read),
+    ("diff", "query", Access::Read),
+    ("note", "assert", Access::Write),
+    ("ping", "act", Access::Write),
+];
+
 fn tool(name: &str) -> ToolFamily {
     ToolFamily {
         name: name.into(),
@@ -166,23 +176,21 @@ fn tool(name: &str) -> ToolFamily {
     }
 }
 
-fn table() -> OperationTable {
-    let mut table = OperationTable::new("example", Deadlines::default());
+fn catalog() -> CatalogBuilder {
+    let mut catalog = OperationCatalog::builder("example", Deadlines::default());
     for name in ["status", "query", "assert", "act", "inspect"] {
-        table.declare_tool(tool(name)).unwrap();
+        catalog.declare_tool(tool(name)).unwrap();
     }
-    table
-        .register(row("status", "status", Access::Read))
+    for &(name, family, access) in ECHO_ROWS {
+        catalog
+            .declare::<Text, Text>(row(name, family, access), echo_render_text)
+            .unwrap();
+    }
+    catalog
+        .declare_stream::<Text, u64>(follow_spec(), follow_render_event)
         .unwrap();
-    table.register(row("find", "query", Access::Read)).unwrap();
-    table.register(row("diff", "query", Access::Read)).unwrap();
-    table
-        .register(row("note", "assert", Access::Write))
-        .unwrap();
-    table.register(row("ping", "act", Access::Write)).unwrap();
-    table.register_stream(Follow).unwrap();
-    table
-        .register_local::<Text>(OperationSpec {
+    catalog
+        .declare_local::<Text>(OperationSpec {
             kind: OperationKind::Local,
             http_route: None,
             listed: false,
@@ -195,9 +203,30 @@ fn table() -> OperationTable {
             )
         })
         .unwrap();
-    table.register(WhoAmI).unwrap();
-    table.register(Wait).unwrap();
+    catalog
+        .declare::<Text, Text>(who_am_i_spec(), who_am_i_render_text)
+        .unwrap();
+    catalog
+        .declare::<Text, Text>(wait_spec(), wait_render_text)
+        .unwrap();
+    catalog
+}
+fn table_with_options(options: impl IntoIterator<Item = RequestOption>) -> OperationTable {
+    let mut catalog = catalog();
+    for option in options {
+        catalog.accept(option);
+    }
+    let mut table = OperationTable::new(catalog.finish());
+    for &(name, _, _) in ECHO_ROWS {
+        table.bind(name, Echo(name.into())).unwrap();
+    }
+    table.bind_stream("follow", Follow).unwrap();
+    table.bind("whoami", WhoAmI).unwrap();
+    table.bind("wait", Wait).unwrap();
     table
+}
+fn table() -> OperationTable {
+    table_with_options([])
 }
 
 async fn call(table: &OperationTable, tool: &str, arguments: Value) -> Value {
@@ -211,7 +240,7 @@ async fn call(table: &OperationTable, tool: &str, arguments: Value) -> Value {
 
 #[test]
 fn tools_generated() {
-    let table = table();
+    let table = catalog().finish();
     laws::tools_generated(&table).unwrap();
     let tools = table.mcp_tools();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -255,7 +284,7 @@ fn tools_generated() {
         assert!(tool.get("outputSchema").is_none());
     }
     assert!(
-        OperationTable::answer_schema()["properties"]
+        OperationCatalog::answer_schema()["properties"]
             .get("outcome")
             .is_some()
     );
@@ -279,34 +308,42 @@ struct Inner {
 struct Numbered {
     text: u64,
 }
-struct Typed<R>(&'static str, std::marker::PhantomData<R>);
+struct Typed<R>(std::marker::PhantomData<R>);
+fn typed_spec(name: &str) -> OperationSpec {
+    OperationSpec::request(name, &[name], "count", "Count", "A synthetic row")
+}
+fn typed_render_text(value: &Value, _style: TextStyle) -> String {
+    format!("{value}\n")
+}
 impl<R> Operation for Typed<R>
 where
     R: Serialize + serde::de::DeserializeOwned + JsonSchema + Send + Sync + 'static,
 {
     type Request = R;
     type Response = Value;
-    fn spec(&self) -> OperationSpec {
-        OperationSpec::request(self.0, &[self.0], "count", "Count", "A synthetic row")
-    }
+
     fn execute(&self, request: R, _: RequestContext) -> OperationFuture<'_, Answer<Value>> {
         let value = serde_json::to_value(request).unwrap();
         Box::pin(async move { Answer::ok(value) })
-    }
-    fn render_text(&self, value: &Value) -> String {
-        format!("{value}\n")
     }
 }
 
 #[tokio::test]
 async fn family_arguments_merge_flat_and_each_row_checks_its_own() {
-    let mut table = OperationTable::new("example", Deadlines::default());
-    table.declare_tool(tool("count")).unwrap();
+    let mut catalog = OperationCatalog::builder("example", Deadlines::default());
+    catalog.declare_tool(tool("count")).unwrap();
+    catalog
+        .declare::<Counted, Value>(typed_spec("words"), typed_render_text)
+        .unwrap();
+    catalog
+        .declare::<Numbered, Value>(typed_spec("chars"), typed_render_text)
+        .unwrap();
+    let mut table = OperationTable::new(catalog.finish());
     table
-        .register(Typed::<Counted>("words", std::marker::PhantomData))
+        .bind("words", Typed::<Counted>(std::marker::PhantomData))
         .unwrap();
     table
-        .register(Typed::<Numbered>("chars", std::marker::PhantomData))
+        .bind("chars", Typed::<Numbered>(std::marker::PhantomData))
         .unwrap();
     let tools = table.mcp_tools();
     let arguments = &tools[0]["inputSchema"]["properties"]["arguments"]["properties"];
@@ -401,22 +438,26 @@ struct SearchRequest {
     #[serde(default)]
     sort_by_the_earliest_time_first: bool,
 }
+fn search_spec() -> OperationSpec {
+    OperationSpec {
+        arguments: vec![
+            ArgumentSpec::new(
+                "sort_by_the_earliest_time_first",
+                ArgumentForm::Flag,
+                "oldest first",
+            )
+            .unlisted(),
+        ],
+        ..OperationSpec::request("search", &["search"], "count", "Search", "A synthetic row")
+    }
+}
+fn search_render_text(value: &Value, _style: TextStyle) -> String {
+    format!("oldest first: {value}\n")
+}
 impl Operation for Search {
     type Request = SearchRequest;
     type Response = Value;
-    fn spec(&self) -> OperationSpec {
-        OperationSpec {
-            arguments: vec![
-                ArgumentSpec::new(
-                    "sort_by_the_earliest_time_first",
-                    ArgumentForm::Flag,
-                    "oldest first",
-                )
-                .unlisted(),
-            ],
-            ..OperationSpec::request("search", &["search"], "count", "Search", "A synthetic row")
-        }
-    }
+
     fn execute(
         &self,
         request: SearchRequest,
@@ -424,16 +465,17 @@ impl Operation for Search {
     ) -> OperationFuture<'_, Answer<Value>> {
         Box::pin(async move { Answer::ok(json!(request.sort_by_the_earliest_time_first)) })
     }
-    fn render_text(&self, value: &Value) -> String {
-        format!("oldest first: {value}\n")
-    }
 }
 
 #[tokio::test]
 async fn unlisted_arguments_stay_off_the_list_and_still_dispatch() {
-    let mut table = OperationTable::new("example", Deadlines::default());
-    table.declare_tool(tool("count")).unwrap();
-    table.register(Search).unwrap();
+    let mut catalog = OperationCatalog::builder("example", Deadlines::default());
+    catalog.declare_tool(tool("count")).unwrap();
+    catalog
+        .declare::<SearchRequest, Value>(search_spec(), search_render_text)
+        .unwrap();
+    let mut table = OperationTable::new(catalog.finish());
+    table.bind("search", Search).unwrap();
     let with_unlisted = serde_json::to_vec(&json!({ "tools": table.mcp_tools() }))
         .unwrap()
         .len();
@@ -478,9 +520,9 @@ async fn unlisted_arguments_stay_off_the_list_and_still_dispatch() {
 
 #[test]
 fn tools_list_within() {
-    let mut deep = OperationTable::new("example", Deadlines::default());
+    let mut deep = OperationCatalog::builder("example", Deadlines::default());
     deep.declare_tool(tool("count")).unwrap();
-    deep.register(Typed::<Deep>("deep", std::marker::PhantomData))
+    deep.declare::<Deep, Value>(typed_spec("deep"), typed_render_text)
         .unwrap();
     let full = serde_json::to_vec(&deep.family_schemas("count"))
         .unwrap()
@@ -495,7 +537,7 @@ fn tools_list_within() {
     assert_eq!(arguments["items"], json!({"type": "array"}));
     assert_eq!(arguments["child"], json!({"type": "object"}));
 
-    let table = table();
+    let table = catalog().finish();
     let bytes = serde_json::to_vec(&json!({ "tools": table.mcp_tools() }))
         .unwrap()
         .len();
@@ -508,16 +550,16 @@ fn tools_list_within() {
 
 #[test]
 fn tools_generated_refuses_an_empty_tool() {
-    let mut table = table();
+    let mut table = catalog();
     table.declare_tool(tool("unused")).unwrap();
     assert!(laws::tools_generated(&table).is_err());
 }
 
 #[test]
 fn one_tool_holds_one_access_level() {
-    let mut table = table();
+    let mut table = catalog();
     let refused = table
-        .register(row("forget", "query", Access::Write))
+        .declare::<Text, Text>(row("forget", "query", Access::Write), echo_render_text)
         .unwrap_err();
     assert!(
         refused.message.contains("read access"),
@@ -526,7 +568,7 @@ fn one_tool_holds_one_access_level() {
     );
     assert!(
         table
-            .register(row("orphan", "missing", Access::Read))
+            .declare::<Text, Text>(row("orphan", "missing", Access::Read), echo_render_text)
             .is_err()
     );
     assert!(table.declare_tool(tool("query")).is_err());
@@ -685,7 +727,7 @@ proptest! {
         plans in proptest::collection::vec((0usize..4, 0usize..3).prop_map(|(tool, kind)| RowPlan { tool, kind }), 1..12),
         writes in proptest::collection::vec(any::<bool>(), 4),
     ) {
-        let mut table = OperationTable::new("generated", Deadlines::default());
+        let mut table = OperationCatalog::builder("generated", Deadlines::default());
         let tools = ["alpha", "beta", "gamma", "delta"];
         let used: std::collections::BTreeSet<usize> = plans.iter().filter(|p| p.kind == 0).map(|p| p.tool).collect();
         for &index in &used {
@@ -696,10 +738,10 @@ proptest! {
             match plan.kind {
                 0 => {
                     let access = if writes[plan.tool] { Access::Write } else { Access::Read };
-                    table.register(row(&name, tools[plan.tool], access)).unwrap();
+                    table.declare::<Text, Text>(row(&name, tools[plan.tool], access), echo_render_text).unwrap();
                 }
                 1 => table
-                    .register_local::<Text>(OperationSpec {
+                    .declare_local::<Text>(OperationSpec {
                         kind: OperationKind::Local,
                         http_route: None,
                         ..OperationSpec::request(name.as_str(), &[name.as_str()], "", "Local", "Local row")
@@ -708,7 +750,7 @@ proptest! {
                 _ => {
                     let mut spec = OperationSpec::request(name.as_str(), &[name.as_str()], "", "Echo", "Generated");
                     spec.kind = OperationKind::Stream;
-                    table.register(Echo(spec)).unwrap_err();
+                    table.declare::<Text, Text>(spec, echo_render_text).unwrap_err();
                 }
             }
         }
@@ -760,9 +802,13 @@ async fn zero_event_stream_prints_nothing_and_succeeds() {
 async fn stream_lines_print_as_they_arrive() {
     use tokio::io::{AsyncBufReadExt, BufReader};
     let (sender, receiver) = tokio::sync::mpsc::channel(4);
-    let mut table = OperationTable::new("example", Deadlines::default());
+    let mut catalog = OperationCatalog::builder("example", Deadlines::default());
+    catalog
+        .declare_stream::<Text, u64>(ticks_spec(), ticks_render_event)
+        .unwrap();
+    let mut table = OperationTable::new(catalog.finish());
     table
-        .register_stream(Ticks(std::sync::Mutex::new(Some(receiver))))
+        .bind_stream("ticks", Ticks(std::sync::Mutex::new(Some(receiver))))
         .unwrap();
     let (mut stdout, reading) = tokio::io::duplex(1024);
     let mut stderr = Vec::new();
@@ -777,10 +823,10 @@ async fn stream_lines_print_as_they_arrive() {
     );
     let watching = async {
         let mut lines = BufReader::new(reading).lines();
-        sender.send(1).await.unwrap();
+        sender.send(Ok(1)).await.unwrap();
         // The first line arrives while the stream is still open.
         assert_eq!(lines.next_line().await.unwrap().as_deref(), Some("tick 1"));
-        sender.send(2).await.unwrap();
+        sender.send(Ok(2)).await.unwrap();
         assert_eq!(lines.next_line().await.unwrap().as_deref(), Some("tick 2"));
         drop(sender);
     };
@@ -970,15 +1016,12 @@ async fn request_options_are_offered_and_taken_only_when_accepted() {
             refused["result"]["structuredContent"]["error"]["message"],
             format!("example does not take {}", option.name())
         );
-        let mut accepting = self::table();
-        accepting.accept(option);
+        let accepting = table_with_options([option]);
         assert!(options(&accepting).contains(&option.name().to_owned()));
         let taken = call(&accepting, "example_status", arguments).await;
         assert_eq!(taken["result"]["isError"], false, "{option:?}");
     }
-    for option in RequestOption::ALL {
-        table.accept(option);
-    }
+    table = table_with_options(RequestOption::ALL);
     assert_eq!(
         options(&table),
         [
