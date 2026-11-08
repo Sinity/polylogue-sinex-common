@@ -77,3 +77,53 @@ fn canonical_scale_crosses_machine_integer_limits_without_changing_value() {
         Some(Ordering::Equal)
     );
 }
+
+#[test]
+fn scaled_integer_rounding_checks_exact_signed_boundaries_and_half_ties() {
+    for (text, places, expected) in [
+        ("9223372036.854775807", 9, Some(i64::MAX)),
+        ("-9223372036.854775808", 9, Some(i64::MIN)),
+        ("9223372036.85477580749", 9, Some(i64::MAX)),
+        ("-9223372036.85477580849", 9, Some(i64::MIN)),
+        ("9223372036.8547758075", 9, None),
+        ("-9223372036.8547758085", 9, None),
+        ("9223372036.854775808", 9, None),
+        ("-9223372036.854775809", 9, None),
+        ("9007199.254740993", 9, Some(9_007_199_254_740_993)),
+        (".0000000005", 9, Some(1)),
+        ("-.0000000005", 9, Some(-1)),
+        (".00000000049", 9, Some(0)),
+        ("-.00000000049", 9, Some(0)),
+        ("+12300e-3", 1, Some(123)),
+        ("15", -1, Some(2)),
+        ("-15", -1, Some(-2)),
+        ("1e100000000000000000000000", 9, None),
+        ("-1e100000000000000000000000", 9, None),
+        ("1e-100000000000000000000000", 9, Some(0)),
+        ("-0e100000000000000000000000", 9, Some(0)),
+        ("1", i64::MAX, None),
+        ("1", i64::MIN, Some(0)),
+        ("NaN", 9, None),
+        ("inf", 9, None),
+        ("1e", 9, None),
+    ] {
+        assert_eq!(
+            round_scaled_i64(text, places),
+            expected,
+            "{text} * 10^{places}"
+        );
+    }
+}
+
+proptest! {
+    #[test]
+    fn scaled_integer_rounding_matches_independent_integer_division(
+        numerator in any::<i64>(), scale in 0u32..10,
+    ) {
+        let denominator = 10i128.pow(scale);
+        let magnitude = i128::from(numerator).abs();
+        let rounded = (magnitude + denominator / 2) / denominator;
+        let expected = if numerator < 0 { -rounded } else { rounded };
+        prop_assert_eq!(round_scaled_i64(&format!("{numerator}e-{scale}"), 0), Some(expected as i64));
+    }
+}
