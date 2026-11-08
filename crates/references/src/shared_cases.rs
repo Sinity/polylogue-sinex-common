@@ -1,7 +1,7 @@
-//! Law cases that both products run against their own keying paths.
+//! Cases that both products run against their own keying paths.
 //!
 //! [`shared_locator_cases`] is the pinned table behind the
-//! `locator-shared-module` law: every input with the canonical locator the
+//! Shared locator cases: every input with the canonical locator the
 //! canonicalizer at [`crate::locator::VERSION`] gives it. Common's test checks
 //! the canonicalizer against it; each product checks that the path by which
 //! it keys URLs, files and catalog identifiers yields the same text. Changing
@@ -27,7 +27,7 @@ pub struct LocatorCase {
 }
 
 static CASES: LazyLock<LocatorCases> =
-    LazyLock::new(|| parse(include_str!("laws/locator-cases.txt")));
+    LazyLock::new(|| parse(include_str!("shared_cases/locator-cases.txt")));
 
 pub fn shared_locator_cases() -> &'static LocatorCases {
     &CASES

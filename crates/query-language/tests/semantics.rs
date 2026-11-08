@@ -1,9 +1,9 @@
 use query_language::ast::*;
 use query_language::catalog::{Field, FieldKind, NaturalMatch};
+use query_language::compiler_cases::{self, Compiler, Executor, Page, Vocabulary};
 use query_language::conformance::*;
 use query_language::coverage::CoverageState;
 use query_language::cursor::{PageRequest, SealedCursor};
-use query_language::laws::{self, Compiler, Executor, Page, Vocabulary};
 use query_language::semantics::Truth;
 use query_language::{Error, ErrorKind};
 #[path = "support/mod.rs"]
@@ -119,7 +119,7 @@ fn nearest_rank_uses_ceiling_and_omits_unknown_not_zero() {
     assert!(nearest_rank(&values, 101).is_err());
     assert!(nearest_rank(&[Scalar::Number(f64::NAN)], 50).is_err());
 }
-/// The declarations of the short-text fields the law vocabularies name: the
+/// The declarations of the short-text fields the case vocabularies name: the
 /// default one, Polylogue's and Sinex's.
 fn reference_catalog() -> query_language::catalog::Catalog {
     use query_language::catalog::{Catalog, Unit};
@@ -279,7 +279,7 @@ impl Executor<Query> for Reference {
     }
 }
 #[test]
-fn compiler_laws_run_against_both_product_vocabularies() {
+fn compiler_cases_run_against_both_product_vocabularies() {
     // These use each product's unit/field spellings. Grammar's catalog tests own
     // closed-set/default binding; this suite owns backend relation semantics.
     for (catalog, vocabulary) in [
@@ -315,19 +315,23 @@ fn compiler_laws_run_against_both_product_vocabularies() {
             vocabulary.outer, vocabulary.number, vocabulary.number
         );
         let parsed = query_language::parse::parse(&text, &catalog).unwrap();
-        let cases = laws::cases(&vocabulary);
+        let cases = compiler_cases::cases(&vocabulary);
         assert_eq!(
             ReferenceEvaluator::new(&cases[0].fixture)
                 .execute(&parsed)
                 .unwrap(),
             cases[0].expected
         );
-        let failures = laws::check(&Reference, &mut Reference, &laws::cases(&vocabulary));
+        let failures = compiler_cases::check(
+            &Reference,
+            &mut Reference,
+            &compiler_cases::cases(&vocabulary),
+        );
         assert!(failures.is_empty(), "{failures:#?}");
     }
 }
 #[test]
-fn law_harness_detects_a_backend_that_ignores_filters_and_paging() {
+fn case_harness_detects_a_backend_that_ignores_filters_and_paging() {
     struct Broken;
     impl Executor<Query> for Broken {
         fn execute(&mut self, _: &Query, data: &Dataset, _: &PageRequest) -> Result<Page, Error> {
@@ -341,10 +345,10 @@ fn law_harness_detects_a_backend_that_ignores_filters_and_paging() {
             })
         }
     }
-    let failures = laws::check(
+    let failures = compiler_cases::check(
         &Reference,
         &mut Broken,
-        &laws::cases(&Vocabulary::default()),
+        &compiler_cases::cases(&Vocabulary::default()),
     );
     for expected in [
         "ql.filter.composition",
@@ -357,7 +361,7 @@ fn law_harness_detects_a_backend_that_ignores_filters_and_paging() {
         "ql.diff.watch",
         "ql.covered",
     ] {
-        assert!(failures.iter().any(|v| v.law == expected), "{expected}");
+        assert!(failures.iter().any(|v| v.name == expected), "{expected}");
     }
 }
 #[test]
@@ -551,19 +555,19 @@ fn execution_mode_parity_checks_each_supplied_adapter() {
     }
     let mut reference = Reference;
     let mut corrupt = Corrupt;
-    let failures = laws::check_modes(
+    let failures = compiler_cases::check_modes(
         &Reference,
         &mut [
             ("fixture-cli", &mut reference as &mut dyn Executor<Query>),
             ("fixture-http", &mut corrupt as &mut dyn Executor<Query>),
         ],
-        &laws::cases(&Vocabulary::default()),
+        &compiler_cases::cases(&Vocabulary::default()),
     );
     assert!(!failures.is_empty());
     assert!(
         failures
             .iter()
-            .all(|v| v.law == "ql.mode-parity" && v.detail.starts_with("fixture-http:"))
+            .all(|v| v.name == "ql.mode-parity" && v.detail.starts_with("fixture-http:"))
     );
 }
 
@@ -654,35 +658,35 @@ fn nonfinite_singletons_refuse_in_sort_and_aggregate() {
     }
 }
 
-macro_rules! compiler_law {
-    ($name:ident, $law:literal) => {
+macro_rules! compiler_case {
+    ($name:ident, $case:literal) => {
         #[test]
         fn $name() {
-            let cases: Vec<_> = laws::cases(&Vocabulary::default())
+            let cases: Vec<_> = compiler_cases::cases(&Vocabulary::default())
                 .into_iter()
-                .filter(|case| case.law == $law)
+                .filter(|case| case.name == $case)
                 .collect();
             assert!(!cases.is_empty());
-            let failures = laws::check(&Reference, &mut Reference, &cases);
+            let failures = compiler_cases::check(&Reference, &mut Reference, &cases);
             assert!(failures.is_empty(), "{failures:#?}");
         }
     };
 }
-compiler_law!(filter_composition, "ql.filter.composition");
-compiler_law!(filter_three_valued, "ql.filter.three-valued");
-compiler_law!(group_relation, "ql.group.relation");
-compiler_law!(match_order, "ql.match-order");
-compiler_law!(page_not_answer, "ql.page-not-answer");
-compiler_law!(order_semijoin, "ql.order.semijoin");
-compiler_law!(order_join_grain, "ql.order.join-grain");
-compiler_law!(order_steps, "ql.order.steps");
-compiler_law!(order_coarse, "ql.order.coarse");
-compiler_law!(rank_membership, "ql.rank.membership");
-compiler_law!(diff_watch, "ql.diff.watch");
-compiler_law!(covered, "ql.covered");
-compiler_law!(rank_unranked_kept, "ql.rank.unranked-kept");
-compiler_law!(expr_unknown, "ql.expr.unknown");
-compiler_law!(match_natural, "ql.match.natural");
+compiler_case!(filter_composition, "ql.filter.composition");
+compiler_case!(filter_three_valued, "ql.filter.three-valued");
+compiler_case!(group_relation, "ql.group.relation");
+compiler_case!(match_order, "ql.match-order");
+compiler_case!(page_not_answer, "ql.page-not-answer");
+compiler_case!(order_semijoin, "ql.order.semijoin");
+compiler_case!(order_join_grain, "ql.order.join-grain");
+compiler_case!(order_steps, "ql.order.steps");
+compiler_case!(order_coarse, "ql.order.coarse");
+compiler_case!(rank_membership, "ql.rank.membership");
+compiler_case!(diff_watch, "ql.diff.watch");
+compiler_case!(covered, "ql.covered");
+compiler_case!(rank_unranked_kept, "ql.rank.unranked-kept");
+compiler_case!(expr_unknown, "ql.expr.unknown");
+compiler_case!(match_natural, "ql.match.natural");
 
 #[test]
 fn parsed_grouped_implicit_count_can_filter_and_sort_in_both_catalogs() {
@@ -851,7 +855,7 @@ fn matches_expand_exists_into_one_row_per_matched_child() {
     );
 }
 
-/// Law `ql.order.steps`: steps never cross a scope instance, and `within 1
+/// Steps never cross a scope instance, and `within 1
 /// step` before a row is the row whose next row matched.
 #[test]
 fn steps_stay_inside_one_scope_instance() {
@@ -1060,7 +1064,7 @@ fn fusion_chain_ranks_each_original_union_operand_in_its_own_order() {
     assert_eq!(answer.total, 3);
 }
 
-/// Law `ql.union.fuses-once`: a chain of fuse and union at one level is one
+/// A chain of fuse and union at one level is one
 /// fusion of every list, not a fusion of fusions.
 #[test]
 fn union_fuses_once() {

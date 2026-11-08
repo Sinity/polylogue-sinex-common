@@ -2,8 +2,7 @@
 
 How Polylogue and Sinex tell the operator, and agents, about something they
 did not ask for at that moment. A **signal rule** is a watched query with a
-delivery rule. Both products use one rule schema, one evaluator with one set
-of laws, one interrupt budget and one design for desktop notifications, so
+delivery rule. Both products use one rule schema, one evaluator, one interrupt budget and one design for desktop notifications, so
 the operator's attention is spent by one set of rules on each host.
 
 Each product supplies what is its own: what a rule's query can read (its
@@ -60,7 +59,7 @@ write, act and query tools, and `wait` is an option of the query tool.
 
 ## Evaluation
 
-Each statement is a law of the evaluator, tested by the conformance suite that
+Each statement is tested by the conformance suite that
 each product runs against its own catalog and occurrence keys.
 
 - **Logical occurrences.** Each row a rule sees carries a stable occurrence ID
@@ -386,124 +385,3 @@ passive notices, unseen first, with the attention line), the **Why** panel
 **Signals** view (rules with author, channel, last firing, deliveries in
 seven days and usefulness) as maud functions, so both products show the same
 view for the same data. Products supply titles, links and their time format.
-
-## Laws
-
-The evaluator laws:
-
-- **trigger-fires-once**: a trigger fires at most once, and new readings of
-  the same occurrence never fire again.
-- **no-self-amplification**: deliveries and injected text never appear in a
-  rule's input.
-- **baseline-never-fires**: rows observed before a rule starts never fire, and
-  repeated advances over one instant fire nothing new.
-- **revision-takes-new-baseline**: revising or withdrawing a rule cancels its
-  pending work, and a new revision fires nothing for current matches.
-- **only-observed-rows-wake**: a time not yet observed never adds a wakeup.
-- **duration-from-observation**: a `for` rule fires at its deadline without
-  new data, fires nothing if the row stops matching first, and never turns a
-  late-observed closed period into a present-state reminder.
-- **current-state-rechecks-at-handoff**: a current-state reminder whose
-  condition ended before handoff is cancelled; a historical match survives
-  the row's end.
-- **change-kinds-stay-apart**: membership, ranking and `top_k` reports each
-  fire only on their own kind of change, and never on scores or paging alone.
-- **min-change-and-cooldown**: fewer than `min_change` joins and leaves never
-  report, and changes within the cooldown are summarised in the next report.
-- **threshold-crossing-once**: a threshold fires once per false-to-true
-  crossing.
-- **incomplete-never-fires**: a rule over data that is behind reports
-  `incomplete` and fires nothing.
-- **quiet-hours-hold-interrupts-only**: quiet hours hold interrupting
-  deliveries to their end and never passive ones, with the basis fixed at
-  match time.
-- **budget-spares-operator-rules**: past the budget, non-operator interrupts
-  become passive with the stated reason; operator and shipped rules are never
-  downgraded.
-- **no-retroactive-handoff**: after downtime no handoff is stamped in the
-  past, and an overdue current condition is delivered once at the resumed
-  clock.
-- **partition-invariance**: any partition of an interval gives the same
-  handoffs as one advance over it.
-- **one-deliverer-per-host**: with Polylogue on Sinex, Polylogue only
-  reports; its interrupting notices are routed by Sinex's host policy under
-  the one budget and quiet hours.
-- **notification-replaced-in-place**: a second notice about one occurrence
-  replaces the first through `replaces_id`, and a cleared condition closes it.
-- **not-sent-retried-once-unknown-never**: with no notification server, an
-  interrupting notice records `not_sent:no_notification_server` and is
-  retried once under the same identity when the server appears; an
-  unanswered attempt stays `unknown` and is not resent.
-- **slow-server-never-holds-writer**: a notification server that never answers
-  does not delay any commit.
-
-Routing, attention, inhibition and outcomes:
-
-- **route-pure**: `route` is a function of (notice, attention) only, and
-  the decision with its inputs is stored on the delivery.
-- **attention-only-removes**: with every attention input unknown, routing
-  is quiet hours and the budget alone; attention inputs never turn a notice
-  that would not interrupt into one that does.
-- **critical-never-deferred**: a critical delivery is shown at once in
-  every attention state, including quiet hours.
-- **deferral-bounded**: a breakpoint hold ends at the first breakpoint or
-  at its bound, whichever comes first.
-- **away-summary-once**: notices held or sent away while the operator is
-  away produce exactly one summary at the return, listing each once, as
-  held, sent away, cleared or acknowledged; none is shown on its own.
-- **on-screen-is-passive-not-seen**: on-screen suppression records
-  `passive (on screen)` and never marks the notice seen.
-- **inhibit-folds**: while an inhibiting occurrence is open in scope,
-  inhibited deliveries are recorded, passive and lines of the root's
-  notification; when the root clears, those still current are shown at once
-  as one grouped notification.
-- **inhibit-shipped-only**: an authored rule can be neither inhibitor nor
-  exempt.
-- **own-notifications-excluded**: a captured notification carrying an
-  `x-<product>-delivery` hint is a signal origin, and no rule's input
-  includes it.
-- **snooze-rechecks**: a snoozed current-state notice is shown again at
-  the snooze end only if its condition still holds; a historical one is shown
-  again as is.
-- **outcomes-append-only**: a delivery is handed off once and never
-  changes; acts and attempts append outcomes.
-- **checkpoint-loss-never-refires**: rebuilding the evaluator from rules,
-  stored deliveries and stored observations never produces an existing
-  delivery identity; at worst a threshold rule reports `rearmed_late`.
-- **backtest-equals-live**: for rules enabled at one revision throughout,
-  `backtest` over an interval returns exactly what the live evaluator and
-  host policy handed off over it.
-- **wait-is-follow**: `wait` returns at the instant `follow` with the same
-  arguments would emit its first message, and records nothing.
-- **external-notice-budgeted**: a producer notice asking to interrupt is
-  charged to the budget and never exceeds it; a notice with an existing key
-  replaces its notification in place.
-- **forwarded-stale-holds**: a forwarded current-state notice whose
-  producer has not confirmed being up to date through the instant it fired
-  is held as `incomplete`, never shown; progress at the firing instant
-  releases it at a later handoff.
-- **trigger-never-starts-agent**: no delivery starts or resumes an agent;
-  a configured action command that is an agent launcher is refused.
-- **late-is-passive**: a triggering fact older than its rule's
-  `fresh_within` never produces an interrupting delivery, and the delivery
-  states its lateness.
-
-Elicitation (decided target, not built):
-
-- **elicit.answer-cites-prompt**: every prompted self-report has its prompt
-  delivery as parent; a spontaneous one has none.
-- **elicit.missed-is-recorded**: a prompt past `expires_after` without an
-  answer has the outcome `missed`, and no figure imputes it.
-- **elicit.cap**: an instrument never prompts more than `max_per_day` times
-  per logical day.
-- **elicit.none-until-enabled**: with no enabled `ask` rule, no prompt is
-  ever sent.
-
-`trigger-never-starts-agent` and `on-screen-is-passive-not-seen` are the
-products' laws too: a page watch, a live-session trigger or a Sinex presence
-reading that must not start an agent, and a supervised session's on-screen
-notice, are cases of these laws, which each product runs rather than
-restating.
-
-The tests are in `tests/` (evaluator, adoption, route, host, follow, web and
-checkpoint schema) and in `signal-delivery`'s fake notification server suite.

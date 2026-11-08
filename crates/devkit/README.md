@@ -5,7 +5,7 @@ history, changed-package selection, test databases and NATS servers, the
 `#[devkit::test]` fixtures, and the bench, coverage, fuzz and VM runners. A
 product's `xtask` is a thin binary that starts a `devkit::Run`, adds its own
 steps and checks, and passes the shared commands (`status`, `history`,
-`changed`, `db`, `laws`) to `devkit::cli`.
+`changed`, `db`) to `devkit::cli`.
 
 Devkit targets data and guarantees, not one machine. It starts what a run
 needs and stops it on drop, takes paths and services from configuration or
@@ -132,26 +132,6 @@ records why in `observation_error` and has no tree.
 
 Load and cache state at the time of a run are not recorded, so durations are
 compared between runs, never asserted.
-
-## Laws coverage
-
-`cargo xtask laws` reads the `## Laws` sections of a repository's docs and
-crate READMEs and lists each law's key with the tests whose names carry it
-(`restore_refused_while_other_reading_live` for the law
-`restore-refused-while-other-reading-live`, with a suffix when several tests
-check one law), and the laws that have none. It is a report and fails nothing;
-a law without a test is a gap for the area's owner.
-
-A law's stored key is `<scope>.<area>.<name>` in lowercase with hyphens. The
-scope says whose law it is: `pl.` for Polylogue, `sx.` for Sinex, and for
-laws both products run, the scope of the shared page that states them: a
-common crate's own scope (`ql.` for query-language, `sig.` for signals,
-`authored.`, `ranking.`, `references.`, `scoring.` and so on), or a named
-shared suite (`joint.` for the joint web laws, `elicit.` for elicitation).
-A page omits the scope it belongs to, so
-`late-is-passive` on the signals page is stored as `sig.late-is-passive`, and
-a law that two products share has one key in the shared suite instead of two
-product keys.
 
 ## Tests and fixtures
 
@@ -321,42 +301,3 @@ arguments and a real readiness probe.
 Its `xtask` binary and own checks; schema sources and a schema build for the
 `pg` feature; fixture types of its own; bench corpora and metrics; fuzz
 targets; VM scenario names; development-stack services and readiness probes.
-
-## Laws
-
-- **failed-relink**: a failed relink preserves the active patch, every workspace
-  lock and the original backups; a subsequent unlink restores the original
-  Git-backed locks. A synthetic two-workspace dependency accepts a new version
-  in its root but refuses it in its fuzz workspace.
-- **failed-first-link**: a failed first link preserves original locks and the
-  absence of patch and backup files. The same two-workspace refusal exercises
-  the returned-error path.
-- **link-roundtrip**: linking and unlinking restore both workspace locks and
-  the entire Cargo configuration directory, including unrelated settings.
-- **history-never-gates**: a run whose history store cannot be opened reports
-  that and finishes with the outcome of its steps.
-- **changed-selection-includes-reverse-dependencies**: a production change
-  selects every package that depends on the changed one.
-- **changed-test-only-selects-that-test**: a change confined to one test
-  function, whose name has no other use, selects only that test.
-- **unchanged-tree-builds-nothing**: `--changed` on an unchanged tree succeeds
-  without building tests.
-- **template-built-once-per-schema**: concurrent runs on one schema version
-  build its template once.
-- **half-built-template-outlives-its-builder-only**: cleanup never drops a
-  template whose builder process is alive.
-- **schema-version-in-use-never-dropped**: cleanup never drops a schema
-  version that a live server value ensured, whatever its use stamps say.
-- **test-databases-bounded-by-slots**: however many tests are killed, a
-  project's test databases on a server never outnumber its slots and kept
-  failed databases, and the next test takes a killed test's slot.
-- **intermittent-means-same-tree**: `intermittent` groups only results at the
-  same tree and uncommitted-changes hash.
-- **stack-stopped-on-drop**: dropping a development stack leaves no process of
-  its groups running.
-- **vm-refuses-uncommitted-input**: a VM run over uncommitted source input is
-  refused before any build.
-- **empty-coverage-selection-fails**: a coverage run that selects no test
-  fails.
-- **laws-report-fails-nothing**: `xtask laws` exits successfully whatever the
-  coverage it reports.

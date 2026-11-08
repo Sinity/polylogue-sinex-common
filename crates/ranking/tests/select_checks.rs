@@ -1,4 +1,4 @@
-//! Laws of next-set selection, against the fit's public numbers.
+//! Tests of next-set selection, against the fit's public numbers.
 
 #[allow(dead_code)]
 mod common;

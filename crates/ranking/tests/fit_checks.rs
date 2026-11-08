@@ -1,4 +1,4 @@
-//! Laws of the fit, checked against independent oracles in `common`.
+//! Tests of the fit, checked against independent oracles in `common`.
 
 #[allow(dead_code)]
 mod common;

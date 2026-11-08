@@ -14,7 +14,7 @@ fn roundtrip(text: &str, catalog: &Catalog) {
     );
     assert_eq!(rendered, format_query(&parsed, catalog).unwrap());
 }
-/// Law `ql.format.roundtrip`: formatting a parsed question reparses to the
+/// Formatting a parsed question reparses to the
 /// same normal form, and formatting again is stable.
 #[test]
 fn polylogue_forms_roundtrip() {

@@ -69,16 +69,3 @@ a forecast counts in its issuer's record only when it was issued before its
 target period and before any resolving evidence existed, and that a
 backtest's forecasts never mix with prospective ones. Rendering, storage and
 the issuers' identities stay in the product.
-
-## Laws
-
-- **proper-scores**: the crate offers Brier, log, pinball, interval
-  coverage and CRPS only; a probability outside `[0, 1]` or crossing
-  quantiles is refused. Oracle: hand-computed scores on a table of cases.
-- **unknown-not-scored**: an unknown outcome changes no score and is counted
-  as unresolved.
-- **skill-same-set**: skill against a reference is computed only over
-  forecasts that both forecasters made for the same target and origin, and
-  the answer states the count of that set.
-- **calibration-counts**: every calibration bin reports its count, and the
-  bins' counts sum to the number of resolved binary forecasts.

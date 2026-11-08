@@ -1,4 +1,4 @@
-//! Adoption laws use independently chosen civil instants and expected handoffs.
+//! Adoption tests use independently chosen civil instants and expected handoffs.
 use signals::*;
 
 struct Utc;

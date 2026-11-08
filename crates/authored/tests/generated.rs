@@ -1,4 +1,4 @@
-//! Laws over the shared history generator. Products run the same generator
+//! Tests of the shared history generator. Products run the same generator
 //! against their stored currency.
 use authored::generator::history;
 use authored::{Header, History, Revision, Target, affected_roots};

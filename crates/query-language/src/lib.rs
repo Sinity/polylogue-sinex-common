@@ -2,6 +2,8 @@
 pub mod ast;
 pub mod bind;
 pub mod catalog;
+#[cfg(feature = "conformance")]
+pub mod compiler_cases;
 pub mod complete;
 #[cfg(feature = "conformance")]
 pub mod conformance;
@@ -12,8 +14,6 @@ pub mod format;
 pub mod fusion;
 pub mod glob;
 pub mod identity;
-#[cfg(feature = "conformance")]
-pub mod laws;
 pub mod number;
 pub mod parse;
 pub mod scope;

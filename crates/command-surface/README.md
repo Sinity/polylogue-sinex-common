@@ -170,7 +170,7 @@ mistyped value is refused there. Tools carry no `outputSchema`: results keep
 `structuredContent`, and a product serves the answer's schema
 (`OperationTable::answer_schema`) and each family's full row schemas
 (`OperationDeclarations::family_schemas`) once, from its explain or capabilities
-answer. `laws::tools_list_within` holds a product's whole tool list to the
+answer. `checks::tools_list_within` holds a product's whole tool list to the
 byte budget it passes. Hints come from the
 family: read-only for read access, destructive for permanent, and
 idempotent (a retried `request_id` is applied once) and open-world as the
@@ -384,8 +384,8 @@ Authors are stored as text: `operator`, `agent:<harness>:<native>`,
 `agent:<harness>`, `agent`, `script:<unit>`, `unattributed`. A product whose
 stored session IDs differ from the harness's own (Polylogue's
 profile-qualified Hermes sessions) maps the session after gathering. The
-shared caller fixtures (`laws::author_cases`) state every rule;
-`laws::id_one` runs them against the function a product's transports call.
+shared caller fixtures (`checks::author_cases`) state every rule;
+`checks::id_one` runs them against the function a product's transports call.
 
 ## Seen marks
 
@@ -601,98 +601,8 @@ and `measure` gives each independent measurement its own timeout;
 `Status::new` derives the verdict.
 
 The tests send a typed sample table's requests through CLI parsing, a Unix
-socket pair, HTTP and MCP; check the retry law against an independent
+socket pair, HTTP and MCP; check retries against an independent
 SQLite writer whose request log and mutation commit atomically (restart,
 duplicates sent together, timeout after commit); and run property tests at
 the serialization, command-line and fitter boundaries. Run
 `cargo xtask test -p command-surface`.
-
-## Laws
-
-- **one-kind-one-exit**: every failure kind maps to exactly one exit code and
-  one HTTP status, every surface reports the same kind for the same request,
-  and empty and degraded are outcomes, never failure kinds.
-
-- **surface-parity**: the CLI, socket, HTTP and MCP return the same answer, or
-  the same failure, for the same request.
-- **timeout-never-partial**: a read phase past its deadline ends `timeout`
-  with no rows reported as an `ok` answer. A writer that won ownership first
-  returns its actual acknowledgement.
-- **cancel-stops-work**: a cancelled or disconnected read leaves no read work
-  running in the daemon. An already-owned writer finishes through its own
-  transaction and acceptance policy.
-- **any-caller-lifts-deadline**: a lifted deadline is honoured for every
-  caller, and the request runs until done or cancelled.
-- **retry-applies-once**: a write sent twice with one `request_id`, one after
-  the other or both at once, is applied once and both replies name the same
-  committed row; this holds across a restart.
-- **resume-from-last-event-id**: a reconnect with `Last-Event-ID` receives
-  exactly the events after it, or `reload`.
-- **unmeasured-never-zero**: a measurement that was not taken is never
-  rendered as zero or counted as healthy.
-- **measurement-reuse-needs-same-key**: a measurement is reused only while
-  its key is unchanged.
-- **id-one**: Polylogue and Sinex compute the same author for the same caller
-  fixture, both through the shared `author_of` (`laws::id_one` over
-  `laws::author_cases`, run by each product).
-- **id-shared**: an MCP call to a server that serves several sessions,
-  without its own identity, is authored `agent:<harness>`, never the
-  server's start-up session.
-- **tools-generated**: the MCP tool list equals the grouping of the operation
-  table: every request row is reachable from exactly one tool, no stream or
-  local row is a tool, each tool's hints hold for all its rows, and every
-  declared family holds a row. `laws::tools_generated` checks any table;
-  each product runs it on its own.
-- **tools-list-within**: a table's `tools/list`, as compact JSON, is within
-  the byte budget its product passes (`laws::tools_list_within`); tools
-  carry flat, shallow, listed arguments and no output schema, and an
-  unlisted argument still dispatches.
-- **once**: for each supported harness's recorded MCP fixture, the
-  model-visible bytes of an answer contain each row or passage once.
-  The common test checks the property on a synthetic table: an MCP answer's
-  text holds each row once, and its structured content repeats the rows only
-  with `format: json`.
-- **access-checked**: a row above the caller's access is refused before it
-  runs, and a caller the server granted nothing more reads only.
-- **lower-bound-under-gaps**: a count over a source whose coverage is not
-  complete is a lower bound on every surface, and so are the count and
-  facets of a degraded answer.
-- **degraded-names-missing**: a degraded answer names what it lacks.
-- **error-teaches**: a failure in the input carries its position and caret,
-  a suggestion that runs as given when one can be formed, and the
-  candidates nearest an unknown name.
-- **query-error-converts-once**: each query-language refusal becomes the
-  failure kind of the same name, with its position, suggestion and hint.
-- **cli-command-round-trips**: reading back the command line written for a
-  request gives the same request.
-- **whole-entries**: the fitter keeps or leaves out each entry whole.
-- **pending-first**: pending sections are offered room before past ones.
-- **fit-within-budget**: what is kept and left out add up to every entry;
-  everything is kept whenever everything fits; and the text with its
-  left-out lines stays within any budget that can hold what every section is
-  sure to need.
-- **text-within-budget**: the operation fits the typed answer through its
-  context, reserving its envelope lines. Rendering preserves every retained
-  entry and measures the final text into `used_tokens`; it never trims the
-  value again. A budget large enough for the required envelope and omission
-  lines holds the rendered answer within that budget.
-- **expansion-lifts-default-budget**: an omission's expansion explicitly
-  lifts the budget, so executing it cannot fall back to the same default.
-- **json-keeps-data**: a text budget does not cut rows carried as JSON.
-- **text-answers-read-back**: an MCP answer in text format reads back as
-  `Answer<Option<T>>` with the value `None` and `value_in_text`, and
-  `Answer<T>` refuses it saying where the value is.
-- **socket-carries-mcp**: an MCP message sent over the socket is answered as
-  an MCP call, authored from the server's evidence and the call's `_meta`
-  as on stdio, with follow-ups written as tool calls; a cancelled call gets
-  no reply.
-- **streams-print-as-they-arrive**: a stream's events reach the command
-  line's output while the stream is still open, and a stream with no events
-  prints nothing and succeeds.
-- **every-entry-cited**: an entry has at least one line and one citation.
-- **seen-mark-moves-forward**: a seen mark never moves to an earlier
-  position.
-- **only-showing-moves-seen-mark**: only a display or a `since: seen` read
-  moves a seen mark.
-
-For a row that both reads and writes, `required_access` classifies its typed request before execution. The row's declaration advertises its maximum access, so tool annotations remain conservative. Ordinary rows use their declared access for every call.

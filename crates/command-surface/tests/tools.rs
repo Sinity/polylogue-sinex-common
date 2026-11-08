@@ -241,7 +241,7 @@ async fn call(table: &OperationTable, tool: &str, arguments: Value) -> Value {
 #[test]
 fn tools_generated() {
     let table = declarations().finish();
-    laws::tools_generated(&table).unwrap();
+    checks::tools_generated(&table).unwrap();
     let tools = table.mcp_tools();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(
@@ -482,8 +482,8 @@ async fn unlisted_arguments_stay_off_the_list_and_still_dispatch() {
     let arguments = &table.mcp_tools()[0]["inputSchema"]["properties"]["arguments"];
     assert_eq!(arguments["properties"], json!({"text": {"type": "string"}}));
     assert!(arguments.get("additionalProperties").is_none());
-    // The size law counts only what is listed.
-    laws::tools_list_within(&table, with_unlisted).unwrap();
+    // The size limit counts only what is listed.
+    checks::tools_list_within(&table, with_unlisted).unwrap();
     assert!(
         !String::from_utf8(serde_json::to_vec(&table.mcp_tools()).unwrap())
             .unwrap()
@@ -531,7 +531,7 @@ fn tools_list_within() {
         .unwrap()
         .len();
     assert!(full > 2 * listed, "full {full}, listed {listed}");
-    laws::tools_list_within(&deep, 1024).unwrap();
+    checks::tools_list_within(&deep, 1024).unwrap();
     let arguments = &deep.mcp_tools()[0]["inputSchema"]["properties"]["arguments"]["properties"];
     assert_eq!(arguments["mode"], json!({"enum": ["fast", "careful"]}));
     assert_eq!(arguments["items"], json!({"type": "array"}));
@@ -541,8 +541,8 @@ fn tools_list_within() {
     let bytes = serde_json::to_vec(&json!({ "tools": table.mcp_tools() }))
         .unwrap()
         .len();
-    laws::tools_list_within(&table, bytes).unwrap();
-    let error = laws::tools_list_within(&table, bytes - 1).unwrap_err();
+    checks::tools_list_within(&table, bytes).unwrap();
+    let error = checks::tools_list_within(&table, bytes - 1).unwrap_err();
     assert!(error.contains(&format!("{bytes} bytes")), "{error}");
     // Five families of synthetic rows stay small without output schemas.
     assert!(bytes < 4096, "{bytes}");
@@ -552,7 +552,7 @@ fn tools_list_within() {
 fn tools_generated_refuses_an_empty_tool() {
     let mut table = declarations();
     table.declare_tool(tool("unused")).unwrap();
-    assert!(laws::tools_generated(&table).is_err());
+    assert!(checks::tools_generated(&table).is_err());
 }
 
 #[test]
@@ -754,7 +754,7 @@ proptest! {
                 }
             }
         }
-        prop_assert_eq!(laws::tools_generated(&table), Ok(()));
+        prop_assert_eq!(checks::tools_generated(&table), Ok(()));
         let reachable: usize = table
             .mcp_tools()
             .iter()

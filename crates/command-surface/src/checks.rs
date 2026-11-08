@@ -1,4 +1,4 @@
-//! Laws a product checks against its own operation table, in its own tests.
+//! Checks a product runs against its own operation table, in its own tests.
 use crate::{
     AgentSession, Author, Authorship, CallerEvidence, Harness, HookIdentity, OperationDeclarations,
     OperationKind, Via,

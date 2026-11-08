@@ -21,7 +21,7 @@ fn parses(catalog: &Catalog, text: &str) -> Query {
 }
 /// The refusal's suggestion, which must itself parse, bind and format back
 /// to the same normal form on the same catalog. Running it is each product's
-/// half of the law, through its own compiler.
+/// half of the rule, through its own compiler.
 fn suggestion(catalog: &Catalog, text: &str) -> String {
     let error = parse(text, catalog).expect_err(text);
     let suggestion = error
@@ -31,7 +31,7 @@ fn suggestion(catalog: &Catalog, text: &str) -> String {
     suggestion
 }
 
-/// Law `ql.one-spelling`: the real-question examples of both products parse,
+/// The real-question examples of both products parse,
 /// bind and round-trip with one grammar; nothing in a catalog selects a dialect.
 #[test]
 fn one_spelling() {
@@ -88,7 +88,7 @@ fn one_spelling() {
     }
 }
 
-/// Law `ql.lowercase-boolean`: a lowercase `and`, `or` or `not` between
+/// A lowercase `and`, `or` or `not` between
 /// conditions is refused with the capitalised query; quoted, it searches.
 #[test]
 fn lowercase_boolean() {
@@ -134,7 +134,7 @@ fn lowercase_boolean() {
     parse("rock and", &c).unwrap();
 }
 
-/// Law `ql.expr.dimensions`: arithmetic and comparison of incompatible
+/// Arithmetic and comparison of incompatible
 /// dimensions are refused when the query is read, in both catalogs;
 /// compatible ones carry their dimension.
 #[test]
@@ -214,7 +214,7 @@ fn expr_dimensions() {
     }
 }
 
-/// Law `ql.error.suggestion-runs`: the former spellings and common mistakes
+/// The former spellings and common mistakes
 /// are refused with a corrected query that parses as given.
 #[test]
 fn error_suggestion_runs() {
@@ -292,7 +292,7 @@ fn error_suggestion_runs() {
 }
 
 proptest! {
-    /// Law `ql.error.suggestion-runs`, generated against both catalogs:
+    /// Generated against both catalogs:
     /// whatever mistakes a query carries, a suggestion parses and binds.
     #[test]
     fn suggestions_always_parse(
@@ -462,7 +462,7 @@ fn transforms_declare_the_fields_they_add() {
     }
 }
 
-/// Law `ql.identity.spelling`: spellings with one normal form share one
+/// Spellings with one normal form share one
 /// `query:<hash>` in both catalogs, and any changed condition changes it.
 #[test]
 fn identity_spelling_in_both_catalogs() {
@@ -517,7 +517,7 @@ fn identity_spelling_in_both_catalogs() {
     }
 }
 
-/// Law `ql.generated-names`: a field the language generates never hides a
+/// A field the language generates never hides a
 /// stored field, in either catalog; Sinex's stored `events.offset` stays
 /// `offset` beside an order relation's `match.distance`.
 #[test]
