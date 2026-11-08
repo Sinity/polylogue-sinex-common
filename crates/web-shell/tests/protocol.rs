@@ -291,27 +291,9 @@ fn palette_and_picker_share_matcher_vectors() {
 
 #[test]
 fn page_and_palette_cli_derive_from_registered_request() {
-    struct Read;
-    impl command_surface::Operation for Read {
-        type Request = serde_json::Value;
-        type Response = serde_json::Value;
-        fn spec(&self) -> OperationSpec {
-            operation(false)
-        }
-        fn execute(
-            &self,
-            request: Self::Request,
-            _: command_surface::RequestContext,
-        ) -> command_surface::OperationFuture<'_, command_surface::Answer<Self::Response>> {
-            Box::pin(async move { command_surface::Answer::ok(request) })
-        }
-        fn render_text(&self, value: &Self::Response) -> String {
-            value.to_string()
-        }
-    }
-    let mut table =
-        command_surface::OperationTable::new("app", command_surface::Deadlines::default());
-    table
+    let mut catalog =
+        command_surface::OperationCatalog::builder("app", command_surface::Deadlines::default());
+    catalog
         .declare_tool(command_surface::ToolFamily {
             name: "read".into(),
             description: "Read rows".into(),
@@ -319,7 +301,12 @@ fn page_and_palette_cli_derive_from_registered_request() {
             idempotent: true,
         })
         .unwrap();
-    table.register(Read).unwrap();
+    catalog
+        .declare::<serde_json::Value, serde_json::Value>(operation(false), |value| {
+            value.to_string()
+        })
+        .unwrap();
+    let table = catalog.finish();
     let request = Request {
         operation: "read".into(),
         arguments: json!({"ref":"row' & λ"}),

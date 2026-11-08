@@ -8,35 +8,9 @@ struct Text {
     text: String,
 }
 
-/// Two operations with different command shapes: one word, and two words.
-struct Note {
-    name: &'static str,
-    command: &'static [&'static str],
-}
-
-impl Operation for Note {
-    type Request = Text;
-    type Response = Text;
-    fn spec(&self) -> OperationSpec {
-        OperationSpec::request(
-            self.name,
-            self.command,
-            "notes",
-            "Record a note",
-            "Notes have no existing operation",
-        )
-    }
-    fn execute(&self, request: Text, _: RequestContext) -> OperationFuture<'_, Answer<Text>> {
-        Box::pin(async move { Answer::ok(request) })
-    }
-    fn render_text(&self, answer: &Text) -> String {
-        format!("{}\n", answer.text)
-    }
-}
-
-fn table() -> OperationTable {
-    let mut table = OperationTable::new("example", Deadlines::default());
-    table
+fn table() -> std::sync::Arc<OperationCatalog> {
+    let mut catalog = OperationCatalog::builder("example", Deadlines::default());
+    catalog
         .declare_tool(ToolFamily {
             name: "notes".into(),
             description: "Notes".into(),
@@ -44,19 +18,21 @@ fn table() -> OperationTable {
             idempotent: true,
         })
         .unwrap();
-    table
-        .register(Note {
-            name: "read",
-            command: &["read"],
-        })
-        .unwrap();
-    table
-        .register(Note {
-            name: "sink_add",
-            command: &["sink", "add"],
-        })
-        .unwrap();
-    table
+    for (name, command) in [("read", &["read"][..]), ("sink_add", &["sink", "add"][..])] {
+        catalog
+            .declare::<Text, Text>(
+                OperationSpec::request(
+                    name,
+                    command,
+                    "notes",
+                    "Record a note",
+                    "Notes have no existing operation",
+                ),
+                |answer| format!("{}\n", answer.text),
+            )
+            .unwrap();
+    }
+    catalog.finish()
 }
 
 fn request(operation: &str, text: &str, request_id: &str, deadline: Deadline) -> RunnableRequest {

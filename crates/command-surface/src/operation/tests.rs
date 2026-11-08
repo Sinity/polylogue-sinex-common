@@ -136,22 +136,26 @@ struct DurableWrite {
     store: Arc<Store>,
     gate: Option<Arc<Gate>>,
 }
+fn durable_write_spec() -> OperationSpec {
+    OperationSpec {
+        failures: vec![FailureKind::BadValue],
+        access: Access::Write,
+        ..OperationSpec::request(
+            "write",
+            &["write"],
+            "write",
+            "Synthetic atomic writer",
+            "Exercise the product transaction boundary",
+        )
+    }
+}
+fn durable_write_render_text(value: &Committed) -> String {
+    value.row.to_string()
+}
 impl Operation for DurableWrite {
     type Request = Write;
     type Response = Committed;
-    fn spec(&self) -> OperationSpec {
-        OperationSpec {
-            failures: vec![FailureKind::BadValue],
-            access: Access::Write,
-            ..OperationSpec::request(
-                "write",
-                &["write"],
-                "write",
-                "Synthetic atomic writer",
-                "Exercise the product transaction boundary",
-            )
-        }
-    }
+
     fn execute(
         &self,
         request: Write,
@@ -199,13 +203,10 @@ impl Operation for DurableWrite {
             Answer::ok(committed)
         })
     }
-    fn render_text(&self, value: &Committed) -> String {
-        value.row.to_string()
-    }
 }
 fn make_table(store: &Arc<Store>, gate: Option<Arc<Gate>>) -> OperationTable {
-    let mut table = OperationTable::new("fixture", Deadlines::default());
-    table
+    let mut catalog = OperationCatalog::builder("fixture", Deadlines::default());
+    catalog
         .declare_tool(ToolFamily {
             name: "write".into(),
             description: "Write".into(),
@@ -213,11 +214,18 @@ fn make_table(store: &Arc<Store>, gate: Option<Arc<Gate>>) -> OperationTable {
             idempotent: true,
         })
         .unwrap();
+    catalog
+        .declare::<Write, Committed>(durable_write_spec(), durable_write_render_text)
+        .unwrap();
+    let mut table = OperationTable::new(catalog.finish());
     table
-        .register(DurableWrite {
-            store: store.clone(),
-            gate,
-        })
+        .bind(
+            "write",
+            DurableWrite {
+                store: store.clone(),
+                gate,
+            },
+        )
         .unwrap();
     table
 }
@@ -523,22 +531,26 @@ async fn mixed_rows_authorize_the_typed_request_before_any_write() {
     struct Mixed {
         store: Arc<Store>,
     }
+    fn mixed_spec() -> OperationSpec {
+        OperationSpec {
+            access: Access::Write,
+            ..OperationSpec::request(
+                "setting",
+                &["setting"],
+                "settings",
+                "Read or write",
+                "Reads or writes a setting",
+            )
+        }
+    }
+    fn mixed_render_text(value: &Value) -> String {
+        value.to_string()
+    }
     impl Operation for Mixed {
         type Request = Arguments;
         type Response = Value;
-        fn spec(&self) -> OperationSpec {
-            OperationSpec {
-                access: Access::Write,
-                ..OperationSpec::request(
-                    "setting",
-                    &["setting"],
-                    "settings",
-                    "Read or write",
-                    "Reads or writes a setting",
-                )
-            }
-        }
-        fn required_access(&self, request: &Arguments) -> Access {
+
+        fn required_access(&self, request: &Arguments, _declared: Access) -> Access {
             if request.value.is_some() {
                 Access::Write
             } else {
@@ -564,14 +576,11 @@ async fn mixed_rows_authorize_the_typed_request_before_any_write() {
                 }
             })
         }
-        fn render_text(&self, value: &Value) -> String {
-            value.to_string()
-        }
     }
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("records.db"));
-    let mut table = OperationTable::new("example", Deadlines::default());
-    table
+    let mut catalog = OperationCatalog::builder("example", Deadlines::default());
+    catalog
         .declare_tool(crate::ToolFamily {
             name: "settings".into(),
             description: "settings".into(),
@@ -579,10 +588,17 @@ async fn mixed_rows_authorize_the_typed_request_before_any_write() {
             idempotent: true,
         })
         .unwrap();
+    catalog
+        .declare::<Arguments, Value>(mixed_spec(), mixed_render_text)
+        .unwrap();
+    let mut table = OperationTable::new(catalog.finish());
     table
-        .register(Mixed {
-            store: store.clone(),
-        })
+        .bind(
+            "setting",
+            Mixed {
+                store: store.clone(),
+            },
+        )
         .unwrap();
     let read = table
         .call_as(

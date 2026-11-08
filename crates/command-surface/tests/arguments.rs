@@ -25,74 +25,45 @@ struct ExecRequest {
     command: Vec<String>,
 }
 
-struct Read;
-impl Operation for Read {
-    type Request = ReadRequest;
-    type Response = Value;
-    fn spec(&self) -> OperationSpec {
-        OperationSpec {
-            arguments: vec![
-                ArgumentSpec::new("target", ArgumentForm::Positional, "what to read"),
-                ArgumentSpec::new("words", ArgumentForm::Words, "words to find"),
-                ArgumentSpec::new("view", ArgumentForm::Named, "the view").short('v'),
-                ArgumentSpec::new("full", ArgumentForm::Flag, "show every field"),
-                ArgumentSpec::new("tag", ArgumentForm::Repeated, "a tag"),
-                ArgumentSpec::new("out", ArgumentForm::Named, "write here").calling_process(),
-            ],
-            ..OperationSpec::request(
-                "read",
-                &["read"],
-                "read",
-                "Read a target",
-                "Reads one target",
-            )
-        }
-    }
-    fn execute(
-        &self,
-        request: ReadRequest,
-        _: RequestContext,
-    ) -> OperationFuture<'_, Answer<Value>> {
-        Box::pin(async move { Answer::ok(serde_json::to_value(request).unwrap()) })
-    }
-    fn render_text(&self, value: &Value) -> String {
-        format!("{value}\n")
-    }
-}
-struct Exec;
-impl Operation for Exec {
-    type Request = ExecRequest;
-    type Response = Value;
-    fn spec(&self) -> OperationSpec {
-        OperationSpec {
-            arguments: vec![ArgumentSpec::new(
-                "command",
-                ArgumentForm::Rest,
-                "the command",
-            )],
-            ..OperationSpec::request(
-                "exec",
-                &["exec"],
-                "act",
-                "Run a command",
-                "Runs one command",
-            )
-        }
-    }
-    fn execute(
-        &self,
-        request: ExecRequest,
-        _: RequestContext,
-    ) -> OperationFuture<'_, Answer<Value>> {
-        Box::pin(async move { Answer::ok(json!(request.command)) })
-    }
-    fn render_text(&self, value: &Value) -> String {
-        format!("{value}\n")
+fn read_spec() -> OperationSpec {
+    OperationSpec {
+        arguments: vec![
+            ArgumentSpec::new("target", ArgumentForm::Positional, "what to read"),
+            ArgumentSpec::new("words", ArgumentForm::Words, "words to find"),
+            ArgumentSpec::new("view", ArgumentForm::Named, "the view").short('v'),
+            ArgumentSpec::new("full", ArgumentForm::Flag, "show every field"),
+            ArgumentSpec::new("tag", ArgumentForm::Repeated, "a tag"),
+            ArgumentSpec::new("out", ArgumentForm::Named, "write here").calling_process(),
+        ],
+        ..OperationSpec::request(
+            "read",
+            &["read"],
+            "read",
+            "Read a target",
+            "Reads one target",
+        )
     }
 }
 
-fn table() -> OperationTable {
-    let mut table = OperationTable::new("example", Deadlines::default());
+fn exec_spec() -> OperationSpec {
+    OperationSpec {
+        arguments: vec![ArgumentSpec::new(
+            "command",
+            ArgumentForm::Rest,
+            "the command",
+        )],
+        ..OperationSpec::request(
+            "exec",
+            &["exec"],
+            "act",
+            "Run a command",
+            "Runs one command",
+        )
+    }
+}
+
+fn table() -> CatalogBuilder {
+    let mut table = OperationCatalog::builder("example", Deadlines::default());
     for option in RequestOption::ALL {
         table.accept(option);
     }
@@ -106,8 +77,12 @@ fn table() -> OperationTable {
             })
             .unwrap();
     }
-    table.register(Read).unwrap();
-    table.register(Exec).unwrap();
+    table
+        .declare::<ReadRequest, Value>(read_spec(), |value| format!("{value}\n"))
+        .unwrap();
+    table
+        .declare::<ExecRequest, Value>(exec_spec(), |value| format!("{value}\n"))
+        .unwrap();
     table.set_default_operation("read").unwrap();
     table
 }
@@ -196,7 +171,7 @@ fn malformed_command_lines_name_what_is_wrong() {
 
 #[test]
 fn declarations_the_request_cannot_hold_are_refused() {
-    let mut spec = Read.spec();
+    let mut spec = read_spec();
     for (argument, message) in [
         (
             ArgumentSpec::new("missing", ArgumentForm::Named, ""),
@@ -216,25 +191,8 @@ fn declarations_the_request_cannot_hold_are_refused() {
         ),
     ] {
         spec.arguments = vec![argument];
-        struct Declared(OperationSpec);
-        impl Operation for Declared {
-            type Request = ReadRequest;
-            type Response = Value;
-            fn spec(&self) -> OperationSpec {
-                self.0.clone()
-            }
-            fn execute(
-                &self,
-                _: ReadRequest,
-                _: RequestContext,
-            ) -> OperationFuture<'_, Answer<Value>> {
-                Box::pin(async { Answer::ok(Value::Null) })
-            }
-            fn render_text(&self, _: &Value) -> String {
-                String::new()
-            }
-        }
-        let mut table = OperationTable::new("example", Deadlines::default());
+
+        let mut table = OperationCatalog::builder("example", Deadlines::default());
         table
             .declare_tool(ToolFamily {
                 name: "read".into(),
@@ -243,7 +201,9 @@ fn declarations_the_request_cannot_hold_are_refused() {
                 idempotent: true,
             })
             .unwrap();
-        let error = table.register(Declared(spec.clone())).unwrap_err();
+        let error = table
+            .declare::<ReadRequest, Value>(spec.clone(), |_| String::new())
+            .unwrap_err();
         assert!(error.message.contains(message), "{}", error.message);
     }
 }
@@ -406,21 +366,11 @@ fn request_fields_cannot_take_a_flag_of_every_row() {
     struct Paged {
         cursor: Option<String>,
     }
-    struct Clash;
-    impl Operation for Clash {
-        type Request = Paged;
-        type Response = Value;
-        fn spec(&self) -> OperationSpec {
-            OperationSpec::request("page", &["page"], "read", "Page", "Pages")
-        }
-        fn execute(&self, _: Paged, _: RequestContext) -> OperationFuture<'_, Answer<Value>> {
-            Box::pin(async { Answer::ok(Value::Null) })
-        }
-        fn render_text(&self, _: &Value) -> String {
-            String::new()
-        }
+    fn clash_spec() -> OperationSpec {
+        OperationSpec::request("page", &["page"], "read", "Page", "Pages")
     }
-    let mut table = OperationTable::new("example", Deadlines::default());
+
+    let mut table = OperationCatalog::builder("example", Deadlines::default());
     table
         .declare_tool(ToolFamily {
             name: "read".into(),
@@ -429,7 +379,9 @@ fn request_fields_cannot_take_a_flag_of_every_row() {
             idempotent: true,
         })
         .unwrap();
-    let error = table.register(Clash).unwrap_err();
+    let error = table
+        .declare::<Paged, Value>(clash_spec(), |_| String::new())
+        .unwrap_err();
     assert!(error.message.contains("--cursor"), "{}", error.message);
 }
 
@@ -440,28 +392,18 @@ fn a_positional_field_may_share_a_flags_name() {
     struct Paged {
         cursor: String,
     }
-    struct Positional;
-    impl Operation for Positional {
-        type Request = Paged;
-        type Response = Value;
-        fn spec(&self) -> OperationSpec {
-            OperationSpec {
-                arguments: vec![ArgumentSpec::new(
-                    "cursor",
-                    ArgumentForm::Positional,
-                    "where",
-                )],
-                ..OperationSpec::request("page", &["page"], "read", "Page", "Pages")
-            }
-        }
-        fn execute(&self, request: Paged, _: RequestContext) -> OperationFuture<'_, Answer<Value>> {
-            Box::pin(async move { Answer::ok(json!(request.cursor)) })
-        }
-        fn render_text(&self, value: &Value) -> String {
-            format!("{value}\n")
+    fn positional_spec() -> OperationSpec {
+        OperationSpec {
+            arguments: vec![ArgumentSpec::new(
+                "cursor",
+                ArgumentForm::Positional,
+                "where",
+            )],
+            ..OperationSpec::request("page", &["page"], "read", "Page", "Pages")
         }
     }
-    let mut table = OperationTable::new("example", Deadlines::default());
+
+    let mut table = OperationCatalog::builder("example", Deadlines::default());
     table
         .declare_tool(ToolFamily {
             name: "read".into(),
@@ -470,7 +412,9 @@ fn a_positional_field_may_share_a_flags_name() {
             idempotent: true,
         })
         .unwrap();
-    table.register(Positional).unwrap();
+    table
+        .declare::<Paged, Value>(positional_spec(), |value| format!("{value}\n"))
+        .unwrap();
     let parsed = table
         .parse_cli(&["page".into(), "c-7".into()], "r-1")
         .unwrap();
@@ -483,39 +427,27 @@ fn a_positional_array_is_one_json_value_including_empty_and_structured_lists() {
     struct BatchRequest {
         entries: Vec<Value>,
     }
-    struct Batch;
-    impl Operation for Batch {
-        type Request = BatchRequest;
-        type Response = Value;
-        fn spec(&self) -> OperationSpec {
-            OperationSpec {
-                arguments: vec![ArgumentSpec::new(
-                    "entries",
-                    ArgumentForm::Positional,
-                    "records",
-                )],
-                ..OperationSpec::request(
-                    "batch",
-                    &["batch"],
-                    "act",
-                    "Write records",
-                    "Writes records",
-                )
-            }
-        }
-        fn execute(
-            &self,
-            request: BatchRequest,
-            _: RequestContext,
-        ) -> OperationFuture<'_, Answer<Value>> {
-            Box::pin(async move { Answer::ok(json!(request.entries)) })
-        }
-        fn render_text(&self, value: &Value) -> String {
-            value.to_string()
+    fn batch_spec() -> OperationSpec {
+        OperationSpec {
+            arguments: vec![ArgumentSpec::new(
+                "entries",
+                ArgumentForm::Positional,
+                "records",
+            )],
+            ..OperationSpec::request(
+                "batch",
+                &["batch"],
+                "act",
+                "Write records",
+                "Writes records",
+            )
         }
     }
+
     let mut table = table();
-    table.register(Batch).unwrap();
+    table
+        .declare::<BatchRequest, Value>(batch_spec(), |value| value.to_string())
+        .unwrap();
     for entries in [
         json!([]),
         json!(["two words", {"note":"quote ' and λ"}, [1, 2], false]),
