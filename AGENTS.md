@@ -28,6 +28,8 @@ Enter the development shell with `direnv allow` (the `.envrc` loads the
 flake) or `nix develop`. The flake reads `rust-toolchain.toml`, the same pin
 rustup uses; it also carries nextest, PostgreSQL and `nats-server`.
 [Development](docs/development.md) owns local overrides and plain commands.
+Pull requests and master run `cargo xtask check` on GitHub Actions; read the
+result with `gh pr checks`.
 
 | Command | Does |
 |---|---|
