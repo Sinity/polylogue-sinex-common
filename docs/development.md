@@ -46,3 +46,10 @@ A host may queue these commands through its own job runner.
 
 For a change spanning common and a product, use the explicit
 [local linking command](../README.md#depending-on-this-repository).
+
+The common `cargo xtask test` command enables all features of the selected
+packages by default, including focused runs such as `-p query-language`, so
+compiler laws and generators stay in scope. Explicit `--features`, `-F`,
+`--all-features` or `--no-default-features` options are passed through unchanged
+and suppress that default. `cargo xtask check` retains the complete feature
+suite and separately compiles runtime and fixture feature combinations.

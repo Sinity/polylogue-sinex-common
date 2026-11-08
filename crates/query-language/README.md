@@ -23,9 +23,11 @@ The optional `conformance` feature adds `conformance` (fixture rows and the
 reference evaluator) and `laws` (independent compiler/executor cases).
 Products enable it in their development dependency when running those laws;
 production execution does not depend on the fixture representation.
-Run `cargo xtask test -p query-language --features conformance` for the full
-language suite. `cargo xtask check` enables every feature and also compiles
-the runtime surface separately. The truth-table tests run without conformance.
+Run `cargo xtask test -p query-language` for the full language suite. The
+common test command enables every selected package feature unless the caller
+passes explicit feature options. `cargo xtask check` enables every feature and
+also compiles the runtime surface separately. The truth-table tests run
+without conformance.
 
 ## Concepts
 

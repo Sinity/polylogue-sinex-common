@@ -25,6 +25,7 @@ fn main() -> ExitCode {
             run.finish()
         }
         Cli::Test { args } => {
+            let args = test_features(args);
             let mut run = Run::start("polylogue-sinex-common", "test", &args);
             let _ = run.nextest(
                 "test",
@@ -110,3 +111,25 @@ fn check(run: &mut Run) -> devkit::Result {
         },
     )
 }
+
+/// Focused test runs include the selected packages' laws and generators unless
+/// the caller explicitly chooses a feature configuration.
+fn test_features(mut args: Vec<String>) -> Vec<String> {
+    let explicit = args
+        .iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| {
+            matches!(
+                arg.as_str(),
+                "--all-features" | "--no-default-features" | "--features"
+            ) || arg.starts_with("--features=")
+                || arg.starts_with("-F")
+        });
+    if !explicit {
+        args.insert(0, "--all-features".into());
+    }
+    args
+}
+
+#[cfg(test)]
+mod tests;
