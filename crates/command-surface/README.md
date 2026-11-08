@@ -59,8 +59,11 @@ without constructing a daemon, operation or runtime table.
 `cli_arguments(operation)` projects the existing argument declarations and
 typed schema into owned `CliArgument` values: `spec`, `kind`, `required` and
 closed textual `choices`. It includes implicit named fields and calling-process
-flags. A product may build help and completion from this projection; actual
-argument parsing remains in the common parser.
+flags, including catalog-wide calling-process text options declared once with
+`declare_cli_global(name, help)`. `cli_globals()` exposes those `ArgumentSpec`s;
+underscore names use hyphenated flags. Their values appear only in
+`ParsedCommand.calling_process`. A product may build help and completion from
+this projection; actual argument parsing remains in the common parser.
 
 A request with `tool: None` has no tools/list entry and cannot be selected by
 tools/call, including a forged operation name in another family. Empty CLI
@@ -107,7 +110,7 @@ A field without a declaration is written `--name VALUE`. A flag that acts on
 the calling process (`--out FILE`) is read by the command line and kept out
 of the request. Known global options may precede a command (`--json status`,
 `--deadline 100 read REF`) or follow it. Longest command selection normalizes
-only that leading global prefix; `--` and Rest arguments retain their literal
+recognized globals before and between its command words; `--` and Rest arguments retain their literal
 meaning. `--` ends the flags. Every row also takes `--json`,
 `--deadline MS|none`, `--request-id ID`, `--budget N|none`, `--cursor C`,
 `--fresh` and `--request JSON` (the whole value, for any request type). A

@@ -173,7 +173,7 @@ fn project_argument(description: &OperationDescription, spec: ArgumentSpec) -> C
     }
 }
 
-fn projection(description: &OperationDescription) -> Vec<CliArgument> {
+fn projection(description: &OperationDescription, globals: &[ArgumentSpec]) -> Vec<CliArgument> {
     let mut arguments: Vec<_> = description
         .spec
         .arguments
@@ -194,7 +194,40 @@ fn projection(description: &OperationDescription) -> Vec<CliArgument> {
             arguments.push(project_argument(description, spec));
         }
     }
+    arguments.extend(
+        globals
+            .iter()
+            .cloned()
+            .map(|spec| project_argument(description, spec)),
+    );
     arguments
+}
+
+pub(crate) fn check_globals(
+    description: &OperationDescription,
+    globals: &[ArgumentSpec],
+) -> Result<(), Failure> {
+    for global in globals {
+        if description
+            .spec
+            .arguments
+            .iter()
+            .any(|argument| argument.flag() == global.flag())
+            || description.input_schema["properties"]
+                .as_object()
+                .is_some_and(|properties| {
+                    properties
+                        .keys()
+                        .any(|name| name.replace('_', "-") == global.name.replace('_', "-"))
+                })
+        {
+            return Err(bad_request(format!(
+                "{}: {} collides with a CLI global",
+                description.spec.name, global.name
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn is_positional(form: ArgumentForm) -> bool {
@@ -357,7 +390,7 @@ impl OperationCatalog {
                 "{operation} has no command-line surface"
             )));
         }
-        Ok(projection(description))
+        Ok(projection(description, self.cli_globals()))
     }
     /// Decode already URL-decoded query pairs through the same typed field
     /// projection as the CLI. Envelope identity and argument JSON stay distinct.
@@ -442,43 +475,71 @@ impl OperationCatalog {
         }
         Ok(request)
     }
-    // Leading global options belong to the envelope. Move them behind a
-    // matched command so its argument parser remains the one owner. A literal
-    // `--` ends this scan; words consumed by Rest are never inspected here.
+    // Move recognized globals around command words behind the matched command.
+    // Stop as soon as all command words match: Rest and `--` belong to the
+    // row parser, which is the only owner of the remaining lexical input.
     fn ordered_cli_words<'a>(&self, args: &'a [String]) -> Result<Cow<'a, [String]>, Failure> {
-        let mut prefix = 0;
-        while let Some(word) = args.get(prefix) {
-            let Some(flag) = word.strip_prefix("--") else {
-                break;
-            };
-            let (name, inline) = flag
-                .split_once('=')
-                .map_or((flag, false), |(name, _)| (name, true));
-            if !GLOBAL_FLAGS.contains(&name) {
-                break;
-            }
-            prefix += 1;
-            if !inline && !matches!(name, "json" | "fresh") {
-                if args.get(prefix).is_none() {
-                    return Err(bad_request(format!("--{name} needs a value")));
+        let skip_globals = |mut index: usize| -> Result<usize, Failure> {
+            while let Some(flag) = args.get(index).and_then(|word| word.strip_prefix("--")) {
+                let (name, inline) = flag
+                    .split_once('=')
+                    .map_or((flag, false), |(name, _)| (name, true));
+                if !GLOBAL_FLAGS.contains(&name)
+                    && !self
+                        .cli_globals()
+                        .iter()
+                        .any(|argument| argument.flag().trim_start_matches('-') == name)
+                {
+                    break;
                 }
-                prefix += 1;
+                index += 1;
+                if !inline && !matches!(name, "json" | "fresh") {
+                    if args.get(index).is_none() {
+                        return Err(bad_request(format!("--{name} needs a value")));
+                    }
+                    index += 1;
+                }
             }
-        }
-        if prefix == 0 {
-            return Ok(Cow::Borrowed(args));
-        }
-        let command = self
+            Ok(index)
+        };
+        let prefix = skip_globals(0)?;
+        let mut selected: Option<(&OperationDescription, usize, Vec<String>)> = None;
+        for description in self
             .descriptions()
             .iter()
-            .filter(|d| !d.spec.command.is_empty() && args[prefix..].starts_with(&d.spec.command))
-            .max_by_key(|d| d.spec.command.len());
-        let Some(command) = command else {
+            .filter(|d| !d.spec.command.is_empty())
+        {
+            let mut index = prefix;
+            let mut globals = args[..prefix].to_vec();
+            let mut matches = true;
+            for (position, word) in description.spec.command.iter().enumerate() {
+                if position > 0 {
+                    let end = skip_globals(index)?;
+                    globals.extend_from_slice(&args[index..end]);
+                    index = end;
+                }
+                if args.get(index) != Some(word) {
+                    matches = false;
+                    break;
+                }
+                index += 1;
+            }
+            if matches
+                && selected.as_ref().is_none_or(|(command, _, _)| {
+                    command.spec.command.len() < description.spec.command.len()
+                })
+            {
+                selected = Some((description, index, globals));
+            }
+        }
+        let Some((description, end, globals)) = selected else {
             return Ok(Cow::Borrowed(args));
         };
-        let end = prefix + command.spec.command.len();
-        let mut ordered = args[prefix..end].to_vec();
-        ordered.extend_from_slice(&args[..prefix]);
+        if globals.is_empty() {
+            return Ok(Cow::Borrowed(args));
+        }
+        let mut ordered = description.spec.command.clone();
+        ordered.extend(globals);
         ordered.extend_from_slice(&args[end..]);
         Ok(Cow::Owned(ordered))
     }
@@ -519,7 +580,12 @@ impl OperationCatalog {
         let mut rest = false;
         let mut index = start;
         let argument_named = |flag: &str| -> Option<ArgumentSpec> {
-            if let Some(argument) = spec.arguments.iter().find(|a| a.flag() == flag) {
+            if let Some(argument) = spec
+                .arguments
+                .iter()
+                .chain(self.cli_globals())
+                .find(|a| a.flag() == flag)
+            {
                 return Some(argument.clone());
             }
             let name = flag.trim_start_matches("--");
@@ -736,10 +802,10 @@ impl OperationCatalog {
 }
 
 /// The usage of one row: `read REF [--view VIEW] [--fresh]`.
-pub(crate) fn usage(description: &OperationDescription) -> String {
+pub(crate) fn usage(description: &OperationDescription, globals: &[ArgumentSpec]) -> String {
     let spec = &description.spec;
     let mut parts: Vec<String> = spec.command.clone();
-    for argument in projection(description) {
+    for argument in projection(description, globals) {
         let spec = &argument.spec;
         let name = spec.name.to_uppercase();
         let part = match spec.form {

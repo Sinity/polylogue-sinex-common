@@ -666,6 +666,7 @@ pub(crate) struct Forms {
     pub(crate) descriptions: Vec<OperationDescription>,
     pub(crate) tools: Vec<ToolFamily>,
     pub(crate) options: Vec<crate::RequestOption>,
+    pub(crate) cli_globals: Vec<ArgumentSpec>,
 }
 impl Forms {
     pub(crate) fn description(&self, name: &str) -> Option<&OperationDescription> {
@@ -880,6 +881,7 @@ impl OperationCatalog {
                     descriptions: vec![],
                     tools: vec![],
                     options: vec![],
+                    cli_globals: vec![],
                 }),
                 renderers: vec![],
                 deadlines,
@@ -893,6 +895,10 @@ impl OperationCatalog {
     }
     pub fn tools(&self) -> &[ToolFamily] {
         &self.forms.tools
+    }
+    /// Text options owned by the calling process, available on every CLI row.
+    pub fn cli_globals(&self) -> &[ArgumentSpec] {
+        &self.forms.cli_globals
     }
     pub fn accepts(&self, option: crate::RequestOption) -> bool {
         self.forms.options.contains(&option)
@@ -1013,6 +1019,38 @@ impl OperationCatalog {
 impl CatalogBuilder {
     pub fn finish(self) -> Arc<OperationCatalog> {
         Arc::new(self.catalog)
+    }
+    /// Declare one optional text-valued CLI option for the calling process.
+    /// Names use underscores; their flags use hyphens. Values never enter a request.
+    pub fn declare_cli_global(
+        &mut self,
+        name: impl Into<String>,
+        help: impl Into<String>,
+    ) -> Result<(), Failure> {
+        let argument = ArgumentSpec::new(name, ArgumentForm::Named, help).calling_process();
+        if !valid_word(&argument.name, '_')
+            || GLOBAL_FLAGS.contains(&argument.flag().trim_start_matches('-'))
+            || self
+                .cli_globals()
+                .iter()
+                .any(|other| other.name == argument.name)
+        {
+            return Err(bad_request(format!(
+                "CLI global {} is not a free name",
+                argument.name
+            )));
+        }
+        for description in self
+            .descriptions()
+            .iter()
+            .filter(|d| !d.spec.command.is_empty())
+        {
+            crate::arguments::check_globals(description, std::slice::from_ref(&argument))?;
+        }
+        Arc::make_mut(&mut self.catalog.forms)
+            .cli_globals
+            .push(argument);
+        Ok(())
     }
     /// Declare an MCP tool before registering its rows.
     pub fn declare_tool(&mut self, tool: ToolFamily) -> Result<(), Failure> {
@@ -1230,6 +1268,7 @@ impl CatalogBuilder {
         }
         if !spec.command.is_empty() {
             crate::arguments::check(&description)?;
+            crate::arguments::check_globals(&description, self.cli_globals())?;
         }
         let mut forms = (*self.catalog.forms).clone();
         forms.descriptions.push(description);

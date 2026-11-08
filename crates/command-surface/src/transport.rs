@@ -46,7 +46,7 @@ impl OperationCatalog {
                 format!(
                     "{} {}  {}\n",
                     self.product(),
-                    crate::arguments::usage(d),
+                    crate::arguments::usage(d, self.cli_globals()),
                     d.spec.summary
                 )
             })
@@ -61,7 +61,7 @@ impl OperationCatalog {
         let mut text = format!(
             "{} {}\n{}\n",
             self.product(),
-            crate::arguments::usage(description),
+            crate::arguments::usage(description, self.cli_globals()),
             description.spec.summary
         );
         for argument in self.cli_arguments(operation).ok()? {
