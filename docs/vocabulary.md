@@ -28,9 +28,6 @@ mechanic and nothing else in the shared crates.
 
 ## Queries
 
-`transform` (was "stage") and `answer` (was "run", for a query's evaluation)
-are renames the operator may still change (default; open operator question).
-
 | Name | Meaning |
 |---|---|
 | catalog | a product's units or tables, their fields, closed-set values and defaults |
