@@ -8,15 +8,15 @@
 //! - [`Catalog`]: each product's kinds, web address and provider-URL
 //!   patterns; input normalisation, links and web addresses.
 //!
-//! The crate's README states the design and its laws.
+//! The crate's README states the design.
 
 mod catalog;
 mod escape;
-pub mod laws;
 pub mod locator;
 mod pattern;
 mod reference;
 pub mod selector;
+pub mod shared_cases;
 
 pub use catalog::{
     Catalog, CatalogError, ContextWord, Input, Kind, Link, ProductCatalog, RowPick, RowSpan,

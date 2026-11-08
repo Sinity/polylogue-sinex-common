@@ -4,7 +4,7 @@
 //! A judgment orders k targets, best first, with ties as groups (see
 //! [`Judgment`]). The fit is the maximum of a weak-prior Plackett–Luce
 //! likelihood, reached by Hunter's minorization–maximization. Its documentation
-//! and the derivation are in `model.rs`; the crate README states the laws.
+//! and the derivation are in `model.rs`; the crate README states the design.
 
 mod fit;
 mod judgment;

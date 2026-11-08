@@ -5,7 +5,7 @@
 //! through its real query path. The runner compares independently specified
 //! row identities, values, matched rows and totals, not the reference interpreter.
 //! Fixture unit/field names are caller supplied so both product catalogs can
-//! run the same laws. Product-specific transport parity and refusals add cases.
+//! run the same cases. Product-specific transport parity and refusals add cases.
 use crate::Error;
 use crate::ast::*;
 use crate::conformance::{Answer, Dataset, Extent, Row, Scalar};
@@ -56,12 +56,12 @@ impl Default for Vocabulary {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Violation {
-    pub law: String,
+    pub name: String,
     pub detail: String,
 }
 #[derive(Clone, Debug)]
 pub struct Case {
-    pub law: String,
+    pub name: String,
     pub query: Query,
     pub fixture: Dataset,
     pub expected: Answer,
@@ -85,7 +85,7 @@ fn query(
     transforms: Vec<Transform>,
 ) -> Query {
     // Fixture order is explicit: a product's ordinary recency order is not a
-    // property of these language laws. Subsequent transforms may replace it.
+    // property of these language cases. Subsequent transforms may replace it.
     let number = if unit == v.children {
         &v.child_number
     } else {
@@ -178,8 +178,8 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
         (v.outer.clone(), rows.clone()),
         (v.children.clone(), children.clone()),
     ]);
-    let case = |law: &str, query: Query, expected: Vec<Row>| Case {
-        law: law.into(),
+    let case = |name: &str, query: Query, expected: Vec<Row>| Case {
+        name: name.into(),
         query,
         fixture: fixture.clone(),
         expected: answer(expected),
@@ -270,7 +270,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     // equality.
     let titled = |id: &str, title: &str| Row::new(id).with(&v.text, title);
     output.push(Case {
-        law: "ql.match.natural".into(),
+        name: "ql.match.natural".into(),
         query: query(
             v,
             &v.outer,
@@ -484,7 +484,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
         scope: None,
     };
     output.push(Case {
-        law: "ql.order.join-grain".into(),
+        name: "ql.order.join-grain".into(),
         query: query(
             v,
             &v.outer,
@@ -514,7 +514,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
     // The semijoin keeps each outer row once; an untimed row is unknown, so
     // neither the relation nor its negation keeps it.
     output.push(Case {
-        law: "ql.order.semijoin".into(),
+        name: "ql.order.semijoin".into(),
         query: query(v, &v.outer, Some(near_condition.clone()), vec![]),
         fixture: timed.clone(),
         expected: answer(vec![
@@ -525,7 +525,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
         ]),
     });
     output.push(Case {
-        law: "ql.order.semijoin".into(),
+        name: "ql.order.semijoin".into(),
         query: query(v, &v.outer, Some(not(near_condition)), vec![]),
         fixture: timed,
         expected: answer(vec![at("far", 100)]),
@@ -614,7 +614,7 @@ pub fn cases(v: &Vocabulary) -> Vec<Case> {
         ),
     ] {
         output.push(Case {
-            law: "ql.order.coarse".into(),
+            name: "ql.order.coarse".into(),
             query: query(v, &v.outer, Some(order(relation, within)), vec![]),
             fixture: coarse_fixture.clone(),
             expected: answer(expected),
@@ -777,7 +777,7 @@ where
             Ok(p) => p,
             Err(e) => {
                 failures.push(Violation {
-                    law: case.law.clone(),
+                    name: case.name.clone(),
                     detail: format!("compile refused: {e}"),
                 });
                 continue;
@@ -844,7 +844,7 @@ where
                     })();
                     if let Err(detail) = result {
                         failures.push(Violation {
-                            law: case.law.clone(),
+                            name: case.name.clone(),
                             detail: format!(
                                 "rotation={rotation}, reverse={reverse}, page_size={size}: {detail}"
                             ),
@@ -869,8 +869,8 @@ pub fn check_modes<C: Compiler>(
     for (mode, executor) in executors {
         for failure in check(compiler, *executor, cases) {
             failures.push(Violation {
-                law: "ql.mode-parity".into(),
-                detail: format!("{mode}: {}: {}", failure.law, failure.detail),
+                name: "ql.mode-parity".into(),
+                detail: format!("{mode}: {}: {}", failure.name, failure.detail),
             });
         }
     }
@@ -882,7 +882,7 @@ pub fn check_modes<C: Compiler>(
 /// without freezing incidental diagnostic prose.
 #[derive(Clone, Debug)]
 pub struct RefusalCase {
-    pub law: String,
+    pub name: String,
     pub query: Query,
     pub fixture: Dataset,
     pub kind: crate::ErrorKind,
@@ -922,7 +922,7 @@ where
         };
         if let Some(detail) = detail {
             failures.push(Violation {
-                law: case.law.clone(),
+                name: case.name.clone(),
                 detail,
             });
         }

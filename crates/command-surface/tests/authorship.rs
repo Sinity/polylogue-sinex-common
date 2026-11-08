@@ -15,7 +15,7 @@ fn environment(values: &[(&str, &str)]) -> BTreeMap<String, OsString> {
 
 #[test]
 fn id_one() {
-    laws::id_one(author_of).unwrap();
+    checks::id_one(author_of).unwrap();
 }
 
 #[test]
@@ -32,7 +32,7 @@ fn id_one_detects_a_product_with_rules_of_its_own() {
             author_of(evidence, via, hook)
         }
     };
-    assert!(laws::id_one(own_rule).is_err());
+    assert!(checks::id_one(own_rule).is_err());
 }
 
 #[test]

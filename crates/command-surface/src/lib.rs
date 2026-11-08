@@ -11,10 +11,10 @@
 
 mod arguments;
 mod authorship;
+pub mod checks;
 mod envelope;
 mod event;
 mod failure;
-pub mod laws;
 mod operation;
 mod pack;
 pub mod seen;

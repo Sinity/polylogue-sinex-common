@@ -5,8 +5,8 @@ fn args(words: &[&str]) -> Vec<String> {
 }
 
 #[test]
-fn focused_test_selection_keeps_laws_and_filters() {
-    let selection = args(&["-p", "query-language", "-E", "test(compiler_laws)"]);
+fn focused_test_selection_keeps_conformance_cases_and_filters() {
+    let selection = args(&["-p", "query-language", "-E", "test(compiler_cases)"]);
     let mut expected = vec!["--all-features".to_owned()];
     expected.extend(selection.clone());
     assert_eq!(test_features(selection), expected);

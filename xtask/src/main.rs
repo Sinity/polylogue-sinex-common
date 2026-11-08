@@ -46,7 +46,7 @@ fn check(run: &mut Run) -> devkit::Result {
         devkit::cargo_command().args(["fmt", "--all", "--", "--check"]),
     )?;
     // Compile runtime and fixture surfaces without the workspace's all-feature
-    // unification, then retain the complete clippy and law-suite run below.
+    // unification, then retain the complete clippy and conformance run below.
     for package in ["query-language", "web-shell", "devkit"] {
         run.cargo(
             &format!("minimal-{package}"),
@@ -112,7 +112,7 @@ fn check(run: &mut Run) -> devkit::Result {
     )
 }
 
-/// Focused test runs include the selected packages' laws and generators unless
+/// Focused test runs include the selected packages' conformance cases and generators unless
 /// the caller explicitly chooses a feature configuration.
 fn test_features(mut args: Vec<String>) -> Vec<String> {
     let explicit = args

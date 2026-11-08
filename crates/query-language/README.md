@@ -5,14 +5,14 @@ the same text with the same meaning; only the units differ. The crate holds
 the grammar, the syntax tree and its meaning, the parser and formatter, the
 binder and typing, the normal form and its hash, time expressions, the
 logical day, the cursor type, the fusion of ranked lists, the federation
-planner's types, the completer and the law suite every product compiler
+planner's types, the completer and the conformance cases every product compiler
 runs. It is pure: no I/O, no clock and no configuration of its own; the
 caller passes the time, the day setting and the catalog.
 
 Each product keeps its own **catalog** (its units, their fields, closed-set
 values, defaults, order scopes, search fields and extensions) and its own
-**compiler** from the syntax tree to execution, and adds its own forms and
-laws: Polylogue in
+**compiler** from the syntax tree to execution, and adds its own forms:
+Polylogue in
 [its query page](https://github.com/Sinity/polylogue/blob/master/docs/query.md),
 Sinex in [its query page](https://github.com/Sinity/sinex/blob/master/docs/query.md).
 
@@ -20,8 +20,8 @@ Sinex in [its query page](https://github.com/Sinity/sinex/blob/master/docs/query
 
 Runtime builds keep parsing, binding, identity, time and `semantics::Truth`.
 The optional `conformance` feature adds `conformance` (fixture rows and the
-reference evaluator) and `laws` (independent compiler/executor cases).
-Products enable it in their development dependency when running those laws;
+reference evaluator) and `compiler_cases` (independent compiler/executor cases).
+Products enable it in their development dependency when running those cases;
 production execution does not depend on the fixture representation.
 Run `cargo xtask test -p query-language` for the full language suite. The
 common test command enables every selected package feature unless the caller
@@ -601,133 +601,4 @@ closed sets from its stored names, defaults, order scopes, search fields,
 phrases for `read_as`, extensions); its compiler and each ranked list's
 cursor; reference resolution against its data; `fill` coverage states and
 `as of`; its read positions; the output schemas of its saved and kept
-sources; the executor of mixed plans (Polylogue); and the laws that are its
-own.
-
-## Laws
-
-The crate's suite runs against both catalogs, through each product's real
-compiler; each product also runs its own laws. The reusable fixtures name outer and child numeric fields separately and put their source order in the query explicitly, so a product retains its own ordinary listing order. The reusable fixture time ticks are seconds, matching the explicit duration units in their queries; an adapter converts those ticks to its native timestamp representation. The reference evaluator, a
-synthetic-row oracle, is the independent answer for relational mechanics,
-order relations, ranking and federation; it refuses storage, time-bucket and
-extension mechanics that need a product.
-
-Stored keys carry the scope `ql.` with dots for the area: `order-semijoin`
-is stored as `ql.order.semijoin`, `three-valued-filters` as
-`ql.filter.three-valued`.
-
-Language:
-
-- **one-spelling**: every query example in both products' docs parses with
-  the one grammar, and no catalog carries a dialect switch.
-- **format-roundtrip**: formatting a parsed query and parsing it again gives
-  the same normal form, including implicit time bounds, explicit random
-  seeds and extension arguments; formatting twice gives the same text.
-- **identity-spelling**: spellings with one normal form have one
-  `query:<hash>` in both products; any changed condition changes it.
-- **filter-composition**: `Q | where A | where B` returns the same rows as
-  `Q | where A AND B`.
-- **three-valued-filters**: a row whose value is unknown satisfies neither
-  `C` nor `NOT C`; `F:unknown` and `F:known` partition the rows.
-- **grouped-rows-are-a-relation**: `where`, `sort` and `limit` after
-  `group by` act on groups, equal to the same operations over the grouped
-  result as a table.
-- **match-order-independent**: permuting the enumeration order of input rows
-  never changes which rows `exists`, `seq`, an order relation or a join
-  selects.
-- **page-is-not-the-answer**: the rows and count of a question are the same
-  for every `page_size` and every way of paging through it.
-- **closed-sets-refuse**: a value outside a closed set is refused naming the
-  set and the unit where the value exists.
-- **generated-names**: a field the language generates (`match.distance`,
-  `diff`'s `change`, `old_rank` and `new_rank`, `fill`'s `coverage` and
-  `coverage_detail`) never hides a stored field in either catalog.
-- **namespace-binding**: units bind only from tree nodes; namespace-like
-  text inside values never adds a unit.
-- **defaults-bound-once**: after binding, every further condition only
-  narrows the rows.
-- **lowercase-boolean**: lowercase `and`, `or`, `not` between conditions is
-  refused with the capitalised query as the suggestion; quoted, it searches.
-- **days-tile-time**: in every zone, consecutive logical days share their
-  boundary and no instant lies in two days or none.
-- **instant-in-its-day**: every instant lies within the bounds of
-  `logical_day(instant)`.
-- **coarse-times**: a coarse time satisfies a condition only by its whole
-  period, takes part only in windows at least as wide as its period, and
-  ranks after precise matches.
-- **cursor-refusals**: a cursor from another question is `invalid_query`;
-  one past its read context is `stale_cursor`.
-- **cursor-keeps-rows**: rows whose order key did not change between pages
-  are neither skipped nor repeated.
-
-Order relations, ranking and transforms:
-
-- **order-semijoin**: an order-relation condition never multiplies outer
-  rows, and `count` equals the semijoin's.
-- **order-join-grain**: `join REL` returns exactly the pairs whose semijoin
-  keeps the outer row.
-- **order-steps**: `within 1 step` equals the `next.` and `previous.`
-  relations, and steps never cross a scope instance.
-- **rank-membership**: adding, removing or reordering ranking atoms never
-  changes membership or `count`.
-- **rank-unranked-kept**: rows outside every list are returned after the
-  ranked rows and counted as unknown.
-- **rank-fusion-oracle**: the fused order equals an independent n-ary
-  reciprocal-rank fusion evaluator.
-- **rank-early-stop-exact**: the early-stop fusion returns the same page as
-  full fusion for every page size.
-- **union-fuses-once**: a chain of `union` and `fuse` at one level is one
-  fusion.
-- **diff-watch**: `A | diff (B)` reports exactly the membership, ranking and
-  top-k changes the signals evaluator reports for B → A.
-- **expr-dimensions**: arithmetic over incompatible dimensions is refused at
-  bind time; unknown in, unknown out.
-- **covered**: `covered(start, end)` equals the measure of the union of the
-  intervals, against a sweep-line oracle over generated intervals.
-
-Objects, errors and explaining:
-
-- **saved-reuse**: a saved relation selects the same rows by name and
-  inline.
-- **result-reread**: `result:<id>` reads back unchanged after new data and
-  after re-parsing.
-- **error-suggestion-runs**: every `suggestion` parses, binds and runs as
-  given on the same catalog.
-- **error-never-empty**: a failure never yields `empty`; `empty` comes only
-  from a successful read.
-- **read-as-coverage**: every field, operator, transform, order relation
-  and ranking atom has a phrase.
-- **explain-pure**: explain and completion never write, build, embed or call
-  a model.
-- **complete-offline**: completion answers from the catalog file with the
-  daemon down.
-- **complete-parses**: inserting any completion candidate leaves text whose
-  prefix parses.
-- **execution-mode-parity**: CLI, socket, HTTP, MCP and briefs give the same
-  rows, counts and refusals to the same query.
-
-Cross-system, run by Polylogue's executor against a devkit Sinex:
-
-- **mixed-split-equals-oracle**: federated execution equals the federation
-  oracle (both datasets as plain rows, the mixed query evaluated without
-  splitting).
-- **mixed-batching**: the answer does not depend on the bind batch size, and
-  every batch reads one Sinex commit position.
-- **mixed-positions**: every mixed answer reports both products' positions
-  and lags.
-- **mixed-incomplete**: with Sinex stopped, `sx.` parts are `degraded` and
-  named, never empty; with Sinex not configured, they are `not_configured`.
-- **mixed-forward**: `sinexctl` given a mixed query returns the same answer
-  as `polylogue` given it.
-- **mixed-typed-binds**: bind values cross only as typed parameters; a value
-  containing query punctuation stays one value.
-
-`at match.when` selects the matched row's occurrence evidence, retaining any
-uncertainty. `at match.start` and `at match.end` select independently declared
-state endpoints; an occurrence's uncertainty bounds are not state endpoints.
-An open state has no selected end. With matched selectors, `during` tests the
-outer occurrence against the inner declared lifetime and orders states by their
-start; `containing` tests the selected inner evidence against the outer declared
-lifetime. State ends carry their declared inclusion rule. Products refuse a
-selector when their source has no such capability; missing evidence in an
-otherwise capable source remains unknown.
+sources; and the executor of mixed plans (Polylogue).

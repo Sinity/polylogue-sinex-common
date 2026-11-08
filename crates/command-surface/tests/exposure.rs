@@ -313,7 +313,7 @@ fn absent_cli_and_mcp_are_capabilities_while_listed_only_controls_visibility() {
         offered[0]["inputSchema"]["properties"]["operation"]["enum"],
         json!(["mcp", "hidden"])
     );
-    laws::tools_generated(&table).unwrap();
+    checks::tools_generated(&table).unwrap();
     let rendered = table.render_answer(
         Via::Mcp,
         None,

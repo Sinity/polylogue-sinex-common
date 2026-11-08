@@ -131,7 +131,7 @@ their locators are equal under the current canonicalizer.
   fragment; files, attachments and ISBNs have none.
 - **Versioned.** `locator::VERSION` names the canonicalizer. Any changed
   output for any input is a new version, and the table in
-  `src/laws/locator-cases.txt` pins the outputs of the current one. A product
+  `src/shared_cases/locator-cases.txt` pins the outputs of the current one. A product
   that keyed things with an older version recomputes them by replay; it never
   edits a key in place.
 
@@ -177,46 +177,3 @@ and toggles are query parameters, outside the reference.
 - `Catalog::route` reads an address back: a full URL under a configured
   base, or a path in the home product. Collection, status and other
   non-object routes are the product's own and read back as `None`.
-
-## Laws
-
-The Sinex library's `lib.locator.shared-module`, `lib.locator.catalog-folds`
-and `lib.locator.no-guess` are this crate's `locator-shared-module`,
-`locator-catalog-folds` and `locator-no-guess`.
-
-- **round-trip**: a generated reference prints in global form and parses
-  back equal; written in its own product's local form, it parses to the same
-  reference. Identities and revisions cover `:`, `/`, `@`, `#`, `%`, spaces
-  and non-ASCII text. (property)
-- **local-equals-global**: the local and global forms of one reference parse
-  equal in either product; a local form of the other product's kind is
-  refused with its global form. (table)
-- **selector-round-trip**: a generated selector of any combination of parts
-  prints and parses back equal, and prints the same text again; accepted
-  alternative spellings parse to the canonical one. (property and table)
-- **selector-out-of-range-is-invalid-not-clamped**: every part beyond a known
-  bound is refused, every part within bounds is accepted, and unknown bounds
-  are not checked. (table)
-- **quote-follows-moved-text**: with the container unchanged the span is `Current`;
-  after text is inserted before it, `Moved` to the shifted range; after the
-  quoted text changes, or when the quote occurs twice, `ChangedSince`.
-  (property and table)
-- **locator-shared-module**: the canonicalizer gives exactly the pinned
-  outputs in `src/laws/locator-cases.txt` for the version that table names.
-  Both products run the same table (`references::laws::shared_locator_cases`)
-  through the path by which they key URLs, files and catalog identifiers, so
-  their keys are byte-identical. (table, run by both products)
-- **locator-idempotent**: canonicalizing a generated URL's canonical locator
-  again changes nothing. (property)
-- **locator-catalog-folds**: every declared URL form of a catalog object
-  yields one locator. (table)
-- **locator-no-guess**: URLs differing in host case, default port, parameter
-  order or declared tracking parameters give one locator; adding any other
-  parameter gives a different one. (property)
-- **catalog-web-address-folds-back**: the web address of every catalog
-  locator, with its selector, canonicalizes back to it. (table)
-- **route-round-trip**: reading back the web address of a generated
-  reference, with or without a sub-view, gives the reference and the
-  sub-view. (property)
-- **unconfigured-product-is-text**: a reference to a product with no web
-  address here renders as text with "<Product> not configured". (unit)

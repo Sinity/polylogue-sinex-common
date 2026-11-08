@@ -1,4 +1,4 @@
-//! Laws of ranking, `covered` and `diff`, each against an independent oracle.
+//! Tests of ranking, `covered` and `diff`, each against an independent oracle.
 use proptest::prelude::*;
 use query_language::conformance::covered;
 use query_language::diff::{ChangeKind, changes};
@@ -65,7 +65,7 @@ fn oracle(lists: &[Vec<Entry<u8>>]) -> Vec<u8> {
 }
 
 proptest! {
-    /// Law `ql.rank.fusion-oracle`: the fused order equals an independent
+    /// The fused order equals an independent
     /// n-ary reciprocal-rank fusion.
     #[test]
     fn rank_fusion_oracle(lists in lists()) {
@@ -73,7 +73,7 @@ proptest! {
         prop_assert_eq!(fused, oracle(&lists));
     }
 
-    /// Law `ql.rank.early-stop-exact`: reading the lists only as deep as each
+    /// Reading the lists only as deep as each
     /// page needs returns exactly the full fusion, for every page size.
     #[test]
     fn rank_early_stop_exact(lists in lists(), size in 1usize..7) {
@@ -95,7 +95,7 @@ proptest! {
         }
     }
 
-    /// Law `ql.covered`: the union length equals a count of covered ticks.
+    /// The union length equals a count of covered ticks.
     #[test]
     fn covered_equals_the_ticks_of_the_union(intervals in prop::collection::vec((-40i64..40, -40i64..40), 0..12)) {
         let ticks: BTreeSet<i64> = intervals

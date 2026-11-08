@@ -16,7 +16,7 @@ use std::sync::LazyLock;
 use url::Url;
 
 /// The canonicalizer's version. Pinned by the shared case table
-/// ([`crate::laws::shared_locator_cases`]): changing an output without
+/// ([`crate::shared_cases::shared_locator_cases`]): changing an output without
 /// raising this number fails that table's test.
 pub const VERSION: u32 = 1;
 

@@ -1,4 +1,4 @@
-//! Host policy laws: inhibition, away handling, on-screen suppression,
+//! Host policy tests: inhibition, away handling, on-screen suppression,
 //! snooze, producers, forwarded staleness and deferral, with expected
 //! handoffs chosen by hand.
 use signals::notifications::Outlets;

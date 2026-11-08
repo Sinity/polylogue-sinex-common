@@ -2,8 +2,8 @@
 //! guessing, and catalog web addresses that fold back.
 
 use proptest::prelude::*;
-use references::laws::shared_locator_cases;
 use references::locator::VERSION;
+use references::shared_cases::shared_locator_cases;
 use references::{Locator, LocatorKind, PatternError, Selector, UrlPattern};
 
 fn canonical(text: &str) -> String {

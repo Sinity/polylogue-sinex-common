@@ -1,4 +1,4 @@
-//! The route function's table and its laws over every combination of inputs.
+//! The route function's table and properties over every combination of inputs.
 use signals::*;
 
 const MINUTE: i64 = 60_000;
@@ -218,7 +218,7 @@ fn route_applies_its_rules_in_order() {
     }
 }
 
-/// Every combination of the inputs the law cares about.
+/// Every combination of the inputs the rule depends on.
 fn candidates() -> Vec<Candidate> {
     let mut all = Vec::new();
     for interrupt in [false, true] {

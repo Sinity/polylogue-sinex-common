@@ -56,7 +56,7 @@ fn declarations_parse_describe_and_render_without_runtime_handlers() {
             .unwrap(),
         "hello\n"
     );
-    laws::tools_generated(&declarations).unwrap();
+    checks::tools_generated(&declarations).unwrap();
 }
 
 struct Read;

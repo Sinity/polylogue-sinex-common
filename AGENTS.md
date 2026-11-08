@@ -32,8 +32,8 @@ in both products before changing a shared interface.
   rule, requests placed together or not at all, one uniqueness function for
   every cardinality, order keys with no precision limit.
 - [`query-language`](crates/query-language/README.md): one surface language, two
-  catalogs and two compilers; the language owns the laws that are properties
-  of the language and runs them against both catalogs.
+  catalogs and two compilers; the language owns the tests of its own semantics
+  and runs them against both catalogs.
 - [`command-surface`](crates/command-surface/README.md): one operation table per
   product, from which every transport is generated; one answer contract and
   one failure table for every surface of both products.
@@ -128,7 +128,7 @@ These are the operator's standing positions; the product repositories'
 - **Valid input is never refused or truncated for size.**
 - **Tests with value.** A test checks behaviour a caller can observe through
   a stable interface, against an expected result known independently of the
-  code under test: independent oracles, law suites, crash tests at real
+  code under test: independent oracles, shared conformance tests, crash tests at real
   durability boundaries, property tests at serialization boundaries. Code
   that was removed is gone because it was deleted, so a test describes what
   exists, never that a name, variant or format stays absent. Assertions are
