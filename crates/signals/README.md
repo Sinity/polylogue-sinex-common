@@ -270,9 +270,7 @@ shown again only if its condition still holds; a historical one as is).
 
 ## Desktop notifications
 
-Ruling, 2026-10-28, on desktop notifications: "it sounds like good idea, just
-needs to be designed elegantly to not be a kludgy mess"
-(cc:ee52794c-8a9e-43b6-9fbc-9749c7e78e8f:3ae3257e-e70a-433a-be97-d1222670c284).
+Desktop notifications are part of the design and are built as one coherent channel, not as an add-on. (ruling 2026-10-28, cc:ee52794c-8a9e-43b6-9fbc-9749c7e78e8f:3ae3257e-e70a-433a-be97-d1222670c284).
 
 - **Transport:** the freedesktop Notifications interface
   (`org.freedesktop.Notifications`, specification 1.2) on the session bus,
