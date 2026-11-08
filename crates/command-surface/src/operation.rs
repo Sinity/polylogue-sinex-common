@@ -105,7 +105,7 @@ pub struct ArgumentSpec {
     pub calling_process: bool,
     /// Named in the MCP tool list. An unlisted field is still accepted and
     /// checked by its row at dispatch; a product's explain answer lists it
-    /// (`OperationTable::family_schemas`).
+    /// (`OperationCatalog::family_schemas`).
     #[serde(default = "listed", skip_serializing_if = "is_listed")]
     pub listed: bool,
 }
@@ -234,30 +234,26 @@ pub struct ToolFamily {
 pub trait Operation: Send + Sync + 'static {
     type Request: Serialize + DeserializeOwned + JsonSchema + Send + 'static;
     type Response: Serialize + DeserializeOwned + JsonSchema + Send + 'static;
-    fn spec(&self) -> OperationSpec;
     /// Access for this typed request. The declaration advertises the row's maximum.
-    fn required_access(&self, _request: &Self::Request) -> Access {
-        self.spec().access
+    fn required_access(&self, _request: &Self::Request, declared: Access) -> Access {
+        declared
     }
     fn execute(
         &self,
         request: Self::Request,
         context: RequestContext,
     ) -> OperationFuture<'_, Answer<Self::Response>>;
-    fn render_text(&self, answer: &Self::Response) -> String;
 }
 
 /// One stream row: opening it yields its events until the sender closes.
 pub trait StreamOperation: Send + Sync + 'static {
     type Request: Serialize + DeserializeOwned + JsonSchema + Send + 'static;
     type Event: Serialize + DeserializeOwned + JsonSchema + Send + 'static;
-    fn spec(&self) -> OperationSpec;
     fn open(
         &self,
         request: Self::Request,
         context: RequestContext,
     ) -> OperationFuture<'_, Result<tokio::sync::mpsc::Receiver<Self::Event>, Failure>>;
-    fn render_event(&self, event: &Self::Event) -> String;
 }
 
 /// A stream's events as JSON, in the order sent.
@@ -535,29 +531,30 @@ enum Row {
 }
 
 trait ErasedOperation: Send + Sync {
-    fn execute(
-        &self,
+    fn execute<'a>(
+        &'a self,
         arguments: Value,
         context: RequestContext,
-    ) -> OperationFuture<'_, Result<Answer<Value>, Failure>>;
-    fn render_text(&self, value: Value) -> Result<String, Failure>;
+        spec: &'a OperationSpec,
+    ) -> OperationFuture<'a, Result<Answer<Value>, Failure>>;
 }
 impl<O: Operation> ErasedOperation for O {
-    fn execute(
-        &self,
+    fn execute<'a>(
+        &'a self,
         arguments: Value,
         context: RequestContext,
-    ) -> OperationFuture<'_, Result<Answer<Value>, Failure>> {
+        spec: &'a OperationSpec,
+    ) -> OperationFuture<'a, Result<Answer<Value>, Failure>> {
         Box::pin(async move {
             let request = match serde_json::from_value(arguments) {
                 Ok(request) => request,
                 Err(error) => return Err(bad_request(error.to_string())),
             };
-            let access = Operation::required_access(self, &request);
+            let access = Operation::required_access(self, &request, spec.access);
             if access > context.caller().access() {
                 return Err(Failure::new(
                     FailureKind::Refused,
-                    format!("{} needs {} access", self.spec().name, access.name()),
+                    format!("{} needs {} access", spec.name, access.name()),
                 ));
             }
             let answer = Operation::execute(self, request, context).await;
@@ -579,11 +576,6 @@ impl<O: Operation> ErasedOperation for O {
             Ok(Answer { outcome, envelope })
         })
     }
-    fn render_text(&self, value: Value) -> Result<String, Failure> {
-        serde_json::from_value(value)
-            .map(|answer| Operation::render_text(self, &answer))
-            .map_err(|e| Failure::new(FailureKind::Io, e.to_string()))
-    }
 }
 
 trait ErasedStream: Send + Sync {
@@ -592,7 +584,6 @@ trait ErasedStream: Send + Sync {
         arguments: Value,
         context: RequestContext,
     ) -> OperationFuture<'_, Result<Events, Failure>>;
-    fn render_event(&self, event: Value) -> Result<String, Failure>;
 }
 impl<S: StreamOperation> ErasedStream for S {
     fn open(
@@ -608,11 +599,6 @@ impl<S: StreamOperation> ErasedStream for S {
                 events: Box::new(receiver),
             })
         })
-    }
-    fn render_event(&self, event: Value) -> Result<String, Failure> {
-        serde_json::from_value(event)
-            .map(|event| StreamOperation::render_event(self, &event))
-            .map_err(|e| Failure::new(FailureKind::Io, e.to_string()))
     }
 }
 
@@ -639,60 +625,140 @@ pub(crate) const GLOBAL_FLAGS: [&str; 7] = [
     "fresh",
 ];
 
-/// Heterogeneous typed table. Registration rejects ambiguity once at startup.
-/// Retry identity lives with the product's writer, in the same transaction
-/// as its mutation; the table keeps no request state.
-pub struct OperationTable {
-    rows: Vec<Row>,
+/// Immutable declarations, schemas and presentation, independent of handlers.
+pub struct OperationCatalog {
     forms: Arc<Forms>,
+    renderers: Vec<Option<Renderer>>,
     deadlines: Deadlines,
     failure_codes: BTreeMap<String, FailureKind>,
     default_operation: Option<String>,
 }
-impl OperationTable {
-    pub fn new(product: impl Into<String>, deadlines: Deadlines) -> Self {
-        Self {
-            rows: vec![],
-            forms: Arc::new(Forms {
-                product: product.into(),
-                descriptions: vec![],
-                tools: vec![],
-                options: vec![],
-            }),
-            deadlines,
-            failure_codes: BTreeMap::new(),
-            default_operation: None,
+type Renderer = Box<dyn Fn(Value) -> Result<String, Failure> + Send + Sync>;
+/// Builds the declaration owner before real runtime handlers are bound.
+pub struct CatalogBuilder {
+    catalog: OperationCatalog,
+}
+impl std::ops::Deref for CatalogBuilder {
+    type Target = OperationCatalog;
+    fn deref(&self) -> &Self::Target {
+        &self.catalog
+    }
+}
+impl OperationCatalog {
+    pub fn builder(product: impl Into<String>, deadlines: Deadlines) -> CatalogBuilder {
+        CatalogBuilder {
+            catalog: Self {
+                forms: Arc::new(Forms {
+                    product: product.into(),
+                    descriptions: vec![],
+                    tools: vec![],
+                    options: vec![],
+                }),
+                renderers: vec![],
+                deadlines,
+                failure_codes: BTreeMap::new(),
+                default_operation: None,
+            },
         }
     }
     pub fn product(&self) -> &str {
         &self.forms.product
+    }
+    pub fn tools(&self) -> &[ToolFamily] {
+        &self.forms.tools
+    }
+    pub fn accepts(&self, option: crate::RequestOption) -> bool {
+        self.forms.options.contains(&option)
+    }
+    pub fn descriptions(&self) -> &[OperationDescription] {
+        &self.forms.descriptions
+    }
+    /// The named operation's spec, borrowed from the catalog without cloning.
+    pub fn spec_named(&self, name: &str) -> Option<&OperationSpec> {
+        self.forms.description(name).map(|d| &d.spec)
+    }
+    pub(crate) fn default_operation(&self) -> Option<&OperationDescription> {
+        self.default_operation
+            .as_deref()
+            .and_then(|name| self.forms.description(name))
+    }
+    fn index(&self, name: &str) -> Option<usize> {
+        self.forms
+            .descriptions
+            .iter()
+            .position(|d| d.spec.name == name)
+    }
+    pub fn deadline(&self, request: &RunnableRequest) -> Option<Duration> {
+        self.spec_named(&request.operation)
+            .and_then(|spec| request.deadline.duration(self.deadlines.get(spec.latency)))
+    }
+    pub fn socket_timeout(&self, request: &RunnableRequest) -> Option<Duration> {
+        self.deadline(request)
+            .and_then(|d| d.checked_add(Duration::from_millis(50)))
+    }
+    pub(crate) fn forms(&self) -> &Arc<Forms> {
+        &self.forms
+    }
+    pub fn render_event(&self, operation: &str, event: Value) -> Result<String, Failure> {
+        let index = self
+            .index(operation)
+            .ok_or_else(|| bad_request(format!("{operation} is not a stream")))?;
+        if self.descriptions()[index].spec.kind != OperationKind::Stream {
+            return Err(bad_request(format!("{operation} is not a stream")));
+        }
+        self.renderers[index]
+            .as_ref()
+            .expect("stream declaration has a renderer")(event)
+    }
+    /// Render an answer without constructing or binding a handler.
+    pub fn render_text(&self, operation: &str, answer: &Answer<Value>) -> Result<String, Failure> {
+        match &answer.outcome {
+            Outcome::Error(error) => Ok(format!(
+                "error ({}): {}\n",
+                error.kind.name(),
+                terminal_text(&error.message)
+            )),
+            Outcome::Ok(value) | Outcome::Empty(value) | Outcome::Degraded { value, .. } => {
+                let index = self
+                    .index(operation)
+                    .ok_or_else(|| bad_request(format!("{operation} has no answer to render")))?;
+                if !matches!(
+                    self.descriptions()[index].spec.kind,
+                    OperationKind::Request { .. }
+                ) {
+                    return Err(bad_request(format!("{operation} has no answer to render")));
+                }
+                self.renderers[index]
+                    .as_ref()
+                    .expect("request declaration has a renderer")(value.clone())
+            }
+        }
+    }
+}
+impl CatalogBuilder {
+    pub fn finish(self) -> Arc<OperationCatalog> {
+        Arc::new(self.catalog)
     }
     /// Declare an MCP tool before registering its rows.
     pub fn declare_tool(&mut self, tool: ToolFamily) -> Result<(), Failure> {
         if !valid_word(&tool.name, '_') || tool.description.is_empty() {
             return Err(bad_request("a tool needs a name and a description"));
         }
-        if self.forms.tools.iter().any(|t| t.name == tool.name) {
+        if self.catalog.forms.tools.iter().any(|t| t.name == tool.name) {
             return Err(bad_request(format!("tool {} is declared twice", tool.name)));
         }
-        Arc::make_mut(&mut self.forms).tools.push(tool);
+        Arc::make_mut(&mut self.catalog.forms).tools.push(tool);
         Ok(())
-    }
-    pub fn tools(&self) -> &[ToolFamily] {
-        &self.forms.tools
     }
     /// Serve a request option on every row: tools offer it, and dispatch
     /// takes it. A table serves only `request_id` and `deadline` until it
     /// names more.
     pub fn accept(&mut self, option: crate::RequestOption) {
-        let options = &mut Arc::make_mut(&mut self.forms).options;
+        let options = &mut Arc::make_mut(&mut self.catalog.forms).options;
         if !options.contains(&option) {
             options.push(option);
             options.sort();
         }
-    }
-    pub fn accepts(&self, option: crate::RequestOption) -> bool {
-        self.forms.options.contains(&option)
     }
     /// The row a command line runs when its first words name no command
     /// (`polylogue QUERY`).
@@ -704,13 +770,8 @@ impl OperationTable {
         if matches!(spec.kind, OperationKind::Stream) {
             return Err(bad_request("a stream cannot be the default operation"));
         }
-        self.default_operation = Some(name);
+        self.catalog.default_operation = Some(name);
         Ok(())
-    }
-    pub(crate) fn default_operation(&self) -> Option<&OperationDescription> {
-        self.default_operation
-            .as_deref()
-            .and_then(|name| self.forms.description(name))
     }
     /// Register each precise product code once, at table construction.
     pub fn register_failure_code(
@@ -722,7 +783,7 @@ impl OperationTable {
         if code.is_empty() {
             return Err(bad_request("failure code must not be empty"));
         }
-        if let Some(existing) = self.failure_codes.get(&code) {
+        if let Some(existing) = self.catalog.failure_codes.get(&code) {
             if *existing == kind {
                 return Ok(());
             }
@@ -730,56 +791,63 @@ impl OperationTable {
                 "failure code {code} already has a different classification"
             )));
         }
-        self.failure_codes.insert(code, kind);
+        self.catalog.failure_codes.insert(code, kind);
         Ok(())
     }
-    pub fn register<O: Operation>(&mut self, operation: O) -> Result<(), Failure> {
-        let description = OperationDescription {
-            spec: operation.spec(),
-            input_schema: schema_for!(O::Request).to_value(),
-            output_schema: schema_for!(Answer<O::Response>).to_value(),
-        };
-        if !matches!(description.spec.kind, OperationKind::Request { .. }) {
-            return Err(bad_request(format!(
-                "operation {} implements Operation, so it is a request row",
-                description.spec.name
-            )));
+    pub fn declare<A: JsonSchema, R: Serialize + DeserializeOwned + JsonSchema + 'static>(
+        &mut self,
+        spec: OperationSpec,
+        render: fn(&R) -> String,
+    ) -> Result<(), Failure> {
+        if !matches!(spec.kind, OperationKind::Request { .. }) {
+            return Err(bad_request("request declaration needs a request kind"));
         }
-        self.add(description, Row::Request(Box::new(operation)))
+        self.add(
+            OperationDescription {
+                spec,
+                input_schema: schema_for!(A).to_value(),
+                output_schema: schema_for!(Answer<R>).to_value(),
+            },
+            Some(renderer(render)),
+        )
     }
-    pub fn register_stream<S: StreamOperation>(&mut self, stream: S) -> Result<(), Failure> {
-        let description = OperationDescription {
-            spec: stream.spec(),
-            input_schema: schema_for!(S::Request).to_value(),
-            output_schema: schema_for!(S::Event).to_value(),
-        };
-        if description.spec.kind != OperationKind::Stream {
-            return Err(bad_request(format!(
-                "operation {} implements StreamOperation, so it is a stream row",
-                description.spec.name
-            )));
+    pub fn declare_stream<A: JsonSchema, E: Serialize + DeserializeOwned + JsonSchema + 'static>(
+        &mut self,
+        spec: OperationSpec,
+        render: fn(&E) -> String,
+    ) -> Result<(), Failure> {
+        if spec.kind != OperationKind::Stream {
+            return Err(bad_request("stream declaration needs a stream kind"));
         }
-        self.add(description, Row::Stream(Box::new(stream)))
+        self.add(
+            OperationDescription {
+                spec,
+                input_schema: schema_for!(A).to_value(),
+                output_schema: schema_for!(E).to_value(),
+            },
+            Some(renderer(render)),
+        )
     }
-    /// A row the calling process runs itself. The table parses its command
-    /// line into `R` and lists it in help; nothing else reaches it.
-    pub fn register_local<R: JsonSchema>(&mut self, spec: OperationSpec) -> Result<(), Failure> {
+    pub fn declare_local<A: JsonSchema>(&mut self, spec: OperationSpec) -> Result<(), Failure> {
         if spec.kind != OperationKind::Local {
-            return Err(bad_request(format!(
-                "operation {} is registered as local, so its kind is local",
-                spec.name
-            )));
+            return Err(bad_request("local declaration needs a local kind"));
         }
-        let description = OperationDescription {
-            spec,
-            input_schema: schema_for!(R).to_value(),
-            output_schema: Value::Bool(true),
-        };
-        self.add(description, Row::Local)
+        self.add(
+            OperationDescription {
+                spec,
+                input_schema: schema_for!(A).to_value(),
+                output_schema: Value::Bool(true),
+            },
+            None,
+        )
     }
-    fn add(&mut self, description: OperationDescription, row: Row) -> Result<(), Failure> {
+    fn add(
+        &mut self,
+        description: OperationDescription,
+        renderer: Option<Renderer>,
+    ) -> Result<(), Failure> {
         let spec = &description.spec;
-        let product = &self.forms.product;
+        let product = &self.catalog.forms.product;
         if !valid_word(&product.replace('_', "-"), '-')
             || spec.name.is_empty()
             || spec.command.is_empty()
@@ -811,7 +879,7 @@ impl OperationTable {
                 )));
             }
         }
-        for existing in &self.forms.descriptions {
+        for existing in &self.catalog.forms.descriptions {
             let other = &existing.spec;
             if other.name == spec.name
                 || other.command == spec.command
@@ -824,7 +892,7 @@ impl OperationTable {
             }
         }
         if let OperationKind::Request { tool } = &spec.kind {
-            if !self.forms.tools.iter().any(|t| &t.name == tool) {
+            if !self.catalog.forms.tools.iter().any(|t| &t.name == tool) {
                 return Err(bad_request(format!(
                     "operation {} names undeclared tool {tool}",
                     spec.name
@@ -846,41 +914,112 @@ impl OperationTable {
             }
         }
         crate::arguments::check(&description)?;
-        let mut forms = (*self.forms).clone();
+        let mut forms = (*self.catalog.forms).clone();
         forms.descriptions.push(description);
         if let Some(tool) = forms.descriptions.last().and_then(|d| d.spec.tool()) {
             // A family's schema must merge.
             crate::tools::tool_input(&forms, tool)?;
         }
-        self.forms = Arc::new(forms);
-        self.rows.push(row);
+        self.catalog.forms = Arc::new(forms);
+        self.catalog.renderers.push(renderer);
         Ok(())
     }
-    pub fn descriptions(&self) -> &[OperationDescription] {
-        &self.forms.descriptions
+}
+fn renderer<R: DeserializeOwned + 'static>(render: fn(&R) -> String) -> Renderer {
+    Box::new(move |value| {
+        serde_json::from_value(value)
+            .map(|typed| render(&typed))
+            .map_err(|error| Failure::new(FailureKind::Io, error.to_string()))
+    })
+}
+
+/// Real runtime handlers bound to one immutable declaration owner.
+pub struct OperationTable {
+    catalog: Arc<OperationCatalog>,
+    rows: Vec<Option<Row>>,
+}
+impl std::ops::Deref for OperationTable {
+    type Target = OperationCatalog;
+    fn deref(&self) -> &Self::Target {
+        &self.catalog
     }
-    /// The named operation's spec, borrowed from the table without cloning.
-    pub fn spec_named(&self, name: &str) -> Option<&OperationSpec> {
-        self.forms.description(name).map(|d| &d.spec)
+}
+impl OperationTable {
+    pub fn new(catalog: Arc<OperationCatalog>) -> Self {
+        let rows = catalog
+            .descriptions()
+            .iter()
+            .map(|d| {
+                if d.spec.kind == OperationKind::Local {
+                    Some(Row::Local)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        Self { catalog, rows }
+    }
+    pub fn catalog(&self) -> &Arc<OperationCatalog> {
+        &self.catalog
+    }
+    pub fn bind<O: Operation>(&mut self, name: &str, operation: O) -> Result<(), Failure> {
+        let index = self.binding(
+            name,
+            schema_for!(O::Request).to_value(),
+            schema_for!(Answer<O::Response>).to_value(),
+            true,
+        )?;
+        self.rows[index] = Some(Row::Request(Box::new(operation)));
+        Ok(())
+    }
+    pub fn bind_stream<S: StreamOperation>(
+        &mut self,
+        name: &str,
+        stream: S,
+    ) -> Result<(), Failure> {
+        let index = self.binding(
+            name,
+            schema_for!(S::Request).to_value(),
+            schema_for!(S::Event).to_value(),
+            false,
+        )?;
+        self.rows[index] = Some(Row::Stream(Box::new(stream)));
+        Ok(())
+    }
+    fn binding(
+        &self,
+        name: &str,
+        input: Value,
+        output: Value,
+        request: bool,
+    ) -> Result<usize, Failure> {
+        let index = self
+            .catalog
+            .index(name)
+            .ok_or_else(|| bad_request(format!("unknown operation {name}")))?;
+        let description = &self.catalog.descriptions()[index];
+        let kind_matches = if request {
+            matches!(description.spec.kind, OperationKind::Request { .. })
+        } else {
+            description.spec.kind == OperationKind::Stream
+        };
+        if !kind_matches || description.input_schema != input || description.output_schema != output
+        {
+            return Err(bad_request(format!(
+                "binding {name} does not match its declared kind and schemas"
+            )));
+        }
+        if self.rows[index].is_some() {
+            return Err(bad_request(format!("operation {name} is already bound")));
+        }
+        Ok(index)
     }
     fn row(&self, name: &str) -> Option<(&OperationDescription, &Row)> {
-        let index = self
-            .forms
-            .descriptions
-            .iter()
-            .position(|d| d.spec.name == name)?;
-        Some((&self.forms.descriptions[index], &self.rows[index]))
-    }
-    pub fn deadline(&self, request: &RunnableRequest) -> Option<Duration> {
-        self.spec_named(&request.operation)
-            .and_then(|spec| request.deadline.duration(self.deadlines.get(spec.latency)))
-    }
-    pub fn socket_timeout(&self, request: &RunnableRequest) -> Option<Duration> {
-        self.deadline(request)
-            .and_then(|d| d.checked_add(Duration::from_millis(50)))
-    }
-    pub(crate) fn forms(&self) -> &Arc<Forms> {
-        &self.forms
+        let index = self.catalog.index(name)?;
+        Some((
+            &self.catalog.descriptions()[index],
+            self.rows[index].as_ref()?,
+        ))
     }
     pub async fn call(
         &self,
@@ -990,7 +1129,7 @@ impl OperationTable {
             fresh: request.fresh,
             format: request.format,
             metadata,
-            forms: self.forms.clone(),
+            forms: self.catalog.forms.clone(),
             progress: Arc::default(),
         }
     }
@@ -1029,7 +1168,7 @@ impl OperationTable {
             biased;
             _ = cancellation.cancelled() => Err(Failure::new(FailureKind::Cancelled, "request cancelled")),
             _ = wait_deadline => Ok(timeout_answer(&request, &progress)),
-            answer = operation.execute(request.arguments.clone(), context) => answer,
+            answer = operation.execute(request.arguments.clone(), context, &description.spec) => answer,
         };
         drop(guard);
         match answer {
@@ -1056,12 +1195,6 @@ impl OperationTable {
         };
         let context = self.context(&request, description, via, caller, None, cancellation);
         stream.open(request.arguments.clone(), context).await
-    }
-    pub fn render_event(&self, operation: &str, event: Value) -> Result<String, Failure> {
-        match self.row(operation) {
-            Some((_, Row::Stream(stream))) => stream.render_event(event),
-            _ => Err(bad_request(format!("{operation} is not a stream"))),
-        }
     }
     fn checked_answer(&self, answer: Answer<Value>, spec: &OperationSpec) -> Answer<Value> {
         let Answer {
@@ -1115,23 +1248,6 @@ impl OperationTable {
             );
         }
         error
-    }
-    /// The answer's value as text, from its operation's renderer; a failure
-    /// as its kind and message.
-    pub fn render_text(&self, operation: &str, answer: &Answer<Value>) -> Result<String, Failure> {
-        match &answer.outcome {
-            Outcome::Error(error) => Ok(format!(
-                "error ({}): {}\n",
-                error.kind.name(),
-                terminal_text(&error.message)
-            )),
-            Outcome::Ok(value) | Outcome::Empty(value) | Outcome::Degraded { value, .. } => {
-                match self.row(operation) {
-                    Some((_, Row::Request(row))) => row.render_text(value.clone()),
-                    _ => Err(bad_request(format!("{operation} has no answer to render"))),
-                }
-            }
-        }
     }
 }
 

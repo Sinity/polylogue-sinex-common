@@ -37,6 +37,28 @@ Answers are typed values. Each surface renders them from the type: text for
 the terminal and for a model, JSON for programs, HTML for the web. No surface
 assembles an answer of its own.
 
+### Declaration and execution
+
+`OperationCatalog::builder(product, deadlines)` creates a `CatalogBuilder`.
+It declares tool families, request options, precise failure codes and typed
+rows. `declare::<Request, Response>(spec, render)` and
+`declare_stream::<Request, Event>(spec, render)` take a pure rendering
+function; `declare_local::<Request>(spec)` declares a caller-local row.
+`finish()` returns an immutable `Arc<OperationCatalog>`.
+
+The catalog alone supplies CLI parsing, help, completion, schemas, MCP tool
+lists, follow-up requests, deadlines and answer/event rendering. A client can
+use all of them without constructing a daemon, operation or runtime table.
+
+`OperationTable::new(catalog)` binds execution separately.
+`bind(name, operation)` and `bind_stream(name, stream)` require an existing
+declaration with the matching row kind and request/response or event schemas;
+a second binding is refused. Operations own only execution and typed access
+policy. `required_access(request, declared)` defaults to the declaration's
+access, so extracting metadata cannot lower authorization. The table borrows
+all pure views from that same catalog. Product transactions, retry identity,
+cancellation and transport execution retain their existing owners.
+
 ### Access
 
 Each row needs one level: **read**, **write** (attributed writes that can be
@@ -100,7 +122,7 @@ schema checks the arguments at dispatch, so a field of another row or a
 mistyped value is refused there. Tools carry no `outputSchema`: results keep
 `structuredContent`, and a product serves the answer's schema
 (`OperationTable::answer_schema`) and each family's full row schemas
-(`OperationTable::family_schemas`) once, from its explain or capabilities
+(`OperationCatalog::family_schemas`) once, from its explain or capabilities
 answer. `laws::tools_list_within` holds a product's whole tool list to the
 byte budget it passes. Hints come from the
 family: read-only for read access, destructive for permanent, and

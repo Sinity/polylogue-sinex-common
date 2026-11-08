@@ -18,8 +18,9 @@ pub struct RenderedAnswer {
 }
 use crate::operation::{Forms, terminal_text};
 use crate::{
-    Access, Answer, Caller, CancellationToken, Deadline, Failure, Format, LeftOut, OperationTable,
-    Outcome, RunnableRequest, Suggestion, Via, approximate_tokens, bad_request,
+    Access, Answer, Caller, CancellationToken, Deadline, Failure, Format, LeftOut,
+    OperationCatalog, OperationTable, Outcome, RunnableRequest, Suggestion, Via,
+    approximate_tokens, bad_request,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -27,7 +28,7 @@ use serde_json::{Map, Value, json};
 /// The type of one request field as a tool list states it: a scalar keeps
 /// its type and its enum values; an object, a list or a choice among
 /// them is only its bare type. The full schema of each row is
-/// `OperationTable::family_schemas`, for a product's explain answer.
+/// `OperationCatalog::family_schemas`, for a product's explain answer.
 fn shallow(schema: &Value, definitions: &Map<String, Value>) -> Value {
     let schema = match schema
         .get("$ref")
@@ -393,7 +394,7 @@ impl Forms {
     }
 }
 
-impl OperationTable {
+impl OperationCatalog {
     /// Every row of a tool family with its full request schema, for a
     /// product's explain or capabilities answer: the tool list states only
     /// each field's shallow type.
@@ -448,6 +449,9 @@ impl OperationTable {
             })
             .collect()
     }
+}
+
+impl OperationTable {
     /// The complete MCP JSON-RPC adapter for `tools/list` and `tools/call`,
     /// suitable for stdio or streamable HTTP. The host owns initialization,
     /// authentication and cancellation notifications.
@@ -543,6 +547,9 @@ impl OperationTable {
             "content": [{"type": "text", "text": format!("{value_text}{footer}")}],
         })
     }
+}
+
+impl OperationCatalog {
     /// The request a tool call makes: its row (named by `operation` when the
     /// tool has several) and the call's options. The row's own schema checks
     /// the arguments at dispatch.

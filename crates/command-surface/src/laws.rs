@@ -1,7 +1,7 @@
 //! Laws a product checks against its own operation table, in its own tests.
 use crate::{
-    AgentSession, Author, Authorship, CallerEvidence, Harness, HookIdentity, OperationKind,
-    OperationTable, Via,
+    AgentSession, Author, Authorship, CallerEvidence, Harness, HookIdentity, OperationCatalog,
+    OperationKind, Via,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 /// request row is reachable from exactly one tool, the one it names; no
 /// stream or local row is a tool; each tool's hints hold for every row it
 /// holds; and every declared tool holds a row.
-pub fn tools_generated(table: &OperationTable) -> Result<(), String> {
+pub fn tools_generated(table: &OperationCatalog) -> Result<(), String> {
     let tools = table.mcp_tools();
     let mut reached: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for tool in &tools {
@@ -340,7 +340,7 @@ pub fn id_one(
 /// `tools-list-within`: the MCP `tools/list` result of `table`, as compact
 /// JSON, is at most `max_bytes`. A product passes the budget its harnesses
 /// can afford in every session.
-pub fn tools_list_within(table: &OperationTable, max_bytes: usize) -> Result<(), String> {
+pub fn tools_list_within(table: &OperationCatalog, max_bytes: usize) -> Result<(), String> {
     let bytes = serde_json::to_vec(&serde_json::json!({ "tools": table.mcp_tools() }))
         .expect("tool lists serialize")
         .len();

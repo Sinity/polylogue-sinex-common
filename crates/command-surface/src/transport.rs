@@ -1,7 +1,7 @@
 //! Transport adapters contain framing only. None builds an answer of its own.
 use crate::{
-    Answer, Caller, CancellationToken, Failure, FailureKind, Format, OperationKind, OperationTable,
-    RunnableRequest, Via, bad_request,
+    Answer, Caller, CancellationToken, Failure, FailureKind, Format, OperationCatalog,
+    OperationKind, OperationTable, RunnableRequest, Via, bad_request,
 };
 use http::{Request as HttpRequest, Response as HttpResponse, StatusCode};
 use serde::Serialize;
@@ -36,7 +36,7 @@ impl StreamLine {
     }
 }
 
-impl OperationTable {
+impl OperationCatalog {
     /// Generated help: one line per listed row, with its usage.
     pub fn help(&self) -> String {
         self.descriptions()
@@ -87,6 +87,9 @@ impl OperationTable {
             .filter(|command| command.starts_with(prefix))
             .collect()
     }
+}
+
+impl OperationTable {
     pub async fn cli(
         &self,
         args: &[String],
