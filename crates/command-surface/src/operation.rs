@@ -1503,7 +1503,6 @@ impl OperationTable {
     fn context(
         &self,
         request: &RunnableRequest,
-        description: &OperationDescription,
         via: Via,
         caller: Caller,
         metadata: Option<Value>,
@@ -1531,7 +1530,9 @@ impl OperationTable {
                 parent: cancellation,
             })),
             budget_tokens: request.budget_tokens,
-            default_budget_tokens: description.spec.default_budget_tokens,
+            default_budget_tokens: self
+                .spec_named(&request.operation)
+                .and_then(|spec| spec.default_budget_tokens),
             cursor: request.cursor.clone(),
             fresh: request.fresh,
             format: request.format,
@@ -1575,7 +1576,6 @@ impl OperationTable {
         }
         let context = self.context(
             &request,
-            description,
             via,
             caller,
             metadata,
@@ -1627,15 +1627,7 @@ impl OperationTable {
         if cancellation.is_cancelled() {
             return Err(Failure::new(FailureKind::Cancelled, "request cancelled"));
         }
-        let context = self.context(
-            &request,
-            description,
-            via,
-            caller,
-            None,
-            cancellation,
-            policy.read_phase,
-        );
+        let context = self.context(&request, via, caller, None, cancellation, policy.read_phase);
         let guard = context.cancellation.clone().drop_guard();
         let open = match row {
             Row::Stream(stream) => stream.open(request.arguments.clone(), context.clone()),
