@@ -19,7 +19,7 @@ pub struct RenderedAnswer {
 use crate::operation::{Forms, terminal_text};
 use crate::{
     Access, Answer, Caller, CancellationToken, Deadline, Failure, Format, LeftOut,
-    OperationCatalog, OperationTable, Outcome, RunnableRequest, Suggestion, Via,
+    OperationCatalog, OperationTable, Outcome, RunnableRequest, Suggestion, TextStyle, Via,
     approximate_tokens, bad_request,
 };
 use serde::Deserialize;
@@ -263,16 +263,18 @@ impl Forms {
         }
         Some(format!("{} {}", self.tool_name(tool), Value::Object(call)))
     }
-    /// A follow-up as the surface writes it: an MCP tool call, or a command
-    /// line everywhere else (and for a row no tool holds).
-    pub(crate) fn follow_up(&self, via: Via, request: &RunnableRequest) -> String {
-        if via == Via::Mcp
-            && let Some(call) = self.tool_call(request)
-        {
-            return call;
+    /// A surface-ready call; absence never falls back to a different surface.
+    pub(crate) fn follow_up(&self, via: Via, request: &RunnableRequest) -> Result<String, Failure> {
+        if via == Via::Mcp {
+            return self
+                .tool_call(request)
+                .ok_or_else(|| bad_request(format!("{} has no MCP surface", request.operation)));
         }
         self.cli_command(request)
-            .unwrap_or_else(|_| format!("{} (unknown operation)", request.operation))
+    }
+    fn display_follow_up(&self, via: Via, request: &RunnableRequest) -> String {
+        self.follow_up(via, request)
+            .unwrap_or_else(|error| format!("unavailable: {}", terminal_text(&error.message)))
     }
     /// The one line an answer prints for something it left out.
     pub(crate) fn left_out_line(&self, via: Via, item: &LeftOut) -> String {
@@ -282,7 +284,7 @@ impl Forms {
                 "left out: {} {unit} of {}; read them: {}\n",
                 item.count,
                 terminal_text(&item.what),
-                self.follow_up(via, expand)
+                self.display_follow_up(via, expand)
             ),
             None => format!(
                 "left out: {} {unit} of {}\n",
@@ -323,7 +325,7 @@ impl Forms {
                     text.push_str(&format!("did you mean: {}\n", terminal_text(query)));
                 }
                 Some(Suggestion::Request(request)) => {
-                    text.push_str(&format!("try: {}\n", self.follow_up(via, request)));
+                    text.push_str(&format!("try: {}\n", self.display_follow_up(via, request)));
                 }
                 None => {}
             }
@@ -387,7 +389,7 @@ impl Forms {
             text.push_str(&format!(
                 "next: {}: {}\n",
                 terminal_text(&next.label),
-                self.follow_up(via, &next.request)
+                self.display_follow_up(via, &next.request)
             ));
         }
         text
@@ -419,7 +421,7 @@ impl OperationCatalog {
         self.forms().cli_command(request)
     }
     /// A follow-up as the surface of `via` writes it.
-    pub fn follow_up(&self, via: Via, request: &RunnableRequest) -> String {
+    pub fn follow_up(&self, via: Via, request: &RunnableRequest) -> Result<String, Failure> {
         self.forms().follow_up(via, request)
     }
     /// The MCP `tools/list` entries: one per declared tool that holds a row.
@@ -529,7 +531,7 @@ impl OperationTable {
             mut answer,
             value_text,
             footer,
-        } = self.render_answer(Via::Mcp, request.as_ref(), answer);
+        } = self.render_answer(Via::Mcp, request.as_ref(), answer, TextStyle::Plain);
         if format == Format::Text && !answer.is_error() {
             // The rows are in the text part; the structured part says so
             // instead of sending them twice.
@@ -597,6 +599,7 @@ impl OperationCatalog {
         via: Via,
         request: Option<&RunnableRequest>,
         mut answer: Answer<Value>,
+        style: TextStyle,
     ) -> RenderedAnswer {
         let operation = request.map_or("", |request| request.operation.as_str());
         let streamed = self
@@ -604,10 +607,10 @@ impl OperationCatalog {
             .is_some_and(|spec| spec.kind == crate::OperationKind::Stream);
         let json = request.is_some_and(|request| request.format == Format::Json);
         let full = match &answer.outcome {
-            Outcome::Error(_) => self.render_text("", &answer).unwrap_or_default(),
+            Outcome::Error(_) => self.render_text("", &answer, style).unwrap_or_default(),
             _ if json || streamed || operation.is_empty() => String::new(),
             _ => self
-                .render_text(operation, &answer)
+                .render_text(operation, &answer, style)
                 .unwrap_or_else(|failure| format!("error (io): {}\n", failure.message)),
         };
         let value_text = full;

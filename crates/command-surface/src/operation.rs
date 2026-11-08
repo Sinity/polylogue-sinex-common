@@ -19,6 +19,14 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 
 pub type OperationFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+/// Explicit text presentation, supplied by the accepting client.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextStyle {
+    #[default]
+    Plain,
+    Ansi,
+}
+
 /// Who may call an operation. Each level includes the ones below it.
 #[derive(
     Clone,
@@ -58,9 +66,11 @@ impl Access {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OperationKind {
-    /// The daemon answers it once. It is offered on every surface; over MCP
-    /// it is a row of the named tool.
-    Request { tool: String },
+    /// The daemon answers it once. Only a named tool exposes it over MCP.
+    Request {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool: Option<String>,
+    },
     /// The daemon sends events until the stream ends or the caller leaves
     /// (a change feed, `follow`). Offered on the CLI, the socket and HTTP
     /// (as server-sent events); not over MCP, whose calls answer once.
@@ -104,6 +114,10 @@ pub struct ArgumentSpec {
     /// and kept out of the request.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub calling_process: bool,
+    /// Split one repeated CLI value into several textual items. HTTP pairs
+    /// and canonical JSON retain their own value representation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_delimiter: Option<char>,
     /// Named in the MCP tool list. An unlisted field is still accepted and
     /// checked by its row at dispatch; a product's explain answer lists it
     /// (`OperationCatalog::family_schemas`).
@@ -118,12 +132,17 @@ impl ArgumentSpec {
             help: help.into(),
             short: None,
             calling_process: false,
+            value_delimiter: None,
             listed: true,
         }
     }
     /// Leave the field out of the MCP tool list; it stays accepted.
     pub fn unlisted(mut self) -> Self {
         self.listed = false;
+        self
+    }
+    pub fn delimiter(mut self, delimiter: char) -> Self {
+        self.value_delimiter = Some(delimiter);
         self
     }
     pub fn short(mut self, short: char) -> Self {
@@ -142,6 +161,8 @@ impl ArgumentSpec {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct OperationSpec {
     pub name: String,
+    /// Empty when the row has no command-line surface.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub command: Vec<String>,
     pub summary: String,
     /// Why this operation cannot be a query plus an existing operation.
@@ -182,12 +203,14 @@ impl OperationSpec {
     ) -> Self {
         let command: Vec<String> = command.iter().map(|word| (*word).to_owned()).collect();
         Self {
-            http_route: Some(format!("/v1/{}", command.join("/"))),
+            http_route: (!command.is_empty()).then(|| format!("/v1/{}", command.join("/"))),
             name: name.into(),
             command,
             summary: summary.into(),
             reason: reason.into(),
-            kind: OperationKind::Request { tool: tool.into() },
+            kind: OperationKind::Request {
+                tool: Some(tool.into()),
+            },
             latency: LatencyClass::Read,
             failures: vec![],
             access: Access::Read,
@@ -198,7 +221,7 @@ impl OperationSpec {
     }
     pub fn tool(&self) -> Option<&str> {
         match &self.kind {
-            OperationKind::Request { tool } => Some(tool),
+            OperationKind::Request { tool } => tool.as_deref(),
             _ => None,
         }
     }
@@ -538,7 +561,7 @@ impl RequestContext {
     }
     /// How this request's surface writes a follow-up: a command line, or an
     /// MCP tool call.
-    pub fn follow_up(&self, request: &RunnableRequest) -> String {
+    pub fn follow_up(&self, request: &RunnableRequest) -> Result<String, Failure> {
         self.forms.follow_up(self.via, request)
     }
     /// Fit a typed answer's logical entries once. Its outcome is preserved;
@@ -832,7 +855,7 @@ pub struct OperationCatalog {
     failure_codes: BTreeMap<String, FailureKind>,
     default_operation: Option<String>,
 }
-type Renderer = Box<dyn Fn(Value) -> Result<String, Failure> + Send + Sync>;
+type Renderer = Box<dyn Fn(Value, TextStyle) -> Result<String, Failure> + Send + Sync>;
 #[derive(Default)]
 struct Presentation {
     answer: Option<Renderer>,
@@ -904,7 +927,12 @@ impl OperationCatalog {
     pub(crate) fn forms(&self) -> &Arc<Forms> {
         &self.forms
     }
-    pub fn render_event(&self, operation: &str, event: Value) -> Result<String, Failure> {
+    pub fn render_event(
+        &self,
+        operation: &str,
+        event: Value,
+        style: TextStyle,
+    ) -> Result<String, Failure> {
         let index = self
             .index(operation)
             .ok_or_else(|| bad_request(format!("{operation} is not a stream")))?;
@@ -916,10 +944,15 @@ impl OperationCatalog {
         self.renderers[index]
             .event
             .as_ref()
-            .expect("stream declaration has a renderer")(event)
+            .expect("stream declaration has a renderer")(event, style)
     }
     /// Render an answer without constructing or binding a handler.
-    pub fn render_text(&self, operation: &str, answer: &Answer<Value>) -> Result<String, Failure> {
+    pub fn render_text(
+        &self,
+        operation: &str,
+        answer: &Answer<Value>,
+        style: TextStyle,
+    ) -> Result<String, Failure> {
         match &answer.outcome {
             Outcome::Error(error) => Ok(format!(
                 "error ({}): {}\n",
@@ -939,7 +972,9 @@ impl OperationCatalog {
                 self.renderers[index]
                     .answer
                     .as_ref()
-                    .expect("request declaration has a renderer")(value.clone())
+                    .expect("request declaration has a renderer")(
+                    value.clone(), style
+                )
             }
         }
     }
@@ -1010,6 +1045,11 @@ impl CatalogBuilder {
         if matches!(spec.kind, OperationKind::Stream) {
             return Err(bad_request("a stream cannot be the default operation"));
         }
+        if spec.command.is_empty() {
+            return Err(bad_request(
+                "the default operation needs a command-line surface",
+            ));
+        }
         self.catalog.default_operation = Some(name);
         Ok(())
     }
@@ -1037,7 +1077,7 @@ impl CatalogBuilder {
     pub fn declare<A: JsonSchema, R: Serialize + DeserializeOwned + JsonSchema + 'static>(
         &mut self,
         spec: OperationSpec,
-        render: fn(&R) -> String,
+        render: fn(&R, TextStyle) -> String,
     ) -> Result<(), Failure> {
         if !matches!(spec.kind, OperationKind::Request { .. }) {
             return Err(bad_request("request declaration needs a request kind"));
@@ -1058,7 +1098,7 @@ impl CatalogBuilder {
     pub fn declare_stream<A: JsonSchema, E: Serialize + DeserializeOwned + JsonSchema + 'static>(
         &mut self,
         spec: OperationSpec,
-        render: fn(&E) -> String,
+        render: fn(&E, TextStyle) -> String,
     ) -> Result<(), Failure> {
         if spec.kind != OperationKind::Stream {
             return Err(bad_request("stream declaration needs a stream kind"));
@@ -1083,8 +1123,8 @@ impl CatalogBuilder {
     >(
         &mut self,
         spec: OperationSpec,
-        answer: fn(&R) -> String,
-        event: fn(&E) -> String,
+        answer: fn(&R, TextStyle) -> String,
+        event: fn(&E, TextStyle) -> String,
     ) -> Result<(), Failure> {
         if !matches!(spec.kind, OperationKind::Request { .. }) {
             return Err(bad_request("transfer declaration needs a request kind"));
@@ -1125,17 +1165,17 @@ impl CatalogBuilder {
         let product = &self.catalog.forms.product;
         if !valid_word(&product.replace('_', "-"), '-')
             || spec.name.is_empty()
-            || spec.command.is_empty()
+            || (spec.kind == OperationKind::Local && spec.command.is_empty())
             || spec.command.iter().any(|word| !valid_word(word, '-'))
             || spec.summary.is_empty()
             || spec.reason.is_empty()
         {
             return Err(bad_request(
-                "operation needs a name, command words, summary and reason",
+                "operation needs a name, valid command words, summary and reason",
             ));
         }
         match (&spec.kind, &spec.http_route) {
-            (OperationKind::Local, None) => {}
+            (_, None) => {}
             (OperationKind::Local, Some(_)) => {
                 return Err(bad_request(format!(
                     "local operation {} has no HTTP route",
@@ -1157,7 +1197,7 @@ impl CatalogBuilder {
         for existing in &self.catalog.forms.descriptions {
             let other = &existing.spec;
             if other.name == spec.name
-                || other.command == spec.command
+                || (!spec.command.is_empty() && other.command == spec.command)
                 || (other.http_route.is_some() && other.http_route == spec.http_route)
             {
                 return Err(bad_request(format!(
@@ -1166,7 +1206,7 @@ impl CatalogBuilder {
                 )));
             }
         }
-        if let OperationKind::Request { tool } = &spec.kind {
+        if let OperationKind::Request { tool: Some(tool) } = &spec.kind {
             if !self.catalog.forms.tools.iter().any(|t| &t.name == tool) {
                 return Err(bad_request(format!(
                     "operation {} names undeclared tool {tool}",
@@ -1188,7 +1228,9 @@ impl CatalogBuilder {
                 )));
             }
         }
-        crate::arguments::check(&description)?;
+        if !spec.command.is_empty() {
+            crate::arguments::check(&description)?;
+        }
         let mut forms = (*self.catalog.forms).clone();
         forms.descriptions.push(description);
         if let Some(tool) = forms.descriptions.last().and_then(|d| d.spec.tool()) {
@@ -1200,10 +1242,10 @@ impl CatalogBuilder {
         Ok(())
     }
 }
-fn renderer<R: DeserializeOwned + 'static>(render: fn(&R) -> String) -> Renderer {
-    Box::new(move |value| {
+fn renderer<R: DeserializeOwned + 'static>(render: fn(&R, TextStyle) -> String) -> Renderer {
+    Box::new(move |value, style| {
         serde_json::from_value(value)
-            .map(|typed| render(&typed))
+            .map(|typed| render(&typed, style))
             .map_err(|error| Failure::new(FailureKind::Io, error.to_string()))
     })
 }

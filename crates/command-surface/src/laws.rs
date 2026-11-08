@@ -7,8 +7,8 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// `tools-generated`: `tools/list` is the grouping of the table. Every
-/// request row is reachable from exactly one tool, the one it names; no
-/// stream or local row is a tool; each tool's hints hold for every row it
+/// request row naming a tool is reachable from exactly that tool; request
+/// rows without MCP exposure, streams and local rows are absent from tools; each tool's hints hold for every row it
 /// holds; and every declared tool holds a row.
 pub fn tools_generated(table: &OperationCatalog) -> Result<(), String> {
     let tools = table.mcp_tools();
@@ -36,7 +36,7 @@ pub fn tools_generated(table: &OperationCatalog) -> Result<(), String> {
             let spec = table
                 .spec_named(&row)
                 .ok_or_else(|| format!("{name} offers {row}, which the table does not have"))?;
-            let OperationKind::Request { tool: own } = &spec.kind else {
+            let OperationKind::Request { tool: Some(own) } = &spec.kind else {
                 return Err(format!("{name} offers {row}, which is not a request row"));
             };
             if name != format!("{}_{own}", table.product()) {
@@ -56,8 +56,13 @@ pub fn tools_generated(table: &OperationCatalog) -> Result<(), String> {
         let spec = &description.spec;
         let tools = reached.get(&spec.name).map_or(0, Vec::len);
         match (&spec.kind, tools) {
-            (OperationKind::Request { .. }, 1)
-            | (OperationKind::Stream | OperationKind::Local, 0) => {}
+            (OperationKind::Request { tool: Some(_) }, 1)
+            | (
+                OperationKind::Request { tool: None }
+                | OperationKind::Stream
+                | OperationKind::Local,
+                0,
+            ) => {}
             (OperationKind::Request { .. }, count) => {
                 return Err(format!("{} is reachable from {count} tools", spec.name));
             }

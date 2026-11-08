@@ -22,7 +22,7 @@ mod tools;
 mod transport;
 mod values;
 
-pub use arguments::ParsedCommand;
+pub use arguments::{CliArgument, ParsedCommand, ValueKind};
 pub use authorship::*;
 pub use envelope::*;
 pub use event::*;

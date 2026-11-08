@@ -1,9 +1,9 @@
 # command-surface
 
 How an operation travels between a caller and a product daemon, and what
-comes back. Each product declares one typed operation table; the CLI, the
-socket, HTTP and MCP are generated from it, so every operation is reachable
-the same way from every surface and none exists on one surface only. This
+comes back. Each product declares one typed catalog with the actual CLI,
+HTTP and MCP exposure of every operation. Transport adapters share that
+catalog and the same authenticated execution handlers. This
 crate holds the mechanics both products share: the `Operation` trait, the
 answer contract every surface of both products uses, the `Failure` type with
 its exit and HTTP table, who the caller is and who authored a write, the
@@ -14,27 +14,31 @@ status format of measurements and a verdict.
 
 An operation is one row of a product's table. Its `OperationSpec` declares:
 
-- its name and command words;
+- its name and command words; an empty command means no CLI surface;
 - its **kind**: a **request** the daemon answers once, a **stream** of events
   the daemon sends until it ends or the caller leaves (a change feed,
   `follow`), or a **local** row the calling process runs without the daemon
   (help, installers, the MCP server and hook entry points);
-- for a request, the tool family it belongs to over MCP;
-- its HTTP route (none for a local row);
+- for a request, its optional MCP tool family; `None` means no MCP exposure;
+- its optional HTTP route (always absent for a local row);
 - its latency class, declared failure kinds, access level and default token
   budget;
 - how each request field is written on the command line;
 - whether help lists it.
 
-Its request type supplies its fields of the MCP tool's `inputSchema` and
-its own row's schema in `GET /v1/commands`, with its answer type (or a
-stream's event type). A request row implements
+The catalog keeps every request and answer schema (or a stream's event
+schema). A request naming a tool family also supplies that tool's
+`inputSchema`; `GET /v1/commands` describes all rows and their explicit
+surface capabilities. A request row implements
 `Operation`, a stream row `StreamOperation`; a local row registers its
 request type only, and the product runs it after `parse_cli` says it is
 local.
 
 Answers are typed values. Each surface renders them from the type: text for
-the terminal and for a model, JSON for programs, HTML for the web. No surface
+the terminal and for a model, JSON for programs, HTML for the web. The one
+pure text renderer accepts an explicit `TextStyle` (`Plain` or `Ansi`). MCP
+and the shared transport helpers use Plain; a product CLI passes its captured
+output style. The shared renderer reads no process environment. No surface
 assembles an answer of its own.
 
 ### Declaration and execution
@@ -42,13 +46,31 @@ assembles an answer of its own.
 `OperationCatalog::builder(product, deadlines)` creates a `CatalogBuilder`.
 It declares tool families, request options, precise failure codes and typed
 rows. `declare::<Request, Response>(spec, render)` and
-`declare_stream::<Request, Event>(spec, render)` take a pure rendering
-function; `declare_local::<Request>(spec)` declares a caller-local row.
+`declare_stream::<Request, Event>(spec, render)` take a pure
+`fn(&ValueType, TextStyle) -> String` rendering function.
+`declare_local::<Request>(spec)` declares a caller-local row.
 `finish()` returns an immutable `Arc<OperationCatalog>`.
 
 The catalog alone supplies CLI parsing, help, completion, schemas, MCP tool
-lists, follow-up requests, read deadlines and connection budgets and answer/event rendering. A client can
-use all of them without constructing a daemon, operation or runtime table.
+lists, fallible follow-up requests, read deadlines, connection budgets and
+answer/event rendering with an explicit style. A client can use all of them
+without constructing a daemon, operation or runtime table.
+
+`cli_arguments(operation)` projects the existing argument declarations and
+typed schema into owned `CliArgument` values: `spec`, `kind`, `required` and
+closed textual `choices`. It includes implicit named fields and calling-process
+flags. A product may build help and completion from this projection; actual
+argument parsing remains in the common parser.
+
+A request with `tool: None` has no tools/list entry and cannot be selected by
+tools/call, including a forged operation name in another family. Empty CLI
+commands are absent from parsing, help, completion and ready command lines.
+An absent HTTP route excludes HTTP dispatch. The HTTP command listing is
+the full catalog, with each surface explicitly present or absent. Native
+execution remains subject to product authentication and access policy.
+`listed` controls human help/completion visibility, not transport access.
+`follow_up` fails when its requested ready-call surface is absent; MCP never
+falls back to a CLI invocation. Answer footers display that absence explicitly.
 
 `OperationTable::new(catalog)` binds execution separately.
 `bind(name, operation)` and `bind_stream(name, stream)` require an existing
@@ -69,7 +91,7 @@ refuses a row above it before the row runs.
 
 ### The command line
 
-Every surface but the command line uses the request's own field names. The
+Every exposed surface but the command line uses the request's own field names. The
 command line writes each field in its row's declared form:
 
 | Form | Written | Value |
@@ -83,11 +105,20 @@ command line writes each field in its row's declared form:
 
 A field without a declaration is written `--name VALUE`. A flag that acts on
 the calling process (`--out FILE`) is read by the command line and kept out
-of the request. `--` ends the flags. Every row also takes `--json`,
+of the request. Known global options may precede a command (`--json status`,
+`--deadline 100 read REF`) or follow it. Longest command selection normalizes
+only that leading global prefix; `--` and Rest arguments retain their literal
+meaning. `--` ends the flags. Every row also takes `--json`,
 `--deadline MS|none`, `--request-id ID`, `--budget N|none`, `--cursor C`,
 `--fresh` and `--request JSON` (the whole value, for any request type). A
 product may name one **default operation**, run when a command line's first
 words name no command (`polylogue QUERY`).
+
+A repeated list argument may explicitly declare `delimiter(',')`, stored as
+`value_delimiter`, to split one CLI flag value into several items. This does
+not split Words/path lists, HTTP query values or canonical `--request` JSON.
+A ready CLI call containing a literal delimiter inside one item uses the
+canonical request form so its identity survives parsing.
 
 A request written back as a command line uses the row's own forms whenever
 every field can be written that way, and `--request JSON` otherwise; flags
@@ -443,7 +474,7 @@ Declare typed values implementing serde and `JsonSchema` in a
 `CatalogBuilder`, finish the catalog, and bind real `Operation` or
 `StreamOperation` handlers in `OperationTable`. `declare_local` needs only
 the local row's request type. Declaration rejects duplicate names, commands and routes, a request
-row in an undeclared family or in a family of another access level, rows of
+row naming an undeclared family or a family of another access level, rows of
 one family that define one schema name two ways, and argument declarations
 the request type cannot hold or the command line cannot read back.
 
@@ -461,10 +492,26 @@ notifications are taken, and lines are read whole without holding up the
 call), HTTP dispatch at `POST
 /v1` or each row's route (JSON, or a URL-encoded form with one `request`
 field, so a form works without JavaScript; `GET /v1/commands` lists the
-rows), `open_stream` for a product's server-sent events, and MCP
+full catalog with explicit surface capabilities), `open_stream` for a product's server-sent events, and MCP
 `tools/list` and `tools/call`. MCP hosts keep initialization,
 authentication, transport lifetime and cancellation notifications. Request
 IDs are mandatory on every wire transport.
+
+A product's GET routes use `parse_http_query(operation, pairs, request_id)`
+on already decoded query pairs. Flat fields use the same typed field kinds
+as the CLI: repeated text-list keys remain whole items, structured values
+are JSON, and the existing flat HTTP boolean spellings (``, `true`, `1`)
+mean true. `request_id`, `cursor`, `deadline`, `budget_tokens` and `fresh`
+are envelope fields; a declared argument called `format` remains an argument.
+Repeated non-list keys are refused.
+
+An `operation` or `arguments` query key selects canonical envelope mode.
+It deserializes one envelope, preserves the original argument JSON and
+omitted argument defaults, rejects duplicate keys and requires the operation
+to match its route. The route and supplied request identity fill missing
+envelope identity fields; typed payload validation stays with the handler.
+Canonical JSON booleans retain strict JSON typing. CLI delimiters never
+apply to HTTP query pairs.
 
 `Deadline::Default` is omitted on the wire, using the product's `Deadlines`;
 `Deadline::None` is JSON null. Dispatch owns each read future and drops

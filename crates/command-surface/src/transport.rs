@@ -1,7 +1,7 @@
 //! Transport adapters contain framing only. None builds an answer of its own.
 use crate::{
     Answer, Caller, CancellationToken, Failure, FailureKind, Format, OperationCatalog,
-    OperationKind, OperationTable, RunnableRequest, Via, bad_request,
+    OperationKind, OperationTable, RunnableRequest, TextStyle, Via, bad_request,
 };
 use http::{Request as HttpRequest, Response as HttpResponse, StatusCode};
 use serde::Serialize;
@@ -41,7 +41,7 @@ impl OperationCatalog {
     pub fn help(&self) -> String {
         self.descriptions()
             .iter()
-            .filter(|d| d.spec.listed)
+            .filter(|d| d.spec.listed && !d.spec.command.is_empty())
             .map(|d| {
                 format!(
                     "{} {}  {}\n",
@@ -57,14 +57,15 @@ impl OperationCatalog {
         let description = self
             .descriptions()
             .iter()
-            .find(|d| d.spec.name == operation)?;
+            .find(|d| d.spec.name == operation && !d.spec.command.is_empty())?;
         let mut text = format!(
             "{} {}\n{}\n",
             self.product(),
             crate::arguments::usage(description),
             description.spec.summary
         );
-        for argument in &description.spec.arguments {
+        for argument in self.cli_arguments(operation).ok()? {
+            let argument = &argument.spec;
             text.push_str(&format!(
                 "  {}  {}\n",
                 match argument.form {
@@ -82,7 +83,7 @@ impl OperationCatalog {
     pub fn complete(&self, prefix: &str) -> Vec<String> {
         self.descriptions()
             .iter()
-            .filter(|d| d.spec.listed)
+            .filter(|d| d.spec.listed && !d.spec.command.is_empty())
             .map(|d| d.spec.command.join(" "))
             .filter(|command| command.starts_with(prefix))
             .collect()
@@ -196,7 +197,7 @@ impl OperationTable {
             answer,
             value_text,
             footer,
-        } = self.render_answer(Via::Cli, request.as_ref(), answer);
+        } = self.render_answer(Via::Cli, request.as_ref(), answer, TextStyle::Plain);
         if answer.is_error() {
             stderr
                 .write_all(format!("{value_text}{footer}").as_bytes())
@@ -232,7 +233,7 @@ impl OperationTable {
             let line = match event {
                 Err(failure) => return Ok(Answer::error(failure)),
                 Ok(event) if json => format!("{}\n", json!({ "event": event })),
-                Ok(event) => match self.render_event(&operation, event) {
+                Ok(event) => match self.render_event(&operation, event, TextStyle::Plain) {
                     Ok(line) => line,
                     Err(failure) => return Ok(Answer::error(failure)),
                 },
@@ -466,8 +467,11 @@ impl OperationTable {
                 Err(error) => Answer::error(error),
                 Ok(envelope) => {
                     let spec = self.spec_named(&envelope.operation);
-                    let matches = path == "/v1"
-                        || spec.is_some_and(|spec| spec.http_route.as_deref() == Some(&path));
+                    let matches = spec.is_some_and(|spec| {
+                        spec.http_route
+                            .as_deref()
+                            .is_some_and(|route| path == "/v1" || route == path)
+                    });
                     match spec.map(|spec| &spec.kind) {
                         _ if !matches => Answer::error(Failure::new(
                             FailureKind::NotFound,

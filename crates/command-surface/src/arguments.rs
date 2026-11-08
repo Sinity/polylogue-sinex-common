@@ -7,11 +7,11 @@ use crate::{
     OperationKind, RequestOption, RunnableRequest, bad_request, quote_argument,
 };
 use serde_json::{Map, Value};
-use std::fmt::Write as _;
+use std::{borrow::Cow, fmt::Write as _};
 
 /// How a request field's value is written as words.
-#[derive(Clone, Debug, PartialEq)]
-enum ValueKind {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ValueKind {
     /// Taken as written.
     Text,
     Boolean,
@@ -19,6 +19,16 @@ enum ValueKind {
     List(Box<ValueKind>),
     /// Written as JSON (numbers, objects, enums of objects).
     Json,
+}
+
+/// The shared CLI projection used by help, completion adapters and parsing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CliArgument {
+    pub spec: ArgumentSpec,
+    pub kind: ValueKind,
+    pub required: bool,
+    /// Closed choices for the textual word this argument accepts.
+    pub choices: Vec<String>,
 }
 
 fn resolve<'a>(schema: &'a Value, root: &'a Value) -> &'a Value {
@@ -90,6 +100,103 @@ fn required(description: &OperationDescription, name: &str) -> bool {
         .as_array()
         .is_some_and(|names| names.iter().any(|n| n == name))
 }
+fn argument_kind(description: &OperationDescription, argument: &ArgumentSpec) -> ValueKind {
+    if !argument.calling_process {
+        return kind_of(description, &argument.name);
+    }
+    match argument.form {
+        ArgumentForm::Flag => ValueKind::Boolean,
+        ArgumentForm::Repeated => ValueKind::List(Box::new(ValueKind::Text)),
+        _ => ValueKind::Text,
+    }
+}
+fn text_choices(schema: &Value, root: &Value) -> Option<Vec<String>> {
+    let schema = resolve(schema, root);
+    if let Some(value) = schema.get("const").and_then(Value::as_str) {
+        return Some(vec![value.to_owned()]);
+    }
+    if let Some(values) = schema.get("enum").and_then(Value::as_array) {
+        return values
+            .iter()
+            .filter(|value| !value.is_null())
+            .map(|value| value.as_str().map(str::to_owned))
+            .collect();
+    }
+    for key in ["anyOf", "oneOf"] {
+        if let Some(branches) = schema.get(key).and_then(Value::as_array) {
+            let mut choices = vec![];
+            for branch in branches
+                .iter()
+                .filter(|branch| resolve(branch, root).get("type") != Some(&Value::from("null")))
+            {
+                for choice in text_choices(branch, root)? {
+                    if !choices.contains(&choice) {
+                        choices.push(choice);
+                    }
+                }
+            }
+            return Some(choices);
+        }
+    }
+    None
+}
+fn argument_choices(
+    description: &OperationDescription,
+    argument: &ArgumentSpec,
+    kind: &ValueKind,
+) -> Vec<String> {
+    let Some(schema) = property(description, &argument.name).filter(|_| !argument.calling_process)
+    else {
+        return vec![];
+    };
+    let schema = resolve(schema, &description.input_schema);
+    let choice = match kind {
+        ValueKind::Text => Some(schema),
+        ValueKind::List(item)
+            if **item == ValueKind::Text && argument.form == ArgumentForm::Repeated =>
+        {
+            schema.get("items")
+        }
+        _ => None,
+    };
+    choice
+        .and_then(|schema| text_choices(schema, &description.input_schema))
+        .unwrap_or_default()
+}
+fn project_argument(description: &OperationDescription, spec: ArgumentSpec) -> CliArgument {
+    let kind = argument_kind(description, &spec);
+    CliArgument {
+        choices: argument_choices(description, &spec, &kind),
+        kind,
+        required: !spec.calling_process && required(description, &spec.name),
+        spec,
+    }
+}
+
+fn projection(description: &OperationDescription) -> Vec<CliArgument> {
+    let mut arguments: Vec<_> = description
+        .spec
+        .arguments
+        .iter()
+        .cloned()
+        .map(|spec| project_argument(description, spec))
+        .collect();
+    if let Some(properties) = description.input_schema["properties"].as_object() {
+        for (name, schema) in properties {
+            if description.spec.argument(name).is_some() {
+                continue;
+            }
+            let spec = ArgumentSpec::new(
+                name,
+                ArgumentForm::Named,
+                schema["description"].as_str().unwrap_or(""),
+            );
+            arguments.push(project_argument(description, spec));
+        }
+    }
+    arguments
+}
+
 fn is_positional(form: ArgumentForm) -> bool {
     matches!(
         form,
@@ -144,6 +251,15 @@ pub(crate) fn check(description: &OperationDescription) -> Result<(), Failure> {
             return refuse(format!("short flag -{short} is not a free letter"));
         }
         let exists = property(description, &argument.name).is_some();
+        if argument.value_delimiter.is_some()
+            && (argument.form != ArgumentForm::Repeated
+                || !matches!(argument_kind(description, argument), ValueKind::List(_)))
+        {
+            return refuse(format!(
+                "{} declares a delimiter without a repeated list",
+                argument.name
+            ));
+        }
         if argument.calling_process {
             if exists || is_positional(argument.form) {
                 return refuse(format!(
@@ -224,10 +340,147 @@ impl OperationCatalog {
     fn command_row(&self, args: &[String]) -> Option<(&OperationDescription, usize)> {
         self.descriptions()
             .iter()
-            .filter(|d| args.starts_with(&d.spec.command))
+            .filter(|d| !d.spec.command.is_empty() && args.starts_with(&d.spec.command))
             .max_by_key(|d| d.spec.command.len())
             .map(|d| (d, d.spec.command.len()))
             .or_else(|| self.default_operation().map(|d| (d, 0)))
+    }
+
+    pub fn cli_arguments(&self, operation: &str) -> Result<Vec<CliArgument>, Failure> {
+        let description = self
+            .descriptions()
+            .iter()
+            .find(|d| d.spec.name == operation)
+            .ok_or_else(|| bad_request("unknown operation"))?;
+        if description.spec.command.is_empty() {
+            return Err(bad_request(format!(
+                "{operation} has no command-line surface"
+            )));
+        }
+        Ok(projection(description))
+    }
+    /// Decode already URL-decoded query pairs through the same typed field
+    /// projection as the CLI. Envelope identity and argument JSON stay distinct.
+    pub fn parse_http_query(
+        &self,
+        operation: &str,
+        pairs: &[(String, String)],
+        request_id: impl Into<String>,
+    ) -> Result<RunnableRequest, Failure> {
+        let description = self
+            .descriptions()
+            .iter()
+            .find(|description| description.spec.name == operation)
+            .ok_or_else(|| bad_request("unknown operation"))?;
+        if description.spec.http_route.is_none() {
+            return Err(bad_request(format!("{operation} has no HTTP surface")));
+        }
+        let canonical = pairs
+            .iter()
+            .any(|(key, _)| matches!(key.as_str(), "operation" | "arguments"));
+        let mut envelope = Map::new();
+        envelope.insert("operation".into(), Value::String(operation.to_owned()));
+        envelope.insert("request_id".into(), Value::String(request_id.into()));
+        let mut seen = std::collections::BTreeSet::new();
+        let mut arguments = Map::new();
+        for (key, text) in pairs {
+            let reserved = matches!(
+                key.as_str(),
+                "request_id" | "cursor" | "deadline" | "budget_tokens" | "fresh"
+            );
+            if !canonical && !reserved && property(description, key).is_some() {
+                let kind = kind_of(description, key);
+                if matches!(&kind, ValueKind::List(item) if **item == ValueKind::Text) {
+                    arguments
+                        .entry(key.clone())
+                        .or_insert_with(|| Value::Array(vec![]))
+                        .as_array_mut()
+                        .expect("HTTP repeated values form a list")
+                        .push(Value::String(text.clone()));
+                    continue;
+                }
+                if !seen.insert(key.clone()) {
+                    return Err(bad_request(format!("duplicate {key}")));
+                }
+                let value = match kind {
+                    ValueKind::Text => Value::String(text.clone()),
+                    ValueKind::Boolean => Value::Bool(matches!(text.as_str(), "" | "true" | "1")),
+                    _ => word_value(&ValueKind::Json, text, key)?,
+                };
+                arguments.insert(key.clone(), value);
+                continue;
+            }
+            if !seen.insert(key.clone()) {
+                return Err(bad_request(format!("duplicate {key}")));
+            }
+            let value = match key.as_str() {
+                "operation" | "request_id" | "cursor" | "format" => Value::String(text.clone()),
+                "arguments" if canonical => serde_json::from_str(text)
+                    .map_err(|error| bad_request(format!("{key} needs JSON: {error}")))?,
+                "deadline" | "budget_tokens" => {
+                    if !canonical && text == "none" {
+                        Value::Null
+                    } else {
+                        serde_json::from_str(text)
+                            .map_err(|error| bad_request(format!("{key} needs JSON: {error}")))?
+                    }
+                }
+                "fresh" if canonical => serde_json::from_str(text)
+                    .map_err(|error| bad_request(format!("{key} needs a JSON boolean: {error}")))?,
+                "fresh" => Value::Bool(matches!(text.as_str(), "" | "true" | "1")),
+                _ => return Err(bad_request(format!("unknown query field {key}"))),
+            };
+            envelope.insert(key.clone(), value);
+        }
+        if !canonical {
+            envelope.insert("arguments".into(), Value::Object(arguments));
+        }
+        let request: RunnableRequest = serde_json::from_value(Value::Object(envelope))
+            .map_err(|error| bad_request(error.to_string()))?;
+        if request.operation != operation {
+            return Err(bad_request("route does not match operation"));
+        }
+        Ok(request)
+    }
+    // Leading global options belong to the envelope. Move them behind a
+    // matched command so its argument parser remains the one owner. A literal
+    // `--` ends this scan; words consumed by Rest are never inspected here.
+    fn ordered_cli_words<'a>(&self, args: &'a [String]) -> Result<Cow<'a, [String]>, Failure> {
+        let mut prefix = 0;
+        while let Some(word) = args.get(prefix) {
+            let Some(flag) = word.strip_prefix("--") else {
+                break;
+            };
+            let (name, inline) = flag
+                .split_once('=')
+                .map_or((flag, false), |(name, _)| (name, true));
+            if !GLOBAL_FLAGS.contains(&name) {
+                break;
+            }
+            prefix += 1;
+            if !inline && !matches!(name, "json" | "fresh") {
+                if args.get(prefix).is_none() {
+                    return Err(bad_request(format!("--{name} needs a value")));
+                }
+                prefix += 1;
+            }
+        }
+        if prefix == 0 {
+            return Ok(Cow::Borrowed(args));
+        }
+        let command = self
+            .descriptions()
+            .iter()
+            .filter(|d| !d.spec.command.is_empty() && args[prefix..].starts_with(&d.spec.command))
+            .max_by_key(|d| d.spec.command.len());
+        let Some(command) = command else {
+            return Ok(Cow::Borrowed(args));
+        };
+        let end = prefix + command.spec.command.len();
+        let mut ordered = args[prefix..end].to_vec();
+        ordered.extend_from_slice(&args[..prefix]);
+        ordered.extend_from_slice(&args[end..]);
+        Ok(Cow::Owned(ordered))
     }
 
     /// Read a command line into its row's request. Fields come from the
@@ -240,6 +493,8 @@ impl OperationCatalog {
         args: &[String],
         request_id: impl Into<String>,
     ) -> Result<ParsedCommand, Failure> {
+        let ordered = self.ordered_cli_words(args)?;
+        let args = ordered.as_ref();
         let (description, start) = self
             .command_row(args)
             .ok_or_else(|| bad_request("unknown command; use --help"))?;
@@ -382,15 +637,7 @@ impl OperationCatalog {
                     } else {
                         &mut fields
                     };
-                    let kind = if argument.calling_process {
-                        match argument.form {
-                            ArgumentForm::Flag => ValueKind::Boolean,
-                            ArgumentForm::Repeated => ValueKind::List(Box::new(ValueKind::Text)),
-                            _ => ValueKind::Text,
-                        }
-                    } else {
-                        kind_of(description, &argument.name)
-                    };
+                    let kind = argument_kind(description, &argument);
                     match argument.form {
                         ArgumentForm::Flag => {
                             let value = match &inline {
@@ -402,13 +649,21 @@ impl OperationCatalog {
                             }
                         }
                         ArgumentForm::Repeated => {
-                            let item = word_value(&kind, &value()?, &flag)?;
+                            let word = value()?;
+                            let words: Vec<&str> = match argument.value_delimiter {
+                                Some(delimiter) => word.split(delimiter).collect(),
+                                None => vec![word.as_str()],
+                            };
+                            let items = words
+                                .into_iter()
+                                .map(|word| word_value(&kind, word, &flag))
+                                .collect::<Result<Vec<_>, _>>()?;
                             target
                                 .entry(argument.name.clone())
                                 .or_insert_with(|| Value::Array(vec![]))
                                 .as_array_mut()
                                 .expect("repeated values are a list")
-                                .push(item);
+                                .extend(items);
                         }
                         _ => {
                             // A list written with one flag is written whole, as JSON.
@@ -484,34 +739,22 @@ impl OperationCatalog {
 pub(crate) fn usage(description: &OperationDescription) -> String {
     let spec = &description.spec;
     let mut parts: Vec<String> = spec.command.clone();
-    let mut declared = std::collections::BTreeSet::new();
-    for argument in &spec.arguments {
-        declared.insert(argument.name.as_str());
-        let name = argument.name.to_uppercase();
-        let needed = !argument.calling_process && required(description, &argument.name);
-        let part = match argument.form {
+    for argument in projection(description) {
+        let spec = &argument.spec;
+        let name = spec.name.to_uppercase();
+        let part = match spec.form {
             ArgumentForm::Positional => name,
             ArgumentForm::Words => format!("{name}..."),
             ArgumentForm::Rest => format!("-- {name}..."),
-            ArgumentForm::Named => format!("{} {name}", argument.flag()),
-            ArgumentForm::Repeated => format!("{} {name}...", argument.flag()),
-            ArgumentForm::Flag => argument.flag(),
+            ArgumentForm::Named => format!("{} {name}", spec.flag()),
+            ArgumentForm::Repeated => format!("{} {name}...", spec.flag()),
+            ArgumentForm::Flag => spec.flag(),
         };
-        parts.push(if needed { part } else { format!("[{part}]") });
-    }
-    if let Some(properties) = description.input_schema["properties"].as_object() {
-        for name in properties
-            .keys()
-            .filter(|name| !declared.contains(name.as_str()))
-        {
-            let flag = format!("--{}", name.replace('_', "-"));
-            let part = format!("{flag} {}", name.to_uppercase());
-            parts.push(if required(description, name) {
-                part
-            } else {
-                format!("[{part}]")
-            });
-        }
+        parts.push(if argument.required {
+            part
+        } else {
+            format!("[{part}]")
+        });
     }
     parts.join(" ")
 }
@@ -542,6 +785,12 @@ impl Forms {
         let description = self
             .description(&request.operation)
             .ok_or_else(|| bad_request("unknown operation"))?;
+        if description.spec.command.is_empty() {
+            return Err(bad_request(format!(
+                "{} has no command-line surface",
+                request.operation
+            )));
+        }
         let mut words = vec![quote_argument(&self.product)];
         words.extend(description.spec.command.iter().map(|s| quote_argument(s)));
         // Flags come before positionals: a positional that takes the rest of
@@ -640,6 +889,16 @@ fn natural_words(
                 };
                 let items = value.as_array().filter(|items| !items.is_empty())?;
                 for item_value in items {
+                    if argument
+                        .and_then(|argument| argument.value_delimiter)
+                        .is_some_and(|delimiter| {
+                            item_value
+                                .as_str()
+                                .is_some_and(|text| text.contains(delimiter))
+                        })
+                    {
+                        return None;
+                    }
                     flags.extend([flag.clone(), quote_argument(&word(item, item_value)?)]);
                 }
             }
