@@ -75,9 +75,7 @@ Correction paths produce edits to the original question. The outer parser chains
 those edits until the whole question parses, then checks the resulting tree
 against the catalog once. An intermediate correction need not be runnable.
 
-There is no command-name typo guessing. Ruling, 2026-07-05: "typo hint is
-actually unnecessary given we do not want bare query support anyway"
-(cc:900c6128-99a3-4986-8ed4-d5d7aacb38fe:e5f52f29-85e8-4cfc-9088-b5ea79b7bccc).
+There is no command-name typo guessing. (ruling 2026-07-05, cc:900c6128-99a3-4986-8ed4-d5d7aacb38fe:e5f52f29-85e8-4cfc-9088-b5ea79b7bccc).
 Near-miss suggestions for fields, units and transforms inside a query
 remain. A misspelled unquoted source unit returns `not_a_query` with a
 runnable catalog-derived correction, inserting `where` before its conditions.
@@ -319,9 +317,7 @@ matches` exposes the alias as `parent.source` with its original type and provena
 ## Ranking
 
 Conditions select and ranking orders; ranking never changes membership or
-`count`. Ruling, 2026-01-24, on embeddings: "Not as a filter, but as a
-scoring criteria, to rank order items"
-(cc:1d6c0b33-94c7-4a2a-9957-347e5383f5c5:0bdc45a3-7aca-41a6-9b70-6f6fb086bbbe).
+`count`. (ruling 2026-01-24, cc:1d6c0b33-94c7-4a2a-9957-347e5383f5c5:0bdc45a3-7aca-41a6-9b70-6f6fb086bbbe).
 
 - **Ranked lists.** A query's lists are `relevance` when text terms are
   present; each ranking atom (`similar:"text"`, `similar:REF`,
@@ -529,10 +525,7 @@ the pinned commit position.
 A **logical day** is the day a person reads: from a configured start hour in
 a named zone to the same hour the next day. `DaySetting` is that pair, and it
 has one implementation, used by queries, SQL generation, derivations,
-analysis and rendering in both products. Ruling, 2026-10-11: "it should be
-configurable, and default should be sth like 4AM maybe … need to design the
-system so that this works reliably, there are no unexpected exceptions"
-(cc:e3e37f29-2490-47ae-89ef-fd40b6242e9a:d716993a-f5d6-4422-aa5e-97d91e430d93).
+analysis and rendering in both products. (ruling 2026-10-11, cc:e3e37f29-2490-47ae-89ef-fd40b6242e9a:d716993a-f5d6-4422-aa5e-97d91e430d93).
 
 - The zone is an IANA name and travels with its name, so generated SQL never
   falls back to UTC. A `DaySetting` is constructed only from a resolved zone

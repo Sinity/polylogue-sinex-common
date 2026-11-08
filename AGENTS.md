@@ -150,6 +150,10 @@ or add the new concept in the same change.
 
 The repository is public. Test fixtures are synthetic and neutral, and
 nothing names a particular host, path or person.
+Public docs state design intent in neutral language and cite rulings by date
+and locator, never quoting the operator's private sessions; PR bodies, review
+comments and commit messages carry no excerpts of captured data or private
+analyses.
 
 ## Cloud sessions and changes the products need
 
