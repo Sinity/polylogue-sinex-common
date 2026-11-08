@@ -163,7 +163,7 @@ impl<'a> Frame<'a> {
         product: Product,
         title: &'a str,
         query_route: &'a str,
-        table: &command_surface::OperationCatalog,
+        table: &command_surface::OperationDeclarations,
         request: &command_surface::RunnableRequest,
     ) -> Result<Self, command_surface::Failure> {
         let mut frame = Self::new(product, title, query_route, "");

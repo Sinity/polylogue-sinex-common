@@ -521,13 +521,12 @@ fn grouped_rows_do_not_claim_their_original_row_match_patterns() {
 }
 
 #[test]
-fn declared_singular_and_local_namespace_have_one_unit_identity() {
+fn local_namespace_prefix_has_one_unit_identity() {
     let mut catalog = catalog();
     catalog.namespace = Some("pl".into());
-    catalog.units[0].singular = Some("session".into());
     let canonical = parse("sessions", &catalog).unwrap();
     let id = question_id(&canonical, &catalog, &BTreeMap::new()).unwrap();
-    for text in ["session", "pl.sessions", "PL.SESSION"] {
+    for text in ["pl.sessions", "PL.SESSIONS"] {
         let parsed = parse(text, &catalog).unwrap();
         assert_eq!(parsed, canonical, "{text}");
         assert_eq!(
@@ -635,23 +634,8 @@ fn quoted_native_references_round_trip_without_stealing_scoped_fields() {
 }
 
 #[test]
-fn unknown_units_suggest_declared_singular_names() {
-    let mut catalog = catalog();
-    catalog.units[0].singular = Some("session".into());
-    let error = parse("sessin where id:one", &catalog).unwrap_err();
-    let correction = error.suggestion.unwrap();
-    let corrected = parse(&correction, &catalog).unwrap();
-    let expected = parse("sessions where id:one", &catalog).unwrap();
-    assert_eq!(
-        question_id(&corrected, &catalog, &BTreeMap::new()).unwrap(),
-        question_id(&expected, &catalog, &BTreeMap::new()).unwrap()
-    );
-}
-
-#[test]
 fn source_unit_typos_offer_runnable_canonical_corrections_without_changing_literals() {
     let mut catalog = catalog();
-    catalog.units[0].singular = Some("session".into());
     catalog.units.push(Unit {
         name: "messages".into(),
         fields: vec![field("text", FieldKind::Text)],
@@ -659,7 +643,7 @@ fn source_unit_typos_offer_runnable_canonical_corrections_without_changing_liter
     });
     for (text, expected) in [
         ("messges cargo", "messages where cargo"),
-        ("sessin where id:one", "sessions where id:one"),
+        ("sesions where id:one", "sessions where id:one"),
         ("messges", "messages"),
         ("messges | count", "messages | count"),
     ] {

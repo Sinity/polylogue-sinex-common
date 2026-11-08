@@ -181,11 +181,11 @@ fn table_with<O: Operation<Request = Find>>(
     spec: OperationSpec,
     render: fn(&O::Response, TextStyle) -> String,
 ) -> OperationTable {
-    let mut catalog = OperationCatalog::builder("example", Deadlines::default());
+    let mut declarations = OperationDeclarations::builder("example", Deadlines::default());
     for option in RequestOption::ALL {
-        catalog.accept(option);
+        declarations.accept(option);
     }
-    catalog
+    declarations
         .declare_tool(ToolFamily {
             name: "query".into(),
             description: "Search rows".into(),
@@ -193,8 +193,10 @@ fn table_with<O: Operation<Request = Find>>(
             idempotent: true,
         })
         .unwrap();
-    catalog.declare::<Find, O::Response>(spec, render).unwrap();
-    let mut table = OperationTable::new(catalog.finish());
+    declarations
+        .declare::<Find, O::Response>(spec, render)
+        .unwrap();
+    let mut table = OperationTable::new(declarations.finish());
     table.bind("find", operation).unwrap();
     table
 }

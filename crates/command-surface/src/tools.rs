@@ -19,7 +19,7 @@ pub struct RenderedAnswer {
 use crate::operation::{Forms, terminal_text};
 use crate::{
     Access, Answer, Caller, CancellationToken, Deadline, Failure, Format, LeftOut,
-    OperationCatalog, OperationTable, Outcome, RunnableRequest, Suggestion, TextStyle, Via,
+    OperationDeclarations, OperationTable, Outcome, RunnableRequest, Suggestion, TextStyle, Via,
     approximate_tokens, bad_request,
 };
 use serde::Deserialize;
@@ -28,7 +28,7 @@ use serde_json::{Map, Value, json};
 /// The type of one request field as a tool list states it: a scalar keeps
 /// its type and its enum values; an object, a list or a choice among
 /// them is only its bare type. The full schema of each row is
-/// `OperationCatalog::family_schemas`, for a product's explain answer.
+/// `OperationDeclarations::family_schemas`, for a product's explain answer.
 fn shallow(schema: &Value, definitions: &Map<String, Value>) -> Value {
     let schema = match schema
         .get("$ref")
@@ -396,7 +396,7 @@ impl Forms {
     }
 }
 
-impl OperationCatalog {
+impl OperationDeclarations {
     /// Every row of a tool family with its full request schema, for a
     /// product's explain or capabilities answer: the tool list states only
     /// each field's shallow type.
@@ -551,7 +551,7 @@ impl OperationTable {
     }
 }
 
-impl OperationCatalog {
+impl OperationDeclarations {
     /// The request a tool call makes: its row (named by `operation` when the
     /// tool has several) and the call's options. The row's own schema checks
     /// the arguments at dispatch.

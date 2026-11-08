@@ -9,11 +9,11 @@ struct Input {
     text: String,
 }
 
-fn catalog() -> Arc<OperationCatalog> {
+fn declarations() -> Arc<OperationDeclarations> {
     let mut deadlines = Deadlines::default();
     deadlines.set(LatencyClass::Read, Some(Duration::from_secs(2)));
-    let mut catalog = OperationCatalog::builder("example", deadlines);
-    catalog
+    let mut declarations = OperationDeclarations::builder("example", deadlines);
+    declarations
         .declare_tool(ToolFamily {
             name: "query".into(),
             description: "Read synthetic text".into(),
@@ -21,7 +21,7 @@ fn catalog() -> Arc<OperationCatalog> {
             idempotent: true,
         })
         .unwrap();
-    catalog
+    declarations
         .declare::<Input, String>(
             OperationSpec::request(
                 "read",
@@ -33,30 +33,30 @@ fn catalog() -> Arc<OperationCatalog> {
             |answer, _style| format!("{answer}\n"),
         )
         .unwrap();
-    catalog.finish()
+    declarations.finish()
 }
 
 #[test]
-fn catalog_parses_describes_and_renders_without_runtime_handlers() {
-    let catalog = catalog();
-    let parsed = catalog
+fn declarations_parse_describe_and_render_without_runtime_handlers() {
+    let declarations = declarations();
+    let parsed = declarations
         .parse_cli(&["read".into(), "--text".into(), "hello".into()], "request")
         .unwrap();
     assert_eq!(parsed.request.arguments, json!({"text": "hello"}));
-    assert_eq!(catalog.complete("re"), vec!["read"]);
-    assert!(catalog.help_for("read").unwrap().contains("Read text"));
-    assert_eq!(catalog.mcp_tools()[0]["name"], "example_query");
+    assert_eq!(declarations.complete("re"), vec!["read"]);
+    assert!(declarations.help_for("read").unwrap().contains("Read text"));
+    assert_eq!(declarations.mcp_tools()[0]["name"], "example_query");
     assert_eq!(
-        catalog.deadline(&parsed.request),
+        declarations.deadline(&parsed.request),
         Some(Duration::from_secs(2))
     );
     assert_eq!(
-        catalog
+        declarations
             .render_text("read", &Answer::ok(json!("hello")), TextStyle::Plain)
             .unwrap(),
         "hello\n"
     );
-    laws::tools_generated(&catalog).unwrap();
+    laws::tools_generated(&declarations).unwrap();
 }
 
 struct Read;
@@ -77,12 +77,15 @@ impl Operation for WrongInput {
 }
 
 #[test]
-fn binding_uses_existing_catalog_and_rejects_schema_drift_and_duplicates() {
-    let catalog = catalog();
-    let mut table = OperationTable::new(catalog.clone());
-    assert!(Arc::ptr_eq(table.catalog(), &catalog));
+fn binding_uses_existing_declarations_and_rejects_schema_drift_and_duplicates() {
+    let declarations = declarations();
+    let mut table = OperationTable::new(declarations.clone());
+    assert!(Arc::ptr_eq(table.declarations(), &declarations));
     assert!(table.bind("read", WrongInput).is_err());
     table.bind("read", Read).unwrap();
     assert!(table.bind("read", Read).is_err());
-    assert!(std::ptr::eq(table.descriptions(), catalog.descriptions()));
+    assert!(std::ptr::eq(
+        table.descriptions(),
+        declarations.descriptions()
+    ));
 }

@@ -19,7 +19,7 @@ fn spec(name: &str, command: &[&str]) -> OperationSpec {
     spec.http_route = None;
     spec
 }
-fn globals(builder: &mut CatalogBuilder) {
+fn globals(builder: &mut DeclarationsBuilder) {
     for (name, help) in [
         ("archive", "Archive directory"),
         ("config", "Configuration file"),
@@ -29,8 +29,8 @@ fn globals(builder: &mut CatalogBuilder) {
         builder.declare_cli_global(name, help).unwrap();
     }
 }
-fn catalog() -> std::sync::Arc<OperationCatalog> {
-    let mut builder = OperationCatalog::builder("example", Deadlines::default());
+fn declarations() -> std::sync::Arc<OperationDeclarations> {
+    let mut builder = OperationDeclarations::builder("example", Deadlines::default());
     globals(&mut builder);
     builder
         .declare_local::<Empty>(spec("daemon", &["daemon"]))
@@ -52,8 +52,8 @@ fn catalog() -> std::sync::Arc<OperationCatalog> {
 }
 #[test]
 fn caller_globals_select_commands_and_preserve_envelope_options() {
-    let catalog = catalog();
-    let expected = catalog
+    let declarations = declarations();
+    let expected = declarations
         .parse_cli(
             &words(&[
                 "sink",
@@ -82,7 +82,7 @@ fn caller_globals_select_commands_and_preserve_envelope_options() {
             "unused",
         )
         .unwrap();
-    let interleaved = catalog
+    let interleaved = declarations
         .parse_cli(
             &words(&[
                 "--archive=/example",
@@ -111,7 +111,7 @@ fn caller_globals_select_commands_and_preserve_envelope_options() {
     assert_eq!(interleaved, expected);
     assert_eq!(expected.request.arguments, json!({}));
     assert_eq!(expected.calling_process, json!({"archive":"/example", "config":"settings", "listen":"127.0.0.1:1234", "auth_token_file":"token"}).as_object().unwrap().clone());
-    let daemon = catalog
+    let daemon = declarations
         .parse_cli(&words(&["--archive", "/example", "daemon"]), "r")
         .unwrap();
     assert_eq!(daemon.request.operation, "daemon");
@@ -119,19 +119,19 @@ fn caller_globals_select_commands_and_preserve_envelope_options() {
 }
 #[test]
 fn caller_globals_do_not_consume_rest_or_literal_separator_words() {
-    let catalog = catalog();
+    let declarations = declarations();
     for input in [
         words(&["ping", "target", "--", "literal", "--archive", "/example"]),
         words(&["ping", "target", "literal", "--archive", "/example"]),
     ] {
-        let parsed = catalog.parse_cli(&input, "r").unwrap();
+        let parsed = declarations.parse_cli(&input, "r").unwrap();
         assert_eq!(
             parsed.request.arguments,
             json!({"target":"target", "message":"literal --archive /example"})
         );
         assert!(parsed.calling_process.is_empty());
     }
-    let parsed = catalog
+    let parsed = declarations
         .parse_cli(
             &words(&[
                 "--archive",
@@ -152,12 +152,12 @@ fn caller_globals_do_not_consume_rest_or_literal_separator_words() {
     assert_eq!(parsed.calling_process["archive"], "/actual");
 }
 #[test]
-fn global_projection_and_help_use_the_same_catalog_declarations() {
-    let catalog = catalog();
-    assert_eq!(catalog.cli_globals().len(), 4);
+fn global_projection_and_help_use_the_same_declarations() {
+    let declarations = declarations();
+    assert_eq!(declarations.cli_globals().len(), 4);
     for name in ["daemon", "add", "ping"] {
-        let arguments = catalog.cli_arguments(name).unwrap();
-        for global in catalog.cli_globals() {
+        let arguments = declarations.cli_arguments(name).unwrap();
+        for global in declarations.cli_globals() {
             let projected = arguments
                 .iter()
                 .find(|argument| argument.spec.name == global.name)
@@ -166,10 +166,14 @@ fn global_projection_and_help_use_the_same_catalog_declarations() {
             assert_eq!(projected.kind, ValueKind::Text);
             assert!(!projected.required);
             assert!(projected.spec.calling_process);
-            assert!(catalog.help_for(name).unwrap().contains(&global.help));
+            assert!(declarations.help_for(name).unwrap().contains(&global.help));
         }
     }
-    assert!(catalog.help().contains("--auth-token-file AUTH_TOKEN_FILE"));
+    assert!(
+        declarations
+            .help()
+            .contains("--auth-token-file AUTH_TOKEN_FILE")
+    );
 }
 #[derive(Deserialize, Serialize, JsonSchema)]
 struct Collision {
@@ -177,7 +181,7 @@ struct Collision {
 }
 #[test]
 fn global_collisions_are_rejected_in_both_declaration_orders() {
-    let mut before = OperationCatalog::builder("example", Deadlines::default());
+    let mut before = OperationDeclarations::builder("example", Deadlines::default());
     before.declare_cli_global("archive", "Archive").unwrap();
     assert!(
         before
@@ -188,7 +192,7 @@ fn global_collisions_are_rejected_in_both_declaration_orders() {
     for name in ["json", "request_id", "not-plain"] {
         assert!(before.declare_cli_global(name, "Invalid").is_err());
     }
-    let mut after = OperationCatalog::builder("example", Deadlines::default());
+    let mut after = OperationDeclarations::builder("example", Deadlines::default());
     after
         .declare_local::<Collision>(spec("collision", &["collision"]))
         .unwrap();
@@ -204,9 +208,9 @@ fn global_collisions_are_rejected_in_both_declaration_orders() {
 }
 #[test]
 fn caller_global_values_are_text_and_duplicate_or_missing_values_fail() {
-    let catalog = catalog();
+    let declarations = declarations();
     assert_eq!(
-        catalog
+        declarations
             .parse_cli(&words(&["daemon", "--archive=123"]), "r")
             .unwrap()
             .calling_process["archive"],
@@ -218,6 +222,6 @@ fn caller_global_values_are_text_and_duplicate_or_missing_values_fail() {
         words(&["daemon", "--archive"]),
         words(&["--archive", "a", "daemon", "--archive", "b"]),
     ] {
-        assert!(catalog.parse_cli(&input, "r").is_err());
+        assert!(declarations.parse_cli(&input, "r").is_err());
     }
 }

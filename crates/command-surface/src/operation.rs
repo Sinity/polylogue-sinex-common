@@ -120,7 +120,7 @@ pub struct ArgumentSpec {
     pub value_delimiter: Option<char>,
     /// Named in the MCP tool list. An unlisted field is still accepted and
     /// checked by its row at dispatch; a product's explain answer lists it
-    /// (`OperationCatalog::family_schemas`).
+    /// (`OperationDeclarations::family_schemas`).
     #[serde(default = "listed", skip_serializing_if = "is_listed")]
     pub listed: bool,
 }
@@ -312,7 +312,7 @@ pub trait TransferOperation:
 pub struct Events {
     events: Option<Box<dyn ErasedEvents>>,
     context: RequestContext,
-    catalog: Arc<OperationCatalog>,
+    declarations: Arc<OperationDeclarations>,
     done: bool,
     _guard: DropGuard,
 }
@@ -334,10 +334,10 @@ impl Events {
         event.map(|value| {
             value.map_err(|error| {
                 let spec = self
-                    .catalog
+                    .declarations
                     .spec_named(&self.context.request().operation)
                     .expect("bound stream is declared");
-                self.catalog.checked_failure(error, spec)
+                self.declarations.checked_failure(error, spec)
             })
         })
     }
@@ -864,7 +864,7 @@ pub(crate) const GLOBAL_FLAGS: [&str; 7] = [
 ];
 
 /// Immutable declarations, schemas and presentation, independent of handlers.
-pub struct OperationCatalog {
+pub struct OperationDeclarations {
     forms: Arc<Forms>,
     renderers: Vec<Presentation>,
     deadlines: Deadlines,
@@ -883,19 +883,19 @@ struct Presentation {
     event: Option<Renderer>,
 }
 /// Builds the declaration owner before real runtime handlers are bound.
-pub struct CatalogBuilder {
-    catalog: OperationCatalog,
+pub struct DeclarationsBuilder {
+    declarations: OperationDeclarations,
 }
-impl std::ops::Deref for CatalogBuilder {
-    type Target = OperationCatalog;
+impl std::ops::Deref for DeclarationsBuilder {
+    type Target = OperationDeclarations;
     fn deref(&self) -> &Self::Target {
-        &self.catalog
+        &self.declarations
     }
 }
-impl OperationCatalog {
-    pub fn builder(product: impl Into<String>, deadlines: Deadlines) -> CatalogBuilder {
-        CatalogBuilder {
-            catalog: Self {
+impl OperationDeclarations {
+    pub fn builder(product: impl Into<String>, deadlines: Deadlines) -> DeclarationsBuilder {
+        DeclarationsBuilder {
+            declarations: Self {
                 forms: Arc::new(Forms {
                     product: product.into(),
                     descriptions: vec![],
@@ -926,7 +926,7 @@ impl OperationCatalog {
     pub fn descriptions(&self) -> &[OperationDescription] {
         &self.forms.descriptions
     }
-    /// The named operation's spec, borrowed from the catalog without cloning.
+    /// The named operation's spec, borrowed from the declarations without cloning.
     pub fn spec_named(&self, name: &str) -> Option<&OperationSpec> {
         self.forms.description(name).map(|d| &d.spec)
     }
@@ -946,13 +946,13 @@ impl OperationCatalog {
             .iter()
             .position(|d| d.spec.name == name)
     }
-    /// Declared timing metadata for connection admission. Runtime read policy
+    /// Declared timing metadata for connecting. Runtime read policy
     /// may choose a different default after decoding the typed request.
     pub fn deadline(&self, request: &RunnableRequest) -> Option<Duration> {
         self.spec_named(&request.operation)
             .and_then(|spec| request.deadline.duration(self.deadlines.get(spec.latency)))
     }
-    /// Connection/readiness admission only; not an accepted request's reply timeout.
+    /// Connecting and readiness only; not an accepted request's reply timeout.
     pub fn connection_timeout(&self, request: &RunnableRequest) -> Option<Duration> {
         self.deadline(request)
             .and_then(|d| d.checked_add(Duration::from_millis(50)))
@@ -1055,9 +1055,9 @@ impl OperationCatalog {
         error
     }
 }
-impl CatalogBuilder {
-    pub fn finish(self) -> Arc<OperationCatalog> {
-        Arc::new(self.catalog)
+impl DeclarationsBuilder {
+    pub fn finish(self) -> Arc<OperationDeclarations> {
+        Arc::new(self.declarations)
     }
     /// Declare one optional text-valued CLI option for the calling process.
     /// Names use underscores; their flags use hyphens. Values never enter a request.
@@ -1086,7 +1086,7 @@ impl CatalogBuilder {
         {
             crate::arguments::check_globals(description, std::slice::from_ref(&argument))?;
         }
-        Arc::make_mut(&mut self.catalog.forms)
+        Arc::make_mut(&mut self.declarations.forms)
             .cli_globals
             .push(argument);
         Ok(())
@@ -1096,17 +1096,23 @@ impl CatalogBuilder {
         if !valid_word(&tool.name, '_') || tool.description.is_empty() {
             return Err(bad_request("a tool needs a name and a description"));
         }
-        if self.catalog.forms.tools.iter().any(|t| t.name == tool.name) {
+        if self
+            .declarations
+            .forms
+            .tools
+            .iter()
+            .any(|t| t.name == tool.name)
+        {
             return Err(bad_request(format!("tool {} is declared twice", tool.name)));
         }
-        Arc::make_mut(&mut self.catalog.forms).tools.push(tool);
+        Arc::make_mut(&mut self.declarations.forms).tools.push(tool);
         Ok(())
     }
     /// Serve a request option on every row: tools offer it, and dispatch
     /// takes it. A table serves only `request_id` and `deadline` until it
     /// names more.
     pub fn accept(&mut self, option: crate::RequestOption) {
-        let options = &mut Arc::make_mut(&mut self.catalog.forms).options;
+        let options = &mut Arc::make_mut(&mut self.declarations.forms).options;
         if !options.contains(&option) {
             options.push(option);
             options.sort();
@@ -1133,7 +1139,7 @@ impl CatalogBuilder {
                 "the default operation needs a command-line surface",
             ));
         }
-        self.catalog.default_operation = Some(DefaultOperation {
+        self.declarations.default_operation = Some(DefaultOperation {
             name,
             accepts_first,
         });
@@ -1149,7 +1155,7 @@ impl CatalogBuilder {
         if code.is_empty() {
             return Err(bad_request("failure code must not be empty"));
         }
-        if let Some(existing) = self.catalog.failure_codes.get(&code) {
+        if let Some(existing) = self.declarations.failure_codes.get(&code) {
             if *existing == kind {
                 return Ok(());
             }
@@ -1157,7 +1163,7 @@ impl CatalogBuilder {
                 "failure code {code} already has a different classification"
             )));
         }
-        self.catalog.failure_codes.insert(code, kind);
+        self.declarations.failure_codes.insert(code, kind);
         Ok(())
     }
     pub fn declare<A: JsonSchema, R: Serialize + DeserializeOwned + JsonSchema + 'static>(
@@ -1248,7 +1254,7 @@ impl CatalogBuilder {
         renderer: Presentation,
     ) -> Result<(), Failure> {
         let spec = &description.spec;
-        let product = &self.catalog.forms.product;
+        let product = &self.declarations.forms.product;
         if !valid_word(&product.replace('_', "-"), '-')
             || spec.name.is_empty()
             || (spec.kind == OperationKind::Local && spec.command.is_empty())
@@ -1280,7 +1286,7 @@ impl CatalogBuilder {
                 )));
             }
         }
-        for existing in &self.catalog.forms.descriptions {
+        for existing in &self.declarations.forms.descriptions {
             let other = &existing.spec;
             if other.name == spec.name
                 || (!spec.command.is_empty() && other.command == spec.command)
@@ -1293,7 +1299,13 @@ impl CatalogBuilder {
             }
         }
         if let OperationKind::Request { tool: Some(tool) } = &spec.kind {
-            if !self.catalog.forms.tools.iter().any(|t| &t.name == tool) {
+            if !self
+                .declarations
+                .forms
+                .tools
+                .iter()
+                .any(|t| &t.name == tool)
+            {
                 return Err(bad_request(format!(
                     "operation {} names undeclared tool {tool}",
                     spec.name
@@ -1318,14 +1330,14 @@ impl CatalogBuilder {
             crate::arguments::check(&description)?;
             crate::arguments::check_globals(&description, self.cli_globals())?;
         }
-        let mut forms = (*self.catalog.forms).clone();
+        let mut forms = (*self.declarations.forms).clone();
         forms.descriptions.push(description);
         if let Some(tool) = forms.descriptions.last().and_then(|d| d.spec.tool()) {
             // A family's schema must merge.
             crate::tools::tool_input(&forms, tool)?;
         }
-        self.catalog.forms = Arc::new(forms);
-        self.catalog.renderers.push(renderer);
+        self.declarations.forms = Arc::new(forms);
+        self.declarations.renderers.push(renderer);
         Ok(())
     }
 }
@@ -1339,18 +1351,18 @@ fn renderer<R: DeserializeOwned + 'static>(render: fn(&R, TextStyle) -> String) 
 
 /// Real runtime handlers bound to one immutable declaration owner.
 pub struct OperationTable {
-    catalog: Arc<OperationCatalog>,
+    declarations: Arc<OperationDeclarations>,
     rows: Vec<Option<Row>>,
 }
 impl std::ops::Deref for OperationTable {
-    type Target = OperationCatalog;
+    type Target = OperationDeclarations;
     fn deref(&self) -> &Self::Target {
-        &self.catalog
+        &self.declarations
     }
 }
 impl OperationTable {
-    pub fn new(catalog: Arc<OperationCatalog>) -> Self {
-        let rows = catalog
+    pub fn new(declarations: Arc<OperationDeclarations>) -> Self {
+        let rows = declarations
             .descriptions()
             .iter()
             .map(|d| {
@@ -1361,10 +1373,10 @@ impl OperationTable {
                 }
             })
             .collect();
-        Self { catalog, rows }
+        Self { declarations, rows }
     }
-    pub fn catalog(&self) -> &Arc<OperationCatalog> {
-        &self.catalog
+    pub fn declarations(&self) -> &Arc<OperationDeclarations> {
+        &self.declarations
     }
     pub fn bind<O: Operation>(&mut self, name: &str, operation: O) -> Result<(), Failure> {
         let index = self.binding(
@@ -1407,7 +1419,7 @@ impl OperationTable {
         self.rows[index] = Some(Row::Request(Box::new(TransferHandler(operation))));
         Ok(())
     }
-    /// Decide event delivery from the admitted request type, never JSON field names.
+    /// Decide event delivery from the checked request type, never JSON field names.
     pub fn streaming(&self, request: &RunnableRequest) -> Result<bool, Failure> {
         let (_, row) = self.row(&request.operation).ok_or_else(|| {
             bad_request(format!(
@@ -1430,10 +1442,10 @@ impl OperationTable {
         event_schema: Option<Value>,
     ) -> Result<usize, Failure> {
         let index = self
-            .catalog
+            .declarations
             .index(name)
             .ok_or_else(|| bad_request(format!("unknown operation {name}")))?;
-        let description = &self.catalog.descriptions()[index];
+        let description = &self.declarations.descriptions()[index];
         let kind_matches = if request {
             matches!(description.spec.kind, OperationKind::Request { .. })
         } else {
@@ -1454,9 +1466,9 @@ impl OperationTable {
         Ok(index)
     }
     fn row(&self, name: &str) -> Option<(&OperationDescription, &Row)> {
-        let index = self.catalog.index(name)?;
+        let index = self.declarations.index(name)?;
         Some((
-            &self.catalog.descriptions()[index],
+            &self.declarations.descriptions()[index],
             self.rows[index].as_ref()?,
         ))
     }
@@ -1498,7 +1510,7 @@ impl OperationTable {
     }
     /// Check a request against its row: it exists, has a request ID, names
     /// only known arguments, and the caller may run it.
-    fn admit<'a>(
+    fn check_request<'a>(
         &'a self,
         request: &RunnableRequest,
         caller: &Caller,
@@ -1587,7 +1599,7 @@ impl OperationTable {
             fresh: request.fresh,
             format: request.format,
             metadata,
-            forms: self.catalog.forms.clone(),
+            forms: self.declarations.forms.clone(),
             progress: Arc::default(),
         }
     }
@@ -1599,8 +1611,8 @@ impl OperationTable {
         metadata: Option<Value>,
         cancellation: CancellationToken,
     ) -> Answer<Value> {
-        let (description, row) = match self.admit(&request, &caller) {
-            Ok(admitted) => admitted,
+        let (description, row) = match self.check_request(&request, &caller) {
+            Ok(checked) => checked,
             Err(failure) => return Answer::error(failure),
         };
         let Row::Request(operation) = row else {
@@ -1653,7 +1665,7 @@ impl OperationTable {
         caller: Caller,
         cancellation: CancellationToken,
     ) -> Result<Events, Failure> {
-        let (description, row) = self.admit(&request, &caller)?;
+        let (description, row) = self.check_request(&request, &caller)?;
         let policy = match row {
             Row::Stream(_) => Policy {
                 access: description.spec.access,
@@ -1691,7 +1703,7 @@ impl OperationTable {
         Ok(Events {
             events: Some(events),
             context,
-            catalog: self.catalog.clone(),
+            declarations: self.declarations.clone(),
             done: false,
             _guard: guard,
         })
@@ -1740,7 +1752,7 @@ fn timeout_failure(operation: &str, progress: &Mutex<Progress>) -> Failure {
         |rows| format!("after {rows} rows scanned"),
     );
     let stage = if progress.stage.is_empty() {
-        "admission"
+        "setup"
     } else {
         &progress.stage
     };

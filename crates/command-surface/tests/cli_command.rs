@@ -8,9 +8,9 @@ struct Text {
     text: String,
 }
 
-fn table() -> std::sync::Arc<OperationCatalog> {
-    let mut catalog = OperationCatalog::builder("example", Deadlines::default());
-    catalog
+fn table() -> std::sync::Arc<OperationDeclarations> {
+    let mut declarations = OperationDeclarations::builder("example", Deadlines::default());
+    declarations
         .declare_tool(ToolFamily {
             name: "notes".into(),
             description: "Notes".into(),
@@ -19,7 +19,7 @@ fn table() -> std::sync::Arc<OperationCatalog> {
         })
         .unwrap();
     for (name, command) in [("read", &["read"][..]), ("sink_add", &["sink", "add"][..])] {
-        catalog
+        declarations
             .declare::<Text, Text>(
                 OperationSpec::request(
                     name,
@@ -32,7 +32,7 @@ fn table() -> std::sync::Arc<OperationCatalog> {
             )
             .unwrap();
     }
-    catalog.finish()
+    declarations.finish()
 }
 
 fn request(operation: &str, text: &str, request_id: &str, deadline: Deadline) -> RunnableRequest {

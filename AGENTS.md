@@ -126,9 +126,15 @@ These are the operator's standing positions; the product repositories'
 - **Good design instead of guard machinery:** no build-enforced bans, line
   budgets or word checks.
 - **Valid input is never refused or truncated for size.**
-- **Tests with value:** independent oracles, law suites, crash tests at real
-  durability boundaries, property tests at serialization boundaries. Tests
-  live in their own files (`<module>/tests.rs` or the crate's `tests/`).
+- **Tests with value.** A test checks behaviour a caller can observe through
+  a stable interface, against an expected result known independently of the
+  code under test: independent oracles, law suites, crash tests at real
+  durability boundaries, property tests at serialization boundaries. Code
+  that was removed is gone because it was deleted, so a test describes what
+  exists, never that a name, variant or format stays absent. Assertions are
+  exact; a changed expectation follows a changed design page and cites it,
+  and an assertion is never weakened to make a run pass. Tests live in their
+  own files (`<module>/tests.rs` or the crate's `tests/`).
 - **Hardware-independent design.** Devkit and the shared crates target data
   and guarantees, not one machine; host tuning belongs to the host.
   Measurements report hardware-independent figures alongside absolute rates,

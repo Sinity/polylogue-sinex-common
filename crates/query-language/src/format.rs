@@ -162,7 +162,7 @@ impl Renderer<'_> {
                 terms.dedup_by(|a, b| {
                     a.0 == b.0 && (!matches!(condition.kind, ConditionKind::And { .. }) || !a.1)
                 });
-                // A one-term OR still suppresses witness publication. The
+                // A one-term OR still suppresses match exposure. The
                 // surface's binary OR spells that wrapper with the term twice.
                 if matches!(condition.kind, ConditionKind::Or { .. })
                     && terms.len() == 1
@@ -300,7 +300,7 @@ impl Renderer<'_> {
                     self.query(query)?,
                     order_options(within.as_ref(), *at, scope.as_deref())?
                 );
-                if let WitnessChoice::FirstBy { keys } = pick {
+                if let MatchChoice::FirstBy { keys } = pick {
                     if keys.is_empty() {
                         return Err(invalid("pick first needs a sort key"));
                     }

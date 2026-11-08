@@ -176,20 +176,20 @@ fn tool(name: &str) -> ToolFamily {
     }
 }
 
-fn catalog() -> CatalogBuilder {
-    let mut catalog = OperationCatalog::builder("example", Deadlines::default());
+fn declarations() -> DeclarationsBuilder {
+    let mut declarations = OperationDeclarations::builder("example", Deadlines::default());
     for name in ["status", "query", "assert", "act", "inspect"] {
-        catalog.declare_tool(tool(name)).unwrap();
+        declarations.declare_tool(tool(name)).unwrap();
     }
     for &(name, family, access) in ECHO_ROWS {
-        catalog
+        declarations
             .declare::<Text, Text>(row(name, family, access), echo_render_text)
             .unwrap();
     }
-    catalog
+    declarations
         .declare_stream::<Text, u64>(follow_spec(), follow_render_event)
         .unwrap();
-    catalog
+    declarations
         .declare_local::<Text>(OperationSpec {
             kind: OperationKind::Local,
             http_route: None,
@@ -203,20 +203,20 @@ fn catalog() -> CatalogBuilder {
             )
         })
         .unwrap();
-    catalog
+    declarations
         .declare::<Text, Text>(who_am_i_spec(), who_am_i_render_text)
         .unwrap();
-    catalog
+    declarations
         .declare::<Text, Text>(wait_spec(), wait_render_text)
         .unwrap();
-    catalog
+    declarations
 }
 fn table_with_options(options: impl IntoIterator<Item = RequestOption>) -> OperationTable {
-    let mut catalog = catalog();
+    let mut declarations = declarations();
     for option in options {
-        catalog.accept(option);
+        declarations.accept(option);
     }
-    let mut table = OperationTable::new(catalog.finish());
+    let mut table = OperationTable::new(declarations.finish());
     for &(name, _, _) in ECHO_ROWS {
         table.bind(name, Echo(name.into())).unwrap();
     }
@@ -240,7 +240,7 @@ async fn call(table: &OperationTable, tool: &str, arguments: Value) -> Value {
 
 #[test]
 fn tools_generated() {
-    let table = catalog().finish();
+    let table = declarations().finish();
     laws::tools_generated(&table).unwrap();
     let tools = table.mcp_tools();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -284,7 +284,7 @@ fn tools_generated() {
         assert!(tool.get("outputSchema").is_none());
     }
     assert!(
-        OperationCatalog::answer_schema()["properties"]
+        OperationDeclarations::answer_schema()["properties"]
             .get("outcome")
             .is_some()
     );
@@ -330,15 +330,15 @@ where
 
 #[tokio::test]
 async fn family_arguments_merge_flat_and_each_row_checks_its_own() {
-    let mut catalog = OperationCatalog::builder("example", Deadlines::default());
-    catalog.declare_tool(tool("count")).unwrap();
-    catalog
+    let mut declarations = OperationDeclarations::builder("example", Deadlines::default());
+    declarations.declare_tool(tool("count")).unwrap();
+    declarations
         .declare::<Counted, Value>(typed_spec("words"), typed_render_text)
         .unwrap();
-    catalog
+    declarations
         .declare::<Numbered, Value>(typed_spec("chars"), typed_render_text)
         .unwrap();
-    let mut table = OperationTable::new(catalog.finish());
+    let mut table = OperationTable::new(declarations.finish());
     table
         .bind("words", Typed::<Counted>(std::marker::PhantomData))
         .unwrap();
@@ -469,12 +469,12 @@ impl Operation for Search {
 
 #[tokio::test]
 async fn unlisted_arguments_stay_off_the_list_and_still_dispatch() {
-    let mut catalog = OperationCatalog::builder("example", Deadlines::default());
-    catalog.declare_tool(tool("count")).unwrap();
-    catalog
+    let mut declarations = OperationDeclarations::builder("example", Deadlines::default());
+    declarations.declare_tool(tool("count")).unwrap();
+    declarations
         .declare::<SearchRequest, Value>(search_spec(), search_render_text)
         .unwrap();
-    let mut table = OperationTable::new(catalog.finish());
+    let mut table = OperationTable::new(declarations.finish());
     table.bind("search", Search).unwrap();
     let with_unlisted = serde_json::to_vec(&json!({ "tools": table.mcp_tools() }))
         .unwrap()
@@ -520,7 +520,7 @@ async fn unlisted_arguments_stay_off_the_list_and_still_dispatch() {
 
 #[test]
 fn tools_list_within() {
-    let mut deep = OperationCatalog::builder("example", Deadlines::default());
+    let mut deep = OperationDeclarations::builder("example", Deadlines::default());
     deep.declare_tool(tool("count")).unwrap();
     deep.declare::<Deep, Value>(typed_spec("deep"), typed_render_text)
         .unwrap();
@@ -537,7 +537,7 @@ fn tools_list_within() {
     assert_eq!(arguments["items"], json!({"type": "array"}));
     assert_eq!(arguments["child"], json!({"type": "object"}));
 
-    let table = catalog().finish();
+    let table = declarations().finish();
     let bytes = serde_json::to_vec(&json!({ "tools": table.mcp_tools() }))
         .unwrap()
         .len();
@@ -550,14 +550,14 @@ fn tools_list_within() {
 
 #[test]
 fn tools_generated_refuses_an_empty_tool() {
-    let mut table = catalog();
+    let mut table = declarations();
     table.declare_tool(tool("unused")).unwrap();
     assert!(laws::tools_generated(&table).is_err());
 }
 
 #[test]
 fn one_tool_holds_one_access_level() {
-    let mut table = catalog();
+    let mut table = declarations();
     let refused = table
         .declare::<Text, Text>(row("forget", "query", Access::Write), echo_render_text)
         .unwrap_err();
@@ -727,7 +727,7 @@ proptest! {
         plans in proptest::collection::vec((0usize..4, 0usize..3).prop_map(|(tool, kind)| RowPlan { tool, kind }), 1..12),
         writes in proptest::collection::vec(any::<bool>(), 4),
     ) {
-        let mut table = OperationCatalog::builder("generated", Deadlines::default());
+        let mut table = OperationDeclarations::builder("generated", Deadlines::default());
         let tools = ["alpha", "beta", "gamma", "delta"];
         let used: std::collections::BTreeSet<usize> = plans.iter().filter(|p| p.kind == 0).map(|p| p.tool).collect();
         for &index in &used {
@@ -802,11 +802,11 @@ async fn zero_event_stream_prints_nothing_and_succeeds() {
 async fn stream_lines_print_as_they_arrive() {
     use tokio::io::{AsyncBufReadExt, BufReader};
     let (sender, receiver) = tokio::sync::mpsc::channel(4);
-    let mut catalog = OperationCatalog::builder("example", Deadlines::default());
-    catalog
+    let mut declarations = OperationDeclarations::builder("example", Deadlines::default());
+    declarations
         .declare_stream::<Text, u64>(ticks_spec(), ticks_render_event)
         .unwrap();
-    let mut table = OperationTable::new(catalog.finish());
+    let mut table = OperationTable::new(declarations.finish());
     table
         .bind_stream("ticks", Ticks(std::sync::Mutex::new(Some(receiver))))
         .unwrap();

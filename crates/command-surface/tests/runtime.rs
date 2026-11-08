@@ -26,9 +26,9 @@ fn spec(name: &str) -> OperationSpec {
         )
     }
 }
-fn builder() -> CatalogBuilder {
-    let mut catalog = OperationCatalog::builder("example", Deadlines::default());
-    catalog
+fn builder() -> DeclarationsBuilder {
+    let mut declarations = OperationDeclarations::builder("example", Deadlines::default());
+    declarations
         .declare_tool(ToolFamily {
             name: "query".into(),
             description: "Read".into(),
@@ -36,7 +36,7 @@ fn builder() -> CatalogBuilder {
             idempotent: true,
         })
         .unwrap();
-    catalog
+    declarations
 }
 fn timed(name: &str, arguments: Value) -> RunnableRequest {
     let mut request = RunnableRequest::new(name, arguments, "request");
@@ -88,11 +88,11 @@ fn handoff() -> Fixture {
     let proceed = Arc::new(Notify::new());
     let acknowledge = Arc::new(Notify::new());
     let effects = Arc::new(AtomicUsize::new(0));
-    let mut catalog = builder();
-    catalog
+    let mut declarations = builder();
+    declarations
         .declare::<Input, bool>(spec("write"), |value, _style| value.to_string())
         .unwrap();
-    let mut table = OperationTable::new(catalog.finish());
+    let mut table = OperationTable::new(declarations.finish());
     table
         .bind(
             "write",
@@ -248,15 +248,15 @@ impl TransferOperation for Transfer {
     }
 }
 fn transfer() -> OperationTable {
-    let mut catalog = builder();
-    catalog
+    let mut declarations = builder();
+    declarations
         .declare_transfer::<Input, String, u64>(
             spec("read"),
             |value, _style| format!("{value}\n"),
             |value, _style| format!("event {value}\n"),
         )
         .unwrap();
-    let mut table = OperationTable::new(catalog.finish());
+    let mut table = OperationTable::new(declarations.finish());
     table.bind_transfer("read", Transfer).unwrap();
     table
 }
@@ -367,13 +367,13 @@ impl StreamOperation for WaitingStream {
 }
 #[tokio::test(start_paused = true)]
 async fn stream_late_receive_uses_the_original_absolute_deadline() {
-    let mut catalog = OperationCatalog::builder("example", Deadlines::default());
+    let mut declarations = OperationDeclarations::builder("example", Deadlines::default());
     let mut declaration = spec("follow");
     declaration.kind = OperationKind::Stream;
-    catalog
+    declarations
         .declare_stream::<Input, u64>(declaration, |value, _style| value.to_string())
         .unwrap();
-    let mut table = OperationTable::new(catalog.finish());
+    let mut table = OperationTable::new(declarations.finish());
     table
         .bind_stream("follow", WaitingStream(std::sync::Mutex::new(None)))
         .unwrap();
@@ -407,11 +407,11 @@ impl Operation for DirectWrite {
 }
 #[tokio::test]
 async fn typed_no_read_policy_is_selected_before_starting_a_read_timer() {
-    let mut catalog = builder();
-    catalog
+    let mut declarations = builder();
+    declarations
         .declare::<Input, bool>(spec("direct"), |value, _style| value.to_string())
         .unwrap();
-    let mut table = OperationTable::new(catalog.finish());
+    let mut table = OperationTable::new(declarations.finish());
     table.bind("direct", DirectWrite).unwrap();
     let mut request = timed("direct", json!({}));
     request.deadline = Deadline::Milliseconds(0);
@@ -443,13 +443,13 @@ impl Operation for CallerAccess {
 #[tokio::test]
 async fn typed_access_policy_reads_authenticated_caller_before_execution() {
     let effects = Arc::new(AtomicUsize::new(0));
-    let mut catalog = builder();
+    let mut declarations = builder();
     let mut declaration = spec("context");
     declaration.access = Access::Write;
-    catalog
+    declarations
         .declare::<Input, bool>(declaration, |value, _style| value.to_string())
         .unwrap();
-    let mut table = OperationTable::new(catalog.finish());
+    let mut table = OperationTable::new(declarations.finish());
     table
         .bind("context", CallerAccess(effects.clone()))
         .unwrap();

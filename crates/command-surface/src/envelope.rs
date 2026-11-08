@@ -38,7 +38,7 @@ impl LatencyClass {
     }
 }
 
-/// Milliseconds from admission. A JSON null lifts the deadline; absence uses
+/// Milliseconds from when the daemon accepts the request. A JSON null lifts the deadline; absence uses
 /// the operation's typed read default (its class default unless overridden).
 /// All surfaces use this same representation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -58,7 +58,7 @@ impl Deadline {
             Self::Milliseconds(ms) => Some(Duration::from_millis(ms)),
         }
     }
-    /// Connection/readiness admission budget, including the protocol's 50 ms grace.
+    /// Budget for connecting and waiting for readiness, including the protocol's 50 ms grace.
     /// Accepted requests await the server's typed terminal result.
     pub fn connection_timeout(self, default: Option<Duration>) -> Option<Duration> {
         self.duration(default)

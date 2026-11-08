@@ -291,9 +291,11 @@ fn palette_and_picker_share_matcher_vectors() {
 
 #[test]
 fn page_and_palette_cli_derive_from_registered_request() {
-    let mut catalog =
-        command_surface::OperationCatalog::builder("app", command_surface::Deadlines::default());
-    catalog
+    let mut declarations = command_surface::OperationDeclarations::builder(
+        "app",
+        command_surface::Deadlines::default(),
+    );
+    declarations
         .declare_tool(command_surface::ToolFamily {
             name: "read".into(),
             description: "Read rows".into(),
@@ -301,12 +303,12 @@ fn page_and_palette_cli_derive_from_registered_request() {
             idempotent: true,
         })
         .unwrap();
-    catalog
+    declarations
         .declare::<serde_json::Value, serde_json::Value>(operation(false), |value, _style| {
             value.to_string()
         })
         .unwrap();
-    let table = catalog.finish();
+    let table = declarations.finish();
     let request = Request {
         operation: "read".into(),
         arguments: json!({"ref":"row' & λ"}),

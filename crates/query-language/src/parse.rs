@@ -390,7 +390,7 @@ impl Parser<'_> {
             .catalog
             .units
             .iter()
-            .flat_map(|unit| std::iter::once(unit.name.as_str()).chain(unit.singular.as_deref()))
+            .map(|unit| unit.name.as_str())
             .collect();
         self.near_miss(
             t,
@@ -1804,7 +1804,7 @@ impl Parser<'_> {
         let pick = if self.take("pick") {
             self.expect("first")?;
             self.expect("by")?;
-            let candidate = self.witness_scope(&inner, within.as_ref());
+            let candidate = self.match_scope(&inner, within.as_ref());
             let mut keys = Vec::new();
             loop {
                 let expression = self.expression(&candidate, Place::Condition)?;
@@ -1820,9 +1820,9 @@ impl Parser<'_> {
                     break;
                 }
             }
-            WitnessChoice::FirstBy { keys }
+            MatchChoice::FirstBy { keys }
         } else {
-            WitnessChoice::Nearest
+            MatchChoice::Nearest
         };
         self.inner_scopes.insert(start, inner);
         Ok(self.cond(
@@ -1837,7 +1837,7 @@ impl Parser<'_> {
             },
         ))
     }
-    fn witness_scope(&self, inner: &Scope, within: Option<&Distance>) -> Scope {
+    fn match_scope(&self, inner: &Scope, within: Option<&Distance>) -> Scope {
         let mut candidate = inner.clone();
         for (name, kind) in [
             ("match.id", FieldKind::Reference),

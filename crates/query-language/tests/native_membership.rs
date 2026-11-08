@@ -12,11 +12,6 @@ fn catalog() -> Catalog {
     for unit in ["sessions", "events"] {
         catalog.units.push(Unit {
             name: unit.into(),
-            singular: if unit == "sessions" {
-                Some("conversation".into())
-            } else {
-                None
-            },
             fields: vec![
                 Field {
                     name: "id".into(),

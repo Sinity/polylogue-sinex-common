@@ -50,7 +50,7 @@ impl Prepared {
             encoded_hash: self.encoded_hash,
         }
     }
-    /// Return ownership of the encoded inode. Products own its persistence and custody.
+    /// Return ownership of the encoded inode. Products own where it is persisted.
     pub fn into_file(self) -> File {
         self.file
     }

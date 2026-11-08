@@ -124,7 +124,7 @@ impl CursorSeal {
     }
 }
 
-/// An authenticated capture awaiting binding to an authoritative question.
+/// A cursor whose seal checked out, not yet bound to the question it pages.
 /// Products may inspect its recorded context to load an immutable run or pack;
 /// that lookup must also validate the current request against its stored
 /// executable representation. Authentication never supplies a grant.

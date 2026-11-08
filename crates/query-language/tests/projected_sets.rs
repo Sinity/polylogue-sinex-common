@@ -14,7 +14,7 @@ fn catalog() -> Catalog {
         unit: Some(target.into()),
         ..Field::default()
     };
-    let mut same_owner = reference("same_owner", "person");
+    let mut same_owner = reference("same_owner", "people");
     same_owner.help = "another source's explanation".into();
     same_owner.read_as = "another phrase".into();
     let mut owners = reference("owners", "people");
@@ -71,7 +71,6 @@ fn catalog() -> Catalog {
     });
     catalog.units.push(Unit {
         name: "people".into(),
-        singular: Some("person".into()),
         ..Unit::default()
     });
     catalog.units.push(Unit {
