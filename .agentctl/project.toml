@@ -6,9 +6,9 @@ root_markers = ["Cargo.toml", "flake.nix", "xtask"]
 
 [environment]
 kind = "nix-develop"
-command = ["nix", "develop", "--command"]
-inherit = ["HOME", "USER", "PATH", "LANG", "XDG_RUNTIME_DIR", "CARGO_TARGET_DIR"]
-unset = ["DATABASE_URL", "PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "SQLX_OFFLINE"]
+command = ["env", "-u", "CARGO_TARGET_DIR", "nix", "develop", "--command"]
+inherit = ["HOME", "USER", "PATH", "LANG", "XDG_RUNTIME_DIR"]
+unset = ["CARGO_TARGET_DIR", "DATABASE_URL", "PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "SQLX_OFFLINE"]
 
 [environment.values]
 # Builds run several at once; -j8 each keeps them

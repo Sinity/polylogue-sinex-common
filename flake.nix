@@ -137,6 +137,11 @@
         LLVM_COV = "${toolchain}/lib/rustlib/${system}/bin/llvm-cov";
         LLVM_PROFDATA = "${toolchain}/lib/rustlib/${system}/bin/llvm-profdata";
         shellHook = ''
+          if [ -z "''${CARGO_TARGET_DIR:-}" ] && command -v sinnix-cargo-target >/dev/null 2>&1; then
+            if cargo_target="$(sinnix-cargo-target)"; then
+              export CARGO_TARGET_DIR="$cargo_target"
+            fi
+          fi
           if [ -d .githooks ] && git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
             && ! git config --get core.hooksPath >/dev/null; then
             git config --local core.hooksPath .githooks

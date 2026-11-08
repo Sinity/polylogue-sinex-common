@@ -16,6 +16,13 @@ cargo xtask test -p devkit --all-features
 and compiler wrappers. Cargo's default output directory is `target/`; a
 caller may set `CARGO_TARGET_DIR` explicitly.
 
+Declared AgentCTL operations clear an ambient `CARGO_TARGET_DIR` before entering
+the actual workspace's shell. The shell selects that checkout's isolated host
+target when `sinnix-cargo-target` is available, with dependency artifacts seeded
+by the host helper. For an explicit target experiment, pass
+`exec -- env CARGO_TARGET_DIR=... cargo ...`; this assignment runs after shell
+selection. Keep the experimental target exclusive to the same checkout.
+
 `nix flake check` builds sealed formatting, Clippy, nextest and browser-shell
 checks. Clippy and nextest reuse one Crane dependency artifact build with the
 same Rust toolchain and all workspace features. The source includes fixture
