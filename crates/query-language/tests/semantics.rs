@@ -1,9 +1,10 @@
 use query_language::ast::*;
 use query_language::catalog::{Field, FieldKind, NaturalMatch};
+use query_language::conformance::*;
 use query_language::coverage::CoverageState;
 use query_language::cursor::{PageRequest, SealedCursor};
 use query_language::laws::{self, Compiler, Executor, Page, Vocabulary};
-use query_language::semantics::*;
+use query_language::semantics::Truth;
 use query_language::{Error, ErrorKind};
 #[path = "support/mod.rs"]
 mod support;
@@ -52,29 +53,6 @@ fn ids(answer: &Answer) -> Vec<&str> {
     answer.rows.iter().map(|row| row.id.as_str()).collect()
 }
 
-#[test]
-fn truth_tables_cover_every_pair_and_negation() {
-    use Truth::{False as F, True as T, Unknown as U};
-    for (a, b, and, or) in [
-        (F, F, F, F),
-        (F, U, F, U),
-        (F, T, F, T),
-        (U, F, F, U),
-        (U, U, U, U),
-        (U, T, U, T),
-        (T, F, F, T),
-        (T, U, U, T),
-        (T, T, T, T),
-    ] {
-        assert_eq!(a.and(b), and);
-        assert_eq!(a.or(b), or);
-    }
-    for (a, expected) in [(T, F), (F, T), (U, U)] {
-        assert_eq!(!a, expected);
-        assert_eq!(a.not(), expected);
-        assert_eq!(a.matches(), a == T);
-    }
-}
 #[test]
 fn unknown_is_not_zero_or_empty_and_lists_keep_unknown() {
     for op in [Op::Eq, Op::Ne, Op::Lt, Op::Le, Op::Gt, Op::Ge] {

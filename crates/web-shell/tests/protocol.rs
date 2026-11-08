@@ -256,6 +256,7 @@ fn copy_target_escapes_text_and_round_trips_forms() {
     );
 }
 
+#[cfg(feature = "typescript")]
 #[test]
 fn generated_types_match_rust() {
     assert_eq!(

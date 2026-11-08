@@ -446,6 +446,12 @@ follow-at-end, or an explicit apply.
 
 ### Development
 
+The optional `typescript` feature enables Rust declaration generation and
+its `web-shell-types` binary, including command-surface's matching feature.
+Runtime builds retain the wire types, rendering and committed assets without
+linking the declaration generator. `cargo xtask check` compiles this runtime
+surface separately and tests generated declarations with every feature enabled.
+
 Products consume the committed `assets/shell.js` and `assets/feed-worker.js`
 and need no JavaScript build step. Maintainers need `node`, `tsc` and `esbuild` on PATH (the tools can also
 be supplied through `TSC` and `ESBUILD`). No npm installation is used.
@@ -453,8 +459,8 @@ be supplied through `TSC` and `ESBUILD`). No npm installation is used.
 ```sh
 node crates/web-shell/build.mjs --test
 node crates/web-shell/build.mjs --write --test
-cargo run -p web-shell --bin web-shell-types -- --write crates/web-shell/typescript/types.ts
-cargo xtask test -p web-shell
+cargo run -p web-shell --features typescript --bin web-shell-types -- --write crates/web-shell/typescript/types.ts
+cargo xtask test -p web-shell --features typescript
 WEB_SHELL_WRITE_FIXTURE=1 cargo xtask test -p web-shell -E 'test(timeline_zoom_fixture)'
 ```
 

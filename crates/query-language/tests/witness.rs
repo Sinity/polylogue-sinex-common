@@ -1,10 +1,11 @@
+use query_language::semantics::Truth;
 use query_language::{
     ast::*,
     bind::bind,
+    conformance::*,
     format::format_query,
     identity::{normal_form, question_id},
     parse::parse,
-    semantics::*,
 };
 use std::collections::BTreeMap;
 mod support;

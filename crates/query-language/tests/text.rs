@@ -2,11 +2,11 @@ use query_language::{
     ast::*,
     bind::bind,
     catalog::*,
+    conformance::*,
     format::format_query,
     identity::normal_form,
     parse::parse,
     scope::{Origin, TypeRule},
-    semantics::*,
 };
 use std::collections::BTreeMap;
 fn catalog() -> Catalog {

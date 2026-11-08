@@ -578,6 +578,7 @@ fn half_built_template_outlives_its_builder_only() {
     assert!(!server.database_exists("bootstrap_building_killed").unwrap());
 }
 
+#[cfg(feature = "runner")]
 #[test]
 fn every_test_run_reaps_without_building_a_schema() {
     let server = Server::start(&ClusterOptions::default()).unwrap();

@@ -4,10 +4,12 @@
 use maud::{Markup, html};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+#[cfg(feature = "typescript")]
 use ts_rs::TS;
 
 /// How one series row is drawn. A state is an interval with a label.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
 #[serde(rename_all = "snake_case")]
 pub enum Render {
     Interval,
@@ -16,7 +18,8 @@ pub enum Render {
 }
 
 /// Who acted in a span.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
 #[serde(rename_all = "snake_case")]
 pub enum Agency {
     Operator,
@@ -25,7 +28,8 @@ pub enum Agency {
 }
 
 /// A timeline row defined by a query: its rows carry a time or an interval.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
 #[serde(deny_unknown_fields)]
 pub struct Lane {
     /// Stable name the series rows refer to.
@@ -41,11 +45,12 @@ pub struct Lane {
 
 /// What one series row draws. Count rows stand for several rows in one bin and
 /// carry no reference: opening one zooms into its span.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
 #[serde(tag = "render", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Shape {
     Interval {
-        #[ts(type = "number")]
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
         end: i64,
         label: Option<String>,
         agency: Option<Agency>,
@@ -59,21 +64,22 @@ pub enum Shape {
         href: String,
     },
     Count {
-        #[ts(type = "number")]
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
         end: i64,
-        #[ts(type = "number")]
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
         count: u64,
     },
 }
 
 /// One drawable row: `(lane, group, start, shape)`. Times are milliseconds since
 /// the Unix epoch.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
 #[serde(deny_unknown_fields)]
 pub struct SeriesRow {
     pub lane: String,
     pub group: Option<String>,
-    #[ts(type = "number")]
+    #[cfg_attr(feature = "typescript", ts(type = "number"))]
     pub start: i64,
     pub shape: Shape,
 }
@@ -106,12 +112,13 @@ impl SeriesRow {
 }
 
 /// A half-open span of time, `[start, end)`, in milliseconds since the epoch.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
 #[serde(deny_unknown_fields)]
 pub struct Window {
-    #[ts(type = "number")]
+    #[cfg_attr(feature = "typescript", ts(type = "number"))]
     pub start: i64,
-    #[ts(type = "number")]
+    #[cfg_attr(feature = "typescript", ts(type = "number"))]
     pub end: i64,
 }
 impl Window {
@@ -121,7 +128,8 @@ impl Window {
 }
 
 /// The rows of every lane over one window, fitted to a drawn width.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
 #[serde(deny_unknown_fields)]
 pub struct Series {
     pub window: Window,
@@ -131,7 +139,7 @@ pub struct Series {
     pub minimum_pixels: u32,
     /// Length of one bin in milliseconds: a power of two, aligned to the epoch.
     /// A row belongs to the bin its start falls in.
-    #[ts(type = "number")]
+    #[cfg_attr(feature = "typescript", ts(type = "number"))]
     pub bin: i64,
     /// IANA time zone the axis is labelled in.
     pub time_zone: String,

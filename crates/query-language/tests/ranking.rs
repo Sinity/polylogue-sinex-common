@@ -1,8 +1,8 @@
 //! Laws of ranking, `covered` and `diff`, each against an independent oracle.
 use proptest::prelude::*;
+use query_language::conformance::covered;
 use query_language::diff::{ChangeKind, changes};
 use query_language::fusion::{Entry, Fusion, K, fuse};
-use query_language::semantics::covered;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Ranked lists over a small universe, each key at most once per list, with

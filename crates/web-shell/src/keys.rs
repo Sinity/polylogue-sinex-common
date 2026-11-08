@@ -2,8 +2,10 @@
 //! and the checks that keep each product's own keys consistent with it and
 //! with the other product.
 use serde::Serialize;
+#[cfg(feature = "typescript")]
 use ts_rs::TS;
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
 #[serde(rename_all = "snake_case")]
 pub enum KeyAction {
     FocusQuery,
@@ -32,13 +34,15 @@ pub enum KeyAction {
 }
 /// Where a shared binding acts. Timeline keys act only while focus is inside a
 /// timeline; elsewhere the key keeps the browser's own meaning.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
 #[serde(rename_all = "snake_case")]
 pub enum Place {
     Everywhere,
     Timeline,
 }
-#[derive(Clone, Copy, Debug, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Serialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
 pub struct KeyBinding {
     pub key: &'static str,
     pub prefix: Option<&'static str>,

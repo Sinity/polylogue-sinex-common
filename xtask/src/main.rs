@@ -44,6 +44,47 @@ fn check(run: &mut Run) -> devkit::Result {
         "fmt",
         devkit::cargo_command().args(["fmt", "--all", "--", "--check"]),
     )?;
+    // Compile runtime and fixture surfaces without the workspace's all-feature
+    // unification, then retain the complete clippy and law-suite run below.
+    for package in ["query-language", "web-shell", "devkit"] {
+        run.cargo(
+            &format!("minimal-{package}"),
+            &[
+                "check",
+                "--locked",
+                "-p",
+                package,
+                "--all-targets",
+                "--no-default-features",
+            ],
+        )?;
+    }
+    run.cargo(
+        "devkit-service-fixtures",
+        &[
+            "check",
+            "--locked",
+            "-p",
+            "devkit",
+            "--all-targets",
+            "--no-default-features",
+            "--features",
+            "pg,nats",
+        ],
+    )?;
+    run.cargo(
+        "devkit-runner",
+        &[
+            "check",
+            "--locked",
+            "-p",
+            "devkit",
+            "--all-targets",
+            "--no-default-features",
+            "--features",
+            "runner",
+        ],
+    )?;
     run.command(
         "web-shell",
         std::process::Command::new("node").args(["crates/web-shell/build.mjs", "--test"]),

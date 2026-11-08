@@ -1,7 +1,7 @@
 //! Law `ql.diff.watch`: a watch's change report and the query language's
 //! `A | diff (B)` agree on membership, ranking and top-k changes.
 use query_language::ast::*;
-use query_language::semantics::{Dataset, ReferenceEvaluator, Row, Scalar};
+use query_language::conformance::{Dataset, ReferenceEvaluator, Row, Scalar};
 use signals::{ChangeKind, Occurrence, difference};
 use std::collections::BTreeSet;
 

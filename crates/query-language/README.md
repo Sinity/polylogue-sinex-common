@@ -16,6 +16,17 @@ laws: Polylogue in
 [its query page](https://github.com/Sinity/polylogue/blob/master/docs/query.md),
 Sinex in [its query page](https://github.com/Sinity/sinex/blob/master/docs/query.md).
 
+## Build features
+
+Runtime builds keep parsing, binding, identity, time and `semantics::Truth`.
+The optional `conformance` feature adds `conformance` (fixture rows and the
+reference evaluator) and `laws` (independent compiler/executor cases).
+Products enable it in their development dependency when running those laws;
+production execution does not depend on the fixture representation.
+Run `cargo xtask test -p query-language --features conformance` for the full
+language suite. `cargo xtask check` enables every feature and also compiles
+the runtime surface separately. The truth-table tests run without conformance.
+
 ## Concepts
 
 The language has seven concepts, and nothing else is a language concept:

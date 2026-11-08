@@ -13,6 +13,18 @@ the environment, and names its interfaces neutrally (`DEVKIT_JOB_ID`,
 `DEVKIT_SCRATCH`, `DEVKIT_PG_SOCKET`, `DEVKIT_NATS_URL`) so that any job
 runner can set them. Nothing here knows a particular runner or host.
 
+## Build features
+
+Fixture consumers use `default-features = false` and select `pg` and/or
+`nats` when needed. This keeps `Fixture`, `#[devkit::test]`, service ownership
+and process helpers available without the run recorder or source parser.
+The `runner` feature adds `Run`, result/diagnostic types, changed-test
+selection and local dependency linking. `history` includes `runner`; the
+default `cli` feature includes history, and `bench` includes history too.
+Products opt into CLI or runner features in their xtask dependency.
+`cargo xtask check` compiles fixture-only, service-fixture and runner builds
+separately before checking and testing every feature together.
+
 ## Runs
 
 A run is one `xtask` invocation. It adds steps (`cargo` commands with

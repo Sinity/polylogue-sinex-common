@@ -8,8 +8,8 @@
 //! run the same laws. Product-specific transport parity and refusals add cases.
 use crate::Error;
 use crate::ast::*;
+use crate::conformance::{Answer, Dataset, Extent, Row, Scalar};
 use crate::cursor::{PageRequest, SealedCursor};
-use crate::semantics::{Answer, Dataset, Extent, Row, Scalar};
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 

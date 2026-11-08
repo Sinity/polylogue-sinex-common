@@ -1,10 +1,10 @@
 //! Development commands shared by Polylogue and Sinex.
 //!
-//! A project's xtask starts a [`Run`], adds its steps (cargo commands, a
+//! A project's xtask starts a `Run`, adds its steps (cargo commands, a
 //! nextest run, its own checks) and finishes it. The run prints a short
 //! summary and, with the `history` feature, records its stages, test outcomes
 //! and compiler diagnostics in one machine-wide SQLite store. The `status` and
-//! `history` commands in [`cli`] read that store, so an agent starting a
+//! `history` commands in `cli` read that store, so an agent starting a
 //! session can see what failed last time without rerunning anything.
 //!
 //! History is data, never a gate: a store that cannot be opened is reported
@@ -12,11 +12,15 @@
 
 mod cargo;
 mod files;
+#[cfg(feature = "runner")]
 mod junit;
+#[cfg(feature = "runner")]
 pub mod local_link;
 #[cfg(any(feature = "nats", feature = "pg"))]
 mod owner;
+#[cfg(feature = "runner")]
 mod run;
+#[cfg(feature = "runner")]
 pub mod select;
 
 #[cfg(feature = "bench")]
@@ -32,9 +36,11 @@ pub mod pg;
 
 pub use cargo::cargo_command;
 pub use devkit_macros::test;
+#[cfg(feature = "runner")]
 pub use run::{Diagnostic, Failed, Nextest, Run, Stage, TestOutcome, TestStatus, Tree};
 
 /// The result of one step of a run.
+#[cfg(feature = "runner")]
 pub type Result<T = ()> = std::result::Result<T, Failed>;
 
 /// A value [`test`] creates for each test parameter of this type, before the
