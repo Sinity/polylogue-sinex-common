@@ -869,7 +869,11 @@ pub struct OperationCatalog {
     renderers: Vec<Presentation>,
     deadlines: Deadlines,
     failure_codes: BTreeMap<String, FailureKind>,
-    default_operation: Option<(String, fn(&str) -> bool)>,
+    default_operation: Option<DefaultOperation>,
+}
+struct DefaultOperation {
+    name: String,
+    accepts_first: fn(&str) -> bool,
 }
 type Renderer =
     Box<dyn Fn(Value, Option<TextStyle>) -> Result<Option<String>, Failure> + Send + Sync>;
@@ -929,12 +933,12 @@ impl OperationCatalog {
     pub(crate) fn default_operation(&self) -> Option<&OperationDescription> {
         self.default_operation
             .as_ref()
-            .and_then(|(name, _)| self.forms.description(name))
+            .and_then(|operation| self.forms.description(&operation.name))
     }
     pub(crate) fn accepts_default_first(&self, word: &str) -> bool {
         self.default_operation
             .as_ref()
-            .is_some_and(|(_, accepts)| accepts(word))
+            .is_some_and(|operation| (operation.accepts_first)(word))
     }
     fn index(&self, name: &str) -> Option<usize> {
         self.forms
@@ -1129,7 +1133,10 @@ impl CatalogBuilder {
                 "the default operation needs a command-line surface",
             ));
         }
-        self.catalog.default_operation = Some((name, accepts_first));
+        self.catalog.default_operation = Some(DefaultOperation {
+            name,
+            accepts_first,
+        });
         Ok(())
     }
     /// Register each precise product code once, at table construction.
