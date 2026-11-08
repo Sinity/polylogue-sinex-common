@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 use jiff::{Timestamp, civil::Time as CivilTime, tz::TimeZone};
 use query_language::{
     ast::{ConditionKind, Query, Source, Value},

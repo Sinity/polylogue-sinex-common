@@ -7,6 +7,7 @@ rust-version.workspace = true
 repository.workspace = true
 publish.workspace = true
 description = "Authored-record rules shared by Polylogue and Sinex: currency, stale base, atomic requests, uniqueness slots and order keys"
+autotests = false
 
 [features]
 # The shared history generator, for property tests in this crate and in the
@@ -23,6 +24,8 @@ thiserror = "2"
 [dev-dependencies]
 proptest = "1"
 
+# One integration-test binary per crate: each test file is a module of
+# tests/main.rs, so the crate and its dependencies link once.
 [[test]]
-name = "generated"
-required-features = ["generator"]
+name = "main"
+path = "tests/main.rs"

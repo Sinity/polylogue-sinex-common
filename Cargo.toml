@@ -13,8 +13,16 @@ publish = false
 # Tests spend most of their CPU in compression.
 # Optimizing dependencies, and the workspace lightly, cuts that sharply while
 # keeping incremental rebuilds cheap.
+# Same profile as Polylogue: line tables keep backtraces useful, debug info
+# is most of a test binary's bytes otherwise, and incremental state cost
+# more than it saved on this disk.
 [profile.dev]
 opt-level = 1
+debug = "line-tables-only"
+incremental = false
+codegen-units = 256
 
 [profile.dev.package."*"]
+codegen-units = 16
 opt-level = 2
+debug = false

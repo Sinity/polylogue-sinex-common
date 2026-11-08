@@ -1,7 +1,6 @@
 //! Tests of the fit, checked against independent oracles in `common`.
 
-#[allow(dead_code)]
-mod common;
+use crate::common;
 
 use common::*;
 use ranking::{FitOptions, FitStatus, JudgeSet, Judgment, RankError, fit, fit_warm};

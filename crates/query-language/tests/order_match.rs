@@ -1,3 +1,4 @@
+use crate::support;
 use query_language::semantics::Truth;
 use query_language::{
     ast::*,
@@ -8,7 +9,6 @@ use query_language::{
     parse::parse,
 };
 use std::collections::BTreeMap;
-mod support;
 
 #[test]
 fn explicit_pick_keys_bind_inner_output_and_local_candidate_metadata() {

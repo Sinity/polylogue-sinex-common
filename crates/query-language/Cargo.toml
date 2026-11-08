@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 description = "Pure shared query grammar, time, continuation and compiler cases"
+autotests = false
 
 [features]
 # Fixture rows, the reference evaluator and the reusable compiler cases.
@@ -23,26 +24,8 @@ schemars = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
 proptest = "1"
 
+# One integration-test binary per crate: each test file is a module of
+# tests/main.rs, so the crate and its dependencies link once.
 [[test]]
-name = "conditional"
-required-features = ["conformance"]
-
-[[test]]
-name = "glob"
-required-features = ["conformance"]
-
-[[test]]
-name = "ranking"
-required-features = ["conformance"]
-
-[[test]]
-name = "semantics"
-required-features = ["conformance"]
-
-[[test]]
-name = "text"
-required-features = ["conformance"]
-
-[[test]]
-name = "order_match"
-required-features = ["conformance"]
+name = "main"
+path = "tests/main.rs"

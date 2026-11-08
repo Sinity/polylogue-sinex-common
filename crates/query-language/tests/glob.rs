@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 use query_language::ast::Expression;
 use query_language::conformance::{Dataset, ReferenceEvaluator, Row, Scalar};
 

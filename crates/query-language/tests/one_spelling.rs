@@ -1,7 +1,7 @@
 //! The one spelling, against both catalogs: the real-question examples of
 //! both products parse with the same grammar, and every refusal of a former
 //! or mistaken spelling carries a suggestion that parses as given.
-mod support;
+use crate::support;
 use proptest::prelude::*;
 use query_language::{
     ErrorKind, ast::*, bind::bind, catalog::Catalog, format::format_query, identity::normal_form,
