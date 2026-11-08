@@ -21,6 +21,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: TypeScript and esbuild for the web-shell build
+        run: npm install -g typescript@7.0.2 esbuild@0.27.2
       - name: PostgreSQL and nats-server binaries for devkit service fixtures
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q postgresql
