@@ -550,7 +550,12 @@ async fn mixed_rows_authorize_the_typed_request_before_any_write() {
         type Request = Arguments;
         type Response = Value;
 
-        fn required_access(&self, request: &Arguments, _declared: Access) -> Access {
+        fn required_access(
+            &self,
+            request: &Arguments,
+            _declared: Access,
+            _caller: &Caller,
+        ) -> Access {
             if request.value.is_some() {
                 Access::Write
             } else {

@@ -14,7 +14,8 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio_util::sync::CancellationToken;
+use tokio::time::Instant;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 pub type OperationFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -235,8 +236,17 @@ pub trait Operation: Send + Sync + 'static {
     type Request: Serialize + DeserializeOwned + JsonSchema + Send + 'static;
     type Response: Serialize + DeserializeOwned + JsonSchema + Send + 'static;
     /// Access for this typed request. The declaration advertises the row's maximum.
-    fn required_access(&self, _request: &Self::Request, declared: Access) -> Access {
+    fn required_access(
+        &self,
+        _request: &Self::Request,
+        declared: Access,
+        _caller: &Caller,
+    ) -> Access {
         declared
+    }
+    /// Whether this typed request has a cancellable read phase.
+    fn has_read_phase(&self, _request: &Self::Request) -> bool {
+        true
     }
     fn execute(
         &self,
@@ -244,6 +254,9 @@ pub trait Operation: Send + Sync + 'static {
         context: RequestContext,
     ) -> OperationFuture<'_, Answer<Self::Response>>;
 }
+
+/// Typed stream items include late failures as well as successful events.
+pub type EventReceiver<E> = tokio::sync::mpsc::Receiver<Result<E, Failure>>;
 
 /// One stream row: opening it yields its events until the sender closes.
 pub trait StreamOperation: Send + Sync + 'static {
@@ -253,31 +266,75 @@ pub trait StreamOperation: Send + Sync + 'static {
         &self,
         request: Self::Request,
         context: RequestContext,
-    ) -> OperationFuture<'_, Result<tokio::sync::mpsc::Receiver<Self::Event>, Failure>>;
+    ) -> OperationFuture<'_, Result<EventReceiver<Self::Event>, Failure>>;
 }
 
-/// A stream's events as JSON, in the order sent.
+/// One request row with both a bounded answer and a typed event delivery.
+pub trait TransferOperation:
+    Operation + StreamOperation<Request = <Self as Operation>::Request>
+{
+    fn streaming(&self, request: &<Self as Operation>::Request) -> bool;
+}
+
+/// A stream's typed failures end delivery without a successful terminal answer.
 pub struct Events {
-    events: Box<dyn ErasedEvents>,
+    events: Option<Box<dyn ErasedEvents>>,
+    context: RequestContext,
+    catalog: Arc<OperationCatalog>,
+    done: bool,
+    _guard: DropGuard,
 }
 impl Events {
-    /// The next event; `None` when the stream has ended.
     pub async fn next(&mut self) -> Option<Result<Value, Failure>> {
-        self.events.receive().await
+        if self.done {
+            return None;
+        }
+        let event = tokio::select! {
+            biased;
+            failure = self.context.wait_for_read_stop() => Some(Err(failure)),
+            event = self.events.as_mut().expect("active stream has a receiver").receive() => event,
+        };
+        if event.as_ref().is_none_or(Result::is_err) {
+            self.done = true;
+            self.events = None;
+            self.context.cancellation.cancel();
+        }
+        event.map(|value| {
+            value.map_err(|error| {
+                let spec = self
+                    .catalog
+                    .spec_named(&self.context.request().operation)
+                    .expect("bound stream is declared");
+                self.catalog.checked_failure(error, spec)
+            })
+        })
     }
 }
 trait ErasedEvents: Send {
     fn receive(&mut self) -> OperationFuture<'_, Option<Result<Value, Failure>>>;
 }
-impl<T: Serialize + Send + 'static> ErasedEvents for tokio::sync::mpsc::Receiver<T> {
+impl<T: Serialize + Send + 'static> ErasedEvents for EventReceiver<T> {
     fn receive(&mut self) -> OperationFuture<'_, Option<Result<Value, Failure>>> {
         Box::pin(async move {
             self.recv().await.map(|event| {
-                serde_json::to_value(event)
-                    .map_err(|e| Failure::new(FailureKind::Io, e.to_string()))
+                event.and_then(|event| {
+                    serde_json::to_value(event)
+                        .map_err(|error| Failure::new(FailureKind::Io, error.to_string()))
+                })
             })
         })
     }
+}
+
+enum Phase {
+    Reading,
+    OwnedWrite,
+    Stopped(Failure),
+}
+struct ReadLifetime {
+    phase: Phase,
+    deadline: Option<Instant>,
+    parent: CancellationToken,
 }
 
 #[derive(Clone)]
@@ -289,6 +346,8 @@ pub struct RequestContext {
     pub request_id: String,
     pub cancellation: CancellationToken,
     caller: Caller,
+    request: Arc<RunnableRequest>,
+    lifetime: Arc<Mutex<ReadLifetime>>,
     budget_tokens: crate::TokenBudget,
     default_budget_tokens: Option<u32>,
     cursor: Option<String>,
@@ -387,6 +446,70 @@ struct Progress {
     narrower: Option<RunnableRequest>,
 }
 impl RequestContext {
+    /// The exact accepted envelope, including its original argument object.
+    pub fn request(&self) -> &RunnableRequest {
+        &self.request
+    }
+    pub fn read_deadline(&self) -> Option<Instant> {
+        self.lifetime
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .deadline
+    }
+    /// Atomically win ownership before handing a mutation to its writer.
+    pub fn finish_read_phase(&self) -> Result<(), Failure> {
+        self.read_state(true)
+    }
+    fn read_state(&self, finish: bool) -> Result<(), Failure> {
+        let mut lifetime = self
+            .lifetime
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match &lifetime.phase {
+            Phase::OwnedWrite => return Ok(()),
+            Phase::Stopped(failure) => return Err(failure.clone()),
+            Phase::Reading => {}
+        }
+        let failure = if lifetime.parent.is_cancelled() || self.cancellation.is_cancelled() {
+            Some(Failure::new(FailureKind::Cancelled, "request cancelled"))
+        } else if lifetime
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            Some(timeout_failure(&self.progress))
+        } else {
+            None
+        };
+        if let Some(failure) = failure {
+            lifetime.phase = Phase::Stopped(failure.clone());
+            self.cancellation.cancel();
+            return Err(failure);
+        }
+        if finish {
+            lifetime.phase = Phase::OwnedWrite;
+        }
+        Ok(())
+    }
+    async fn wait_for_read_stop(&self) -> Failure {
+        let (parent, deadline) = {
+            let lifetime = self
+                .lifetime
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            (lifetime.parent.clone(), lifetime.deadline)
+        };
+        tokio::select! {
+            biased;
+            _ = parent.cancelled() => {},
+            _ = self.cancellation.cancelled() => {},
+            _ = async { match deadline { Some(at) => tokio::time::sleep_until(at).await, None => std::future::pending().await } } => {},
+        }
+        match self.read_state(false) {
+            Err(failure) => failure,
+            Ok(()) => std::future::pending().await,
+        }
+    }
+
     pub fn caller(&self) -> &Caller {
         &self.caller
     }
@@ -490,11 +613,7 @@ impl RequestContext {
         self.check_cancelled()
     }
     pub fn check_cancelled(&self) -> Result<(), Failure> {
-        if self.cancellation.is_cancelled() {
-            Err(Failure::new(FailureKind::Cancelled, "request cancelled"))
-        } else {
-            Ok(())
-        }
+        self.read_state(false)
     }
 }
 
@@ -507,6 +626,13 @@ pub struct OperationDescription {
     /// The answer's schema; for a stream, one event's.
     #[serde(rename = "outputSchema")]
     pub output_schema: Value,
+    /// A request row may also expose finite typed event delivery.
+    #[serde(
+        rename = "eventSchema",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub event_schema: Option<Value>,
 }
 
 /// What every surface needs to write a request back: the product name, the
@@ -530,75 +656,148 @@ enum Row {
     Local,
 }
 
-trait ErasedOperation: Send + Sync {
-    fn execute<'a>(
-        &'a self,
-        arguments: Value,
-        context: RequestContext,
-        spec: &'a OperationSpec,
-    ) -> OperationFuture<'a, Result<Answer<Value>, Failure>>;
+struct Policy {
+    access: Access,
+    read_phase: bool,
 }
-impl<O: Operation> ErasedOperation for O {
-    fn execute<'a>(
-        &'a self,
+trait ErasedOperation: Send + Sync {
+    fn policy(
+        &self,
+        arguments: &Value,
+        declared: Access,
+        caller: &Caller,
+    ) -> Result<Policy, Failure>;
+    fn streaming(&self, arguments: &Value) -> Result<bool, Failure>;
+    fn execute(
+        &self,
         arguments: Value,
         context: RequestContext,
-        spec: &'a OperationSpec,
-    ) -> OperationFuture<'a, Result<Answer<Value>, Failure>> {
-        Box::pin(async move {
-            let request = match serde_json::from_value(arguments) {
-                Ok(request) => request,
-                Err(error) => return Err(bad_request(error.to_string())),
-            };
-            let access = Operation::required_access(self, &request, spec.access);
-            if access > context.caller().access() {
-                return Err(Failure::new(
-                    FailureKind::Refused,
-                    format!("{} needs {} access", spec.name, access.name()),
-                ));
-            }
-            let answer = Operation::execute(self, request, context).await;
-            let Answer { outcome, envelope } = answer;
-            let outcome = match outcome.map(serde_json::to_value) {
-                Outcome::Ok(Ok(value)) => Outcome::Ok(value),
-                Outcome::Empty(Ok(value)) => Outcome::Empty(value),
-                Outcome::Degraded {
-                    value: Ok(value),
-                    missing,
-                } => Outcome::Degraded { value, missing },
-                Outcome::Error(error) => Outcome::Error(error),
-                Outcome::Ok(Err(error))
-                | Outcome::Empty(Err(error))
-                | Outcome::Degraded {
-                    value: Err(error), ..
-                } => Outcome::Error(Failure::new(FailureKind::Io, error.to_string())),
-            };
-            Ok(Answer { outcome, envelope })
-        })
+    ) -> OperationFuture<'_, Result<Answer<Value>, Failure>>;
+    fn open(
+        &self,
+        _arguments: Value,
+        _context: RequestContext,
+    ) -> OperationFuture<'_, Result<Box<dyn ErasedEvents>, Failure>> {
+        Box::pin(async { Err(bad_request("operation has no event delivery")) })
     }
 }
-
+struct RequestHandler<O>(O);
+struct TransferHandler<O>(O);
+fn policy<O: Operation>(
+    operation: &O,
+    arguments: &Value,
+    declared: Access,
+    caller: &Caller,
+) -> Result<Policy, Failure> {
+    let request = serde_json::from_value(arguments.clone())
+        .map_err(|error| bad_request(error.to_string()))?;
+    Ok(Policy {
+        access: operation.required_access(&request, declared, caller),
+        read_phase: operation.has_read_phase(&request),
+    })
+}
+fn execute_operation<O: Operation>(
+    operation: &O,
+    arguments: Value,
+    context: RequestContext,
+) -> OperationFuture<'_, Result<Answer<Value>, Failure>> {
+    Box::pin(async move {
+        let request =
+            serde_json::from_value(arguments).map_err(|error| bad_request(error.to_string()))?;
+        let answer = Operation::execute(operation, request, context).await;
+        let Answer { outcome, envelope } = answer;
+        let outcome = match outcome.map(serde_json::to_value) {
+            Outcome::Ok(Ok(value)) => Outcome::Ok(value),
+            Outcome::Empty(Ok(value)) => Outcome::Empty(value),
+            Outcome::Degraded {
+                value: Ok(value),
+                missing,
+            } => Outcome::Degraded { value, missing },
+            Outcome::Error(error) => Outcome::Error(error),
+            Outcome::Ok(Err(error))
+            | Outcome::Empty(Err(error))
+            | Outcome::Degraded {
+                value: Err(error), ..
+            } => Outcome::Error(Failure::new(FailureKind::Io, error.to_string())),
+        };
+        Ok(Answer { outcome, envelope })
+    })
+}
+impl<O: Operation> ErasedOperation for RequestHandler<O> {
+    fn policy(
+        &self,
+        arguments: &Value,
+        declared: Access,
+        caller: &Caller,
+    ) -> Result<Policy, Failure> {
+        policy(&self.0, arguments, declared, caller)
+    }
+    fn streaming(&self, _arguments: &Value) -> Result<bool, Failure> {
+        Ok(false)
+    }
+    fn execute(
+        &self,
+        arguments: Value,
+        context: RequestContext,
+    ) -> OperationFuture<'_, Result<Answer<Value>, Failure>> {
+        execute_operation(&self.0, arguments, context)
+    }
+}
+impl<O: TransferOperation> ErasedOperation for TransferHandler<O> {
+    fn policy(
+        &self,
+        arguments: &Value,
+        declared: Access,
+        caller: &Caller,
+    ) -> Result<Policy, Failure> {
+        policy(&self.0, arguments, declared, caller)
+    }
+    fn streaming(&self, arguments: &Value) -> Result<bool, Failure> {
+        let request = serde_json::from_value(arguments.clone())
+            .map_err(|error| bad_request(error.to_string()))?;
+        Ok(TransferOperation::streaming(&self.0, &request))
+    }
+    fn execute(
+        &self,
+        arguments: Value,
+        context: RequestContext,
+    ) -> OperationFuture<'_, Result<Answer<Value>, Failure>> {
+        execute_operation(&self.0, arguments, context)
+    }
+    fn open(
+        &self,
+        arguments: Value,
+        context: RequestContext,
+    ) -> OperationFuture<'_, Result<Box<dyn ErasedEvents>, Failure>> {
+        open_events(&self.0, arguments, context)
+    }
+}
 trait ErasedStream: Send + Sync {
     fn open(
         &self,
         arguments: Value,
         context: RequestContext,
-    ) -> OperationFuture<'_, Result<Events, Failure>>;
+    ) -> OperationFuture<'_, Result<Box<dyn ErasedEvents>, Failure>>;
+}
+fn open_events<S: StreamOperation>(
+    stream: &S,
+    arguments: Value,
+    context: RequestContext,
+) -> OperationFuture<'_, Result<Box<dyn ErasedEvents>, Failure>> {
+    Box::pin(async move {
+        let request =
+            serde_json::from_value(arguments).map_err(|error| bad_request(error.to_string()))?;
+        let receiver = stream.open(request, context).await?;
+        Ok(Box::new(receiver) as Box<dyn ErasedEvents>)
+    })
 }
 impl<S: StreamOperation> ErasedStream for S {
     fn open(
         &self,
         arguments: Value,
         context: RequestContext,
-    ) -> OperationFuture<'_, Result<Events, Failure>> {
-        Box::pin(async move {
-            let request =
-                serde_json::from_value(arguments).map_err(|e| bad_request(e.to_string()))?;
-            let receiver = StreamOperation::open(self, request, context).await?;
-            Ok(Events {
-                events: Box::new(receiver),
-            })
-        })
+    ) -> OperationFuture<'_, Result<Box<dyn ErasedEvents>, Failure>> {
+        open_events(self, arguments, context)
     }
 }
 
@@ -628,12 +827,17 @@ pub(crate) const GLOBAL_FLAGS: [&str; 7] = [
 /// Immutable declarations, schemas and presentation, independent of handlers.
 pub struct OperationCatalog {
     forms: Arc<Forms>,
-    renderers: Vec<Option<Renderer>>,
+    renderers: Vec<Presentation>,
     deadlines: Deadlines,
     failure_codes: BTreeMap<String, FailureKind>,
     default_operation: Option<String>,
 }
 type Renderer = Box<dyn Fn(Value) -> Result<String, Failure> + Send + Sync>;
+#[derive(Default)]
+struct Presentation {
+    answer: Option<Renderer>,
+    event: Option<Renderer>,
+}
 /// Builds the declaration owner before real runtime handlers are bound.
 pub struct CatalogBuilder {
     catalog: OperationCatalog,
@@ -692,7 +896,8 @@ impl OperationCatalog {
         self.spec_named(&request.operation)
             .and_then(|spec| request.deadline.duration(self.deadlines.get(spec.latency)))
     }
-    pub fn socket_timeout(&self, request: &RunnableRequest) -> Option<Duration> {
+    /// Connection/readiness admission only; not an accepted request's reply timeout.
+    pub fn connection_timeout(&self, request: &RunnableRequest) -> Option<Duration> {
         self.deadline(request)
             .and_then(|d| d.checked_add(Duration::from_millis(50)))
     }
@@ -703,10 +908,13 @@ impl OperationCatalog {
         let index = self
             .index(operation)
             .ok_or_else(|| bad_request(format!("{operation} is not a stream")))?;
-        if self.descriptions()[index].spec.kind != OperationKind::Stream {
+        if self.descriptions()[index].spec.kind != OperationKind::Stream
+            && self.descriptions()[index].event_schema.is_none()
+        {
             return Err(bad_request(format!("{operation} is not a stream")));
         }
         self.renderers[index]
+            .event
             .as_ref()
             .expect("stream declaration has a renderer")(event)
     }
@@ -729,10 +937,42 @@ impl OperationCatalog {
                     return Err(bad_request(format!("{operation} has no answer to render")));
                 }
                 self.renderers[index]
+                    .answer
                     .as_ref()
                     .expect("request declaration has a renderer")(value.clone())
             }
         }
+    }
+    fn checked_failure(&self, error: Failure, spec: &OperationSpec) -> Failure {
+        if error
+            .code
+            .as_ref()
+            .is_some_and(|code| self.failure_codes.get(code) != Some(&error.kind))
+        {
+            return Failure::new(
+                FailureKind::Io,
+                "operation returned an unregistered or misclassified product failure code",
+            );
+        }
+        let infrastructure = matches!(
+            error.kind,
+            FailureKind::BadRequest
+                | FailureKind::Timeout
+                | FailureKind::Cancelled
+                | FailureKind::Conflict
+                | FailureKind::Io
+        );
+        if !infrastructure && !spec.failures.contains(&error.kind) {
+            return Failure::new(
+                FailureKind::Io,
+                format!(
+                    "operation {} returned undeclared failure {}",
+                    spec.name,
+                    error.kind.name()
+                ),
+            );
+        }
+        error
     }
 }
 impl CatalogBuilder {
@@ -807,8 +1047,12 @@ impl CatalogBuilder {
                 spec,
                 input_schema: schema_for!(A).to_value(),
                 output_schema: schema_for!(Answer<R>).to_value(),
+                event_schema: None,
             },
-            Some(renderer(render)),
+            Presentation {
+                answer: Some(renderer(render)),
+                event: None,
+            },
         )
     }
     pub fn declare_stream<A: JsonSchema, E: Serialize + DeserializeOwned + JsonSchema + 'static>(
@@ -824,8 +1068,38 @@ impl CatalogBuilder {
                 spec,
                 input_schema: schema_for!(A).to_value(),
                 output_schema: schema_for!(E).to_value(),
+                event_schema: None,
             },
-            Some(renderer(render)),
+            Presentation {
+                answer: None,
+                event: Some(renderer(render)),
+            },
+        )
+    }
+    pub fn declare_transfer<
+        A: JsonSchema,
+        R: Serialize + DeserializeOwned + JsonSchema + 'static,
+        E: Serialize + DeserializeOwned + JsonSchema + 'static,
+    >(
+        &mut self,
+        spec: OperationSpec,
+        answer: fn(&R) -> String,
+        event: fn(&E) -> String,
+    ) -> Result<(), Failure> {
+        if !matches!(spec.kind, OperationKind::Request { .. }) {
+            return Err(bad_request("transfer declaration needs a request kind"));
+        }
+        self.add(
+            OperationDescription {
+                spec,
+                input_schema: schema_for!(A).to_value(),
+                output_schema: schema_for!(Answer<R>).to_value(),
+                event_schema: Some(schema_for!(E).to_value()),
+            },
+            Presentation {
+                answer: Some(renderer(answer)),
+                event: Some(renderer(event)),
+            },
         )
     }
     pub fn declare_local<A: JsonSchema>(&mut self, spec: OperationSpec) -> Result<(), Failure> {
@@ -837,14 +1111,15 @@ impl CatalogBuilder {
                 spec,
                 input_schema: schema_for!(A).to_value(),
                 output_schema: Value::Bool(true),
+                event_schema: None,
             },
-            None,
+            Presentation::default(),
         )
     }
     fn add(
         &mut self,
         description: OperationDescription,
-        renderer: Option<Renderer>,
+        renderer: Presentation,
     ) -> Result<(), Failure> {
         let spec = &description.spec;
         let product = &self.catalog.forms.product;
@@ -968,8 +1243,9 @@ impl OperationTable {
             schema_for!(O::Request).to_value(),
             schema_for!(Answer<O::Response>).to_value(),
             true,
+            None,
         )?;
-        self.rows[index] = Some(Row::Request(Box::new(operation)));
+        self.rows[index] = Some(Row::Request(Box::new(RequestHandler(operation))));
         Ok(())
     }
     pub fn bind_stream<S: StreamOperation>(
@@ -982,9 +1258,39 @@ impl OperationTable {
             schema_for!(S::Request).to_value(),
             schema_for!(S::Event).to_value(),
             false,
+            None,
         )?;
         self.rows[index] = Some(Row::Stream(Box::new(stream)));
         Ok(())
+    }
+    pub fn bind_transfer<O: TransferOperation>(
+        &mut self,
+        name: &str,
+        operation: O,
+    ) -> Result<(), Failure> {
+        let index = self.binding(
+            name,
+            schema_for!(<O as Operation>::Request).to_value(),
+            schema_for!(Answer<O::Response>).to_value(),
+            true,
+            Some(schema_for!(O::Event).to_value()),
+        )?;
+        self.rows[index] = Some(Row::Request(Box::new(TransferHandler(operation))));
+        Ok(())
+    }
+    /// Decide event delivery from the admitted request type, never JSON field names.
+    pub fn streaming(&self, request: &RunnableRequest) -> Result<bool, Failure> {
+        let (_, row) = self.row(&request.operation).ok_or_else(|| {
+            bad_request(format!(
+                "unknown or unbound operation {}",
+                request.operation
+            ))
+        })?;
+        match row {
+            Row::Request(operation) => operation.streaming(&request.arguments),
+            Row::Stream(_) => Ok(true),
+            Row::Local => Ok(false),
+        }
     }
     fn binding(
         &self,
@@ -992,6 +1298,7 @@ impl OperationTable {
         input: Value,
         output: Value,
         request: bool,
+        event_schema: Option<Value>,
     ) -> Result<usize, Failure> {
         let index = self
             .catalog
@@ -1003,7 +1310,10 @@ impl OperationTable {
         } else {
             description.spec.kind == OperationKind::Stream
         };
-        if !kind_matches || description.input_schema != input || description.output_schema != output
+        if !kind_matches
+            || description.input_schema != input
+            || description.output_schema != output
+            || description.event_schema != event_schema
         {
             return Err(bad_request(format!(
                 "binding {name} does not match its declared kind and schemas"
@@ -1117,12 +1427,28 @@ impl OperationTable {
         caller: Caller,
         metadata: Option<Value>,
         cancellation: CancellationToken,
+        read_phase: bool,
     ) -> RequestContext {
         RequestContext {
             via,
             request_id: request.request_id.clone(),
-            cancellation,
+            cancellation: CancellationToken::new(),
             caller,
+            request: Arc::new(request.clone()),
+            lifetime: Arc::new(Mutex::new(ReadLifetime {
+                phase: if read_phase {
+                    Phase::Reading
+                } else {
+                    Phase::OwnedWrite
+                },
+                deadline: if read_phase {
+                    self.deadline(request)
+                        .map(|duration| Instant::now() + duration)
+                } else {
+                    None
+                },
+                parent: cancellation,
+            })),
             budget_tokens: request.budget_tokens,
             default_budget_tokens: description.spec.default_budget_tokens,
             cursor: request.cursor.clone(),
@@ -1151,24 +1477,37 @@ impl OperationTable {
                 _ => format!("{} runs in the calling process", request.operation),
             }));
         };
-        let token = cancellation.child_token();
-        let guard = token.clone().drop_guard();
-        let context = self.context(&request, description, via, caller, metadata, token);
-        let progress = context.progress.clone();
-        let wait_deadline = async {
-            match request
-                .deadline
-                .duration(self.deadlines.get(description.spec.latency))
-            {
-                Some(duration) => tokio::time::sleep(duration).await,
-                None => std::future::pending::<()>().await,
-            }
+        let policy = match operation.policy(&request.arguments, description.spec.access, &caller) {
+            Ok(policy) => policy,
+            Err(failure) => return Answer::error(failure),
         };
+        if policy.access > caller.access() {
+            return Answer::error(access_failure(&description.spec, policy.access));
+        }
+        match operation.streaming(&request.arguments) {
+            Ok(true) => return Answer::error(stream_transport_required()),
+            Err(failure) => return Answer::error(failure),
+            Ok(false) => {}
+        }
+        if cancellation.is_cancelled() {
+            return Answer::error(Failure::new(FailureKind::Cancelled, "request cancelled"));
+        }
+        let context = self.context(
+            &request,
+            description,
+            via,
+            caller,
+            metadata,
+            cancellation,
+            policy.read_phase,
+        );
+        let guard = context.cancellation.clone().drop_guard();
         let answer = tokio::select! {
             biased;
-            _ = cancellation.cancelled() => Err(Failure::new(FailureKind::Cancelled, "request cancelled")),
-            _ = wait_deadline => Ok(timeout_answer(&request, &progress)),
-            answer = operation.execute(request.arguments.clone(), context, &description.spec) => answer,
+            failure = context.wait_for_read_stop() => {
+                if failure.kind == FailureKind::Timeout { Ok(timeout_answer(&request, &context.progress)) } else { Err(failure) }
+            },
+            answer = operation.execute(request.arguments.clone(), context.clone()) => answer,
         };
         drop(guard);
         match answer {
@@ -1176,9 +1515,8 @@ impl OperationTable {
             Err(failure) => Answer::error(failure),
         }
     }
-    /// Open a stream row. Its events arrive until the stream ends, the
-    /// caller drops `Events`, or `cancellation` fires; streams have no
-    /// deadline.
+    /// Open ordinary streams or the event delivery of a transfer request.
+    /// Opening and every late event share one absolute deadline and cancellation.
     pub async fn open_stream(
         &self,
         request: RunnableRequest,
@@ -1187,15 +1525,52 @@ impl OperationTable {
         cancellation: CancellationToken,
     ) -> Result<Events, Failure> {
         let (description, row) = self.admit(&request, &caller)?;
-        let Row::Stream(stream) = row else {
-            return Err(bad_request(format!(
-                "{} is not a stream",
-                request.operation
-            )));
+        let policy = match row {
+            Row::Stream(_) => Policy {
+                access: description.spec.access,
+                read_phase: true,
+            },
+            Row::Request(operation) if operation.streaming(&request.arguments)? => {
+                operation.policy(&request.arguments, description.spec.access, &caller)?
+            }
+            _ => {
+                return Err(bad_request(format!(
+                    "{} does not select event delivery",
+                    request.operation
+                )));
+            }
         };
-        let context = self.context(&request, description, via, caller, None, cancellation);
-        stream.open(request.arguments.clone(), context).await
+        if policy.access > caller.access() {
+            return Err(access_failure(&description.spec, policy.access));
+        }
+        if cancellation.is_cancelled() {
+            return Err(Failure::new(FailureKind::Cancelled, "request cancelled"));
+        }
+        let context = self.context(
+            &request,
+            description,
+            via,
+            caller,
+            None,
+            cancellation,
+            policy.read_phase,
+        );
+        let guard = context.cancellation.clone().drop_guard();
+        let open = match row {
+            Row::Stream(stream) => stream.open(request.arguments.clone(), context.clone()),
+            Row::Request(operation) => operation.open(request.arguments.clone(), context.clone()),
+            Row::Local => unreachable!("local row refused before opening"),
+        };
+        let events = tokio::select! { biased; failure = context.wait_for_read_stop() => Err(failure), events = open => events }?;
+        Ok(Events {
+            events: Some(events),
+            context,
+            catalog: self.catalog.clone(),
+            done: false,
+            _guard: guard,
+        })
     }
+
     fn checked_answer(&self, answer: Answer<Value>, spec: &OperationSpec) -> Answer<Value> {
         let Answer {
             outcome,
@@ -1218,40 +1593,21 @@ impl OperationTable {
         envelope.mark_lower_bounds(degraded);
         Answer { outcome, envelope }
     }
-    fn checked_failure(&self, error: Failure, spec: &OperationSpec) -> Failure {
-        if error
-            .code
-            .as_ref()
-            .is_some_and(|code| self.failure_codes.get(code) != Some(&error.kind))
-        {
-            return Failure::new(
-                FailureKind::Io,
-                "operation returned an unregistered or misclassified product failure code",
-            );
-        }
-        let infrastructure = matches!(
-            error.kind,
-            FailureKind::BadRequest
-                | FailureKind::Timeout
-                | FailureKind::Cancelled
-                | FailureKind::Conflict
-                | FailureKind::Io
-        );
-        if !infrastructure && !spec.failures.contains(&error.kind) {
-            return Failure::new(
-                FailureKind::Io,
-                format!(
-                    "operation {} returned undeclared failure {}",
-                    spec.name,
-                    error.kind.name()
-                ),
-            );
-        }
-        error
-    }
 }
 
-fn timeout_answer(request: &RunnableRequest, progress: &Mutex<Progress>) -> Answer<Value> {
+fn access_failure(spec: &OperationSpec, access: Access) -> Failure {
+    Failure::new(
+        FailureKind::Refused,
+        format!("{} needs {} access", spec.name, access.name()),
+    )
+}
+fn stream_transport_required() -> Failure {
+    bad_request(
+        "event delivery requires a streaming transport; request a bounded page for this call",
+    )
+}
+
+fn timeout_failure(progress: &Mutex<Progress>) -> Failure {
     let progress = progress.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let scanned = progress.rows_scanned.map_or_else(
         || "with rows scanned unknown".into(),
@@ -1262,11 +1618,19 @@ fn timeout_answer(request: &RunnableRequest, progress: &Mutex<Progress>) -> Answ
     } else {
         &progress.stage
     };
-    let failure = Failure::new(
+    Failure::new(
         FailureKind::Timeout,
         format!("deadline passed during {stage} {scanned}"),
     )
-    .with_hint("narrow the request or lift its deadline");
+    .with_hint("narrow the request or lift its deadline")
+}
+
+fn timeout_answer(request: &RunnableRequest, progress: &Mutex<Progress>) -> Answer<Value> {
+    let failure = timeout_failure(progress);
+    let progress = progress
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
     let mut answer = Answer::error(failure);
     if let Some(narrower) = progress.narrower {
         answer = answer.with_next("narrower request", narrower);

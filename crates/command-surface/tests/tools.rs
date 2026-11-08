@@ -48,7 +48,7 @@ impl StreamOperation for Follow {
         &self,
         request: Text,
         _: RequestContext,
-    ) -> OperationFuture<'_, Result<tokio::sync::mpsc::Receiver<u64>, Failure>> {
+    ) -> OperationFuture<'_, Result<EventReceiver<u64>, Failure>> {
         Box::pin(async move {
             let count: u64 = request
                 .text
@@ -56,7 +56,7 @@ impl StreamOperation for Follow {
                 .map_err(|_| Failure::new(FailureKind::BadValue, "not a count"))?;
             let (sender, receiver) = tokio::sync::mpsc::channel(8);
             for n in 1..=count {
-                sender.try_send(n).unwrap();
+                sender.try_send(Ok(n)).unwrap();
             }
             Ok(receiver)
         })
@@ -121,7 +121,7 @@ impl Operation for Wait {
 }
 
 /// Sends what the test gives it, as it gives it.
-struct Ticks(std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<u64>>>);
+struct Ticks(std::sync::Mutex<Option<EventReceiver<u64>>>);
 fn ticks_spec() -> OperationSpec {
     OperationSpec {
         kind: OperationKind::Stream,
@@ -139,7 +139,7 @@ impl StreamOperation for Ticks {
         &self,
         _: Text,
         _: RequestContext,
-    ) -> OperationFuture<'_, Result<tokio::sync::mpsc::Receiver<u64>, Failure>> {
+    ) -> OperationFuture<'_, Result<EventReceiver<u64>, Failure>> {
         let receiver = self.0.lock().unwrap().take();
         Box::pin(
             async move { receiver.ok_or_else(|| Failure::new(FailureKind::Io, "opened twice")) },
@@ -823,10 +823,10 @@ async fn stream_lines_print_as_they_arrive() {
     );
     let watching = async {
         let mut lines = BufReader::new(reading).lines();
-        sender.send(1).await.unwrap();
+        sender.send(Ok(1)).await.unwrap();
         // The first line arrives while the stream is still open.
         assert_eq!(lines.next_line().await.unwrap().as_deref(), Some("tick 1"));
-        sender.send(2).await.unwrap();
+        sender.send(Ok(2)).await.unwrap();
         assert_eq!(lines.next_line().await.unwrap().as_deref(), Some("tick 2"));
         drop(sender);
     };

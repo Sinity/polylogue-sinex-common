@@ -47,15 +47,15 @@ function; `declare_local::<Request>(spec)` declares a caller-local row.
 `finish()` returns an immutable `Arc<OperationCatalog>`.
 
 The catalog alone supplies CLI parsing, help, completion, schemas, MCP tool
-lists, follow-up requests, deadlines and answer/event rendering. A client can
+lists, follow-up requests, read deadlines and connection budgets and answer/event rendering. A client can
 use all of them without constructing a daemon, operation or runtime table.
 
 `OperationTable::new(catalog)` binds execution separately.
 `bind(name, operation)` and `bind_stream(name, stream)` require an existing
 declaration with the matching row kind and request/response or event schemas;
 a second binding is refused. Operations own only execution and typed access
-policy. `required_access(request, declared)` defaults to the declaration's
-access, so extracting metadata cannot lower authorization. The table borrows
+policy. `required_access(request, declared, caller)` defaults to the declaration's
+access; an override may use the authenticated caller to classify the typed request. The table borrows
 all pure views from that same catalog. Product transactions, retry identity,
 cancellation and transport execution retain their existing owners.
 
@@ -368,12 +368,16 @@ daemon: help, grammar-only completion, refusals of malformed input),
 gives the request's default deadline; each product sets its classes' budgets
 and default deadlines on its interfaces page.
 
-- Every request carries its deadline. The CLI's socket timeout is the
-  deadline plus 50 ms, so a hung daemon never hangs a shell.
-- A request whose deadline passes ends `timeout`, never `ok` with a partial
-  page. The daemon stops the work within 100 ms of the deadline, of a
-  cancellation (MCP cancellation, Ctrl-C) or of the caller disconnecting; no
-  abandoned work keeps running.
+- Every request carries its read deadline. `connection_timeout` adds 50 ms
+  for connection/readiness admission. After admission, the server owns the
+  read timer and a client awaits its typed terminal result or an explicit
+  outer caller cancellation.
+- A read whose deadline passes ends `timeout`, never `ok` with a partial
+  page. The daemon stops read work within 100 ms of the deadline, of a
+  cancellation (MCP cancellation, Ctrl-C) or of the caller disconnecting.
+  A writer that already won `finish_read_phase` returns its actual
+  acknowledgement; the read timer cannot turn an accepted mutation into a
+  timeout.
 - **Any caller can lift the deadline**, agents included: `--deadline MS` or
   `--deadline none` on the CLI, `deadline: null` over MCP and HTTP. A deadline
   is a default for interactive display, not a limit on what may be asked, so
@@ -435,10 +439,10 @@ request state of its own.
 
 ## Using the crate
 
-Implement `Operation` (or `StreamOperation`) with typed values that
-implement serde and `JsonSchema`, declare the tool families, and register
-each row in `OperationTable`; `register_local` takes a local row's request
-type. Registration rejects duplicate names, commands and routes, a request
+Declare typed values implementing serde and `JsonSchema` in a
+`CatalogBuilder`, finish the catalog, and bind real `Operation` or
+`StreamOperation` handlers in `OperationTable`. `declare_local` needs only
+the local row's request type. Declaration rejects duplicate names, commands and routes, a request
 row in an undeclared family or in a family of another access level, rows of
 one family that define one schema name two ways, and argument declarations
 the request type cannot hold or the command line cannot read back.
@@ -463,12 +467,35 @@ authentication, transport lifetime and cancellation notifications. Request
 IDs are mandatory on every wire transport.
 
 `Deadline::Default` is omitted on the wire, using the product's `Deadlines`;
-`Deadline::None` is JSON null. Dispatch owns the operation future and drops
+`Deadline::None` is JSON null. Dispatch owns each read future and drops
 it on timeout, cancellation or socket disconnect. `RequestContext::progress`
 records the stage, the measured scan count and an optional narrower request
 for the timeout answer, and checks cancellation; `progress_unknown` reports
 a stage without inventing a count. Blocking work checks its token within
-100 ms and stays owned by its request. Streams have no deadline.
+100 ms and stays owned by its request. Opening a stream and receiving all its
+events use the same absolute read deadline and cancellation token. A
+`Receiver<Result<Event, Failure>>` carries late typed failures directly;
+those terminate the stream with a failure rather than a successful end.
+
+`TransferOperation` implements both `Operation` and `StreamOperation` for one
+request type. Its pure typed `streaming(request)` method chooses a bounded
+answer or finite event delivery. `declare_transfer::<Request, Response, Event>`
+declares the answer and event renderers and separate schemas in one row;
+`bind_transfer` binds its real handler. `OperationTable::streaming` lets a
+transport choose delivery without inspecting JSON fields. Direct calls and
+MCP accept bounded answers and refuse event delivery with a request to use a
+streaming transport or a bounded page.
+
+`Operation::has_read_phase(request)` is evaluated before the read timer
+starts. A request with a read phase receives its absolute `read_deadline()`
+and exact accepted envelope through `RequestContext::request()`. Before a
+mutation is handed to its writer, `finish_read_phase()` arbitrates against
+the timer and cancellation under one mutex. Expiry or cancellation winning
+first refuses the handoff. Ownership winning first makes dispatch await the
+writer's actual acknowledgement, even if the read deadline later passes or
+its caller cancels. Product writer admission and publication fences remain
+product-owned. Pure writes may declare that they have no read phase;
+authentication and pre-admission cancellation still apply.
 
 `FailureKind` is closed; `register_failure_code` records each product code's
 kind once, and dispatch reports an unregistered or differently classified
@@ -517,10 +544,12 @@ the serialization, command-line and fitter boundaries. Run
 
 - **surface-parity**: the CLI, socket, HTTP and MCP return the same answer, or
   the same failure, for the same request.
-- **timeout-never-partial**: a request past its deadline ends `timeout` with
-  no rows reported as an `ok` answer.
-- **cancel-stops-work**: a cancelled or disconnected request leaves no work
-  running in the daemon.
+- **timeout-never-partial**: a read phase past its deadline ends `timeout`
+  with no rows reported as an `ok` answer. A writer that won ownership first
+  returns its actual acknowledgement.
+- **cancel-stops-work**: a cancelled or disconnected read leaves no read work
+  running in the daemon. An already-owned writer finishes through its own
+  transaction and admission policy.
 - **any-caller-lifts-deadline**: a lifted deadline is honoured for every
   caller, and the request runs until done or cancelled.
 - **retry-applies-once**: a write sent twice with one `request_id`, one after

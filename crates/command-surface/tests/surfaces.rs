@@ -271,10 +271,10 @@ async fn timeout_never_partial_and_any_caller_lifts_deadline() {
     let answer = call.await;
     assert_eq!(answer.exit_code(), 7);
     assert_eq!(active.load(Ordering::SeqCst), 0);
-    assert_eq!(table.socket_timeout(&request), None);
+    assert_eq!(table.connection_timeout(&request), None);
     request.deadline = Deadline::Milliseconds(11);
     assert_eq!(
-        table.socket_timeout(&request),
+        table.connection_timeout(&request),
         Some(Duration::from_millis(61))
     );
 }
