@@ -78,10 +78,10 @@ fn table() -> CatalogBuilder {
             .unwrap();
     }
     table
-        .declare::<ReadRequest, Value>(read_spec(), |value| format!("{value}\n"))
+        .declare::<ReadRequest, Value>(read_spec(), |value, _style| format!("{value}\n"))
         .unwrap();
     table
-        .declare::<ExecRequest, Value>(exec_spec(), |value| format!("{value}\n"))
+        .declare::<ExecRequest, Value>(exec_spec(), |value, _style| format!("{value}\n"))
         .unwrap();
     table.set_default_operation("read").unwrap();
     table
@@ -202,7 +202,7 @@ fn declarations_the_request_cannot_hold_are_refused() {
             })
             .unwrap();
         let error = table
-            .declare::<ReadRequest, Value>(spec.clone(), |_| String::new())
+            .declare::<ReadRequest, Value>(spec.clone(), |_, _style| String::new())
             .unwrap_err();
         assert!(error.message.contains(message), "{}", error.message);
     }
@@ -380,7 +380,7 @@ fn request_fields_cannot_take_a_flag_of_every_row() {
         })
         .unwrap();
     let error = table
-        .declare::<Paged, Value>(clash_spec(), |_| String::new())
+        .declare::<Paged, Value>(clash_spec(), |_, _style| String::new())
         .unwrap_err();
     assert!(error.message.contains("--cursor"), "{}", error.message);
 }
@@ -413,7 +413,7 @@ fn a_positional_field_may_share_a_flags_name() {
         })
         .unwrap();
     table
-        .declare::<Paged, Value>(positional_spec(), |value| format!("{value}\n"))
+        .declare::<Paged, Value>(positional_spec(), |value, _style| format!("{value}\n"))
         .unwrap();
     let parsed = table
         .parse_cli(&["page".into(), "c-7".into()], "r-1")
@@ -446,7 +446,7 @@ fn a_positional_array_is_one_json_value_including_empty_and_structured_lists() {
 
     let mut table = table();
     table
-        .declare::<BatchRequest, Value>(batch_spec(), |value| value.to_string())
+        .declare::<BatchRequest, Value>(batch_spec(), |value, _style| value.to_string())
         .unwrap();
     for entries in [
         json!([]),

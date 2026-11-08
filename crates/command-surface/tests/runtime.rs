@@ -90,7 +90,7 @@ fn handoff() -> Fixture {
     let effects = Arc::new(AtomicUsize::new(0));
     let mut catalog = builder();
     catalog
-        .declare::<Input, bool>(spec("write"), |value| value.to_string())
+        .declare::<Input, bool>(spec("write"), |value, _style| value.to_string())
         .unwrap();
     let mut table = OperationTable::new(catalog.finish());
     table
@@ -252,8 +252,8 @@ fn transfer() -> OperationTable {
     catalog
         .declare_transfer::<Input, String, u64>(
             spec("read"),
-            |value| format!("{value}\n"),
-            |value| format!("event {value}\n"),
+            |value, _style| format!("{value}\n"),
+            |value, _style| format!("event {value}\n"),
         )
         .unwrap();
     let mut table = OperationTable::new(catalog.finish());
@@ -371,7 +371,7 @@ async fn stream_late_receive_uses_the_original_absolute_deadline() {
     let mut declaration = spec("follow");
     declaration.kind = OperationKind::Stream;
     catalog
-        .declare_stream::<Input, u64>(declaration, u64::to_string)
+        .declare_stream::<Input, u64>(declaration, |value, _style| value.to_string())
         .unwrap();
     let mut table = OperationTable::new(catalog.finish());
     table
@@ -409,7 +409,7 @@ impl Operation for DirectWrite {
 async fn typed_no_read_policy_is_selected_before_starting_a_read_timer() {
     let mut catalog = builder();
     catalog
-        .declare::<Input, bool>(spec("direct"), bool::to_string)
+        .declare::<Input, bool>(spec("direct"), |value, _style| value.to_string())
         .unwrap();
     let mut table = OperationTable::new(catalog.finish());
     table.bind("direct", DirectWrite).unwrap();
@@ -447,7 +447,7 @@ async fn typed_access_policy_reads_authenticated_caller_before_execution() {
     let mut declaration = spec("context");
     declaration.access = Access::Write;
     catalog
-        .declare::<Input, bool>(declaration, bool::to_string)
+        .declare::<Input, bool>(declaration, |value, _style| value.to_string())
         .unwrap();
     let mut table = OperationTable::new(catalog.finish());
     table

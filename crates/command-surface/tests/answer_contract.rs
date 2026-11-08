@@ -30,7 +30,7 @@ fn search_spec() -> OperationSpec {
         )
     }
 }
-fn search_render_text(rows: &Rows) -> String {
+fn search_render_text(rows: &Rows, _style: TextStyle) -> String {
     rows.rows.iter().map(|row| format!("{row}\n")).collect()
 }
 impl Operation for Search {
@@ -179,7 +179,7 @@ fn table() -> OperationTable {
 fn table_with<O: Operation<Request = Find>>(
     operation: O,
     spec: OperationSpec,
-    render: fn(&O::Response) -> String,
+    render: fn(&O::Response, TextStyle) -> String,
 ) -> OperationTable {
     let mut catalog = OperationCatalog::builder("example", Deadlines::default());
     for option in RequestOption::ALL {
@@ -199,7 +199,7 @@ fn table_with<O: Operation<Request = Find>>(
     table
 }
 fn packing_table() -> OperationTable {
-    table_with(PackingSearch, packing_search_spec(), |sections| {
+    table_with(PackingSearch, packing_search_spec(), |sections, _style| {
         render_sections(sections)
     })
 }
@@ -347,7 +347,7 @@ async fn text_within_budget() {
     let read = table
         .call(request.clone(), Via::Cli, CancellationToken::new())
         .await;
-    let rendered = table.render_answer(Via::Cli, Some(&request), read);
+    let rendered = table.render_answer(Via::Cli, Some(&request), read, TextStyle::Plain);
     assert_eq!(rendered.value_text, cli.stdout);
     assert_eq!(rendered.footer, cli.stderr);
 }
@@ -640,7 +640,7 @@ fn coverage_footer_uses_the_typed_state_and_detail() {
             },
         }],
     }];
-    let rendered = table().render_answer(Via::Cli, None, answer);
+    let rendered = table().render_answer(Via::Cli, None, answer, TextStyle::Plain);
     assert!(
         rendered
             .footer
@@ -666,7 +666,7 @@ async fn expanding_a_default_budget_reads_the_whole_logical_entries() {
         .await;
     assert_eq!(follow.envelope.shown, Some(100));
     assert!(follow.envelope.left_out.is_empty());
-    let rendered = table.render_answer(Via::Mcp, Some(&expand), follow);
+    let rendered = table.render_answer(Via::Mcp, Some(&expand), follow, TextStyle::Plain);
     assert!(
         rendered
             .value_text
@@ -706,7 +706,7 @@ fn rendering_preserves_an_operations_complete_response() {
         rows: vec!["a whole entry\nwith its detail".into()],
     };
     let answer = Answer::ok(serde_json::to_value(rows).unwrap());
-    let rendered = table().render_answer(Via::Cli, Some(&request), answer);
+    let rendered = table().render_answer(Via::Cli, Some(&request), answer, TextStyle::Plain);
     assert_eq!(rendered.value_text, "a whole entry\nwith its detail\n");
     assert!(rendered.answer.envelope.left_out.is_empty());
 }
@@ -730,7 +730,7 @@ async fn a_text_budget_does_not_cut_json_rows() {
     );
     assert_eq!(answer.envelope.shown, Some(100));
     assert!(answer.envelope.left_out.is_empty());
-    let rendered = table.render_answer(Via::Mcp, Some(&request), answer);
+    let rendered = table.render_answer(Via::Mcp, Some(&request), answer, TextStyle::Plain);
     assert!(rendered.value_text.is_empty());
 }
 
@@ -743,7 +743,12 @@ async fn fitting_preserves_degradation_and_reserves_the_cap_note() {
     assert!(
         matches!(degraded.outcome,Outcome::Degraded {ref missing,..} if missing==&["mail is offline"])
     );
-    let rendered = table.render_answer(Via::Mcp, Some(&find("degraded")), degraded);
+    let rendered = table.render_answer(
+        Via::Mcp,
+        Some(&find("degraded")),
+        degraded,
+        TextStyle::Plain,
+    );
     assert!(approximate_tokens(&format!("{}{}", rendered.value_text, rendered.footer)) <= 120);
     let mut capped = find("capped");
     capped.budget_tokens = TokenBudget::Unlimited;
@@ -758,6 +763,6 @@ async fn fitting_preserves_degradation_and_reserves_the_cap_note() {
             .any(|note| note.contains("unlimited to 180"))
     );
     assert!(answer.envelope.shown.unwrap() < 40);
-    let rendered = table.render_answer(Via::Mcp, Some(&capped), answer);
+    let rendered = table.render_answer(Via::Mcp, Some(&capped), answer, TextStyle::Plain);
     assert!(approximate_tokens(&format!("{}{}", rendered.value_text, rendered.footer)) <= 180);
 }

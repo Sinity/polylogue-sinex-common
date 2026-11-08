@@ -12,7 +12,7 @@ struct Text {
 
 /// A row that echoes its text, declared with any spec.
 struct Echo(String);
-fn echo_render_text(text: &Text) -> String {
+fn echo_render_text(text: &Text, _style: TextStyle) -> String {
     format!("{}\n", text.text)
 }
 impl Operation for Echo {
@@ -37,7 +37,7 @@ fn follow_spec() -> OperationSpec {
         ..OperationSpec::request("follow", &["follow"], "", "Follow changes", "A live stream")
     }
 }
-fn follow_render_event(event: &u64) -> String {
+fn follow_render_event(event: &u64, _style: TextStyle) -> String {
     format!("event {event}\n")
 }
 impl StreamOperation for Follow {
@@ -75,7 +75,7 @@ fn who_am_i_spec() -> OperationSpec {
         "Shows the channel",
     )
 }
-fn who_am_i_render_text(text: &Text) -> String {
+fn who_am_i_render_text(text: &Text, _style: TextStyle) -> String {
     format!("{}\n", text.text)
 }
 impl Operation for WhoAmI {
@@ -108,7 +108,7 @@ struct Wait;
 fn wait_spec() -> OperationSpec {
     OperationSpec::request("wait", &["wait"], "inspect", "Wait", "Never finishes")
 }
-fn wait_render_text(text: &Text) -> String {
+fn wait_render_text(text: &Text, _style: TextStyle) -> String {
     text.text.clone()
 }
 impl Operation for Wait {
@@ -128,7 +128,7 @@ fn ticks_spec() -> OperationSpec {
         ..OperationSpec::request("ticks", &["ticks"], "", "Live ticks", "A live stream")
     }
 }
-fn ticks_render_event(event: &u64) -> String {
+fn ticks_render_event(event: &u64, _style: TextStyle) -> String {
     format!("tick {event}\n")
 }
 impl StreamOperation for Ticks {
@@ -312,7 +312,7 @@ struct Typed<R>(std::marker::PhantomData<R>);
 fn typed_spec(name: &str) -> OperationSpec {
     OperationSpec::request(name, &[name], "count", "Count", "A synthetic row")
 }
-fn typed_render_text(value: &Value) -> String {
+fn typed_render_text(value: &Value, _style: TextStyle) -> String {
     format!("{value}\n")
 }
 impl<R> Operation for Typed<R>
@@ -451,7 +451,7 @@ fn search_spec() -> OperationSpec {
         ..OperationSpec::request("search", &["search"], "count", "Search", "A synthetic row")
     }
 }
-fn search_render_text(value: &Value) -> String {
+fn search_render_text(value: &Value, _style: TextStyle) -> String {
     format!("oldest first: {value}\n")
 }
 impl Operation for Search {

@@ -28,7 +28,7 @@ fn table() -> std::sync::Arc<OperationCatalog> {
                     "Record a note",
                     "Notes have no existing operation",
                 ),
-                |answer| format!("{}\n", answer.text),
+                |answer, _style| format!("{}\n", answer.text),
             )
             .unwrap();
     }

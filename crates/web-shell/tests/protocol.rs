@@ -302,7 +302,7 @@ fn page_and_palette_cli_derive_from_registered_request() {
         })
         .unwrap();
     catalog
-        .declare::<serde_json::Value, serde_json::Value>(operation(false), |value| {
+        .declare::<serde_json::Value, serde_json::Value>(operation(false), |value, _style| {
             value.to_string()
         })
         .unwrap();

@@ -149,7 +149,7 @@ fn durable_write_spec() -> OperationSpec {
         )
     }
 }
-fn durable_write_render_text(value: &Committed) -> String {
+fn durable_write_render_text(value: &Committed, _style: TextStyle) -> String {
     value.row.to_string()
 }
 impl Operation for DurableWrite {
@@ -543,7 +543,7 @@ async fn mixed_rows_authorize_the_typed_request_before_any_write() {
             )
         }
     }
-    fn mixed_render_text(value: &Value) -> String {
+    fn mixed_render_text(value: &Value, _style: TextStyle) -> String {
         value.to_string()
     }
     impl Operation for Mixed {

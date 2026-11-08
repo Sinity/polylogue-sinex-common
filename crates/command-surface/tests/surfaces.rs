@@ -49,7 +49,7 @@ fn sample_spec(write: bool) -> OperationSpec {
         )
     }
 }
-fn sample_render_text(response: &Rows) -> String {
+fn sample_render_text(response: &Rows, _style: TextStyle) -> String {
     format!("{}\n", response.rows.join("\n"))
 }
 impl Operation for Sample {
@@ -517,7 +517,7 @@ fn echo_spec() -> OperationSpec {
         "Exercise arbitrary JSON arguments",
     )
 }
-fn echo_render_text(value: &Value) -> String {
+fn echo_render_text(value: &Value, _style: TextStyle) -> String {
     value.to_string()
 }
 impl Operation for Echo {

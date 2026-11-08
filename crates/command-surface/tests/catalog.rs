@@ -30,7 +30,7 @@ fn catalog() -> Arc<OperationCatalog> {
                 "Read text",
                 "Read the requested synthetic value",
             ),
-            |answer| format!("{answer}\n"),
+            |answer, _style| format!("{answer}\n"),
         )
         .unwrap();
     catalog.finish()
@@ -52,7 +52,7 @@ fn catalog_parses_describes_and_renders_without_runtime_handlers() {
     );
     assert_eq!(
         catalog
-            .render_text("read", &Answer::ok(json!("hello")))
+            .render_text("read", &Answer::ok(json!("hello")), TextStyle::Plain)
             .unwrap(),
         "hello\n"
     );
