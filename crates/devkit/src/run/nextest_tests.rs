@@ -448,7 +448,7 @@ fn concurrent_report_child() {
     if label == "two" {
         wait("one.written");
     }
-    fs::write(path, format!(r#"<testsuites><testsuite name="isolated"><testcase name="{label}" classname="synthetic" time="0"/></testsuite></testsuites>"#)).unwrap();
+    fs::write(path, format!(r#"<testsuites tests="1"><testsuite name="isolated"><testcase name="{label}" classname="synthetic" time="0"/></testsuite></testsuites>"#)).unwrap();
     fs::write(shared.join(format!("{label}.written")), "ready").unwrap();
     if label == "one" {
         wait("two.written");
