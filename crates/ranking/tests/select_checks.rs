@@ -1,7 +1,7 @@
 //! Tests of next-set selection, against the fit's public numbers.
 
 #[allow(dead_code)]
-mod common;
+use crate::common;
 
 use ranking::{Fit, FitOptions, Judgment, RankError, SeatWhy, SelectionRule, fit, next_set};
 

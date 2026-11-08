@@ -7,6 +7,7 @@ license-file = "../../LICENSE"
 repository = "https://github.com/Sinity/polylogue-sinex-common"
 description = "Product-committed append-only segments with checked plain and sealed frames"
 publish = false
+autotests = false
 
 [dependencies]
 blake3 = "1"
@@ -17,3 +18,9 @@ sha2 = "0.10"
 libc = "0.2"
 
 tempfile = "3"
+
+# One integration-test binary per crate: each test file is a module of
+# tests/main.rs, so the crate and its dependencies link once.
+[[test]]
+name = "main"
+path = "tests/main.rs"

@@ -7,5 +7,12 @@ rust-version.workspace = true
 repository.workspace = true
 publish.workspace = true
 description = "Plackett-Luce fit with intervals, components, warm starts and next-set selection"
+autotests = false
 
 [dependencies]
+
+# One integration-test binary per crate: each test file is a module of
+# tests/main.rs, so the crate and its dependencies link once.
+[[test]]
+name = "main"
+path = "tests/main.rs"

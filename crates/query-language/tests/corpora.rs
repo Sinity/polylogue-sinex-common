@@ -1,7 +1,7 @@
 //! Synthetic predecessor examples from both products, each with its one
 //! shared spelling. A former spelling that changed is refused; it never
 //! parses to a different question.
-mod support;
+use crate::support;
 use query_language::{ast::*, catalog::Catalog, parse::parse};
 
 /// Every `(former, shared)` pair: the shared spelling parses; a former

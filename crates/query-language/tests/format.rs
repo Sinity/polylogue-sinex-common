@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 use proptest::prelude::*;
 use query_language::{
     ast::*, catalog::*, format::format_query, identity::normal_form, parse::parse,

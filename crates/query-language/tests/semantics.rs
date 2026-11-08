@@ -1,3 +1,4 @@
+use crate::support;
 use query_language::ast::*;
 use query_language::catalog::{Field, FieldKind, NaturalMatch};
 use query_language::compiler_cases::{self, Compiler, Executor, Page, Vocabulary};
@@ -6,8 +7,6 @@ use query_language::coverage::CoverageState;
 use query_language::cursor::{PageRequest, SealedCursor};
 use query_language::semantics::Truth;
 use query_language::{Error, ErrorKind};
-#[path = "support/mod.rs"]
-mod support;
 use std::collections::BTreeMap;
 
 fn condition(kind: ConditionKind) -> Condition {

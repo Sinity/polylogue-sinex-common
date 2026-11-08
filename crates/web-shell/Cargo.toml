@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 publish.workspace = true
+autotests = false
 
 [features]
 # Generate declarations from the runtime wire types; products serve committed assets.
@@ -23,3 +24,9 @@ maud = "0.27"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ts-rs = { version = "11", optional = true, features = ["serde-compat", "no-serde-warnings"] }
+
+# One integration-test binary per crate: each test file is a module of
+# tests/main.rs, so the crate and its dependencies link once.
+[[test]]
+name = "main"
+path = "tests/main.rs"

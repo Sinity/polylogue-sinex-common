@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 use query_language::{ErrorKind, ast::*, catalog::*, parse::parse};
 fn condition(text: &str, catalog: &Catalog) -> Condition {
     match parse(text, catalog).unwrap().source {

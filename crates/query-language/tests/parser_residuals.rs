@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use query_language::{
     ErrorKind,

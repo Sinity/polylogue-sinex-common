@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 use query_language::complete::complete;
 fn values(text: &str, c: &query_language::catalog::Catalog) -> Vec<String> {
     complete(text, text.len(), c)
