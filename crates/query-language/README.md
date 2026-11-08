@@ -242,8 +242,14 @@ shows the gap, never `0`. The states are `coverage::CoverageState`, which
 command-surface's answer envelope uses for its coverage facet; any state but
 `complete` makes a count over the interval a lower bound.
 
-Projected set operands, and projected operands of `diff`, require the same
-column names and declared semantic types: field kinds (including list elements),
+`intersect` and `except` keep the left operand's values and columns. When both
+operands have the same explicit native row domain, they compare native row
+identities even when either side projects different columns. Projection does
+not reopen fields hidden on the left. Without that native-domain proof, the
+existing projected-schema compatibility rule applies.
+
+Projected `union` operands, projected operands of `diff`, and other set operands
+without the same native domain require the same column names and declared semantic types: field kinds (including list elements),
 reference targets, closed-value sets and unknown policies. Reference targets
 use the catalog's canonical unit name. Descriptive phrases and field origins
 do not affect compatibility. `text(E)` explicitly clears reference and closed-set

@@ -2529,7 +2529,25 @@ impl Parser<'_> {
                     "except" => Combination::Except,
                     _ => Combination::Fuse,
                 };
-                if how != Combination::Fuse {
+                // Membership-only operations keep the left values. Native
+                // identity survives projection, so visible columns need not match.
+                let same_native_domain = match (&scope.row_domain, &inner.row_domain) {
+                    (Some(left), Some(right)) => {
+                        let left = self
+                            .catalog
+                            .unit(left)
+                            .map_or(left.as_str(), |unit| unit.name.as_str());
+                        let right = self
+                            .catalog
+                            .unit(right)
+                            .map_or(right.as_str(), |unit| unit.name.as_str());
+                        left == right
+                    }
+                    _ => false,
+                };
+                let native_membership = matches!(how, Combination::Intersect | Combination::Except)
+                    && same_native_domain;
+                if how != Combination::Fuse && !native_membership {
                     self.check_same_rows(scope, &inner, &word, start)?;
                 }
                 TransformKind::Combine {
