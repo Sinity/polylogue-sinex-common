@@ -41,9 +41,16 @@ boot ID. A run still marked running reads as `interrupted` once the machine
 has booted since, its process is gone, or its process ID names a later
 process; nothing rewrites the record.
 
+Each `Run::nextest` invocation keeps its generated configuration and JUnit
+report in its existing exclusive scratch child, alongside its tests' state.
+Concurrent invocations may share Cargo's target directory; neither rewrites
+or removes another invocation's configuration or report. Outcomes enter the
+run before its scratch child is removed. Compiler-cache locking remains Cargo's.
+
 The tests of `Run::nextest` get an `XDG_STATE_HOME` of their own, removed
 after the run, so a test that starts a run, devkit's own included, records
-it in a throwaway store and never in the user's.
+it in a throwaway store and never in the user's. Caller-supplied test
+environment entries cannot replace this owned state directory.
 
 Nested Cargo commands use `devkit::cargo_command()`, which drops the parent's
 `CARGO_MANIFEST_DIR`, `CARGO_MANIFEST_PATH` and `CARGO_PKG_*` so they do not
@@ -103,7 +110,9 @@ checkout's last run. `cargo xtask history` queries the store; output is
 formatted JSON, or one line per record with `--json`. Queries read the
 current checkout by default; repeat `--checkout /absolute/path` to read
 several worktrees of the same product, including ones that no longer exist.
-Other products' runs are never included.
+Other products' runs are never included. An explicit run ID may select another
+checkout of the invoking product; a foreign product's ID is refused before
+its diagnostics or test output are read.
 
 Each run records its HEAD, the Git tree object of that commit and a hash of
 its uncommitted changes (tracked diffs and untracked files). If Git fails, an
@@ -270,7 +279,9 @@ and an optional HTML or LCOV report. It checks weighted line totals, report
 existence and a caller-chosen threshold, and records the exact selection and
 the line regions mapped through each function's file table. Build
 diagnostics, stages and test outcomes enter the same history as ordinary
-runs. An empty test selection fails. Output is never reused or broadly
+runs. An empty test selection fails. The instrumentation directory is created
+exclusively before any build, so concurrent coverage invocations cannot share
+one output. Failed runs retain their output; output is never reused or broadly
 removed.
 
 **Fuzz.** Saved inputs are replayed once as ordinary tests, so a crash found
@@ -287,7 +298,10 @@ with a matching Clang linker when the compiler bundles no sanitizer runtimes).
 **VM scenarios.** `devkit::vm` validates the whole requested set of exported
 NixOS scenarios before building, refuses uncommitted source input, retrieves
 each scenario's log with `nix log` even for cached builds, writes build output
-separately, continues through failures and writes per-scenario results. A
+separately, continues through failures and writes per-scenario results. It
+exclusively creates `results.json` before any scenario command, giving the
+invocation ownership of its output directory even when concurrent requests
+select different scenarios. Logs and partial output remain after failure. A
 product supplies its scenario names.
 
 **Development stacks.** `devkit::process` owns a checkout's development

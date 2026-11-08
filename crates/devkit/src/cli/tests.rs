@@ -60,3 +60,41 @@ fn history_queries_parse_test_names_and_checkouts() {
     };
     assert!(scope.paths(Path::new("/default")).is_err());
 }
+
+#[test]
+fn explicit_run_ids_keep_project_ownership_and_allow_named_cross_checkout_runs() {
+    let store = Store::open_at(Path::new(":memory:")).unwrap();
+    for (id, project, checkout) in [
+        (1, "demo", "/repo"),
+        (2, "other", "/private"),
+        (3, "demo", "/another-checkout"),
+    ] {
+        store.connection().execute(
+            "INSERT INTO runs(id,project,checkout,command,args,pid,started_ms,status) VALUES(?1,?2,?3,'test','[]',0,0,'passed')",
+            rusqlite::params![id, project, checkout],
+        ).unwrap();
+    }
+    assert_eq!(
+        resolve(&store, "demo", Path::new("/repo"), None)
+            .unwrap()
+            .unwrap()
+            .id,
+        1
+    );
+    assert_eq!(
+        resolve(&store, "demo", Path::new("/repo"), Some(3))
+            .unwrap()
+            .unwrap()
+            .checkout,
+        "/another-checkout"
+    );
+    let refused = resolve(&store, "demo", Path::new("/repo"), Some(2)).unwrap_err();
+    assert_eq!(refused, "run is not in this project");
+    assert!(!refused.contains("other"));
+    assert!(!refused.contains("/private"));
+    assert!(
+        resolve(&store, "demo", Path::new("/repo"), Some(999))
+            .unwrap()
+            .is_none()
+    );
+}

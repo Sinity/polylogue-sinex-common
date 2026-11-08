@@ -63,11 +63,19 @@ fn execute_with(
     }
     fs::create_dir_all(&options.output).map_err(|e| e.to_string())?;
     let output = fs::canonicalize(&options.output).map_err(|e| e.to_string())?;
-    // Refuse reuse rather than report stale output from an earlier measurement.
     let summary = output.join("coverage.json");
-    if summary.exists() || output.join("build").exists() {
+    if summary.exists() {
         return Err("coverage output already used; choose a new directory".into());
     }
+    // Reserving the actual instrumentation directory gives this invocation
+    // exclusive output ownership before any compiler or report command runs.
+    fs::create_dir(output.join("build")).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            "coverage output already used; choose a new directory".to_owned()
+        } else {
+            format!("coverage build directory: {error}")
+        }
+    })?;
     let mut env = env.to_vec();
     for name in [
         "CARGO_TARGET_DIR",
