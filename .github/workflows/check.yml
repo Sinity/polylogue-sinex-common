@@ -1,0 +1,34 @@
+name: check
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: taiki-e/install-action@nextest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: TypeScript and esbuild for the web-shell build
+        run: npm install -g typescript@7.0.2 esbuild@0.27.2
+      - name: PostgreSQL and nats-server binaries for devkit service fixtures
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q postgresql
+          echo "$(ls -d /usr/lib/postgresql/*/bin | tail -1)" >> "$GITHUB_PATH"
+          curl -sSfL https://github.com/nats-io/nats-server/releases/download/v2.10.22/nats-server-v2.10.22-linux-amd64.tar.gz | tar xz
+          sudo mv nats-server-v2.10.22-linux-amd64/nats-server /usr/local/bin/
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo xtask check
+        run: cargo xtask check
