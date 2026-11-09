@@ -53,25 +53,32 @@ and lock updates; a change reaches each product when its lock update lands.
 **Design first.** Read the crate's page and the consumers in both products
 before changing a shared interface. Write the whole change from the design.
 
-**Review your own work before verifying it.** Walk through every changed file
-and function and narrate, in your notes, what it does, checked against the
-task and the design, and against how both products use it. Look for
-everything that is wrong at once: a requirement not met, a mechanism
+**Review your own work before verifying it.** Read the whole diff once
+against the task and the design, and against how both products use it, and
+list everything wrong in that one pass: a requirement not met, a mechanism
 duplicated, a predecessor left in place, a caller not converted in either
 product, a limit that refuses valid input, a test that cannot fail, a name
-that does not say what the thing is. Fix all of it, narrate again, and repeat
-until a full pass finds nothing. Then verify scoped to the change; the full
-check runs once on the tree that lands.
+that does not say what the thing is. Fix the whole list, then read only what
+the fixes changed. Then verify scoped to the change.
 
-**Git and pull requests.** Branch, commit with plain messages whose body says
-why, stage explicit paths, rebase onto `origin/master` before the final
-verification. PR descriptions are plain prose: what changed and why, the
+**Git and pull requests.** Branch from `origin/master`, commit with plain
+messages whose body says why, stage explicit paths. A pull request is
+verified by GitHub Actions; master requires the `check` status on the pull
+request's head, branches need not be up to date, so rebase only to resolve a
+conflict. Merge with `gh pr merge --auto --squash --match-head-commit <sha>`.
+Development speed comes before a perfectly green master (operator,
+2026-11-09): whoever's change breaks master fixes it next. PR descriptions are plain prose: what changed and why, the
 decisions taken, what was verified and what was not, and what each product
 must change to adopt it.
 
 **Decide technical details yourself** from the principles here and record
-them on the task and in the PR. The operator decides product scope, privacy,
-money, irreversible actions on real data and anything published outward.
+them on the task and in the PR. The operator decides product scope and intent,
+privacy, money (paid APIs, purchased vectors) and anything published outward.
+Deploying, activating, restarting, rebuilding an archive and the release
+cutover are yours: original inputs stay where their sources keep them and an
+old archive is set aside, not deleted. No stored format or archive is deployed
+in a sense that needs compatibility or migration; target one current
+format.
 
 ## Engineering values
 
@@ -146,6 +153,8 @@ pins the commit. To change a crate here together with its callers, check
 the product out beside this repository (a cloud session includes both) and
 run `cargo xtask link-common` in the product, which builds it against this
 checkout. Merge the pull request here first. The `Update product locks`
-workflow then opens a pull request in each product that moves its lock to
-the new master; the callers are converted on that branch, or on a branch
-that runs the same `cargo update`.
+workflow then opens a pull request in Sinex that moves its lock to the new
+master; the callers are converted on that branch. Polylogue follows after
+Sinex has adopted the commit, in one pull request that moves its Sinex
+revision and its common lock together (README.md, "Depending on this
+repository").
