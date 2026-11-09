@@ -2,11 +2,115 @@
 //! each construct has one tag and one shape, so two queries hash alike exactly
 //! when their normal forms are equal.
 use crate::ast::*;
-use serde_json::{Value as Json, json};
+use serde_json::Value as Json;
+
+/// Builds JSON from owned parts. `serde_json::json!` turns each interpolated
+/// value into JSON by serializing a reference to it, which copies an already
+/// built child form, recursively and once per enclosing level; this moves it.
+macro_rules! json {
+    ({ $($key:literal : $value:expr),* $(,)? }) => {{
+        let mut fields = serde_json::Map::new();
+        $( fields.insert($key.to_owned(), IntoJson::into_json($value)); )*
+        Json::Object(fields)
+    }};
+    ($value:expr) => {
+        IntoJson::into_json($value)
+    };
+}
+
+trait IntoJson {
+    fn into_json(self) -> Json;
+}
+impl IntoJson for Json {
+    fn into_json(self) -> Json {
+        self
+    }
+}
+impl IntoJson for Vec<Json> {
+    fn into_json(self) -> Json {
+        Json::Array(self)
+    }
+}
+impl IntoJson for &str {
+    fn into_json(self) -> Json {
+        Json::String(self.to_owned())
+    }
+}
+impl IntoJson for &String {
+    fn into_json(self) -> Json {
+        Json::String(self.clone())
+    }
+}
+impl IntoJson for String {
+    fn into_json(self) -> Json {
+        Json::String(self)
+    }
+}
+impl IntoJson for bool {
+    fn into_json(self) -> Json {
+        Json::Bool(self)
+    }
+}
+impl IntoJson for &bool {
+    fn into_json(self) -> Json {
+        Json::Bool(*self)
+    }
+}
+impl IntoJson for u64 {
+    fn into_json(self) -> Json {
+        self.into()
+    }
+}
+impl IntoJson for &u64 {
+    fn into_json(self) -> Json {
+        (*self).into()
+    }
+}
+impl IntoJson for usize {
+    fn into_json(self) -> Json {
+        self.into()
+    }
+}
+impl IntoJson for &usize {
+    fn into_json(self) -> Json {
+        (*self).into()
+    }
+}
+impl IntoJson for &f64 {
+    fn into_json(self) -> Json {
+        (*self).into()
+    }
+}
+impl IntoJson for &u8 {
+    fn into_json(self) -> Json {
+        (*self).into()
+    }
+}
+impl IntoJson for Option<Json> {
+    fn into_json(self) -> Json {
+        self.unwrap_or(Json::Null)
+    }
+}
+impl IntoJson for &Option<String> {
+    fn into_json(self) -> Json {
+        self.as_ref()
+            .map_or(Json::Null, |text| Json::String(text.clone()))
+    }
+}
+impl IntoJson for Vec<String> {
+    fn into_json(self) -> Json {
+        Json::Array(self.into_iter().map(Json::String).collect())
+    }
+}
+impl IntoJson for f64 {
+    fn into_json(self) -> Json {
+        self.into()
+    }
+}
 
 fn arguments(args: &[Argument]) -> Vec<Json> {
     args.iter()
-        .map(|a| json!({"parameter":a.parameter,"value":value(&a.value)}))
+        .map(|a| json!({"parameter":&a.parameter,"value":value(&a.value)}))
         .collect()
 }
 fn value(v: &Value) -> Json {
@@ -55,7 +159,7 @@ fn gap(g: &Gap) -> Json {
         Gap::Next => json!("next"),
         Gap::Within {
             distance: Distance::Time { duration },
-        } => json!({"within":{"duration":value(duration)}}),
+        } => json!({"within":json!({"duration":value(duration)})}),
         Gap::Within { distance: d } => json!({"within_positions":distance(d)}),
     }
 }
@@ -228,7 +332,7 @@ fn condition_kind(c: &ConditionKind) -> Json {
     })
 }
 fn attachment(a: &Attachment) -> Json {
-    json!({"unit":a.unit,"fields":a.fields,"windows":a.windows.iter().map(|w| match w {Window::First(n)=>json!({"first":n}),Window::Last(n)=>json!({"last":n}),Window::Where(c)=>json!({"where":condition(c)})}).collect::<Vec<_>>()})
+    json!({"unit":&a.unit,"fields":a.fields.clone(),"windows":a.windows.iter().map(|w| match w {Window::First(n)=>json!({"first":n}),Window::Last(n)=>json!({"last":n}),Window::Where(c)=>json!({"where":condition(c)})}).collect::<Vec<_>>()})
 }
 fn transform(t: &TransformKind) -> Json {
     crate::depth::deeper(|| match t {

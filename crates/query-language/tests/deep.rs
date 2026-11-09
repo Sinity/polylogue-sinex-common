@@ -32,7 +32,11 @@ fn exercise(text: &str) {
     if let Ok(rendered) = format_query(&query, &catalog) {
         let _ = parse(&rendered, &catalog);
     }
-    let _ = normal_form(&query, &catalog);
+    // The normal form is a JSON tree as deep as the query: drop it a level
+    // at a time.
+    if let Ok(form) = normal_form(&query, &catalog) {
+        query_language::depth::json::drop(form);
+    }
 }
 
 fn repeat(prefix: &str, middle: &str, suffix: &str) -> String {

@@ -11,9 +11,15 @@ pub fn format_query(query: &Query, catalog: &Catalog) -> Result<String, Error> {
     let text = render_query(query, catalog)?;
     let parsed = crate::parse::parse(&text, catalog)
         .map_err(|error| invalid(format!("syntax tree cannot be rendered: {}", error.message)))?;
-    if crate::identity::normal_form(query, catalog)?
-        != crate::identity::normal_form(&parsed, catalog)?
-    {
+    use crate::depth::json;
+    let (original, reparsed) = (
+        crate::identity::normal_form(query, catalog)?,
+        crate::identity::normal_form(&parsed, catalog)?,
+    );
+    let same = json::equal(&original, &reparsed);
+    json::drop(original);
+    json::drop(reparsed);
+    if !same {
         return Err(invalid(
             "syntax tree has no equivalent shared surface spelling",
         ));
