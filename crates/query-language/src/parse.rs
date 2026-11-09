@@ -596,32 +596,34 @@ impl Parser<'_> {
             source = match source {
                 Source::Unit {
                     implicit: true,
-                    condition:
-                        Some(Condition {
-                            kind: ConditionKind::Saved { name, arguments },
-                            ..
+                    condition: Some(mut condition),
+                    unit,
+                } => {
+                    let named = match &mut condition.kind {
+                        ConditionKind::Saved { name, arguments } => Some(Source::Saved {
+                            name: std::mem::take(name),
+                            arguments: std::mem::take(arguments),
+                            condition: None,
+                            output: SourceColumns::Unknown,
                         }),
-                    ..
-                } => Source::Saved {
-                    name,
-                    arguments,
-                    condition: None,
-                    output: SourceColumns::Unknown,
-                },
-                Source::Unit {
-                    implicit: true,
-                    condition:
-                        Some(Condition {
-                            kind: ConditionKind::Reference { reference },
-                            ..
-                        }),
-                    ..
-                } if reference.starts_with("result:") => Source::Result {
-                    reference,
-                    part: ResultPart::Rows,
-                    condition: None,
-                    output: SourceColumns::Unknown,
-                },
+                        ConditionKind::Reference { reference }
+                            if reference.starts_with("result:") =>
+                        {
+                            Some(Source::Result {
+                                reference: std::mem::take(reference),
+                                part: ResultPart::Rows,
+                                condition: None,
+                                output: SourceColumns::Unknown,
+                            })
+                        }
+                        _ => None,
+                    };
+                    named.unwrap_or(Source::Unit {
+                        implicit: true,
+                        condition: Some(condition),
+                        unit,
+                    })
+                }
                 other => other,
             };
             if matches!(source, Source::Saved { .. } | Source::Result { .. }) {
@@ -1090,25 +1092,14 @@ impl Parser<'_> {
         .length(token.span.end - token.span.start)
         .suggestion(self.replace(token.span, &crate::format::quote(&token.text)))
     }
-    /// `NOT c`. Two negations cancel (`NOT NOT c` is `c` in three-valued
-    /// logic too), so a run of them never nests deeper than one level.
     fn negation(&self, start: usize, condition: Condition) -> Condition {
-        let span = Span {
-            start,
-            end: condition.span.end,
-        };
-        match condition.kind {
-            // The inner condition keeps its own span: scopes captured while
-            // parsing it are keyed by where it starts.
-            ConditionKind::Not { condition: inner } => *inner,
-            kind => Condition {
-                span,
-                kind: ConditionKind::Not {
-                    condition: Box::new(Condition {
-                        span: condition.span,
-                        kind,
-                    }),
-                },
+        Condition {
+            span: Span {
+                start,
+                end: condition.span.end,
+            },
+            kind: ConditionKind::Not {
+                condition: Box::new(condition),
             },
         }
     }

@@ -14,7 +14,7 @@ pub struct Span {
 /// A relation, its attached child lists and the transforms after each `|`.
 ///
 /// Queries, conditions and expressions nest as deeply as the text does, so
-/// their copying, comparison, printing and serialization run each
+/// their copying, comparison, printing, serialization and dropping run each
 /// level through [`crate::depth::deeper`] (see `ast/deep.rs`) instead of deriving them.
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct Query {

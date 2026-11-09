@@ -3,11 +3,10 @@
 //! impls, so a level costs one stack check; the output matches what
 //! `#[derive]` would produce.
 //!
-//! Dropping is not among them: a `Drop` impl would forbid moving fields out
-//! of these types, which callers do throughout. Dropping a level costs a few
-//! dozen bytes of stack, and parsing keeps the cheapest nesting shallow: a
-//! run of negations collapses (see `Parser::negation`) and a set inside a set
-//! adds its values.
+//! Dropping is guarded on the enums that own the nested children
+//! (`ConditionKind`, `TransformKind`, `Expression`, `ExtensionArgument`): each
+//! takes its children out and drops them one level deeper. A set inside a set
+//! adds its values when parsed, so values stay shallow.
 use super::*;
 use crate::depth::deeper;
 use serde::ser::SerializeStruct;
@@ -202,5 +201,118 @@ impl fmt::Debug for Expression {
 impl Serialize for Expression {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         deeper(|| self.spelled().serialize(serializer))
+    }
+}
+
+impl Query {
+    /// A query with nothing inside, left behind where a child was taken out
+    /// to be dropped a level deeper.
+    fn empty() -> Self {
+        Query {
+            source: Source::Unit {
+                unit: String::new(),
+                implicit: true,
+                condition: None,
+            },
+            attach: Vec::new(),
+            transforms: Vec::new(),
+        }
+    }
+}
+
+impl Condition {
+    /// A condition with nothing inside; see [`Query::empty`].
+    fn empty() -> Self {
+        Condition {
+            span: Span::default(),
+            kind: ConditionKind::And {
+                conditions: Vec::new(),
+            },
+        }
+    }
+}
+
+/// Drops taken-out children one level deeper.
+fn drop_deeper(conditions: Vec<Condition>, queries: Vec<Query>) {
+    if !conditions.is_empty() || !queries.is_empty() {
+        deeper(move || drop((conditions, queries)));
+    }
+}
+
+// Dropping is guarded on the enums that hold the boxed and listed children,
+// not on `Query` or `Condition`, so callers can still move fields out of
+// those two structs.
+impl Drop for ConditionKind {
+    fn drop(&mut self) {
+        let (mut conditions, mut queries) = (Vec::new(), Vec::new());
+        match self {
+            Self::And { conditions: list } | Self::Or { conditions: list } => {
+                conditions = std::mem::take(list)
+            }
+            Self::Sequence { steps, .. } => conditions = std::mem::take(steps),
+            Self::Not { condition }
+            | Self::Exists {
+                condition: Some(condition),
+                ..
+            }
+            | Self::Count {
+                condition: Some(condition),
+                ..
+            } => conditions.push(std::mem::replace(&mut **condition, Condition::empty())),
+            Self::In { query, .. } | Self::Order { query, .. } => {
+                queries.push(std::mem::replace(&mut **query, Query::empty()))
+            }
+            _ => {}
+        }
+        drop_deeper(conditions, queries);
+    }
+}
+
+impl Drop for TransformKind {
+    fn drop(&mut self) {
+        if let Self::Combine { query, .. } | Self::Join { query, .. } | Self::Diff { query } = self
+        {
+            drop_deeper(
+                Vec::new(),
+                vec![std::mem::replace(&mut **query, Query::empty())],
+            );
+        }
+    }
+}
+
+impl Drop for Expression {
+    fn drop(&mut self) {
+        let leaf = || Expression::Field {
+            name: String::new(),
+        };
+        let children = match self {
+            Self::Arithmetic { left, right, .. } => vec![
+                std::mem::replace(&mut **left, leaf()),
+                std::mem::replace(&mut **right, leaf()),
+            ],
+            Self::Function { arguments, .. } => std::mem::take(arguments),
+            Self::Field { .. } | Self::Value { .. } => return,
+        };
+        deeper(move || drop(children));
+    }
+}
+
+impl Drop for ExtensionArgument {
+    fn drop(&mut self) {
+        match self {
+            Self::Condition(condition) => drop_deeper(
+                vec![std::mem::replace(&mut **condition, Condition::empty())],
+                Vec::new(),
+            ),
+            Self::Query(query) => drop_deeper(
+                Vec::new(),
+                vec![std::mem::replace(&mut **query, Query::empty())],
+            ),
+            Self::Optional(list) | Self::List(list) => {
+                let list = std::mem::take(list);
+                deeper(move || drop(list));
+            }
+            _ => {}
+        }
     }
 }

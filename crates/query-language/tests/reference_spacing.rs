@@ -73,7 +73,7 @@ fn reference_colon_spacing_preserves_identity_and_canonical_format() {
         panic!()
     };
     assert_eq!(condition.span, Span { start: 13, end: 26 });
-    assert!(matches!(condition.kind, ConditionKind::Saved { name, .. } if name == "Écho"));
+    assert!(matches!(&condition.kind, ConditionKind::Saved { name, .. } if name == "Écho"));
     assert_ne!(
         question_id(
             &parse("query:Écho", &catalog).unwrap(),

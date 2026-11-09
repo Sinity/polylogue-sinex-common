@@ -112,7 +112,7 @@ fn closed_set_literal_completion_preserves_reserved_words_and_query_punctuation(
         let ConditionKind::Match {
             value: Value::Scalar { text, .. },
             ..
-        } = condition.kind
+        } = &condition.kind
         else {
             panic!("closed-set literal must remain a scalar")
         };
@@ -162,7 +162,7 @@ fn closed_literal_completion_respects_custom_unknown_words_and_calendar_keywords
         else {
             panic!("unit condition")
         };
-        let value = match condition.kind {
+        let value = match &condition.kind {
             ConditionKind::Match { value, .. }
             | ConditionKind::Compare {
                 right: Expression::Value { value },
@@ -223,7 +223,7 @@ fn declared_values_complete_inside_open_quotes_with_escaped_replacements() {
             else {
                 panic!("missing condition")
             };
-            let value = match condition.kind {
+            let value = match &condition.kind {
                 ConditionKind::Match { value, .. }
                 | ConditionKind::Compare {
                     right: Expression::Value { value },
@@ -233,7 +233,7 @@ fn declared_values_complete_inside_open_quotes_with_escaped_replacements() {
             };
             assert_eq!(
                 value,
-                Value::Scalar {
+                &Value::Scalar {
                     text: wanted.into(),
                     quoted: true
                 }

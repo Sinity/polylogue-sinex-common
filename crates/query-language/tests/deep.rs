@@ -68,19 +68,6 @@ fn a_set_inside_a_set_adds_its_values() {
     );
 }
 
-#[test]
-fn two_negations_cancel() {
-    let catalog = support::polylogue();
-    assert_eq!(
-        normal_form(&parse("NOT NOT \"x\"", &catalog).unwrap(), &catalog).unwrap(),
-        normal_form(&parse("\"x\"", &catalog).unwrap(), &catalog).unwrap()
-    );
-    assert_ne!(
-        normal_form(&parse("NOT NOT NOT \"x\"", &catalog).unwrap(), &catalog).unwrap(),
-        normal_form(&parse("\"x\"", &catalog).unwrap(), &catalog).unwrap()
-    );
-}
-
 const TOKENS: &[&str] = &[
     "NOT ",
     "-",

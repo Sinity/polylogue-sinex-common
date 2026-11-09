@@ -177,14 +177,14 @@ fn positional_keywords_and_escaping() {
         ]);
     assert!(parse("count words", &c).is_err()); // count is a declared field in this synthetic catalog.
     assert!(
-        matches!(condition("cats \"and\" dogs",&c).kind,ConditionKind::And{conditions} if conditions.len()==3)
+        matches!(&condition("cats \"and\" dogs",&c).kind,ConditionKind::And{conditions} if conditions.len()==3)
     );
     assert!(matches!(
-        condition("where:yes count >= 1", &c).kind,
+        &condition("where:yes count >= 1", &c).kind,
         ConditionKind::And { .. }
     ));
     let quoted = condition(r#""a\"b\\c\nline""#, &c);
-    assert!(matches!(quoted.kind,ConditionKind::Text{text,..} if text=="a\"b\\c\nline"));
+    assert!(matches!(&quoted.kind,ConditionKind::Text{text,..} if text=="a\"b\\c\nline"));
 }
 #[test]
 fn order_relations_and_as_of_preserve_inner_context() {
@@ -235,7 +235,7 @@ fn valid_size_is_not_a_refusal() {
     let text = vec!["origin:demo"; 4096].join(" ");
     let q = parse(&text, &c).unwrap();
     assert!(
-        matches!(q.source,Source::Unit{condition:Some(Condition{kind:ConditionKind::And{conditions},..}),..} if conditions.len()==4096)
+        matches!(&q.source,Source::Unit{condition:Some(Condition{kind:ConditionKind::And{conditions},..}),..} if conditions.len()==4096)
     );
 }
 
@@ -435,7 +435,7 @@ fn closed_sets_use_their_declared_spelling_in_the_bound_tree() {
     let ConditionKind::Match {
         value: Value::Scalar { text, .. },
         ..
-    } = condition.kind
+    } = &condition.kind
     else {
         panic!("closed-set match")
     };

@@ -564,7 +564,7 @@ fn native_reference_prefixes_preserve_real_fields_in_the_current_scope() {
         .push(field("event", FieldKind::Exact));
     let scoped = parse("sessions where event:started", &catalog).unwrap();
     assert!(
-        matches!(scoped.source, Source::Unit {condition:Some(Condition {kind:ConditionKind::Match {field,..},..}),..} if field == "event")
+        matches!(&scoped.source, Source::Unit {condition:Some(Condition {kind:ConditionKind::Match {field,..},..}),..} if field == "event")
     );
     catalog.references.push(ReferenceForm::Prefix {
         prefix: "event:".into(),
