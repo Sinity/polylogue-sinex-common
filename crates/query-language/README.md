@@ -536,9 +536,15 @@ analysis and rendering in both products. (ruling 2026-10-11, cc:e3e37f29-2490-47
 
 - The zone is an IANA name and travels with its name, so generated SQL never
   falls back to UTC. A `DaySetting` is constructed only from a resolved zone
-  and a valid start; there is no default constructor, and the deployment's
-  value is passed in. Where it is configured, and its default of 04:00, is
-  each product's operations page.
+  and a valid start. When a product's configuration names no zone, both
+  products use `DaySetting::system(start)`: the host's named zone (`TZ`, then
+  `/etc/localtime`), never a hard-coded one. A host whose zone has no IANA
+  name must name one. Where it is configured, and its default start of 04:00,
+  is each product's operations page.
+- Calendar buckets have one spelling, `time::label`: `day()` is `2026-11-09`,
+  `week()` is the ISO week of the logical day, `2026-W46` (labelled by its ISO
+  year, so it sorts in time order), `month()` is `2026-11`, `month_day()` is
+  `11-09` and `weekday()` is `mon` to `sun`.
 - Logical date D covers `[start_of(D), start_of(D+1))`. A start inside a
   skipped hour moves to the first instant that exists; a start inside a
   repeated hour uses its first occurrence. Days around a clock change are 23

@@ -627,3 +627,34 @@ fn four_digit_years_precede_basic_clock_parsing_with_explicit_clock_forms_preser
         );
     }
 }
+
+#[test]
+fn the_system_day_setting_uses_the_hosts_named_zone() {
+    let start = "04:00".parse::<Time>().unwrap();
+    match TimeZone::system().iana_name() {
+        Some(name) => {
+            let day = DaySetting::system(start).unwrap();
+            assert_eq!(day.zone_name(), name);
+            assert_eq!(day.start(), start);
+        }
+        None => assert!(DaySetting::system(start).is_err()),
+    }
+}
+
+#[test]
+fn calendar_labels_have_one_spelling() {
+    use time::label;
+    let d = date("2026-11-09");
+    assert_eq!(label::day(d), "2026-11-09");
+    assert_eq!(label::week(d), "2026-W46");
+    assert_eq!(label::month(d), "2026-11");
+    assert_eq!(label::month_day(d), "11-09");
+    assert_eq!(label::weekday(d), "mon");
+    // The ISO week labels a week by its ISO year, so late December and early
+    // January dates land in the week they belong to and labels sort in order.
+    assert_eq!(label::week(date("2026-12-31")), "2026-W53");
+    assert_eq!(label::week(date("2027-01-03")), "2026-W53");
+    assert_eq!(label::week(date("2027-01-04")), "2027-W01");
+    assert_eq!(label::week(date("2024-12-30")), "2025-W01");
+    assert_eq!(label::day(Date::new(-400, 3, 1).unwrap()), "-0400-03-01");
+}
