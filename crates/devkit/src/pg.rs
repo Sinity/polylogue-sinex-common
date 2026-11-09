@@ -22,8 +22,8 @@
 //!   server's socket directory, and clones the template into the slot's
 //!   database, replacing whatever a previous holder left there. The kernel
 //!   releases the lock however the test process ends, so a project never has
-//!   more test databases than it has slots, plus the few failed ones kept for
-//!   inspection. Test databases are separate from the compile database
+//!   more test databases than it has slots, one more per test process that
+//!   holds several, plus the few failed ones kept for inspection. Test databases are separate from the compile database
 //!   because a database cannot be cloned while anything is connected to it,
 //!   and compilers and editors hold connections.
 //!
@@ -37,7 +37,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::{
         Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -52,6 +52,8 @@ const START_TIMEOUT: Duration = Duration::from_secs(60);
 /// as `WAL_LOG`, one at a time and from four slots at once, idle and beside a
 /// writer (`benchmark_database_clones`), despite the checkpoint it forces.
 const CLONE_STRATEGY: &str = "FILE_COPY";
+/// How often a process waiting for a test database slot looks again.
+const SLOT_WAIT: Duration = Duration::from_millis(50);
 
 /// Required server capabilities and settings for an owned cluster.
 #[derive(Debug, Clone, Default)]
@@ -325,11 +327,17 @@ impl Server {
         }
         // A reused template must be marked before cloning or inspecting it.
         self.stamp_used(&databases.template)?;
+        // A clone fails while any session is connected to its template, and
+        // autovacuum or a TimescaleDB scheduler connects to every database
+        // that allows it. A built template accepts no connections, so none
+        // can start; sessions from before this point are ended.
         self.sql(
             "postgres",
             &format!(
-                "ALTER DATABASE {} WITH IS_TEMPLATE true",
-                databases.template
+                "ALTER DATABASE {name} WITH IS_TEMPLATE true ALLOW_CONNECTIONS false;
+                 SELECT pg_terminate_backend(pid, 5000) FROM pg_stat_activity
+                 WHERE datname = '{name}'",
+                name = databases.template
             ),
         )?;
         if !self.database_exists(&databases.schema)? {
@@ -738,6 +746,16 @@ impl Family {
             Self::Large => slots.large,
         }
     }
+
+    /// How many of this family's slots this process holds.
+    fn held(self) -> &'static AtomicUsize {
+        static ORDINARY: AtomicUsize = AtomicUsize::new(0);
+        static LARGE: AtomicUsize = AtomicUsize::new(0);
+        match self {
+            Self::Ordinary => &ORDINARY,
+            Self::Large => &LARGE,
+        }
+    }
 }
 
 /// The parts of a schema version's database name: project, kind
@@ -826,6 +844,7 @@ pub struct TestDatabase {
     pub name: String,
     project: String,
     failed_kept: usize,
+    family: Family,
     // Held while the test runs; the kernel releases it however the process
     // ends.
     _slot: fs::File,
@@ -861,8 +880,12 @@ impl TestDatabase {
         Self::take(&socket, &template, family, &Slots::from_env()?)
     }
 
-    /// Takes the first free slot of the family, or waits for one, and
-    /// clones `template` into it.
+    /// Takes the first free slot of the family and clones `template` into
+    /// it. A process that holds none of the family's slots waits for any to
+    /// come free. A process that already holds one never waits: two tests
+    /// each holding a slot and waiting for another would wait forever, so it
+    /// takes the first free slot past the configured count instead, and
+    /// the family has at most one extra database per such process.
     fn take(socket: &Path, template: &str, family: Family, slots: &Slots) -> Result<Self> {
         check_name(template)?;
         let Some((project, "_template_", _)) = schema_parts(template) else {
@@ -875,36 +898,47 @@ impl TestDatabase {
                 family.word()
             ));
         }
-        let slot = |k: usize| -> Result<(String, fs::File)> {
+        let try_slot = |k: usize| -> Result<Option<(String, fs::File)>> {
             let name = format!("{project}_{}{k}", family.word());
             check_name(&name)?;
             let file = lock_file(&socket.join(format!("{name}.lock")))?;
-            Ok((name, file))
-        };
-        let mut taken = None;
-        for k in 0..count {
-            let (name, file) = slot(k)?;
             match file.try_lock() {
-                Ok(()) => {
-                    taken = Some((name, file));
-                    break;
-                }
-                Err(fs::TryLockError::WouldBlock) => {}
-                Err(fs::TryLockError::Error(error)) => return Err(format!("{name}: {error}")),
-            }
-        }
-        let (name, file) = match taken {
-            Some(taken) => taken,
-            None => {
-                let (name, file) = slot(unique() as usize % count)?;
-                eprintln!(
-                    "devkit: all {count} {} database slots of {project} are taken; waiting for {name}",
-                    family.word()
-                );
-                file.lock().map_err(|e| format!("{name}: {e}"))?;
-                (name, file)
+                Ok(()) => Ok(Some((name, file))),
+                Err(fs::TryLockError::WouldBlock) => Ok(None),
+                Err(fs::TryLockError::Error(error)) => Err(format!("{name}: {error}")),
             }
         };
+        let first_free = |slots: std::ops::Range<usize>| -> Result<Option<(String, fs::File)>> {
+            for k in slots {
+                if let Some(taken) = try_slot(k)? {
+                    return Ok(Some(taken));
+                }
+            }
+            Ok(None)
+        };
+        let holding = family.held().load(Ordering::SeqCst) > 0;
+        let (name, file) = if holding {
+            match first_free(0..usize::MAX)? {
+                Some(taken) => taken,
+                None => unreachable!("some slot number is free"),
+            }
+        } else {
+            let mut said = false;
+            loop {
+                if let Some(taken) = first_free(0..count)? {
+                    break taken;
+                }
+                if !said {
+                    eprintln!(
+                        "devkit: all {count} {} database slots of {project} are taken; waiting for one",
+                        family.word()
+                    );
+                    said = true;
+                }
+                std::thread::sleep(SLOT_WAIT);
+            }
+        };
+        family.held().fetch_add(1, Ordering::SeqCst);
         sql_at(
             socket,
             "postgres",
@@ -920,6 +954,7 @@ impl TestDatabase {
             name,
             project: project.to_owned(),
             failed_kept: slots.failed,
+            family,
             _slot: file,
         })
     }
@@ -1038,6 +1073,7 @@ impl Drop for TestDatabase {
                 &format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", self.name),
             );
         }
+        self.family.held().fetch_sub(1, Ordering::SeqCst);
     }
 }
 

@@ -652,3 +652,75 @@ fn earlier_test_databases_go_once_nothing_is_connected() {
     assert!(server.database_exists("t_other").unwrap());
     assert!(server.database_exists("devkit_building_1_2").unwrap());
 }
+
+/// A clone fails while any session is connected to its template, so a built
+/// template accepts no connections, and ensuring it ends sessions that a
+/// template from before this rule still has.
+#[test]
+fn a_built_template_accepts_no_connections() {
+    let server = Server::start(&ClusterOptions::default()).unwrap();
+    let databases = demo_schema(&server, "sealed", "one");
+    let allows = |server: &Server| {
+        server
+            .sql(
+                "postgres",
+                &format!(
+                    "SELECT datallowconn FROM pg_database WHERE datname = '{}'",
+                    databases.template
+                ),
+            )
+            .unwrap()
+            .trim()
+            .to_owned()
+    };
+    assert_eq!(allows(&server), "f");
+    assert!(server.sql(&databases.template, "SELECT 1").is_err());
+    // A template that still allows connections, with a session open on it.
+    server
+        .sql(
+            "postgres",
+            &format!(
+                "ALTER DATABASE {} WITH ALLOW_CONNECTIONS true",
+                databases.template
+            ),
+        )
+        .unwrap();
+    let mut session = Command::new("psql")
+        .args(["-X", "-q", "-h"])
+        .arg(server.socket())
+        .args(["-d", &databases.template, "-c", "SELECT pg_sleep(60)"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while server
+        .sql(
+            "postgres",
+            &format!(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = '{}'",
+                databases.template
+            ),
+        )
+        .unwrap()
+        .trim()
+        == "0"
+    {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        server
+            .clone_database(&databases.template, "sealed_copy")
+            .unwrap_err()
+            .contains("being accessed by other users")
+    );
+    let again = demo_schema(&server, "sealed", "one");
+    assert_eq!(again, databases);
+    assert_eq!(allows(&server), "f");
+    server
+        .clone_database(&databases.template, "sealed_copy")
+        .unwrap();
+    let _ = session.kill();
+    let _ = session.wait();
+}

@@ -189,11 +189,18 @@ by abrupt owner death remains the platform init's responsibility.
   server's socket directory while it builds into `<project>_building_<hash>`
   and renames that into place; a builder that was killed leaves that name
   behind, and the next builder or cleanup, finding the lock free, drops it.
+  A built template accepts no connections: a copy fails while any session is
+  connected to its template, and autovacuum or a TimescaleDB scheduler
+  would otherwise connect to it. Ensuring a version ends sessions a template
+  still has from before this rule.
 - A test takes a **slot**: one of a fixed number of test database names per
   project, `<project>_test<k>`. `test_database()` (or a `TestDatabase`
   fixture) locks the slot's file in the socket directory, trying the slots
-  in order and waiting when all are taken, then drops whatever database the
-  slot holds and clones the template into it. A passing test drops it. The
+  in order and waiting for any to come free when all are taken, then drops
+  whatever database the slot holds and clones the template into it. A test
+  process that already holds a slot of the family never waits: two tests
+  each holding one and waiting for another would wait forever, so it takes
+  the first free name past the configured count. A passing test drops it. The
   kernel releases the lock however the test process ends, so a killed test's
   database is simply replaced by the next taker. Tests whose databases grow
   large, such as crash tests, use `large_test_database()` and its own slots,
@@ -203,8 +210,9 @@ by abrupt owner death remains the platform init's responsibility.
   kept failed databases, `<project>_failed<j>`, replacing the oldest failure,
   and its name printed with a `cargo xtask db psql <name>` line.
 - A project therefore never has more test databases on a server than its
-  ordinary and large slots plus its kept failed databases, whatever happens
-  to the tests. `Slots` holds the three numbers. Their defaults are the
+  ordinary and large slots, one more for each test process that holds
+  several of a family, and its kept failed databases, whatever happens to
+  the tests. `Slots` holds the three numbers. Their defaults are the
   host's parallelism (nextest's default thread count), 4 and 5, and
   `DEVKIT_PG_SLOTS`, `DEVKIT_PG_LARGE_SLOTS` and `DEVKIT_PG_FAILED_KEPT`
   replace them, set by the product's `xtask` (through `Nextest::env`) or by
