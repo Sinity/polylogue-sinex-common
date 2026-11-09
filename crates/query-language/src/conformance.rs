@@ -163,35 +163,39 @@ fn bad(message: &str) -> Error {
     Error::new(ErrorKind::BadValue, message, 0)
 }
 fn literal(value: &Value, like: &Scalar) -> Result<Scalar, Error> {
-    if let Scalar::List(items) = like {
-        return literal(
-            value,
-            items
-                .iter()
-                .find(|v| !v.is_unknown())
-                .unwrap_or(&Scalar::Unknown),
-        );
-    }
-    match value {
-        Value::Unknown => Ok(Scalar::Unknown),
-        Value::Scalar { text, .. } => Ok(match like {
-            Scalar::Number(_) => Scalar::Number(
-                text.parse::<f64>()
-                    .ok()
-                    .filter(|n| n.is_finite())
-                    .ok_or_else(|| bad("expected a finite number"))?,
-            ),
-            Scalar::Bool(_) => Scalar::Bool(text.parse().map_err(|_| bad("expected a boolean"))?),
-            _ => Scalar::Text(text.clone()),
-        }),
-        Value::Set { values } => Ok(Scalar::List(
-            values
-                .iter()
-                .map(|v| literal(v, like))
-                .collect::<Result<_, _>>()?,
-        )),
-        _ => Err(unsupported("unbound parameter or wildcard comparison", 0)),
-    }
+    crate::depth::deeper(|| {
+        if let Scalar::List(items) = like {
+            return literal(
+                value,
+                items
+                    .iter()
+                    .find(|v| !v.is_unknown())
+                    .unwrap_or(&Scalar::Unknown),
+            );
+        }
+        match value {
+            Value::Unknown => Ok(Scalar::Unknown),
+            Value::Scalar { text, .. } => Ok(match like {
+                Scalar::Number(_) => Scalar::Number(
+                    text.parse::<f64>()
+                        .ok()
+                        .filter(|n| n.is_finite())
+                        .ok_or_else(|| bad("expected a finite number"))?,
+                ),
+                Scalar::Bool(_) => {
+                    Scalar::Bool(text.parse().map_err(|_| bad("expected a boolean"))?)
+                }
+                _ => Scalar::Text(text.clone()),
+            }),
+            Value::Set { values } => Ok(Scalar::List(
+                values
+                    .iter()
+                    .map(|v| literal(v, like))
+                    .collect::<Result<_, _>>()?,
+            )),
+            _ => Err(unsupported("unbound parameter or wildcard comparison", 0)),
+        }
+    })
 }
 /// A literal standing alone in an expression: a number when it reads as one.
 fn standalone(value: &Value) -> Result<Scalar, Error> {
@@ -503,235 +507,239 @@ impl<'a> ReferenceEvaluator<'a> {
         row.value(name)
     }
     pub fn expression(&self, row: &Row, expression: &Expression) -> Result<Scalar, Error> {
-        match expression {
-            Expression::Field { name } => Ok(self.value(row, name)),
-            Expression::Value { value } => standalone(value),
-            Expression::Function { name, arguments } if name == "len" => {
-                Ok(match self.expression(row, &arguments[0])? {
-                    Scalar::Text(text) => Scalar::Number(text.chars().count() as f64),
-                    Scalar::List(items) => Scalar::Number(items.len() as f64),
-                    Scalar::Unknown => Scalar::Unknown,
-                    _ => return Err(bad("len takes text or a list")),
-                })
-            }
-            Expression::Function { name, arguments } if name == "text" => {
-                let [argument] = arguments.as_slice() else {
-                    return Err(bad("text takes one argument"));
-                };
-                match self.expression(row, argument)? {
-                    value @ (Scalar::Text(_) | Scalar::Unknown) => Ok(value),
-                    _ => Err(bad("text takes a string value")),
+        crate::depth::deeper(|| {
+            match expression {
+                Expression::Field { name } => Ok(self.value(row, name)),
+                Expression::Value { value } => standalone(value),
+                Expression::Function { name, arguments } if name == "len" => {
+                    Ok(match self.expression(row, &arguments[0])? {
+                        Scalar::Text(text) => Scalar::Number(text.chars().count() as f64),
+                        Scalar::List(items) => Scalar::Number(items.len() as f64),
+                        Scalar::Unknown => Scalar::Unknown,
+                        _ => return Err(bad("len takes text or a list")),
+                    })
                 }
-            }
-            Expression::Function { name, arguments } if name == "abs" => {
-                let [argument] = arguments.as_slice() else {
-                    return Err(bad("abs takes one argument"));
-                };
-                match self.expression(row, argument)? {
-                    Scalar::Number(value) => Ok(Scalar::Number(value.abs())),
-                    Scalar::Unknown => Ok(Scalar::Unknown),
-                    _ => Err(bad("abs takes a linear number")),
-                }
-            }
-            Expression::Function { name, arguments } if name == "glob" => {
-                let [text, pattern] = arguments.as_slice() else {
-                    return Err(bad("glob takes two arguments"));
-                };
-                match (self.expression(row, text)?, self.expression(row, pattern)?) {
-                    (Scalar::Unknown, _) | (_, Scalar::Unknown) => Ok(Scalar::Unknown),
-                    (Scalar::Text(text), Scalar::Text(pattern)) => {
-                        Ok(Scalar::Bool(crate::glob::matches(&text, &pattern)))
+                Expression::Function { name, arguments } if name == "text" => {
+                    let [argument] = arguments.as_slice() else {
+                        return Err(bad("text takes one argument"));
+                    };
+                    match self.expression(row, argument)? {
+                        value @ (Scalar::Text(_) | Scalar::Unknown) => Ok(value),
+                        _ => Err(bad("text takes a string value")),
                     }
-                    _ => Err(bad("glob takes text values")),
                 }
-            }
-            Expression::Function { name, arguments } if name == "case_eq" => {
-                let [left, right, selected] = arguments.as_slice() else {
-                    return Err(bad("case_eq takes three arguments"));
-                };
-                let mut left_value = self.expression(row, left)?;
-                let right_value = match right {
-                    Expression::Value { value } => literal(value, &left_value)?,
-                    other => self.expression(row, other)?,
-                };
-                if let Expression::Value { value } = left {
-                    left_value = literal(value, &right_value)?;
-                }
-                if left_value != Scalar::Unknown
-                    && right_value != Scalar::Unknown
-                    && left_value == right_value
-                {
-                    self.expression(row, selected)
-                } else {
-                    Ok(Scalar::Unknown)
-                }
-            }
-            Expression::Function { name, .. } => Err(unsupported(name, 0)),
-            Expression::Arithmetic {
-                operator,
-                left,
-                right,
-            } => {
-                let (l, r) = (self.expression(row, left)?, self.expression(row, right)?);
-                let (Scalar::Number(l), Scalar::Number(r)) = (&l, &r) else {
-                    if l.is_unknown() || r.is_unknown() {
-                        return Ok(Scalar::Unknown);
+                Expression::Function { name, arguments } if name == "abs" => {
+                    let [argument] = arguments.as_slice() else {
+                        return Err(bad("abs takes one argument"));
+                    };
+                    match self.expression(row, argument)? {
+                        Scalar::Number(value) => Ok(Scalar::Number(value.abs())),
+                        Scalar::Unknown => Ok(Scalar::Unknown),
+                        _ => Err(bad("abs takes a linear number")),
                     }
-                    return Err(bad("arithmetic requires numbers"));
-                };
-                let result = match operator {
-                    Arithmetic::Add => l + r,
-                    Arithmetic::Subtract => l - r,
-                    Arithmetic::Multiply => l * r,
-                    // A quotient by zero does not exist: unknown, never infinite.
-                    Arithmetic::Divide if *r == 0. => return Ok(Scalar::Unknown),
-                    Arithmetic::Divide => l / r,
-                };
-                if !result.is_finite() {
-                    return Err(bad("arithmetic requires a finite result"));
                 }
-                Ok(Scalar::Number(result))
+                Expression::Function { name, arguments } if name == "glob" => {
+                    let [text, pattern] = arguments.as_slice() else {
+                        return Err(bad("glob takes two arguments"));
+                    };
+                    match (self.expression(row, text)?, self.expression(row, pattern)?) {
+                        (Scalar::Unknown, _) | (_, Scalar::Unknown) => Ok(Scalar::Unknown),
+                        (Scalar::Text(text), Scalar::Text(pattern)) => {
+                            Ok(Scalar::Bool(crate::glob::matches(&text, &pattern)))
+                        }
+                        _ => Err(bad("glob takes text values")),
+                    }
+                }
+                Expression::Function { name, arguments } if name == "case_eq" => {
+                    let [left, right, selected] = arguments.as_slice() else {
+                        return Err(bad("case_eq takes three arguments"));
+                    };
+                    let mut left_value = self.expression(row, left)?;
+                    let right_value = match right {
+                        Expression::Value { value } => literal(value, &left_value)?,
+                        other => self.expression(row, other)?,
+                    };
+                    if let Expression::Value { value } = left {
+                        left_value = literal(value, &right_value)?;
+                    }
+                    if left_value != Scalar::Unknown
+                        && right_value != Scalar::Unknown
+                        && left_value == right_value
+                    {
+                        self.expression(row, selected)
+                    } else {
+                        Ok(Scalar::Unknown)
+                    }
+                }
+                Expression::Function { name, .. } => Err(unsupported(name, 0)),
+                Expression::Arithmetic {
+                    operator,
+                    left,
+                    right,
+                } => {
+                    let (l, r) = (self.expression(row, left)?, self.expression(row, right)?);
+                    let (Scalar::Number(l), Scalar::Number(r)) = (&l, &r) else {
+                        if l.is_unknown() || r.is_unknown() {
+                            return Ok(Scalar::Unknown);
+                        }
+                        return Err(bad("arithmetic requires numbers"));
+                    };
+                    let result = match operator {
+                        Arithmetic::Add => l + r,
+                        Arithmetic::Subtract => l - r,
+                        Arithmetic::Multiply => l * r,
+                        // A quotient by zero does not exist: unknown, never infinite.
+                        Arithmetic::Divide if *r == 0. => return Ok(Scalar::Unknown),
+                        Arithmetic::Divide => l / r,
+                    };
+                    if !result.is_finite() {
+                        return Err(bad("arithmetic requires a finite result"));
+                    }
+                    Ok(Scalar::Number(result))
+                }
             }
-        }
+        })
     }
     pub fn condition(&self, row: &Row, condition: &Condition) -> Result<Truth, Error> {
-        let truth = match &condition.kind {
-            ConditionKind::And { conditions } => {
-                let mut v = Truth::True;
-                for c in conditions {
-                    v = v.and(self.condition(row, c)?);
-                }
-                v
-            }
-            ConditionKind::Or { conditions } => {
-                let mut v = Truth::False;
-                for c in conditions {
-                    v = v.or(self.condition(row, c)?);
-                }
-                v
-            }
-            ConditionKind::Not { condition } => self.condition(row, condition)?.not(),
-            ConditionKind::Match { field, value } => {
-                let left = self.value(row, field);
-                match value {
-                    Value::Any => Truth::True,
-                    Value::Unknown => left.is_unknown().into(),
-                    Value::Known => (!left.is_unknown()).into(),
-                    _ => natural(
-                        &left,
-                        self.natural
-                            .get(field)
-                            .copied()
-                            .unwrap_or(NaturalMatch::Equal),
-                        &literal(value, &left)?,
-                    )?,
-                }
-            }
-            ConditionKind::Compare { left, op, right } => {
-                let left_value = self.expression(row, left)?;
-                let right_value = match right {
-                    Expression::Value { value } => literal(value, &left_value)?,
-                    other => self.expression(row, other)?,
-                };
-                if *op == Op::Prefix
-                    && let Expression::Field { name } = left
-                    && self.natural.get(name) == Some(&NaturalMatch::Subtree)
-                    && let (Scalar::Text(a), Scalar::Text(b)) = (&left_value, &right_value)
-                {
-                    under(a, b).into()
-                } else {
-                    compare(&left_value, *op, &right_value)?
-                }
-            }
-            ConditionKind::Between { left, from, to } => {
-                let left = self.expression(row, left)?;
-                compare(&left, Op::Ge, &literal(from, &left)?)?.and(compare(
-                    &left,
-                    Op::Le,
-                    &literal(to, &left)?,
-                )?)
-            }
-            ConditionKind::Exists { unit, condition } => {
-                let mut v = Truth::False;
-                for child in self.children(row, unit)? {
-                    v = v.or(match condition {
-                        Some(c) => self.condition(&child, c)?,
-                        None => Truth::True,
-                    });
-                }
-                v
-            }
-            ConditionKind::Count {
-                unit,
-                condition,
-                op,
-                count,
-            } => {
-                let mut n = 0;
-                for child in self.children(row, unit)? {
-                    if condition
-                        .as_ref()
-                        .map_or(Ok(Truth::True), |c| self.condition(&child, c))?
-                        .matches()
-                    {
-                        n += 1;
-                    }
-                }
-                compare(
-                    &Scalar::Number(n as f64),
-                    *op,
-                    &Scalar::Number(*count as f64),
-                )?
-            }
-            ConditionKind::In { left, query } => {
-                let left = self.expression(row, left)?;
-                if left.is_unknown() {
-                    Truth::Unknown
-                } else {
-                    let answer = self.execute(query)?;
-                    let column = membership_column(query).ok_or_else(|| {
-                        refusal("membership requires one grouped key", condition.span.start)
-                    })?;
-                    let mut v = Truth::False;
-                    for r in answer.rows {
-                        let right = r.value(&column);
-                        if !right.is_unknown() {
-                            v = v.or(compare(&left, Op::Eq, &right)?);
-                        }
+        crate::depth::deeper(|| {
+            let truth = match &condition.kind {
+                ConditionKind::And { conditions } => {
+                    let mut v = Truth::True;
+                    for c in conditions {
+                        v = v.and(self.condition(row, c)?);
                     }
                     v
                 }
-            }
-            ConditionKind::Reference { reference } => (row.id == *reference).into(),
-            // Ranking atoms order rows and never select them.
-            ConditionKind::Rank { .. } => Truth::True,
-            ConditionKind::Sequence {
-                unit,
-                all,
-                steps,
-                gaps,
-            } => (!self.sequence(row, unit, *all, steps, gaps)?.is_empty()).into(),
-            ConditionKind::Order {
-                relation,
-                query,
-                within,
-                at,
-                ..
-            } => {
-                let inner = self.execute(query)?.rows;
-                match self.related(row, &inner, *relation, within.as_ref(), *at)? {
-                    None => Truth::Unknown,
-                    Some(pairs) => (!pairs.is_empty()).into(),
+                ConditionKind::Or { conditions } => {
+                    let mut v = Truth::False;
+                    for c in conditions {
+                        v = v.or(self.condition(row, c)?);
+                    }
+                    v
                 }
-            }
-            other => {
-                return Err(unsupported(
-                    &format!("condition {other:?}"),
-                    condition.span.start,
-                ));
-            }
-        };
-        Ok(truth)
+                ConditionKind::Not { condition } => self.condition(row, condition)?.not(),
+                ConditionKind::Match { field, value } => {
+                    let left = self.value(row, field);
+                    match value {
+                        Value::Any => Truth::True,
+                        Value::Unknown => left.is_unknown().into(),
+                        Value::Known => (!left.is_unknown()).into(),
+                        _ => natural(
+                            &left,
+                            self.natural
+                                .get(field)
+                                .copied()
+                                .unwrap_or(NaturalMatch::Equal),
+                            &literal(value, &left)?,
+                        )?,
+                    }
+                }
+                ConditionKind::Compare { left, op, right } => {
+                    let left_value = self.expression(row, left)?;
+                    let right_value = match right {
+                        Expression::Value { value } => literal(value, &left_value)?,
+                        other => self.expression(row, other)?,
+                    };
+                    if *op == Op::Prefix
+                        && let Expression::Field { name } = left
+                        && self.natural.get(name) == Some(&NaturalMatch::Subtree)
+                        && let (Scalar::Text(a), Scalar::Text(b)) = (&left_value, &right_value)
+                    {
+                        under(a, b).into()
+                    } else {
+                        compare(&left_value, *op, &right_value)?
+                    }
+                }
+                ConditionKind::Between { left, from, to } => {
+                    let left = self.expression(row, left)?;
+                    compare(&left, Op::Ge, &literal(from, &left)?)?.and(compare(
+                        &left,
+                        Op::Le,
+                        &literal(to, &left)?,
+                    )?)
+                }
+                ConditionKind::Exists { unit, condition } => {
+                    let mut v = Truth::False;
+                    for child in self.children(row, unit)? {
+                        v = v.or(match condition {
+                            Some(c) => self.condition(&child, c)?,
+                            None => Truth::True,
+                        });
+                    }
+                    v
+                }
+                ConditionKind::Count {
+                    unit,
+                    condition,
+                    op,
+                    count,
+                } => {
+                    let mut n = 0;
+                    for child in self.children(row, unit)? {
+                        if condition
+                            .as_ref()
+                            .map_or(Ok(Truth::True), |c| self.condition(&child, c))?
+                            .matches()
+                        {
+                            n += 1;
+                        }
+                    }
+                    compare(
+                        &Scalar::Number(n as f64),
+                        *op,
+                        &Scalar::Number(*count as f64),
+                    )?
+                }
+                ConditionKind::In { left, query } => {
+                    let left = self.expression(row, left)?;
+                    if left.is_unknown() {
+                        Truth::Unknown
+                    } else {
+                        let answer = self.execute(query)?;
+                        let column = membership_column(query).ok_or_else(|| {
+                            refusal("membership requires one grouped key", condition.span.start)
+                        })?;
+                        let mut v = Truth::False;
+                        for r in answer.rows {
+                            let right = r.value(&column);
+                            if !right.is_unknown() {
+                                v = v.or(compare(&left, Op::Eq, &right)?);
+                            }
+                        }
+                        v
+                    }
+                }
+                ConditionKind::Reference { reference } => (row.id == *reference).into(),
+                // Ranking atoms order rows and never select them.
+                ConditionKind::Rank { .. } => Truth::True,
+                ConditionKind::Sequence {
+                    unit,
+                    all,
+                    steps,
+                    gaps,
+                } => (!self.sequence(row, unit, *all, steps, gaps)?.is_empty()).into(),
+                ConditionKind::Order {
+                    relation,
+                    query,
+                    within,
+                    at,
+                    ..
+                } => {
+                    let inner = self.execute(query)?.rows;
+                    match self.related(row, &inner, *relation, within.as_ref(), *at)? {
+                        None => Truth::Unknown,
+                        Some(pairs) => (!pairs.is_empty()).into(),
+                    }
+                }
+                other => {
+                    return Err(unsupported(
+                        &format!("condition {other:?}"),
+                        condition.span.start,
+                    ));
+                }
+            };
+            Ok(truth)
+        })
     }
     /// The inner rows standing in an order relation to an outer row, nearest
     /// first (precise before coarse, then distance, then identity), each with
@@ -1072,263 +1080,280 @@ impl<'a> ReferenceEvaluator<'a> {
         out: &mut Vec<Vec<usize>>,
         first_only: bool,
     ) -> Result<(), Error> {
-        if step == steps.len() {
-            out.push(picked.clone());
-            return Ok(());
-        }
-        for i in start..rows.len() {
-            if let Some(&prev) = picked.last() {
-                match &gaps[step - 1] {
-                    Gap::Next if i != prev + 1 => continue,
-                    Gap::Within {
-                        distance: Distance::Steps { count },
-                    } => {
-                        let (Some(a), Some(b)) =
-                            (self.position(rows[prev]), self.position(rows[i]))
-                        else {
-                            continue;
-                        };
-                        if b <= a || (b - a) as u64 > *count {
-                            continue;
+        crate::depth::deeper(|| {
+            if step == steps.len() {
+                out.push(picked.clone());
+                return Ok(());
+            }
+            for i in start..rows.len() {
+                if let Some(&prev) = picked.last() {
+                    match &gaps[step - 1] {
+                        Gap::Next if i != prev + 1 => continue,
+                        Gap::Within {
+                            distance: Distance::Steps { count },
+                        } => {
+                            let (Some(a), Some(b)) =
+                                (self.position(rows[prev]), self.position(rows[i]))
+                            else {
+                                continue;
+                            };
+                            if b <= a || (b - a) as u64 > *count {
+                                continue;
+                            }
                         }
-                    }
-                    Gap::Within {
-                        distance: Distance::Time { duration },
-                    } => {
-                        let max = duration
-                            .text()
-                            .and_then(|v| v.parse::<i64>().ok())
-                            .ok_or_else(|| {
-                                unsupported("resolved exact-tick sequence duration", 0)
-                            })?;
-                        let (Some(a), Some(b)) = (rows[prev].time, rows[i].time) else {
-                            continue;
-                        };
-                        if b.start <= a.start
-                            || i128::from(b.start) - i128::from(a.start) > i128::from(max)
-                        {
-                            continue;
+                        Gap::Within {
+                            distance: Distance::Time { duration },
+                        } => {
+                            let max = duration
+                                .text()
+                                .and_then(|v| v.parse::<i64>().ok())
+                                .ok_or_else(|| {
+                                    unsupported("resolved exact-tick sequence duration", 0)
+                                })?;
+                            let (Some(a), Some(b)) = (rows[prev].time, rows[i].time) else {
+                                continue;
+                            };
+                            if b.start <= a.start
+                                || i128::from(b.start) - i128::from(a.start) > i128::from(max)
+                            {
+                                continue;
+                            }
                         }
+                        _ => {}
                     }
-                    _ => {}
+                }
+                if self.condition(rows[i], &steps[step])?.matches() {
+                    picked.push(i);
+                    self.sequence_step(
+                        rows,
+                        steps,
+                        gaps,
+                        step + 1,
+                        i + 1,
+                        picked,
+                        out,
+                        first_only,
+                    )?;
+                    picked.pop();
+                    if first_only && !out.is_empty() {
+                        return Ok(());
+                    }
                 }
             }
-            if self.condition(rows[i], &steps[step])?.matches() {
-                picked.push(i);
-                self.sequence_step(rows, steps, gaps, step + 1, i + 1, picked, out, first_only)?;
-                picked.pop();
-                if first_only && !out.is_empty() {
-                    return Ok(());
-                }
-            }
-        }
-        Ok(())
+            Ok(())
+        })
     }
     pub fn execute(&self, query: &Query) -> Result<Answer, Error> {
-        if !query.attach.is_empty() {
-            return Err(unsupported("attachments", query.attach[0].span.start));
-        }
-        let Source::Unit {
-            unit, condition, ..
-        } = &query.source
-        else {
-            return Err(unsupported("non-unit source", 0));
-        };
-        validate_query(query)?;
-        let mut rows = self.relation(unit)?;
-        for row in &rows {
-            for value in row.fields.values() {
-                validate_scalar(value)?;
+        crate::depth::deeper(|| {
+            if !query.attach.is_empty() {
+                return Err(unsupported("attachments", query.attach[0].span.start));
             }
-        }
-        rows.sort_by(|a, b| a.id.cmp(&b.id));
-        if let Some(c) = condition {
-            rows = self.filter(rows, c)?;
-        }
-        let mut pattern = condition.clone();
-        type IndexedRows = Vec<(usize, Row)>;
-        let mut groups: Option<(Vec<IndexedRows>, Option<Condition>)> = None;
-        // Ranked lists of one level of fuse and union, fused once.
-        let mut lists: Vec<Vec<crate::fusion::Entry<String>>> = Vec::new();
-        for (index, transform) in query.transforms.iter().enumerate() {
-            let at = transform.span.start;
-            match &transform.kind {
-                TransformKind::Where { condition } => {
-                    rows = self.filter(rows, condition)?;
-                    groups = None;
+            let Source::Unit {
+                unit, condition, ..
+            } = &query.source
+            else {
+                return Err(unsupported("non-unit source", 0));
+            };
+            validate_query(query)?;
+            let mut rows = self.relation(unit)?;
+            for row in &rows {
+                for value in row.fields.values() {
+                    validate_scalar(value)?;
                 }
-                TransformKind::Sort { keys } => {
-                    rows = self.sort(rows, keys, at)?;
-                    groups = None;
-                }
-                TransformKind::First { count } if groups.is_some() => {
-                    let (members, input_pattern) = groups.take().unwrap();
-                    let count = usize::try_from(*count).unwrap_or(usize::MAX);
-                    let mut selected = members
-                        .into_iter()
-                        .flat_map(|members| members.into_iter().take(count))
-                        .collect::<Vec<_>>();
-                    selected.sort_by_key(|(position, _)| *position);
-                    rows = selected.into_iter().map(|(_, row)| row).collect();
-                    pattern = input_pattern;
-                }
-                TransformKind::Limit { count } | TransformKind::First { count } => {
-                    rows.truncate(usize::try_from(*count).unwrap_or(usize::MAX));
-                    groups = None;
-                }
-                TransformKind::Offset { count } => {
-                    rows = rows
-                        .into_iter()
-                        .skip(usize::try_from(*count).unwrap_or(usize::MAX))
-                        .collect();
-                    groups = None;
-                }
-                TransformKind::Group { keys } => {
-                    let mut grouped: Vec<(Vec<Scalar>, IndexedRows)> = vec![];
-                    for (position, row) in rows.into_iter().enumerate() {
-                        let values = keys
-                            .iter()
-                            .map(|k| self.expression(&row, &k.expression))
-                            .collect::<Result<Vec<_>, _>>()?;
-                        if let Some((_, members)) = grouped.iter_mut().find(|(v, _)| *v == values) {
-                            members.push((position, row));
-                        } else {
-                            grouped.push((values, vec![(position, row)]));
+            }
+            rows.sort_by(|a, b| a.id.cmp(&b.id));
+            if let Some(c) = condition {
+                rows = self.filter(rows, c)?;
+            }
+            let mut pattern = condition.clone();
+            type IndexedRows = Vec<(usize, Row)>;
+            let mut groups: Option<(Vec<IndexedRows>, Option<Condition>)> = None;
+            // Ranked lists of one level of fuse and union, fused once.
+            let mut lists: Vec<Vec<crate::fusion::Entry<String>>> = Vec::new();
+            for (index, transform) in query.transforms.iter().enumerate() {
+                let at = transform.span.start;
+                match &transform.kind {
+                    TransformKind::Where { condition } => {
+                        rows = self.filter(rows, condition)?;
+                        groups = None;
+                    }
+                    TransformKind::Sort { keys } => {
+                        rows = self.sort(rows, keys, at)?;
+                        groups = None;
+                    }
+                    TransformKind::First { count } if groups.is_some() => {
+                        let (members, input_pattern) = groups.take().unwrap();
+                        let count = usize::try_from(*count).unwrap_or(usize::MAX);
+                        let mut selected = members
+                            .into_iter()
+                            .flat_map(|members| members.into_iter().take(count))
+                            .collect::<Vec<_>>();
+                        selected.sort_by_key(|(position, _)| *position);
+                        rows = selected.into_iter().map(|(_, row)| row).collect();
+                        pattern = input_pattern;
+                    }
+                    TransformKind::Limit { count } | TransformKind::First { count } => {
+                        rows.truncate(usize::try_from(*count).unwrap_or(usize::MAX));
+                        groups = None;
+                    }
+                    TransformKind::Offset { count } => {
+                        rows = rows
+                            .into_iter()
+                            .skip(usize::try_from(*count).unwrap_or(usize::MAX))
+                            .collect();
+                        groups = None;
+                    }
+                    TransformKind::Group { keys } => {
+                        let mut grouped: Vec<(Vec<Scalar>, IndexedRows)> = vec![];
+                        for (position, row) in rows.into_iter().enumerate() {
+                            let values = keys
+                                .iter()
+                                .map(|k| self.expression(&row, &k.expression))
+                                .collect::<Result<Vec<_>, _>>()?;
+                            if let Some((_, members)) =
+                                grouped.iter_mut().find(|(v, _)| *v == values)
+                            {
+                                members.push((position, row));
+                            } else {
+                                grouped.push((values, vec![(position, row)]));
+                            }
                         }
-                    }
-                    grouped.sort_by_key(|(v, _)| format!("{v:?}"));
-                    let mut members = vec![];
-                    rows = vec![];
-                    for (values, items) in grouped {
-                        let mut row = Row::new(format!("group:{values:?}"));
-                        for (key, value) in keys.iter().zip(values) {
-                            row.fields.insert(key.column(), value);
+                        grouped.sort_by_key(|(v, _)| format!("{v:?}"));
+                        let mut members = vec![];
+                        rows = vec![];
+                        for (values, items) in grouped {
+                            let mut row = Row::new(format!("group:{values:?}"));
+                            for (key, value) in keys.iter().zip(values) {
+                                row.fields.insert(key.column(), value);
+                            }
+                            row.fields
+                                .insert("count".into(), Scalar::Number(items.len() as f64));
+                            rows.push(row);
+                            members.push(items);
                         }
-                        row.fields
-                            .insert("count".into(), Scalar::Number(items.len() as f64));
-                        rows.push(row);
-                        members.push(items);
+                        groups = Some((members, pattern.take()));
                     }
-                    groups = Some((members, pattern.take()));
-                }
-                TransformKind::Aggregate { aggregates } => {
-                    let grouped = groups.is_some();
-                    let members = groups
-                        .take()
-                        .map(|(groups, _)| {
-                            groups
-                                .into_iter()
-                                .map(|group| group.into_iter().map(|(_, row)| row).collect())
-                                .collect()
-                        })
-                        .unwrap_or_else(|| vec![rows.clone()]);
-                    if !grouped {
-                        rows = vec![Row::new("aggregate")];
-                    }
-                    for (row, items) in rows.iter_mut().zip(members) {
-                        for aggregate in aggregates {
-                            row.fields.insert(
-                                aggregate.column(),
-                                self.aggregate_value(&items, aggregate)?,
-                            );
-                            for argument in &aggregate.arguments {
-                                if let Expression::Field { name } = argument {
-                                    let mut unknown = 0;
-                                    for item in &items {
-                                        if self.value(item, name).is_unknown() {
-                                            unknown += 1;
+                    TransformKind::Aggregate { aggregates } => {
+                        let grouped = groups.is_some();
+                        let members = groups
+                            .take()
+                            .map(|(groups, _)| {
+                                groups
+                                    .into_iter()
+                                    .map(|group| group.into_iter().map(|(_, row)| row).collect())
+                                    .collect()
+                            })
+                            .unwrap_or_else(|| vec![rows.clone()]);
+                        if !grouped {
+                            rows = vec![Row::new("aggregate")];
+                        }
+                        for (row, items) in rows.iter_mut().zip(members) {
+                            for aggregate in aggregates {
+                                row.fields.insert(
+                                    aggregate.column(),
+                                    self.aggregate_value(&items, aggregate)?,
+                                );
+                                for argument in &aggregate.arguments {
+                                    if let Expression::Field { name } = argument {
+                                        let mut unknown = 0;
+                                        for item in &items {
+                                            if self.value(item, name).is_unknown() {
+                                                unknown += 1;
+                                            }
                                         }
+                                        row.fields.insert(
+                                            format!("unknown_{}", argument.column()),
+                                            Scalar::Number(unknown as f64),
+                                        );
                                     }
-                                    row.fields.insert(
-                                        format!("unknown_{}", argument.column()),
-                                        Scalar::Number(unknown as f64),
-                                    );
                                 }
                             }
                         }
+                        pattern = None;
                     }
-                    pattern = None;
-                }
-                TransformKind::Fields { columns } => {
-                    for row in &mut rows {
-                        let mut fields = BTreeMap::new();
-                        for column in columns {
-                            fields
-                                .insert(column.column(), self.expression(row, &column.expression)?);
-                        }
-                        row.fields = fields;
-                    }
-                    groups = None;
-                }
-                TransformKind::Distinct => {
-                    let mut seen = BTreeSet::new();
-                    rows.retain(|r| seen.insert(r.id.clone()));
-                    groups = None;
-                }
-                TransformKind::Combine {
-                    how,
-                    query: operand,
-                } => {
-                    let other = self.execute(operand)?.rows;
-                    let ids: BTreeSet<_> = other.iter().map(|r| r.id.clone()).collect();
-                    let fusion_chain =
-                        !lists.is_empty() || query_contains_fuse(&query.transforms[index..]);
-                    if fusion_chain && matches!(how, Combination::Union | Combination::Fuse) {
-                        // The left relation is the first operand of this chain;
-                        // later stages add operands, never a fused intermediate.
-                        if lists.is_empty() {
-                            lists.push(ranked_rows(&rows));
-                        }
-                        lists.push(ranked_rows(&other));
-                    }
-                    match how {
-                        Combination::Union => {
-                            rows.extend(other);
-                            let mut seen = BTreeSet::new();
-                            rows.retain(|r| seen.insert(r.id.clone()));
-                            if !fusion_chain {
-                                rows.sort_by(|a, b| a.id.cmp(&b.id));
+                    TransformKind::Fields { columns } => {
+                        for row in &mut rows {
+                            let mut fields = BTreeMap::new();
+                            for column in columns {
+                                fields.insert(
+                                    column.column(),
+                                    self.expression(row, &column.expression)?,
+                                );
                             }
+                            row.fields = fields;
                         }
-                        Combination::Intersect => rows.retain(|r| ids.contains(&r.id)),
-                        Combination::Except => rows.retain(|r| !ids.contains(&r.id)),
-                        Combination::Fuse => {}
+                        groups = None;
                     }
-                    groups = None;
+                    TransformKind::Distinct => {
+                        let mut seen = BTreeSet::new();
+                        rows.retain(|r| seen.insert(r.id.clone()));
+                        groups = None;
+                    }
+                    TransformKind::Combine {
+                        how,
+                        query: operand,
+                    } => {
+                        let other = self.execute(operand)?.rows;
+                        let ids: BTreeSet<_> = other.iter().map(|r| r.id.clone()).collect();
+                        let fusion_chain =
+                            !lists.is_empty() || query_contains_fuse(&query.transforms[index..]);
+                        if fusion_chain && matches!(how, Combination::Union | Combination::Fuse) {
+                            // The left relation is the first operand of this chain;
+                            // later stages add operands, never a fused intermediate.
+                            if lists.is_empty() {
+                                lists.push(ranked_rows(&rows));
+                            }
+                            lists.push(ranked_rows(&other));
+                        }
+                        match how {
+                            Combination::Union => {
+                                rows.extend(other);
+                                let mut seen = BTreeSet::new();
+                                rows.retain(|r| seen.insert(r.id.clone()));
+                                if !fusion_chain {
+                                    rows.sort_by(|a, b| a.id.cmp(&b.id));
+                                }
+                            }
+                            Combination::Intersect => rows.retain(|r| ids.contains(&r.id)),
+                            Combination::Except => rows.retain(|r| !ids.contains(&r.id)),
+                            Combination::Fuse => {}
+                        }
+                        groups = None;
+                    }
+                    TransformKind::Join { query, on } => {
+                        let inner = self.execute(query)?.rows;
+                        rows = self.join(rows, &inner, on)?;
+                        groups = None;
+                        pattern = None;
+                    }
+                    TransformKind::Diff { query } => {
+                        let before = self.execute(query)?.rows;
+                        rows = diff_rows(&before, rows);
+                        groups = None;
+                        pattern = None;
+                    }
+                    TransformKind::Matches => {
+                        rows = self.matches(&rows, pattern.as_ref(), at)?;
+                        groups = None;
+                        pattern = None;
+                    }
+                    other => return Err(unsupported(&format!("transform {other:?}"), at)),
                 }
-                TransformKind::Join { query, on } => {
-                    let inner = self.execute(query)?.rows;
-                    rows = self.join(rows, &inner, on)?;
-                    groups = None;
-                    pattern = None;
+                let chain_continues = matches!(
+                    query.transforms.get(index + 1).map(|t| &t.kind),
+                    Some(TransformKind::Combine {
+                        how: Combination::Fuse | Combination::Union,
+                        ..
+                    })
+                );
+                if !lists.is_empty() && !chain_continues {
+                    rows = apply_fusion(rows, std::mem::take(&mut lists));
                 }
-                TransformKind::Diff { query } => {
-                    let before = self.execute(query)?.rows;
-                    rows = diff_rows(&before, rows);
-                    groups = None;
-                    pattern = None;
-                }
-                TransformKind::Matches => {
-                    rows = self.matches(&rows, pattern.as_ref(), at)?;
-                    groups = None;
-                    pattern = None;
-                }
-                other => return Err(unsupported(&format!("transform {other:?}"), at)),
             }
-            let chain_continues = matches!(
-                query.transforms.get(index + 1).map(|t| &t.kind),
-                Some(TransformKind::Combine {
-                    how: Combination::Fuse | Combination::Union,
-                    ..
-                })
-            );
-            if !lists.is_empty() && !chain_continues {
-                rows = apply_fusion(rows, std::mem::take(&mut lists));
-            }
-        }
-        Ok(Answer {
-            total: rows.len(),
-            rows,
+            Ok(Answer {
+                total: rows.len(),
+                rows,
+            })
         })
     }
     fn sort(&self, mut rows: Vec<Row>, keys: &[SortKey], at: usize) -> Result<Vec<Row>, Error> {
@@ -1460,48 +1485,50 @@ impl<'a> ReferenceEvaluator<'a> {
         Ok(pairs.into_iter().next())
     }
     fn filter(&self, rows: Vec<Row>, c: &Condition) -> Result<Vec<Row>, Error> {
-        let exposed = match c.exposed_order().map(|order| &order.kind) {
-            Some(ConditionKind::Order {
-                relation,
-                query,
-                within,
-                at,
-                pick,
-                ..
-            }) => Some((
-                self.execute(query)?.rows,
-                *relation,
-                within.as_ref(),
-                *at,
-                pick,
-            )),
-            _ => None,
-        };
-        let mut selected = vec![];
-        for mut row in rows {
-            if !self.condition(&row, c)?.matches() {
-                continue;
-            }
-            if let Some((inner, relation, within, at, pick)) = &exposed
-                && let Some(pairs) = self.related(&row, inner, *relation, *within, *at)?
-                && let Some((nearest, offset)) =
-                    self.matched_row(&row, pairs, pick, (*relation, *within, *at))?
-            {
-                row.fields
-                    .insert("match.id".into(), Scalar::Text(nearest.id.clone()));
-                for (name, value) in &nearest.fields {
-                    row.fields.insert(format!("match.{name}"), value.clone());
+        crate::depth::deeper(|| {
+            let exposed = match c.exposed_order().map(|order| &order.kind) {
+                Some(ConditionKind::Order {
+                    relation,
+                    query,
+                    within,
+                    at,
+                    pick,
+                    ..
+                }) => Some((
+                    self.execute(query)?.rows,
+                    *relation,
+                    within.as_ref(),
+                    *at,
+                    pick,
+                )),
+                _ => None,
+            };
+            let mut selected = vec![];
+            for mut row in rows {
+                if !self.condition(&row, c)?.matches() {
+                    continue;
                 }
-                if within.is_some() {
-                    row.fields.insert(
-                        crate::catalog::MATCH_DISTANCE.into(),
-                        Scalar::Number(offset as f64),
-                    );
+                if let Some((inner, relation, within, at, pick)) = &exposed
+                    && let Some(pairs) = self.related(&row, inner, *relation, *within, *at)?
+                    && let Some((nearest, offset)) =
+                        self.matched_row(&row, pairs, pick, (*relation, *within, *at))?
+                {
+                    row.fields
+                        .insert("match.id".into(), Scalar::Text(nearest.id.clone()));
+                    for (name, value) in &nearest.fields {
+                        row.fields.insert(format!("match.{name}"), value.clone());
+                    }
+                    if within.is_some() {
+                        row.fields.insert(
+                            crate::catalog::MATCH_DISTANCE.into(),
+                            Scalar::Number(offset as f64),
+                        );
+                    }
                 }
+                selected.push(row);
             }
-            selected.push(row);
-        }
-        Ok(selected)
+            Ok(selected)
+        })
     }
     /// One row per pair. A pair carries the outer row's fields, the inner
     /// row's as `match.F`, and for an order relation the signed `match.distance`.
@@ -1804,13 +1831,13 @@ fn apply_fusion(rows: Vec<Row>, lists: Vec<Vec<crate::fusion::Entry<String>>>) -
         .collect()
 }
 fn collect_patterns<'a>(condition: &'a Condition, out: &mut Vec<&'a Condition>) {
-    match &condition.kind {
+    crate::depth::deeper(|| match &condition.kind {
         ConditionKind::And { conditions } => {
             conditions.iter().for_each(|c| collect_patterns(c, out))
         }
         ConditionKind::Exists { .. } | ConditionKind::Sequence { .. } => out.push(condition),
         _ => {}
-    }
+    })
 }
 /// The column a membership subquery offers: its last single group key or projected column.
 fn membership_column(query: &Query) -> Option<String> {
@@ -1822,7 +1849,7 @@ fn membership_column(query: &Query) -> Option<String> {
 }
 
 fn validate_expression(e: &Expression, at: usize) -> Result<(), Error> {
-    match e {
+    crate::depth::deeper(|| match e {
         Expression::Field { .. } => Ok(()),
         Expression::Value { value } => validate_value(value),
         Expression::Function { name, arguments }
@@ -1845,10 +1872,10 @@ fn validate_expression(e: &Expression, at: usize) -> Result<(), Error> {
             validate_expression(left, at)?;
             validate_expression(right, at)
         }
-    }
+    })
 }
 fn validate_value(v: &Value) -> Result<(), Error> {
-    match v {
+    crate::depth::deeper(|| match v {
         Value::Parameter { .. } => Err(unsupported("unbound parameter", 0)),
         Value::Set { values } => {
             for value in values {
@@ -1857,56 +1884,58 @@ fn validate_value(v: &Value) -> Result<(), Error> {
             Ok(())
         }
         _ => Ok(()),
-    }
+    })
 }
 fn validate_condition(c: &Condition) -> Result<(), Error> {
-    let at = c.span.start;
-    match &c.kind {
-        ConditionKind::And { conditions } | ConditionKind::Or { conditions } => {
-            for c in conditions {
-                validate_condition(c)?;
-            }
-        }
-        ConditionKind::Not { condition } => validate_condition(condition)?,
-        ConditionKind::Match { value, .. } => validate_value(value)?,
-        ConditionKind::Compare { left, right, .. } => {
-            validate_expression(left, at)?;
-            validate_expression(right, at)?;
-        }
-        ConditionKind::Between { left, from, to } => {
-            validate_expression(left, at)?;
-            validate_value(from)?;
-            validate_value(to)?;
-        }
-        ConditionKind::In { left, query } => {
-            validate_expression(left, at)?;
-            validate_query(query)?;
-        }
-        ConditionKind::Order { query, pick, .. } => {
-            validate_query(query)?;
-            if let MatchChoice::FirstBy { keys } = pick {
-                if keys.is_empty() {
-                    return Err(bad("pick first needs a sort key"));
-                }
-                for key in keys {
-                    validate_expression(&key.expression, at)?;
+    crate::depth::deeper(|| {
+        let at = c.span.start;
+        match &c.kind {
+            ConditionKind::And { conditions } | ConditionKind::Or { conditions } => {
+                for c in conditions {
+                    validate_condition(c)?;
                 }
             }
-        }
-        ConditionKind::Exists { condition, .. } | ConditionKind::Count { condition, .. } => {
-            if let Some(c) = condition {
-                validate_condition(c)?;
+            ConditionKind::Not { condition } => validate_condition(condition)?,
+            ConditionKind::Match { value, .. } => validate_value(value)?,
+            ConditionKind::Compare { left, right, .. } => {
+                validate_expression(left, at)?;
+                validate_expression(right, at)?;
             }
-        }
-        ConditionKind::Sequence { steps, .. } => {
-            for c in steps {
-                validate_condition(c)?;
+            ConditionKind::Between { left, from, to } => {
+                validate_expression(left, at)?;
+                validate_value(from)?;
+                validate_value(to)?;
             }
+            ConditionKind::In { left, query } => {
+                validate_expression(left, at)?;
+                validate_query(query)?;
+            }
+            ConditionKind::Order { query, pick, .. } => {
+                validate_query(query)?;
+                if let MatchChoice::FirstBy { keys } = pick {
+                    if keys.is_empty() {
+                        return Err(bad("pick first needs a sort key"));
+                    }
+                    for key in keys {
+                        validate_expression(&key.expression, at)?;
+                    }
+                }
+            }
+            ConditionKind::Exists { condition, .. } | ConditionKind::Count { condition, .. } => {
+                if let Some(c) = condition {
+                    validate_condition(c)?;
+                }
+            }
+            ConditionKind::Sequence { steps, .. } => {
+                for c in steps {
+                    validate_condition(c)?;
+                }
+            }
+            ConditionKind::Reference { .. } | ConditionKind::Rank { .. } => {}
+            other => return Err(unsupported(&format!("condition {other:?}"), at)),
         }
-        ConditionKind::Reference { .. } | ConditionKind::Rank { .. } => {}
-        other => return Err(unsupported(&format!("condition {other:?}"), at)),
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 fn validate_scalar(value: &Scalar) -> Result<(), Error> {
@@ -1926,62 +1955,64 @@ fn validate_scalar(value: &Scalar) -> Result<(), Error> {
 /// Refuse every node a product must execute before reading any data, so an
 /// empty relation never hides an unsupported nested query.
 fn validate_query(query: &Query) -> Result<(), Error> {
-    if !query.attach.is_empty() {
-        return Err(unsupported("attachments", query.attach[0].span.start));
-    }
-    match &query.source {
-        Source::Unit { condition, .. } => {
-            if let Some(c) = condition {
-                validate_condition(c)?;
-            }
+    crate::depth::deeper(|| {
+        if !query.attach.is_empty() {
+            return Err(unsupported("attachments", query.attach[0].span.start));
         }
-        _ => return Err(unsupported("non-unit source", 0)),
-    }
-    for transform in &query.transforms {
-        let at = transform.span.start;
-        match &transform.kind {
-            TransformKind::Where { condition } => validate_condition(condition)?,
-            TransformKind::Group { keys } => {
-                for key in keys {
-                    validate_expression(&key.expression, at)?;
+        match &query.source {
+            Source::Unit { condition, .. } => {
+                if let Some(c) = condition {
+                    validate_condition(c)?;
                 }
             }
-            TransformKind::Fields { columns } => {
-                for column in columns {
-                    validate_expression(&column.expression, at)?;
-                }
-            }
-            TransformKind::Sort { keys } => {
-                for key in keys {
-                    validate_expression(&key.expression, at)?;
-                }
-            }
-            TransformKind::Aggregate { aggregates } => {
-                for aggregate in aggregates {
-                    if matches!(
-                        aggregate.function,
-                        AggregateFunction::Histogram | AggregateFunction::Correlation
-                    ) {
-                        return Err(unsupported(
-                            "histogram/correlation product representation",
-                            at,
-                        ));
-                    }
-                    for argument in &aggregate.arguments {
-                        validate_expression(argument, at)?;
+            _ => return Err(unsupported("non-unit source", 0)),
+        }
+        for transform in &query.transforms {
+            let at = transform.span.start;
+            match &transform.kind {
+                TransformKind::Where { condition } => validate_condition(condition)?,
+                TransformKind::Group { keys } => {
+                    for key in keys {
+                        validate_expression(&key.expression, at)?;
                     }
                 }
+                TransformKind::Fields { columns } => {
+                    for column in columns {
+                        validate_expression(&column.expression, at)?;
+                    }
+                }
+                TransformKind::Sort { keys } => {
+                    for key in keys {
+                        validate_expression(&key.expression, at)?;
+                    }
+                }
+                TransformKind::Aggregate { aggregates } => {
+                    for aggregate in aggregates {
+                        if matches!(
+                            aggregate.function,
+                            AggregateFunction::Histogram | AggregateFunction::Correlation
+                        ) {
+                            return Err(unsupported(
+                                "histogram/correlation product representation",
+                                at,
+                            ));
+                        }
+                        for argument in &aggregate.arguments {
+                            validate_expression(argument, at)?;
+                        }
+                    }
+                }
+                TransformKind::Combine { query, .. }
+                | TransformKind::Join { query, .. }
+                | TransformKind::Diff { query } => validate_query(query)?,
+                TransformKind::Limit { .. }
+                | TransformKind::First { .. }
+                | TransformKind::Offset { .. }
+                | TransformKind::Distinct
+                | TransformKind::Matches => {}
+                other => return Err(unsupported(&format!("transform {other:?}"), at)),
             }
-            TransformKind::Combine { query, .. }
-            | TransformKind::Join { query, .. }
-            | TransformKind::Diff { query } => validate_query(query)?,
-            TransformKind::Limit { .. }
-            | TransformKind::First { .. }
-            | TransformKind::Offset { .. }
-            | TransformKind::Distinct
-            | TransformKind::Matches => {}
-            other => return Err(unsupported(&format!("transform {other:?}"), at)),
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }

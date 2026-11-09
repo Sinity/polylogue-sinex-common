@@ -1,0 +1,1 @@
+messages where role:user AND NOT ("x" OR origin:(a|b)) | sort by at desc | limit 5

@@ -163,27 +163,34 @@ pub fn arithmetic_kind(
     left: &FieldKind,
     right: &FieldKind,
 ) -> Option<FieldKind> {
-    use FieldKind::*;
-    let number = |k: &FieldKind| matches!(k, Integer | Number);
-    if matches!(left, Json) || matches!(right, Json) {
-        let usable = |k: &FieldKind| matches!(k, Json | Integer | Number | Money | Time | Duration);
-        return (usable(left) && usable(right)).then_some(Json);
-    }
-    Some(match (operator, left, right) {
-        (_, Integer, Integer) if operator != Arithmetic::Divide => Integer,
-        (_, l, r) if number(l) && number(r) => Number,
-        (Arithmetic::Add, Time, Duration) | (Arithmetic::Add, Duration, Time) => Time,
-        (Arithmetic::Subtract, Time, Duration) => Time,
-        (Arithmetic::Subtract, Time, Time) => Duration,
-        (Arithmetic::Add | Arithmetic::Subtract, Duration, Duration) => Duration,
-        (Arithmetic::Add | Arithmetic::Subtract, Money, Money) => Money,
-        (Arithmetic::Multiply, Money, n) | (Arithmetic::Multiply, n, Money) if number(n) => Money,
-        (Arithmetic::Multiply, Duration, n) | (Arithmetic::Multiply, n, Duration) if number(n) => {
-            Duration
+    crate::depth::deeper(|| {
+        use FieldKind::*;
+        let number = |k: &FieldKind| matches!(k, Integer | Number);
+        if matches!(left, Json) || matches!(right, Json) {
+            let usable =
+                |k: &FieldKind| matches!(k, Json | Integer | Number | Money | Time | Duration);
+            return (usable(left) && usable(right)).then_some(Json);
         }
-        (Arithmetic::Divide, Money, n) if number(n) => Money,
-        (Arithmetic::Divide, Duration, n) if number(n) => Duration,
-        (Arithmetic::Divide, Money, Money) | (Arithmetic::Divide, Duration, Duration) => Number,
-        _ => return None,
+        Some(match (operator, left, right) {
+            (_, Integer, Integer) if operator != Arithmetic::Divide => Integer,
+            (_, l, r) if number(l) && number(r) => Number,
+            (Arithmetic::Add, Time, Duration) | (Arithmetic::Add, Duration, Time) => Time,
+            (Arithmetic::Subtract, Time, Duration) => Time,
+            (Arithmetic::Subtract, Time, Time) => Duration,
+            (Arithmetic::Add | Arithmetic::Subtract, Duration, Duration) => Duration,
+            (Arithmetic::Add | Arithmetic::Subtract, Money, Money) => Money,
+            (Arithmetic::Multiply, Money, n) | (Arithmetic::Multiply, n, Money) if number(n) => {
+                Money
+            }
+            (Arithmetic::Multiply, Duration, n) | (Arithmetic::Multiply, n, Duration)
+                if number(n) =>
+            {
+                Duration
+            }
+            (Arithmetic::Divide, Money, n) if number(n) => Money,
+            (Arithmetic::Divide, Duration, n) if number(n) => Duration,
+            (Arithmetic::Divide, Money, Money) | (Arithmetic::Divide, Duration, Duration) => Number,
+            _ => return None,
+        })
     })
 }

@@ -116,8 +116,11 @@ transform := "where" cond | "sort by" keys | "limit" N | "offset" N | "first" N 
            | "as of" (position | time) | "segment by" "(" query ")" | extension
 ```
 
-Parenthesis and nesting depth is checked against 64: a bound on parser
-recursion, not on the size of a query.
+Nesting has no depth limit. Every recursion over the syntax tree (parsing,
+binding, typing, formatting, identity, copying, comparing, serializing and
+dropping) runs each level through `depth::deeper`, which moves onto a new
+stack segment when the current one runs low; products do the same in their
+own compilers. A set inside a set adds its values: `(a|(b|c))` is `(a|b|c)`.
 
 - **Values:** a word, a `"quoted"` string with backslash escapes, a set
   `(a|b|c)`, `*` (names the field without restricting it and drops its

@@ -22,7 +22,7 @@ fn value(v: &Value) -> Json {
     }
 }
 fn expression(e: &Expression) -> Json {
-    match e {
+    crate::depth::deeper(|| match e {
         Expression::Field { name } => json!({"kind":"field","name":name}),
         Expression::Value { value: v } => json!({"kind":"value","value":value(v)}),
         Expression::Function { name, arguments } => {
@@ -35,7 +35,7 @@ fn expression(e: &Expression) -> Json {
         } => {
             json!({"kind":"arithmetic","operator":match operator {Arithmetic::Add=>"add",Arithmetic::Subtract=>"subtract",Arithmetic::Multiply=>"multiply",Arithmetic::Divide=>"divide"},"left":expression(left),"right":expression(right)})
         }
-    }
+    })
 }
 fn op(o: Op) -> &'static str {
     match o {
@@ -95,8 +95,10 @@ fn aggregate_function(f: &AggregateFunction) -> Json {
 }
 
 pub(super) fn query(q: &Query) -> Json {
-    json!({"source":source(&q.source),"attach":q.attach.iter().map(attachment).collect::<Vec<_>>(),
+    crate::depth::deeper(|| {
+        json!({"source":source(&q.source),"attach":q.attach.iter().map(attachment).collect::<Vec<_>>(),
         "stages":q.transforms.iter().map(|t|json!({"kind":transform(&t.kind)})).collect::<Vec<_>>()})
+    })
 }
 fn source(s: &Source) -> Json {
     match s {
@@ -137,7 +139,7 @@ fn condition(c: &Condition) -> Json {
     json!({"kind":condition_kind(&c.kind)})
 }
 fn condition_kind(c: &ConditionKind) -> Json {
-    match c {
+    crate::depth::deeper(|| match c {
         ConditionKind::And { conditions } => {
             json!({"kind":"and","conditions":conditions.iter().map(condition).collect::<Vec<_>>()})
         }
@@ -223,13 +225,13 @@ fn condition_kind(c: &ConditionKind) -> Json {
             form
         }
         ConditionKind::Extension { name, arguments } => extension(name, arguments),
-    }
+    })
 }
 fn attachment(a: &Attachment) -> Json {
     json!({"unit":a.unit,"fields":a.fields,"windows":a.windows.iter().map(|w| match w {Window::First(n)=>json!({"first":n}),Window::Last(n)=>json!({"last":n}),Window::Where(c)=>json!({"where":condition(c)})}).collect::<Vec<_>>()})
 }
 fn transform(t: &TransformKind) -> Json {
-    match t {
+    crate::depth::deeper(|| match t {
         TransformKind::Where { condition: c } => json!({"kind":"where","condition":condition(c)}),
         TransformKind::Sort { keys } => {
             json!({"kind":"sort","keys":keys.iter().map(|k|json!({"expression":expression(&k.expression),"descending":k.descending})).collect::<Vec<_>>()})
@@ -263,7 +265,7 @@ fn transform(t: &TransformKind) -> Json {
             json!({"kind":"as_of","value":value(v),"sequence":sequence})
         }
         TransformKind::Extension { name, arguments } => extension(name, arguments),
-    }
+    })
 }
 fn extension(name: &str, args: &[ExtensionArgument]) -> Json {
     json!({"kind":"extension","name":name,"arguments":args.iter().map(argument).collect::<Vec<_>>()})

@@ -1,0 +1,1 @@
+sessions where words > 1 + 2 * 3 AND exists(messages where "y") AND repo:x since:7d

@@ -7,6 +7,7 @@ mod completion;
 mod conditional;
 mod corpora;
 mod cursors;
+mod deep;
 mod format;
 #[cfg(feature = "conformance")]
 mod glob;

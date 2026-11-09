@@ -67,93 +67,97 @@ fn serialization(error: serde_json::Error) -> Error {
 /// Only boolean nodes in this condition can change its match exposure.
 /// An order inside a nested query is not an order producer in its caller.
 fn order_bearing(node: &Value) -> bool {
-    let kind = node.get("kind");
-    if let Some(kind) = kind.filter(|kind| kind.is_object()) {
-        return order_bearing(kind);
-    }
-    match kind.and_then(Value::as_str) {
-        Some("order") => true,
-        Some("and" | "or") => node
-            .get("conditions")
-            .and_then(Value::as_array)
-            .is_some_and(|conditions| conditions.iter().any(order_bearing)),
-        Some("not") => node.get("condition").is_some_and(order_bearing),
-        _ => false,
-    }
+    crate::depth::deeper(|| {
+        let kind = node.get("kind");
+        if let Some(kind) = kind.filter(|kind| kind.is_object()) {
+            return order_bearing(kind);
+        }
+        match kind.and_then(Value::as_str) {
+            Some("order") => true,
+            Some("and" | "or") => node
+                .get("conditions")
+                .and_then(Value::as_array)
+                .is_some_and(|conditions| conditions.iter().any(order_bearing)),
+            Some("not") => node.get("condition").is_some_and(order_bearing),
+            _ => false,
+        }
+    })
 }
 
 fn normalize(value: &mut Value) {
-    match value {
-        Value::Array(values) => {
-            for value in values {
-                normalize(value);
+    crate::depth::deeper(|| {
+        match value {
+            Value::Array(values) => {
+                for value in values {
+                    normalize(value);
+                }
             }
-        }
-        Value::Object(fields) => {
-            fields.remove("span");
-            if fields.get("implicit") == Some(&Value::Bool(false)) {
-                fields.remove("implicit");
-            }
-            if matches!(
-                fields.get("kind").and_then(Value::as_str),
-                Some("saved" | "result")
-            ) {
-                fields.remove("output");
-            }
-            if fields.get("kind").and_then(Value::as_str) == Some("scalar") {
-                fields.remove("quoted");
-            }
-            for value in fields.values_mut() {
-                normalize(value);
-            }
-            // serde_json's preserve_order feature is additive across dependents.
-            // Identity must have the same bytes in every product's feature union.
-            fields.sort_keys();
-            let unordered = matches!(
-                fields.get("kind").and_then(Value::as_str),
-                Some("and" | "or" | "set")
-            );
-            if unordered {
-                let kind = fields
-                    .get("kind")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                if let Some(Value::Array(conditions)) = fields.get_mut("conditions") {
-                    let mut flat = Vec::new();
-                    for condition in std::mem::take(conditions) {
-                        let nested = condition
-                            .get("kind")
-                            .filter(|node| {
-                                node.get("kind").and_then(Value::as_str) == Some(kind.as_str())
-                            })
-                            .and_then(|node| node.get("conditions"))
-                            .and_then(Value::as_array);
-                        if let Some(nested) = nested {
-                            flat.extend(nested.iter().cloned());
-                        } else {
-                            flat.push(condition);
+            Value::Object(fields) => {
+                fields.remove("span");
+                if fields.get("implicit") == Some(&Value::Bool(false)) {
+                    fields.remove("implicit");
+                }
+                if matches!(
+                    fields.get("kind").and_then(Value::as_str),
+                    Some("saved" | "result")
+                ) {
+                    fields.remove("output");
+                }
+                if fields.get("kind").and_then(Value::as_str) == Some("scalar") {
+                    fields.remove("quoted");
+                }
+                for value in fields.values_mut() {
+                    normalize(value);
+                }
+                // serde_json's preserve_order feature is additive across dependents.
+                // Identity must have the same bytes in every product's feature union.
+                fields.sort_keys();
+                let unordered = matches!(
+                    fields.get("kind").and_then(Value::as_str),
+                    Some("and" | "or" | "set")
+                );
+                if unordered {
+                    let kind = fields
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    if let Some(Value::Array(conditions)) = fields.get_mut("conditions") {
+                        let mut flat = Vec::new();
+                        for condition in std::mem::take(conditions) {
+                            let nested = condition
+                                .get("kind")
+                                .filter(|node| {
+                                    node.get("kind").and_then(Value::as_str) == Some(kind.as_str())
+                                })
+                                .and_then(|node| node.get("conditions"))
+                                .and_then(Value::as_array);
+                            if let Some(nested) = nested {
+                                flat.extend(nested.iter().cloned());
+                            } else {
+                                flat.push(condition);
+                            }
+                        }
+                        *conditions = flat;
+                    }
+                    for key in ["conditions", "values"] {
+                        if let Some(Value::Array(values)) = fields.get_mut(key) {
+                            // Child serialization is infallible for a JSON value.
+                            values.sort_by_cached_key(|value| value.to_string());
+                            values.dedup_by(|a, b| a == b && (kind != "and" || !order_bearing(a)));
                         }
                     }
-                    *conditions = flat;
-                }
-                for key in ["conditions", "values"] {
-                    if let Some(Value::Array(values)) = fields.get_mut(key) {
-                        // Child serialization is infallible for a JSON value.
-                        values.sort_by_cached_key(|value| value.to_string());
-                        values.dedup_by(|a, b| a == b && (kind != "and" || !order_bearing(a)));
+                    if matches!(kind.as_str(), "and" | "or")
+                        && let Some(Value::Array(conditions)) = fields.get("conditions")
+                        && conditions.len() == 1
+                        && !(kind == "or" && order_bearing(&conditions[0]))
+                        && let Some(inner) = conditions[0].get("kind")
+                    {
+                        *value = inner.clone();
                     }
                 }
-                if matches!(kind.as_str(), "and" | "or")
-                    && let Some(Value::Array(conditions)) = fields.get("conditions")
-                    && conditions.len() == 1
-                    && !(kind == "or" && order_bearing(&conditions[0]))
-                    && let Some(inner) = conditions[0].get("kind")
-                {
-                    *value = inner.clone();
-                }
             }
+            _ => {}
         }
-        _ => {}
-    }
+    })
 }

@@ -525,13 +525,13 @@ fn arguments_equal(a: &[Argument], b: &[Argument]) -> bool {
         })
 }
 fn values_equal(a: &Value, b: &Value) -> bool {
-    match (a, b) {
+    crate::depth::deeper(|| match (a, b) {
         (Value::Scalar { text: a, .. }, Value::Scalar { text: b, .. }) => a == b,
         (Value::Set { values: a }, Value::Set { values: b }) => {
             a.len() == b.len() && a.iter().zip(b).all(|(a, b)| values_equal(a, b))
         }
         _ => a == b,
-    }
+    })
 }
 
 pub(crate) fn same_output_source(a: &OutputSource, b: &OutputSource) -> bool {
