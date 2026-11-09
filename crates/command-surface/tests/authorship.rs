@@ -214,3 +214,90 @@ fn caller_evidence_round_trips_and_refuses_unknown_fields() {
     forged["author"] = "operator".into();
     assert!(serde_json::from_value::<CallerEvidence>(forged).is_err());
 }
+
+/// A process table for the walk up the tree: pid, executable, the harness
+/// variables of its environment, and its parent.
+fn table(rows: &[(u32, &str, &[(&str, &str)], u32)]) -> impl Fn(u32) -> Option<Process> + use<> {
+    let rows: BTreeMap<u32, Process> = rows
+        .iter()
+        .map(|(pid, executable, variables, parent)| {
+            (
+                *pid,
+                Process {
+                    executable: Some(executable.into()),
+                    arguments: None,
+                    environment: Some(environment(variables)),
+                    parent: Some(*parent),
+                },
+            )
+        })
+        .collect();
+    move |pid| rows.get(&pid).cloned()
+}
+
+#[test]
+fn claude_exe_is_claude_code() {
+    assert_eq!(
+        harness_of(Some(Path::new("/opt/claude/bin/claude.exe")), None)
+            .unwrap()
+            .as_str(),
+        "claude-code"
+    );
+}
+
+#[test]
+fn mcp_child_without_claude_pid_gets_harness_pid_from_ancestor() {
+    // The MCP server's parent is the harness under a name no list knows; it
+    // set CLAUDECODE in its child but has none of its own.
+    let caller = environment(&[("CLAUDECODE", "1"), ("CLAUDE_CODE_SESSION_ID", "s1")]);
+    let processes = table(&[
+        (40, "/opt/harness/bin/agent", &[], 30),
+        (30, "/usr/bin/zsh", &[], 1),
+    ]);
+    let ancestors = harness_chain(40, &caller, processes);
+    assert_eq!(ancestors, [(40, harness("claude-code"))]);
+    let evidence = select(&caller, &ancestors, false, None);
+    assert_eq!(evidence.session.unwrap().to_string(), "claude-code:s1");
+    assert_eq!(evidence.harness_pid, Some(40));
+}
+
+#[test]
+fn nearest_harness_wins_when_claude_runs_inside_codex() {
+    // codex (10) -> shell (11) -> claude (20) -> shell (21) -> caller.
+    let codex = [("CODEX_THREAD_ID", "t1")];
+    let both = [
+        ("CODEX_THREAD_ID", "t1"),
+        ("CLAUDECODE", "1"),
+        ("CLAUDE_CODE_SESSION_ID", "s1"),
+    ];
+    let processes = table(&[
+        (21, "/usr/bin/bash", &both, 20),
+        (20, "/opt/agent/bin/agent", &codex, 11),
+        (11, "/usr/bin/bash", &codex, 10),
+        (10, "/opt/other/bin/agent", &[], 1),
+    ]);
+    let caller = environment(&both);
+    let ancestors = harness_chain(21, &caller, processes);
+    assert_eq!(
+        ancestors,
+        [(20, harness("claude-code")), (10, harness("codex"))]
+    );
+    let evidence = select(&caller, &ancestors, false, None);
+    assert_eq!(evidence.session.unwrap().to_string(), "claude-code:s1");
+    assert_eq!(evidence.harness_pid, Some(20));
+    assert!(!evidence.ambiguous_harness);
+}
+
+#[test]
+fn an_unreadable_environment_names_no_harness_by_itself() {
+    let caller = environment(&[("CLAUDECODE", "1")]);
+    let processes = |pid: u32| {
+        (pid == 50).then(|| Process {
+            executable: Some("/usr/bin/sudo".into()),
+            arguments: None,
+            environment: None,
+            parent: Some(1),
+        })
+    };
+    assert_eq!(harness_chain(50, &caller, processes), []);
+}
