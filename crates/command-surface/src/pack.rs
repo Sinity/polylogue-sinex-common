@@ -129,6 +129,7 @@ impl Budget {
             },
         }
     }
+    #[cfg(feature = "runtime")]
     pub(crate) fn reserve(self, held: u32) -> Self {
         Self {
             tokens: self.tokens.map(|tokens| tokens.saturating_sub(held)),
