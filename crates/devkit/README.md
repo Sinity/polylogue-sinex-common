@@ -208,7 +208,7 @@ by abrupt owner death remains the platform init's responsibility.
   for one also bounds the load that runs together put on a shared server.
 - A failing (panicking) test's database is renamed to one of a fixed set of
   kept failed databases, `<project>_failed<j>`, replacing the oldest failure,
-  and its name printed with a `cargo xtask db psql <name>` line.
+  and its name printed with a `psql -h <socket> <name>` line that opens it.
 - A project therefore never has more test databases on a server than its
   ordinary and large slots, one more for each test process that holds
   several of a family, and its kept failed databases, whatever happens to

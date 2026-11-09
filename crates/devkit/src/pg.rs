@@ -1053,7 +1053,7 @@ impl Drop for TestDatabase {
         if std::thread::panicking() {
             match self.keep_failed() {
                 Ok(Some(kept)) => eprintln!(
-                    "devkit: kept the failed test's database as {kept} at {}; open it with `cargo xtask db psql {kept}`",
+                    "devkit: kept the failed test's database as {kept}; open it with `psql -h {} {kept}`",
                     self.socket.display()
                 ),
                 Ok(None) => eprintln!(

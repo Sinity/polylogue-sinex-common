@@ -1,5 +1,10 @@
-# Opens or updates a pull request in each product that moves its Cargo.lock to
-# the newest commit of this repository's master branch.
+# Opens or updates a pull request in Sinex that moves its Cargo.lock to the
+# newest commit of this repository's master branch.
+#
+# Polylogue is not updated here: it pins Sinex by revision, and that Sinex
+# revision's own common dependencies must resolve against the same common
+# commit. Polylogue moves its Sinex revision and its common lock together,
+# by hand, after Sinex has adopted the common commit (see README.md).
 #
 # Needs the repository secret COMMON_BUMP_TOKEN: a fine-grained token for
 # Sinity/polylogue and Sinity/sinex with Contents and Pull requests set to
@@ -24,7 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        product: [polylogue, sinex]
+        product: [sinex]
     steps:
       - uses: actions/checkout@v4
         with:

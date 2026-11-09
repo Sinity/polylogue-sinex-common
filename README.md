@@ -62,9 +62,13 @@ Both products follow this repository's `master` branch; each workspace's
 hashed-blobs = { git = "https://github.com/Sinity/polylogue-sinex-common", branch = "master" }
 ```
 
-When `master` moves, a workflow here opens a pull request in each product that
-updates all its workspace locks to the new commit. The product's own checks
-decide when to take it. The workflow needs the repository secret `COMMON_BUMP_TOKEN`,
+When `master` moves, a workflow here opens a pull request in Sinex that updates
+all its workspace locks to the new commit; Sinex's own checks decide when to
+take it. Polylogue also pins Sinex by revision, and that Sinex revision's own
+common dependencies must resolve against the same common commit, so the order
+is: common merges, Sinex adopts that commit, then one Polylogue pull request
+moves its Sinex revision and its common lock together and converts the
+callers. The workflow needs the repository secret `COMMON_BUMP_TOKEN`,
 with Contents and Pull requests read/write access to both products. Without
 it, update their locks with `cargo update` selecting the shared crates
 that product adopts and open those pull requests manually. Convert affected
