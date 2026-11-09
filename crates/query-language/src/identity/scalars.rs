@@ -52,7 +52,7 @@ fn field(scope: &Fields, expression: &Expression, catalog: &Catalog) -> Option<F
     }
 }
 fn value(value: &mut Value, field: &Field) {
-    match value {
+    crate::depth::deeper(|| match value {
         Value::Set { values } => {
             for value in values {
                 self::value(value, field);
@@ -104,7 +104,7 @@ fn value(value: &mut Value, field: &Field) {
             }
         }
         _ => {}
-    }
+    })
 }
 fn duration_value(v: &mut Value) {
     value(
@@ -122,7 +122,7 @@ fn distance(d: &mut Distance) {
 }
 /// Literals inside expressions take the spelling of their own literal kind.
 fn expression(e: &mut Expression, scope: &Fields, catalog: &Catalog) {
-    match e {
+    crate::depth::deeper(|| match e {
         Expression::Value {
             value:
                 Value::Scalar {
@@ -173,10 +173,10 @@ fn expression(e: &mut Expression, scope: &Fields, catalog: &Catalog) {
             expression(right, scope, catalog);
         }
         _ => {}
-    }
+    })
 }
 fn condition(c: &mut Condition, scope: &Fields, catalog: &Catalog) {
-    match &mut c.kind {
+    crate::depth::deeper(|| match &mut c.kind {
         ConditionKind::And { conditions } | ConditionKind::Or { conditions } => {
             for c in conditions {
                 condition(c, scope, catalog);
@@ -286,7 +286,7 @@ fn condition(c: &mut Condition, scope: &Fields, catalog: &Catalog) {
             .iter_mut()
             .for_each(|a| argument(a, scope, catalog)),
         _ => {}
-    }
+    })
 }
 fn argument(a: &mut ExtensionArgument, scope: &Fields, catalog: &Catalog) {
     match a {
@@ -302,165 +302,167 @@ fn argument(a: &mut ExtensionArgument, scope: &Fields, catalog: &Catalog) {
     }
 }
 fn canonicalize_into(query: &mut Query, catalog: &Catalog) -> Fields {
-    let mut scope = match &query.source {
-        Source::Unit { unit, .. } => fields(catalog, unit),
-        Source::Saved { .. } | Source::Result { .. } => catalog
-            .source_output(&query.source)
-            .map(|output| {
-                output
-                    .fields
-                    .iter()
-                    .cloned()
-                    .map(|f| (f.name.clone(), f))
-                    .collect()
-            })
-            .unwrap_or_default(),
-    };
-    match &mut query.source {
-        Source::Unit {
-            unit,
-            implicit,
-            condition: c,
-        } => {
-            if let Some(u) = catalog.unit(unit) {
-                *unit = u.name.clone();
-                *implicit = false;
-            }
-            if let Some(c) = c {
-                condition(c, &scope, catalog);
-            }
-        }
-        Source::Saved {
-            condition: Some(c), ..
-        }
-        | Source::Result {
-            condition: Some(c), ..
-        } => condition(c, &scope, catalog),
-        _ => {}
-    }
-    for attachment in &mut query.attach {
-        for window in &mut attachment.windows {
-            if let Window::Where(c) = window {
-                condition(c, &fields(catalog, &attachment.unit), catalog);
-            }
-        }
-    }
-    let mut group_input = None;
-    for transform in &mut query.transforms {
-        match &mut transform.kind {
-            TransformKind::Where { condition: c } => {
-                condition(c, &scope, catalog);
-                group_input = None;
-            }
-            TransformKind::Scope { unit, condition: c } => {
-                group_input = None;
-                scope = fields(catalog, unit);
+    crate::depth::deeper(|| {
+        let mut scope = match &query.source {
+            Source::Unit { unit, .. } => fields(catalog, unit),
+            Source::Saved { .. } | Source::Result { .. } => catalog
+                .source_output(&query.source)
+                .map(|output| {
+                    output
+                        .fields
+                        .iter()
+                        .cloned()
+                        .map(|f| (f.name.clone(), f))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+        match &mut query.source {
+            Source::Unit {
+                unit,
+                implicit,
+                condition: c,
+            } => {
+                if let Some(u) = catalog.unit(unit) {
+                    *unit = u.name.clone();
+                    *implicit = false;
+                }
                 if let Some(c) = c {
                     condition(c, &scope, catalog);
                 }
             }
-            TransformKind::Matches => {
-                scope.clear();
-                group_input = None;
+            Source::Saved {
+                condition: Some(c), ..
             }
-            TransformKind::Sort { keys } => {
-                for key in keys {
-                    expression(&mut key.expression, &scope, catalog);
+            | Source::Result {
+                condition: Some(c), ..
+            } => condition(c, &scope, catalog),
+            _ => {}
+        }
+        for attachment in &mut query.attach {
+            for window in &mut attachment.windows {
+                if let Window::Where(c) = window {
+                    condition(c, &fields(catalog, &attachment.unit), catalog);
                 }
-                group_input = None;
             }
-            TransformKind::Group { keys } => {
-                group_input = Some(scope.clone());
-                let mut grouped: Fields = keys
-                    .iter()
-                    .filter_map(|k| {
-                        field(&scope, &k.expression, catalog).map(|mut f| {
-                            f.name = k.column();
-                            (k.column(), f)
-                        })
-                    })
-                    .collect();
-                for key in keys.iter_mut() {
-                    expression(&mut key.expression, &scope, catalog);
+        }
+        let mut group_input = None;
+        for transform in &mut query.transforms {
+            match &mut transform.kind {
+                TransformKind::Where { condition: c } => {
+                    condition(c, &scope, catalog);
+                    group_input = None;
                 }
-                grouped.insert(
-                    "count".into(),
-                    Field {
-                        name: "count".into(),
-                        kind: FieldKind::Integer,
-                        ..Field::default()
-                    },
-                );
-                scope = grouped;
-            }
-            TransformKind::Aggregate { aggregates } => {
-                let grouped = group_input.is_some();
-                let input = group_input.take().unwrap_or_else(|| scope.clone());
-                if !grouped {
-                    scope.clear();
-                }
-                for aggregate in aggregates {
-                    let (kind, _) = crate::scope::aggregate_kind(
-                        &aggregate.function,
-                        aggregate
-                            .arguments
-                            .first()
-                            .and_then(|argument| field(&input, argument, catalog))
-                            .map(|field| field.kind)
-                            .as_ref(),
-                    );
-                    for argument in &mut aggregate.arguments {
-                        expression(argument, &input, catalog);
+                TransformKind::Scope { unit, condition: c } => {
+                    group_input = None;
+                    scope = fields(catalog, unit);
+                    if let Some(c) = c {
+                        condition(c, &scope, catalog);
                     }
-                    let name = aggregate.column();
-                    scope.insert(
-                        name.clone(),
+                }
+                TransformKind::Matches => {
+                    scope.clear();
+                    group_input = None;
+                }
+                TransformKind::Sort { keys } => {
+                    for key in keys {
+                        expression(&mut key.expression, &scope, catalog);
+                    }
+                    group_input = None;
+                }
+                TransformKind::Group { keys } => {
+                    group_input = Some(scope.clone());
+                    let mut grouped: Fields = keys
+                        .iter()
+                        .filter_map(|k| {
+                            field(&scope, &k.expression, catalog).map(|mut f| {
+                                f.name = k.column();
+                                (k.column(), f)
+                            })
+                        })
+                        .collect();
+                    for key in keys.iter_mut() {
+                        expression(&mut key.expression, &scope, catalog);
+                    }
+                    grouped.insert(
+                        "count".into(),
                         Field {
-                            name,
-                            kind,
+                            name: "count".into(),
+                            kind: FieldKind::Integer,
                             ..Field::default()
                         },
                     );
+                    scope = grouped;
                 }
-            }
-            TransformKind::Fields { columns } => {
-                let projected: Fields = columns
-                    .iter()
-                    .filter_map(|column| {
-                        field(&scope, &column.expression, catalog).map(|mut f| {
-                            f.name = column.column();
-                            (column.column(), f)
+                TransformKind::Aggregate { aggregates } => {
+                    let grouped = group_input.is_some();
+                    let input = group_input.take().unwrap_or_else(|| scope.clone());
+                    if !grouped {
+                        scope.clear();
+                    }
+                    for aggregate in aggregates {
+                        let (kind, _) = crate::scope::aggregate_kind(
+                            &aggregate.function,
+                            aggregate
+                                .arguments
+                                .first()
+                                .and_then(|argument| field(&input, argument, catalog))
+                                .map(|field| field.kind)
+                                .as_ref(),
+                        );
+                        for argument in &mut aggregate.arguments {
+                            expression(argument, &input, catalog);
+                        }
+                        let name = aggregate.column();
+                        scope.insert(
+                            name.clone(),
+                            Field {
+                                name,
+                                kind,
+                                ..Field::default()
+                            },
+                        );
+                    }
+                }
+                TransformKind::Fields { columns } => {
+                    let projected: Fields = columns
+                        .iter()
+                        .filter_map(|column| {
+                            field(&scope, &column.expression, catalog).map(|mut f| {
+                                f.name = column.column();
+                                (column.column(), f)
+                            })
                         })
-                    })
-                    .collect();
-                for column in columns.iter_mut() {
-                    expression(&mut column.expression, &scope, catalog);
+                        .collect();
+                    for column in columns.iter_mut() {
+                        expression(&mut column.expression, &scope, catalog);
+                    }
+                    scope = projected;
+                    group_input = None;
                 }
-                scope = projected;
-                group_input = None;
-            }
-            TransformKind::Combine { query, .. } | TransformKind::Diff { query } => {
-                canonicalize_into(query, catalog);
-                group_input = None;
-            }
-            TransformKind::Join { query, on } => {
-                canonicalize_into(query, catalog);
-                if let JoinOn::Order {
-                    within: Some(within),
-                    ..
-                } = on
-                {
-                    distance(within);
+                TransformKind::Combine { query, .. } | TransformKind::Diff { query } => {
+                    canonicalize_into(query, catalog);
+                    group_input = None;
                 }
-                group_input = None;
-            }
-            TransformKind::Extension { arguments, .. } => arguments
-                .iter_mut()
-                .for_each(|a| argument(a, &scope, catalog)),
-            _ => {
-                group_input = None;
+                TransformKind::Join { query, on } => {
+                    canonicalize_into(query, catalog);
+                    if let JoinOn::Order {
+                        within: Some(within),
+                        ..
+                    } = on
+                    {
+                        distance(within);
+                    }
+                    group_input = None;
+                }
+                TransformKind::Extension { arguments, .. } => arguments
+                    .iter_mut()
+                    .for_each(|a| argument(a, &scope, catalog)),
+                _ => {
+                    group_input = None;
+                }
             }
         }
-    }
-    scope
+        scope
+    })
 }

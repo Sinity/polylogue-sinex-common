@@ -2,6 +2,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+mod deep;
+
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
 )]
@@ -10,7 +12,11 @@ pub struct Span {
     pub end: usize,
 }
 /// A relation, its attached child lists and the transforms after each `|`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+///
+/// Queries, conditions and expressions nest as deeply as the text does, so
+/// their copying, comparison, printing, serialization and dropping run each
+/// level through [`crate::depth::deeper`] (see `ast/deep.rs`) instead of deriving them.
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct Query {
     pub source: Source,
     pub attach: Vec<Attachment>,
@@ -53,7 +59,7 @@ pub enum ResultPart {
     Rows,
     Matches,
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct Condition {
     pub span: Span,
     pub kind: ConditionKind,
@@ -240,7 +246,7 @@ pub struct Argument {
 }
 /// A typed value computed from a row: a field, a literal, a function call or
 /// arithmetic. Dimensions are checked when the query is parsed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Expression {
     Field {
@@ -268,7 +274,7 @@ impl Expression {
     }
     /// The column name this expression produces when no `as` name is given.
     pub fn column(&self) -> String {
-        match self {
+        crate::depth::deeper(|| match self {
             Self::Field { name } => name.replace(['.', '-'], "_"),
             Self::Value { value } => value
                 .text()
@@ -282,7 +288,7 @@ impl Expression {
                 left,
                 right,
             } => format!("{}_{}_{}", left.column(), operator.word(), right.column()),
-        }
+        })
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -666,45 +672,49 @@ impl Query {
         out
     }
     pub fn visit_units(&self, visitor: &mut impl FnMut(&str)) {
-        match &self.source {
-            Source::Unit {
-                unit, condition, ..
-            } => {
-                visitor(unit);
-                if let Some(c) = condition {
-                    c.visit_units(visitor);
-                }
-            }
-            Source::Saved { condition, .. } | Source::Result { condition, .. } => {
-                if let Some(condition) = condition {
-                    condition.visit_units(visitor);
-                }
-            }
-        }
-        for a in &self.attach {
-            visitor(&a.unit);
-            for w in &a.windows {
-                if let Window::Where(c) = w {
-                    c.visit_units(visitor);
-                }
-            }
-        }
-        for t in &self.transforms {
-            match &t.kind {
-                TransformKind::Where { condition } => condition.visit_units(visitor),
-                TransformKind::Scope { unit, condition } => {
+        crate::depth::deeper(|| {
+            match &self.source {
+                Source::Unit {
+                    unit, condition, ..
+                } => {
                     visitor(unit);
                     if let Some(c) = condition {
                         c.visit_units(visitor);
                     }
                 }
-                TransformKind::Combine { query, .. }
-                | TransformKind::Join { query, .. }
-                | TransformKind::Diff { query } => query.visit_units(visitor),
-                TransformKind::Extension { arguments, .. } => visit_arguments(arguments, visitor),
-                _ => {}
+                Source::Saved { condition, .. } | Source::Result { condition, .. } => {
+                    if let Some(condition) = condition {
+                        condition.visit_units(visitor);
+                    }
+                }
             }
-        }
+            for a in &self.attach {
+                visitor(&a.unit);
+                for w in &a.windows {
+                    if let Window::Where(c) = w {
+                        c.visit_units(visitor);
+                    }
+                }
+            }
+            for t in &self.transforms {
+                match &t.kind {
+                    TransformKind::Where { condition } => condition.visit_units(visitor),
+                    TransformKind::Scope { unit, condition } => {
+                        visitor(unit);
+                        if let Some(c) = condition {
+                            c.visit_units(visitor);
+                        }
+                    }
+                    TransformKind::Combine { query, .. }
+                    | TransformKind::Join { query, .. }
+                    | TransformKind::Diff { query } => query.visit_units(visitor),
+                    TransformKind::Extension { arguments, .. } => {
+                        visit_arguments(arguments, visitor)
+                    }
+                    _ => {}
+                }
+            }
+        })
     }
 }
 impl Condition {
@@ -713,7 +723,7 @@ impl Condition {
     /// Multiple orders and orders beneath OR or NOT expose no new namespace.
     pub fn exposed_order(&self) -> Option<&Condition> {
         fn collect<'a>(condition: &'a Condition, orders: &mut Vec<&'a Condition>) {
-            match &condition.kind {
+            crate::depth::deeper(|| match &condition.kind {
                 ConditionKind::And { conditions } => {
                     for condition in conditions {
                         collect(condition, orders);
@@ -721,7 +731,7 @@ impl Condition {
                 }
                 ConditionKind::Order { .. } => orders.push(condition),
                 _ => {}
-            }
+            })
         }
         let mut orders = Vec::new();
         collect(self, &mut orders);
@@ -732,47 +742,51 @@ impl Condition {
         }
     }
     pub fn visit_units(&self, visitor: &mut impl FnMut(&str)) {
-        match &self.kind {
-            ConditionKind::And { conditions } | ConditionKind::Or { conditions } => {
-                for c in conditions {
-                    c.visit_units(visitor)
+        crate::depth::deeper(|| {
+            match &self.kind {
+                ConditionKind::And { conditions } | ConditionKind::Or { conditions } => {
+                    for c in conditions {
+                        c.visit_units(visitor)
+                    }
                 }
-            }
-            ConditionKind::Not { condition } => condition.visit_units(visitor),
-            ConditionKind::Exists { unit, condition }
-            | ConditionKind::Count {
-                unit, condition, ..
-            } => {
-                visitor(unit);
-                if let Some(c) = condition {
-                    c.visit_units(visitor);
+                ConditionKind::Not { condition } => condition.visit_units(visitor),
+                ConditionKind::Exists { unit, condition }
+                | ConditionKind::Count {
+                    unit, condition, ..
+                } => {
+                    visitor(unit);
+                    if let Some(c) = condition {
+                        c.visit_units(visitor);
+                    }
                 }
-            }
-            ConditionKind::In { query, .. } | ConditionKind::Order { query, .. } => {
-                query.visit_units(visitor)
-            }
-            ConditionKind::Sequence { unit, steps, .. } => {
-                visitor(unit);
-                for c in steps {
-                    c.visit_units(visitor)
+                ConditionKind::In { query, .. } | ConditionKind::Order { query, .. } => {
+                    query.visit_units(visitor)
                 }
+                ConditionKind::Sequence { unit, steps, .. } => {
+                    visitor(unit);
+                    for c in steps {
+                        c.visit_units(visitor)
+                    }
+                }
+                ConditionKind::Extension { arguments, .. } => visit_arguments(arguments, visitor),
+                // Bounds contain values and an already-bound field, never units.
+                _ => {}
             }
-            ConditionKind::Extension { arguments, .. } => visit_arguments(arguments, visitor),
-            // Bounds contain values and an already-bound field, never units.
-            _ => {}
-        }
+        })
     }
 }
 fn visit_arguments(arguments: &[ExtensionArgument], visitor: &mut impl FnMut(&str)) {
-    for a in arguments {
-        match a {
-            ExtensionArgument::Unit(u) => visitor(u),
-            ExtensionArgument::Query(q) => q.visit_units(visitor),
-            ExtensionArgument::Condition(c) => c.visit_units(visitor),
-            ExtensionArgument::Optional(arguments) | ExtensionArgument::List(arguments) => {
-                visit_arguments(arguments, visitor)
+    crate::depth::deeper(|| {
+        for a in arguments {
+            match a {
+                ExtensionArgument::Unit(u) => visitor(u),
+                ExtensionArgument::Query(q) => q.visit_units(visitor),
+                ExtensionArgument::Condition(c) => c.visit_units(visitor),
+                ExtensionArgument::Optional(arguments) | ExtensionArgument::List(arguments) => {
+                    visit_arguments(arguments, visitor)
+                }
+                _ => {}
             }
-            _ => {}
         }
-    }
+    })
 }

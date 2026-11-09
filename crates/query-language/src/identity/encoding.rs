@@ -2,11 +2,115 @@
 //! each construct has one tag and one shape, so two queries hash alike exactly
 //! when their normal forms are equal.
 use crate::ast::*;
-use serde_json::{Value as Json, json};
+use serde_json::Value as Json;
+
+/// Builds JSON from owned parts. `serde_json::json!` turns each interpolated
+/// value into JSON by serializing a reference to it, which copies an already
+/// built child form, recursively and once per enclosing level; this moves it.
+macro_rules! json {
+    ({ $($key:literal : $value:expr),* $(,)? }) => {{
+        let mut fields = serde_json::Map::new();
+        $( fields.insert($key.to_owned(), IntoJson::into_json($value)); )*
+        Json::Object(fields)
+    }};
+    ($value:expr) => {
+        IntoJson::into_json($value)
+    };
+}
+
+trait IntoJson {
+    fn into_json(self) -> Json;
+}
+impl IntoJson for Json {
+    fn into_json(self) -> Json {
+        self
+    }
+}
+impl IntoJson for Vec<Json> {
+    fn into_json(self) -> Json {
+        Json::Array(self)
+    }
+}
+impl IntoJson for &str {
+    fn into_json(self) -> Json {
+        Json::String(self.to_owned())
+    }
+}
+impl IntoJson for &String {
+    fn into_json(self) -> Json {
+        Json::String(self.clone())
+    }
+}
+impl IntoJson for String {
+    fn into_json(self) -> Json {
+        Json::String(self)
+    }
+}
+impl IntoJson for bool {
+    fn into_json(self) -> Json {
+        Json::Bool(self)
+    }
+}
+impl IntoJson for &bool {
+    fn into_json(self) -> Json {
+        Json::Bool(*self)
+    }
+}
+impl IntoJson for u64 {
+    fn into_json(self) -> Json {
+        self.into()
+    }
+}
+impl IntoJson for &u64 {
+    fn into_json(self) -> Json {
+        (*self).into()
+    }
+}
+impl IntoJson for usize {
+    fn into_json(self) -> Json {
+        self.into()
+    }
+}
+impl IntoJson for &usize {
+    fn into_json(self) -> Json {
+        (*self).into()
+    }
+}
+impl IntoJson for &f64 {
+    fn into_json(self) -> Json {
+        (*self).into()
+    }
+}
+impl IntoJson for &u8 {
+    fn into_json(self) -> Json {
+        (*self).into()
+    }
+}
+impl IntoJson for Option<Json> {
+    fn into_json(self) -> Json {
+        self.unwrap_or(Json::Null)
+    }
+}
+impl IntoJson for &Option<String> {
+    fn into_json(self) -> Json {
+        self.as_ref()
+            .map_or(Json::Null, |text| Json::String(text.clone()))
+    }
+}
+impl IntoJson for Vec<String> {
+    fn into_json(self) -> Json {
+        Json::Array(self.into_iter().map(Json::String).collect())
+    }
+}
+impl IntoJson for f64 {
+    fn into_json(self) -> Json {
+        self.into()
+    }
+}
 
 fn arguments(args: &[Argument]) -> Vec<Json> {
     args.iter()
-        .map(|a| json!({"parameter":a.parameter,"value":value(&a.value)}))
+        .map(|a| json!({"parameter":&a.parameter,"value":value(&a.value)}))
         .collect()
 }
 fn value(v: &Value) -> Json {
@@ -22,7 +126,7 @@ fn value(v: &Value) -> Json {
     }
 }
 fn expression(e: &Expression) -> Json {
-    match e {
+    crate::depth::deeper(|| match e {
         Expression::Field { name } => json!({"kind":"field","name":name}),
         Expression::Value { value: v } => json!({"kind":"value","value":value(v)}),
         Expression::Function { name, arguments } => {
@@ -35,7 +139,7 @@ fn expression(e: &Expression) -> Json {
         } => {
             json!({"kind":"arithmetic","operator":match operator {Arithmetic::Add=>"add",Arithmetic::Subtract=>"subtract",Arithmetic::Multiply=>"multiply",Arithmetic::Divide=>"divide"},"left":expression(left),"right":expression(right)})
         }
-    }
+    })
 }
 fn op(o: Op) -> &'static str {
     match o {
@@ -55,7 +159,7 @@ fn gap(g: &Gap) -> Json {
         Gap::Next => json!("next"),
         Gap::Within {
             distance: Distance::Time { duration },
-        } => json!({"within":{"duration":value(duration)}}),
+        } => json!({"within":json!({"duration":value(duration)})}),
         Gap::Within { distance: d } => json!({"within_positions":distance(d)}),
     }
 }
@@ -95,8 +199,10 @@ fn aggregate_function(f: &AggregateFunction) -> Json {
 }
 
 pub(super) fn query(q: &Query) -> Json {
-    json!({"source":source(&q.source),"attach":q.attach.iter().map(attachment).collect::<Vec<_>>(),
+    crate::depth::deeper(|| {
+        json!({"source":source(&q.source),"attach":q.attach.iter().map(attachment).collect::<Vec<_>>(),
         "stages":q.transforms.iter().map(|t|json!({"kind":transform(&t.kind)})).collect::<Vec<_>>()})
+    })
 }
 fn source(s: &Source) -> Json {
     match s {
@@ -137,7 +243,7 @@ fn condition(c: &Condition) -> Json {
     json!({"kind":condition_kind(&c.kind)})
 }
 fn condition_kind(c: &ConditionKind) -> Json {
-    match c {
+    crate::depth::deeper(|| match c {
         ConditionKind::And { conditions } => {
             json!({"kind":"and","conditions":conditions.iter().map(condition).collect::<Vec<_>>()})
         }
@@ -223,13 +329,13 @@ fn condition_kind(c: &ConditionKind) -> Json {
             form
         }
         ConditionKind::Extension { name, arguments } => extension(name, arguments),
-    }
+    })
 }
 fn attachment(a: &Attachment) -> Json {
-    json!({"unit":a.unit,"fields":a.fields,"windows":a.windows.iter().map(|w| match w {Window::First(n)=>json!({"first":n}),Window::Last(n)=>json!({"last":n}),Window::Where(c)=>json!({"where":condition(c)})}).collect::<Vec<_>>()})
+    json!({"unit":&a.unit,"fields":a.fields.clone(),"windows":a.windows.iter().map(|w| match w {Window::First(n)=>json!({"first":n}),Window::Last(n)=>json!({"last":n}),Window::Where(c)=>json!({"where":condition(c)})}).collect::<Vec<_>>()})
 }
 fn transform(t: &TransformKind) -> Json {
-    match t {
+    crate::depth::deeper(|| match t {
         TransformKind::Where { condition: c } => json!({"kind":"where","condition":condition(c)}),
         TransformKind::Sort { keys } => {
             json!({"kind":"sort","keys":keys.iter().map(|k|json!({"expression":expression(&k.expression),"descending":k.descending})).collect::<Vec<_>>()})
@@ -263,7 +369,7 @@ fn transform(t: &TransformKind) -> Json {
             json!({"kind":"as_of","value":value(v),"sequence":sequence})
         }
         TransformKind::Extension { name, arguments } => extension(name, arguments),
-    }
+    })
 }
 fn extension(name: &str, args: &[ExtensionArgument]) -> Json {
     json!({"kind":"extension","name":name,"arguments":args.iter().map(argument).collect::<Vec<_>>()})

@@ -125,7 +125,7 @@ fn lowercase_boolean() {
                 ..
             }),
         ..
-    } = quoted.source
+    } = &quoted.source
     else {
         panic!()
     };

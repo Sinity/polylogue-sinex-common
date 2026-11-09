@@ -1,0 +1,26 @@
+# Coverage-guided fuzzing of the query pipeline with cargo-fuzz. Kept out of
+# the workspace so ordinary builds never compile libFuzzer; the nightly
+# `fuzz` workflow runs it, and `cargo fuzz run query` runs it locally.
+[package]
+name = "common-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+query-language = { path = "../crates/query-language" }
+serde_json = "1"
+
+[[bin]]
+name = "query"
+path = "fuzz_targets/query.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

@@ -47,7 +47,7 @@ impl Parser<'_> {
         FieldInfo { field, origin }
     }
     pub(super) fn expression_info(&self, scope: &Scope, expression: &Expression) -> FieldInfo {
-        match expression {
+        crate::depth::deeper(|| match expression {
             Expression::Field { name } => self.field_info(scope, name),
             Expression::Value { value } => FieldInfo {
                 field: Field {
@@ -139,7 +139,7 @@ impl Parser<'_> {
                     },
                 }
             }
-        }
+        })
     }
     pub(super) fn aggregate_info(
         &self,
@@ -305,8 +305,9 @@ pub(super) fn project(parser: &Parser<'_>, query: &Query) -> Typing {
         parser,
         next_query: 0,
         typing: Typing::default(),
+        path: NodePath::default(),
     };
-    walker.query(query, NodePath::default());
+    walker.query(query);
     debug_assert_eq!(walker.next_query, parser.captures.len());
     let paths: Vec<_> = walker
         .typing
@@ -331,124 +332,153 @@ struct Walker<'a, 'b> {
     parser: &'a Parser<'b>,
     next_query: usize,
     typing: Typing,
+    /// The address of the node being walked. Each level pushes its steps and
+    /// pops them on return, so a deep tree holds one path, not one per level.
+    path: NodePath,
 }
+/// One step of a path into the syntax tree.
+enum Step {
+    Field(&'static str),
+    Index(usize),
+}
+use Step::{Field as F, Index as I};
 impl Walker<'_, '_> {
-    fn field(&mut self, name: &str, scope: &Scope, path: NodePath) {
-        self.expression(&Expression::field(name), scope, path);
-    }
-    fn expression(&mut self, expression: &Expression, scope: &Scope, path: NodePath) {
-        if matches!(expression, Expression::Value { .. }) {
-            return;
+    /// Runs `walk` with `steps` appended to the current path.
+    fn at<R>(&mut self, steps: &[Step], walk: impl FnOnce(&mut Self) -> R) -> R {
+        let depth = self.path.0.len();
+        for step in steps {
+            self.path.0.push(match step {
+                Step::Field(name) => crate::scope::PathElement::Field((*name).into()),
+                Step::Index(index) => crate::scope::PathElement::Index(*index),
+            });
         }
+        let result = walk(self);
+        self.path.0.truncate(depth);
+        result
+    }
+    fn field(&mut self, name: &str, scope: &Scope) {
+        self.expression(&Expression::field(name), scope);
+    }
+    fn operand(&mut self, scope: &Scope, result: FieldInfo) {
         self.typing.operands.push(TypedOperand {
-            path: path.clone(),
+            path: self.path.clone(),
             unit: self
                 .parser
                 .catalog
                 .unit(&scope.unit)
                 .map(|unit| unit.name.clone()),
-            result: self.parser.expression_info(scope, expression),
+            result,
         });
-        match expression {
-            Expression::Function { name, arguments } if name != "random" => {
-                for (index, argument) in arguments.iter().enumerate() {
-                    self.expression(argument, scope, path.field("arguments").index(index));
-                }
-            }
-            Expression::Arithmetic { left, right, .. } => {
-                self.expression(left, scope, path.field("left"));
-                self.expression(right, scope, path.field("right"));
-            }
-            _ => {}
-        }
     }
-    fn query(&mut self, query: &Query, path: NodePath) {
-        let id = self.next_query;
-        self.next_query += 1;
-        let parser = self.parser;
-        let capture = parser.captures[id]
-            .as_ref()
-            .expect("successful parser filled each scope capture");
-        let source = self.parser.snapshot(&capture.source);
-        let mut previous = source.clone();
-        let transforms = capture
-            .transforms
-            .iter()
-            .map(|(before, after)| {
-                let next = if before == after {
-                    previous.clone()
-                } else {
-                    self.parser.snapshot(after)
-                };
-                let transform = TransformScope {
-                    before: previous.clone(),
-                    after: next.clone(),
-                };
-                previous = next;
-                transform
-            })
-            .collect();
-        self.typing.queries.push(QueryScope {
-            path: path.clone(),
-            source,
-            transforms,
-        });
-        match &query.source {
-            Source::Unit {
-                condition: Some(condition),
-                ..
+    fn expression(&mut self, expression: &Expression, scope: &Scope) {
+        crate::depth::deeper(|| {
+            if matches!(expression, Expression::Value { .. }) {
+                return;
             }
-            | Source::Saved {
-                condition: Some(condition),
-                ..
-            }
-            | Source::Result {
-                condition: Some(condition),
-                ..
-            } => self.condition(
-                condition,
-                &capture.source,
-                path.field("source").field("condition"),
-            ),
-            _ => {}
-        }
-        for (index, attachment) in query.attach.iter().enumerate() {
-            let scope = Scope::new(attachment.unit.clone());
-            let at = path.field("attach").index(index);
-            for (index, field) in attachment.fields.iter().enumerate() {
-                self.field(field, &scope, at.field("fields").index(index));
-            }
-            for (index, window) in attachment.windows.iter().enumerate() {
-                if let Window::Where(condition) = window {
-                    self.condition(
-                        condition,
-                        &scope,
-                        at.field("windows").index(index).field("where"),
-                    );
+            let result = self.parser.expression_info(scope, expression);
+            self.operand(scope, result);
+            match expression {
+                Expression::Function { name, arguments } if name != "random" => {
+                    for (index, argument) in arguments.iter().enumerate() {
+                        self.at(&[F("arguments"), I(index)], |w| {
+                            w.expression(argument, scope)
+                        });
+                    }
                 }
-            }
-        }
-        for (index, transform) in query.transforms.iter().enumerate() {
-            let (scope, after) = &capture.transforms[index];
-            let at = path.field("transforms").index(index).field("kind");
-            match &transform.kind {
-                TransformKind::Where { condition } => {
-                    self.condition(condition, scope, at.field("condition"))
+                Expression::Arithmetic { left, right, .. } => {
+                    self.at(&[F("left")], |w| w.expression(left, scope));
+                    self.at(&[F("right")], |w| w.expression(right, scope));
                 }
-                TransformKind::Sort { keys } => {
-                    for (index, key) in keys.iter().enumerate() {
-                        let path = at.field("keys").index(index).field("expression");
+                _ => {}
+            }
+        })
+    }
+    fn query(&mut self, query: &Query) {
+        crate::depth::deeper(|| {
+            let id = self.next_query;
+            self.next_query += 1;
+            let parser = self.parser;
+            let capture = parser.captures[id]
+                .as_ref()
+                .expect("successful parser filled each scope capture");
+            let source = self.parser.snapshot(&capture.source);
+            let mut previous = source.clone();
+            let transforms = capture
+                .transforms
+                .iter()
+                .map(|(before, after)| {
+                    let next = if before == after {
+                        previous.clone()
+                    } else {
+                        self.parser.snapshot(after)
+                    };
+                    let transform = TransformScope {
+                        before: previous.clone(),
+                        after: next.clone(),
+                    };
+                    previous = next;
+                    transform
+                })
+                .collect();
+            self.typing.queries.push(QueryScope {
+                path: self.path.clone(),
+                source,
+                transforms,
+            });
+            match &query.source {
+                Source::Unit {
+                    condition: Some(condition),
+                    ..
+                }
+                | Source::Saved {
+                    condition: Some(condition),
+                    ..
+                }
+                | Source::Result {
+                    condition: Some(condition),
+                    ..
+                } => self.at(&[F("source"), F("condition")], |w| {
+                    w.condition(condition, &capture.source)
+                }),
+                _ => {}
+            }
+            for (index, attachment) in query.attach.iter().enumerate() {
+                let scope = Scope::new(attachment.unit.clone());
+                self.at(&[F("attach"), I(index)], |w| {
+                    for (index, field) in attachment.fields.iter().enumerate() {
+                        w.at(&[F("fields"), I(index)], |w| w.field(field, &scope));
+                    }
+                    for (index, window) in attachment.windows.iter().enumerate() {
+                        if let Window::Where(condition) = window {
+                            w.at(&[F("windows"), I(index), F("where")], |w| {
+                                w.condition(condition, &scope)
+                            });
+                        }
+                    }
+                });
+            }
+            for (index, transform) in query.transforms.iter().enumerate() {
+                let (scope, after) = &capture.transforms[index];
+                self.at(&[F("transforms"), I(index), F("kind")], |w| {
+                    w.transform(transform, scope, after)
+                });
+            }
+        })
+    }
+    fn transform(&mut self, transform: &Transform, scope: &Scope, after: &Scope) {
+        match &transform.kind {
+            TransformKind::Where { condition } => {
+                self.at(&[F("condition")], |w| w.condition(condition, scope))
+            }
+            TransformKind::Sort { keys } => {
+                for (index, key) in keys.iter().enumerate() {
+                    self.at(&[F("keys"), I(index), F("expression")], |w| {
                         if matches!(&key.expression, Expression::Field { name } if name == "rank")
-                            && !self.parser.field_known(scope, "rank")
+                            && !w.parser.field_known(scope, "rank")
                         {
-                            self.typing.operands.push(TypedOperand {
-                                path,
-                                unit: self
-                                    .parser
-                                    .catalog
-                                    .unit(&scope.unit)
-                                    .map(|unit| unit.name.clone()),
-                                result: FieldInfo {
+                            w.operand(
+                                scope,
+                                FieldInfo {
                                     field: Field {
                                         name: "rank".into(),
                                         kind: FieldKind::Number,
@@ -456,83 +486,81 @@ impl Walker<'_, '_> {
                                     },
                                     origin: Origin::Generated,
                                 },
-                            });
-                        } else {
-                            self.expression(&key.expression, scope, path);
-                        }
-                    }
-                }
-                TransformKind::Group { keys } => {
-                    for (index, key) in keys.iter().enumerate() {
-                        self.expression(
-                            &key.expression,
-                            scope,
-                            at.field("keys").index(index).field("expression"),
-                        );
-                    }
-                }
-                TransformKind::Aggregate { aggregates } => {
-                    let rows = scope.group_input.as_deref().unwrap_or(scope);
-                    for (index, aggregate) in aggregates.iter().enumerate() {
-                        for (argument_index, argument) in aggregate.arguments.iter().enumerate() {
-                            self.expression(
-                                argument,
-                                rows,
-                                at.field("aggregates")
-                                    .index(index)
-                                    .field("arguments")
-                                    .index(argument_index),
                             );
+                        } else {
+                            w.expression(&key.expression, scope);
                         }
-                    }
+                    });
                 }
-                TransformKind::Fields { columns } => {
-                    for (index, column) in columns.iter().enumerate() {
-                        self.expression(
-                            &column.expression,
-                            scope,
-                            at.field("columns").index(index).field("expression"),
+            }
+            TransformKind::Group { keys } => {
+                for (index, key) in keys.iter().enumerate() {
+                    self.at(&[F("keys"), I(index), F("expression")], |w| {
+                        w.expression(&key.expression, scope)
+                    });
+                }
+            }
+            TransformKind::Aggregate { aggregates } => {
+                let rows = scope.group_input.as_deref().unwrap_or(scope);
+                for (index, aggregate) in aggregates.iter().enumerate() {
+                    for (argument_index, argument) in aggregate.arguments.iter().enumerate() {
+                        self.at(
+                            &[F("aggregates"), I(index), F("arguments"), I(argument_index)],
+                            |w| w.expression(argument, rows),
                         );
                     }
                 }
-                TransformKind::Scope {
-                    condition: Some(condition),
-                    ..
-                } => self.condition(condition, after, at.field("condition")),
-                TransformKind::Combine { query, .. }
-                | TransformKind::Join { query, .. }
-                | TransformKind::Diff { query } => self.query(query, at.field("query")),
-                TransformKind::Extension { arguments, .. } => {
-                    self.arguments(arguments, scope, at.field("arguments"))
-                }
-                _ => {}
             }
+            TransformKind::Fields { columns } => {
+                for (index, column) in columns.iter().enumerate() {
+                    self.at(&[F("columns"), I(index), F("expression")], |w| {
+                        w.expression(&column.expression, scope)
+                    });
+                }
+            }
+            TransformKind::Scope {
+                condition: Some(condition),
+                ..
+            } => self.at(&[F("condition")], |w| w.condition(condition, after)),
+            TransformKind::Combine { query, .. }
+            | TransformKind::Join { query, .. }
+            | TransformKind::Diff { query } => self.at(&[F("query")], |w| w.query(query)),
+            TransformKind::Extension { arguments, .. } => {
+                self.at(&[F("arguments")], |w| w.arguments(arguments, scope))
+            }
+            _ => {}
         }
     }
-    fn condition(&mut self, condition: &Condition, scope: &Scope, path: NodePath) {
-        let at = path.field("kind");
+    fn condition(&mut self, condition: &Condition, scope: &Scope) {
+        crate::depth::deeper(|| self.at(&[F("kind")], |w| w.condition_kind(condition, scope)))
+    }
+    fn condition_kind(&mut self, condition: &Condition, scope: &Scope) {
         match &condition.kind {
             ConditionKind::And { conditions } | ConditionKind::Or { conditions } => {
                 for (index, condition) in conditions.iter().enumerate() {
-                    self.condition(condition, scope, at.field("conditions").index(index));
+                    self.at(&[F("conditions"), I(index)], |w| {
+                        w.condition(condition, scope)
+                    });
                 }
             }
             ConditionKind::Not { condition } => {
-                self.condition(condition, scope, at.field("condition"))
+                self.at(&[F("condition")], |w| w.condition(condition, scope))
             }
             ConditionKind::Match { field, .. }
             | ConditionKind::Since { field, .. }
-            | ConditionKind::Until { field, .. } => self.field(field, scope, at.field("field")),
+            | ConditionKind::Until { field, .. } => {
+                self.at(&[F("field")], |w| w.field(field, scope))
+            }
             ConditionKind::Compare { left, right, .. } => {
-                self.expression(left, scope, at.field("left"));
-                self.expression(right, scope, at.field("right"));
+                self.at(&[F("left")], |w| w.expression(left, scope));
+                self.at(&[F("right")], |w| w.expression(right, scope));
             }
             ConditionKind::Between { left, .. } | ConditionKind::TimeRange { left, .. } => {
-                self.expression(left, scope, at.field("left"))
+                self.at(&[F("left")], |w| w.expression(left, scope))
             }
             ConditionKind::In { left, query } => {
-                self.expression(left, scope, at.field("left"));
-                self.query(query, at.field("query"));
+                self.at(&[F("left")], |w| w.expression(left, scope));
+                self.at(&[F("query")], |w| w.query(query));
             }
             ConditionKind::Order {
                 query,
@@ -540,19 +568,15 @@ impl Walker<'_, '_> {
                 pick,
                 ..
             } => {
-                self.query(query, at.field("query"));
+                self.at(&[F("query")], |w| w.query(query));
                 if let MatchChoice::FirstBy { keys } = pick {
-                    let inner = &self.parser.inner_scopes[&condition.span.start];
-                    let candidate = self.parser.match_scope(inner, within.as_ref());
+                    let parser = self.parser;
+                    let inner = &parser.inner_scopes[&condition.span.start];
+                    let candidate = parser.match_scope(inner, within.as_ref());
                     for (index, key) in keys.iter().enumerate() {
-                        self.expression(
-                            &key.expression,
-                            &candidate,
-                            at.field("pick")
-                                .field("keys")
-                                .index(index)
-                                .field("expression"),
-                        );
+                        self.at(&[F("pick"), F("keys"), I(index), F("expression")], |w| {
+                            w.expression(&key.expression, &candidate)
+                        });
                     }
                 }
             }
@@ -564,43 +588,44 @@ impl Walker<'_, '_> {
                 unit,
                 condition: Some(condition),
                 ..
-            } => self.condition(condition, &Scope::new(unit.clone()), at.field("condition")),
+            } => self.at(&[F("condition")], |w| {
+                w.condition(condition, &Scope::new(unit.clone()))
+            }),
             ConditionKind::Sequence { unit, steps, .. } => {
                 for (index, condition) in steps.iter().enumerate() {
-                    self.condition(
-                        condition,
-                        &Scope::new(unit.clone()),
-                        at.field("steps").index(index),
-                    );
+                    self.at(&[F("steps"), I(index)], |w| {
+                        w.condition(condition, &Scope::new(unit.clone()))
+                    });
                 }
             }
             ConditionKind::Extension { arguments, .. } => {
-                self.arguments(arguments, scope, at.field("arguments"))
+                self.at(&[F("arguments")], |w| w.arguments(arguments, scope))
             }
             _ => {}
         }
     }
-    fn arguments(&mut self, arguments: &[ExtensionArgument], scope: &Scope, path: NodePath) {
-        for (index, argument) in arguments.iter().enumerate() {
-            let at = path.index(index);
-            match argument {
-                ExtensionArgument::Field(name) => self.field(name, scope, at.field("field")),
-                ExtensionArgument::Expression(expression) => {
-                    self.expression(expression, scope, at.field("expression"))
-                }
-                ExtensionArgument::Condition(condition) => {
-                    self.condition(condition, scope, at.field("condition"))
-                }
-                ExtensionArgument::Query(query) => self.query(query, at.field("query")),
-                ExtensionArgument::Optional(arguments) => {
-                    self.arguments(arguments, scope, at.field("optional"))
-                }
-                ExtensionArgument::List(arguments) => {
-                    self.arguments(arguments, scope, at.field("list"))
-                }
-                _ => {}
+    fn arguments(&mut self, arguments: &[ExtensionArgument], scope: &Scope) {
+        crate::depth::deeper(|| {
+            for (index, argument) in arguments.iter().enumerate() {
+                self.at(&[I(index)], |w| match argument {
+                    ExtensionArgument::Field(name) => w.at(&[F("field")], |w| w.field(name, scope)),
+                    ExtensionArgument::Expression(expression) => {
+                        w.at(&[F("expression")], |w| w.expression(expression, scope))
+                    }
+                    ExtensionArgument::Condition(condition) => {
+                        w.at(&[F("condition")], |w| w.condition(condition, scope))
+                    }
+                    ExtensionArgument::Query(query) => w.at(&[F("query")], |w| w.query(query)),
+                    ExtensionArgument::Optional(arguments) => {
+                        w.at(&[F("optional")], |w| w.arguments(arguments, scope))
+                    }
+                    ExtensionArgument::List(arguments) => {
+                        w.at(&[F("list")], |w| w.arguments(arguments, scope))
+                    }
+                    _ => {}
+                });
             }
-        }
+        })
     }
 }
 

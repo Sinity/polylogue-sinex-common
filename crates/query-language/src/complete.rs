@@ -708,10 +708,10 @@ fn row_scope(text: &str, catalog: &Catalog) -> (Option<String>, Vec<OutputSource
             .source_output(&query.source)
             .and_then(|output| output.unit.clone()),
     };
-    for transform in query.transforms {
-        match transform.kind {
+    for transform in &query.transforms {
+        match &transform.kind {
             TransformKind::Scope { unit: next, .. } => {
-                unit = Some(next);
+                unit = Some(next.clone());
                 sources.clear();
             }
             TransformKind::Matches => unit = None,

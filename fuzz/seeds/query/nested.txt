@@ -1,0 +1,1 @@
+sessions where id in (messages where "z" | fields session.id) | union (sessions where similar:"q")

@@ -9,6 +9,7 @@ pub mod complete;
 pub mod conformance;
 pub mod coverage;
 pub mod cursor;
+pub mod depth;
 pub mod diff;
 pub mod format;
 pub mod fusion;
