@@ -58,6 +58,14 @@ impl DaySetting {
         }
         Ok(Self { zone, start })
     }
+    /// The host's named zone (`TZ`, then `/etc/localtime`) with the given
+    /// start. This is the default both products use when their configuration
+    /// names no zone; a host whose zone has no IANA name must name one.
+    pub fn system(start: CivilTime) -> Result<Self, Error> {
+        Self::new(TimeZone::system(), start).map_err(|_| {
+            bad("the host's time zone has no IANA name; name the day zone in the configuration")
+        })
+    }
     pub fn zone(&self) -> &TimeZone {
         &self.zone
     }
@@ -136,6 +144,43 @@ impl DaySetting {
             self.start_of(from)?,
             self.start_of(through.tomorrow().map_err(bad)?)?,
         )
+    }
+}
+/// Labels of the calendar buckets (`day()`, `week()`, `month()`, `weekday()`,
+/// `month_day()`), one spelling for both products. A week is the ISO week its
+/// logical day falls in, labelled `YYYY-Www` by its ISO year, so the label says
+/// it is a week and sorts in time order. Years before 1 are written with a sign.
+pub mod label {
+    use jiff::civil::Date;
+
+    fn year(year: i16) -> String {
+        if year < 0 {
+            format!("-{:04}", year.unsigned_abs())
+        } else {
+            format!("{year:04}")
+        }
+    }
+    pub fn day(date: Date) -> String {
+        format!(
+            "{}-{:02}-{:02}",
+            year(date.year()),
+            date.month(),
+            date.day()
+        )
+    }
+    pub fn week(date: Date) -> String {
+        let week = date.iso_week_date();
+        format!("{}-W{:02}", year(week.year()), week.week())
+    }
+    pub fn month(date: Date) -> String {
+        format!("{}-{:02}", year(date.year()), date.month())
+    }
+    pub fn month_day(date: Date) -> String {
+        format!("{:02}-{:02}", date.month(), date.day())
+    }
+    pub fn weekday(date: Date) -> &'static str {
+        ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+            [date.weekday().to_monday_zero_offset() as usize]
     }
 }
 /// Count civil labels, independent of offset changes and skipped dates.
