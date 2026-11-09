@@ -52,8 +52,32 @@ fn slots_are_taken_in_order_and_each_test_gets_a_fresh_clone() {
     assert!(test_databases(&server, "order").is_empty());
 }
 
+/// Holds `slots` ordinary slots of `template` in a child process until the
+/// returned child is killed; returns once it holds them.
+fn hold_in_child(server: &Server, template: &str, slots: usize) -> std::process::Child {
+    let ready = tempfile::tempdir().unwrap();
+    let child = Command::new(env::current_exe().unwrap())
+        .args(["--exact", "pg::tests::slots::slot_holder_child"])
+        .env("DEVKIT_SLOT_HOLDER_READY", ready.path())
+        .envs(server.test_env(template))
+        .env("DEVKIT_PG_SLOTS", slots.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while fs::read_dir(ready.path()).unwrap().count() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the child takes a slot"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    child
+}
+
 #[test]
-fn a_test_waits_for_a_slot_while_all_are_taken() {
+fn a_test_waits_for_a_slot_while_another_process_holds_all() {
     let server = Server::start(&ClusterOptions::default()).unwrap();
     let databases = demo_schema(&server, "wait", "one");
     let slots = Slots {
@@ -61,7 +85,7 @@ fn a_test_waits_for_a_slot_while_all_are_taken() {
         large: 1,
         failed: 5,
     };
-    let holder = take(&server, &databases.template, Family::Ordinary, &slots);
+    let mut holder = hold_in_child(&server, &databases.template, 1);
     let (taken, waiting) = std::sync::mpsc::channel();
     std::thread::scope(|scope| {
         scope.spawn(|| {
@@ -72,9 +96,10 @@ fn a_test_waits_for_a_slot_while_all_are_taken() {
             waiting
                 .recv_timeout(std::time::Duration::from_millis(500))
                 .is_err(),
-            "a second test must wait while the only slot is taken"
+            "a test holding no slot waits while the only slot is taken"
         );
-        drop(holder);
+        holder.kill().unwrap();
+        holder.wait().unwrap();
         assert_eq!(
             waiting
                 .recv_timeout(std::time::Duration::from_secs(30))
@@ -82,6 +107,49 @@ fn a_test_waits_for_a_slot_while_all_are_taken() {
             "wait_test0"
         );
     });
+}
+
+/// Two tests that each hold a slot and wait for a second one would wait for
+/// each other forever, so a test that holds one takes its second at once.
+#[test]
+fn a_test_holding_a_slot_takes_another_without_waiting() {
+    let server = Server::start(&ClusterOptions::default()).unwrap();
+    let databases = demo_schema(&server, "pair", "one");
+    let slots = Slots {
+        ordinary: 1,
+        large: 1,
+        failed: 5,
+    };
+    let mut other = hold_in_child(&server, &databases.template, 1);
+    // The child holds pair_test0; this process holds none, so it would wait.
+    // A slot of the other family does not count.
+    let large = take(&server, &databases.template, Family::Large, &slots);
+    let (taken, result) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let first = take(&server, &databases.template, Family::Ordinary, &slots);
+            let second = take(&server, &databases.template, Family::Ordinary, &slots);
+            taken
+                .send((first.name.clone(), second.name.clone()))
+                .unwrap();
+        });
+        assert!(
+            result
+                .recv_timeout(std::time::Duration::from_millis(500))
+                .is_err(),
+            "the first ordinary slot is waited for"
+        );
+        other.kill().unwrap();
+        other.wait().unwrap();
+        assert_eq!(
+            result
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .unwrap(),
+            ("pair_test0".to_owned(), "pair_test1".to_owned())
+        );
+    });
+    drop(large);
+    assert!(test_databases(&server, "pair").is_empty());
 }
 
 #[test]
