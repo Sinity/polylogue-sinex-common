@@ -257,3 +257,106 @@ fn uniqueness_revision_into_a_held_slot() {
     };
     place(&mut history, "d", OnStale::Refuse, kept);
 }
+
+/// Two first titles for one session, each written where the other was not
+/// yet seen (two hosts, or an imported bundle), as the products' apply path
+/// stores them: no uniqueness check, so the slot has two records.
+fn two_first_titles() -> History {
+    let mut history = History::new();
+    for (root, text) in [("a", "From the laptop"), ("b", "From the desktop")] {
+        let write = title(&["s:1"], text);
+        history.push(
+            authored::Header {
+                root: root.into(),
+                rev: root.into(),
+                kind: write.kind,
+                key: None,
+                value: write.value,
+                author: "operator".into(),
+                via: "cli".into(),
+                at: 0,
+                revises: Default::default(),
+                withdraws: Default::default(),
+            },
+            write.unique.unwrap().slots,
+        );
+    }
+    history
+}
+
+#[test]
+fn revision_naming_all_slot_heads_resolves_a_multi_family_slot() {
+    let mut history = two_first_titles();
+    // A revision of one record alone would leave the other holding the slot.
+    let one = Write {
+        revises: vec![Revision::first("b")],
+        ..title(&["s:1"], "Settled")
+    };
+    let mut plan = Plan::new("c", 1, arrival(OnStale::Refuse), &mut history);
+    assert_eq!(
+        plan.add(one).unwrap_err().refusal,
+        Refusal::SlotTaken {
+            holders: vec![Revision::first("a")]
+        }
+    );
+    // One revision naming every head of both records resolves the conflict.
+    let both = Write {
+        revises: vec![Revision::first("b"), Revision::first("a")],
+        ..title(&["s:1"], "Settled")
+    };
+    let mut plan = Plan::new("d", 1, arrival(OnStale::Refuse), &mut history);
+    let placed = plan.add(both).unwrap();
+    let planned = plan.finish().unwrap();
+    assert_eq!(
+        planned.affected_roots,
+        ["a".to_owned(), "b".to_owned()].into_iter().collect()
+    );
+    history.commit(planned);
+    assert_eq!(
+        placed,
+        Placed::Written {
+            revision: Revision::new("a", "d"),
+            revised: vec![Revision::first("a"), Revision::first("b")]
+        }
+    );
+    let mut currency = Currency::new(&mut history);
+    assert_eq!(currency.heads("a").unwrap(), vec![Revision::new("a", "d")]);
+    assert!(currency.heads("b").unwrap().is_empty());
+}
+
+#[test]
+fn a_write_without_bases_into_a_multi_family_slot_revises_every_head() {
+    let mut history = two_first_titles();
+    let placed = place(
+        &mut history,
+        "c",
+        OnStale::Refuse,
+        title(&["s:1"], "Settled"),
+    );
+    assert_eq!(
+        placed,
+        Placed::Written {
+            revision: Revision::new("a", "c"),
+            revised: vec![Revision::first("a"), Revision::first("b")]
+        }
+    );
+    let mut currency = Currency::new(&mut history);
+    assert_eq!(currency.heads("a").unwrap(), vec![Revision::new("a", "c")]);
+    assert!(currency.heads("b").unwrap().is_empty());
+}
+
+#[test]
+fn bases_of_records_holding_no_common_slot_stay_refused() {
+    let mut history = History::new();
+    place(&mut history, "a", OnStale::Refuse, title(&["s:1"], "One"));
+    place(&mut history, "b", OnStale::Refuse, title(&["s:2"], "Two"));
+    let both = Write {
+        revises: vec![Revision::first("a"), Revision::first("b")],
+        ..title(&["s:1"], "Merged")
+    };
+    let mut plan = Plan::new("c", 1, arrival(OnStale::Refuse), &mut history);
+    assert_eq!(
+        plan.add(both).unwrap_err().refusal,
+        Refusal::BasesSpanRoots(vec![Revision::first("a"), Revision::first("b")])
+    );
+}

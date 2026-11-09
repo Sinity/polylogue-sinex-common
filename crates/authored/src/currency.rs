@@ -188,14 +188,17 @@ impl<'a, L: Links> Currency<'a, L> {
 }
 
 /// The roots whose currency can change when `record` is added: its own root,
-/// the roots it withdraws, and, through withdrawals of withdrawals, the roots
-/// those withdrawals name, as far as `withdraws` links reach. A product that
+/// the roots of the revisions it revises (another record's, when it resolves
+/// a conflict between records holding one slot), the roots it withdraws, and,
+/// through withdrawals of withdrawals, the roots those withdrawals name, as
+/// far as `withdraws` links reach. A product that
 /// stores currency recomputes exactly these roots in the writing transaction.
 pub fn affected_roots<L: Links>(
     links: &mut L,
     record: &Header,
 ) -> Result<BTreeSet<String>, L::Error> {
     let mut roots = BTreeSet::from([record.root.clone()]);
+    roots.extend(record.revises.iter().map(|revision| revision.root.clone()));
     let mut visited = HashSet::new();
     let mut queue: VecDeque<Target> = record.withdraws.iter().cloned().collect();
     while let Some(target) = queue.pop_front() {

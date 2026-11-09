@@ -56,7 +56,7 @@ pub struct Write<B> {
     /// The product's own part of the record.
     pub body: B,
     /// Explicit bases: the write is a revision of these revisions, all of one
-    /// record.
+    /// record or of records holding one of the write's slots.
     pub revises: Vec<Revision>,
     pub withdraws: Vec<Target>,
     /// The slots of the written content, from the kind's
@@ -95,7 +95,7 @@ pub enum Refusal<E> {
     UnknownBase(Revision),
     #[error("withdrawal target {0} does not exist")]
     UnknownTarget(Target),
-    #[error("one revision revises one record; bases name several: {}", list(.0))]
+    #[error("one revision revises one record, or records holding one slot; bases name several: {}", list(.0))]
     BasesSpanRoots(Vec<Revision>),
     #[error("the slot is held by several records: {}", list(.holders))]
     Ambiguous { holders: Vec<Revision> },
@@ -222,13 +222,18 @@ impl<'a, S: Holders, B> Plan<'a, S, B> {
             .map(|unique| unique.slots.clone())
             .unwrap_or_default();
         let (root, revised) = if !write.revises.is_empty() {
-            let root = self.check_bases(&write.revises)?;
+            let root = self.check_bases(&write.revises, &slots)?;
             if self.arrival.on_stale == OnStale::Refuse {
+                let revised_roots: BTreeSet<&str> = write
+                    .revises
+                    .iter()
+                    .map(|base| base.root.as_str())
+                    .collect();
                 let holders = self.current_holders(&slots)?;
                 let others: Vec<Revision> = holders
                     .into_values()
                     .flatten()
-                    .filter(|holder| holder.root != root)
+                    .filter(|holder| !revised_roots.contains(holder.root.as_str()))
                     .collect();
                 if !others.is_empty() {
                     return Err(Refusal::SlotTaken { holders: others });
@@ -253,6 +258,25 @@ impl<'a, S: Holders, B> Plan<'a, S, B> {
                     (root, heads)
                 }
                 _ if self.arrival.on_stale == OnStale::Fork => (id.clone(), Vec::new()),
+                _ if self.shared_slot(&unique.slots, holders.keys())?.is_some() => {
+                    // Several records hold one slot (each written first where
+                    // the other was not yet seen): a conflict. The write
+                    // revises every head of every one of them, which resolves
+                    // it into the first record.
+                    if unique.when_held == WhenHeld::Already {
+                        return Ok(Placed::Already {
+                            heads: holders.into_values().flatten().collect(),
+                        });
+                    }
+                    let mut currency = Currency::new(&mut self.view);
+                    let mut heads = Vec::new();
+                    for root in holders.keys() {
+                        heads.extend(currency.heads(root)?);
+                    }
+                    heads.sort();
+                    let root = holders.into_keys().next().expect("several holders");
+                    (root, heads)
+                }
                 _ => {
                     return Err(Refusal::Ambiguous {
                         holders: holders.into_values().flatten().collect(),
@@ -288,16 +312,23 @@ impl<'a, S: Holders, B> Plan<'a, S, B> {
         })
     }
 
-    /// Checks that the bases exist, share one root, and (when refusing stale
-    /// writes) are current. Returns the root.
-    fn check_bases(&mut self, bases: &[Revision]) -> Result<String, Refusal<S::Error>> {
-        let roots: BTreeSet<&str> = bases.iter().map(|base| base.root.as_str()).collect();
-        if roots.len() > 1 {
+    /// Checks that the bases exist, share one root or one slot of the
+    /// write, and (when refusing stale writes) are current. Returns the root
+    /// the revision belongs to: the bases' root, or for bases of several
+    /// records holding one slot, the first of them, so one revision naming
+    /// every head resolves the conflict.
+    fn check_bases(
+        &mut self,
+        bases: &[Revision],
+        slots: &[UniqueSlot],
+    ) -> Result<String, Refusal<S::Error>> {
+        let roots: BTreeSet<String> = bases.iter().map(|base| base.root.clone()).collect();
+        if roots.len() > 1 && self.shared_slot(slots, roots.iter())?.is_none() {
             let mut bases = bases.to_vec();
             bases.sort();
             return Err(Refusal::BasesSpanRoots(bases));
         }
-        let root = bases[0].root.clone();
+        let root = roots.first().expect("bases are not empty").clone();
         for base in bases {
             if !self.exists(&Target::Revision(base.clone()))? {
                 return Err(Refusal::UnknownBase(base.clone()));
@@ -309,12 +340,33 @@ impl<'a, S: Holders, B> Plan<'a, S, B> {
                 if !currency.current(base)? {
                     return Err(Refusal::Stale {
                         base: base.clone(),
-                        heads: currency.heads(&root)?,
+                        heads: currency.heads(&base.root)?,
                     });
                 }
             }
         }
         Ok(root)
+    }
+
+    /// A slot of the write that every one of `roots` holds with a current
+    /// revision, if any: those records are then one slot's conflicting
+    /// values, not records about different things.
+    fn shared_slot<'r>(
+        &mut self,
+        slots: &[UniqueSlot],
+        roots: impl Iterator<Item = &'r String>,
+    ) -> Result<Option<UniqueSlot>, Refusal<S::Error>> {
+        let roots: BTreeSet<&String> = roots.collect();
+        for slot in slots {
+            let holding: BTreeSet<String> = self
+                .current_holders(std::slice::from_ref(slot))?
+                .into_keys()
+                .collect();
+            if roots.iter().all(|root| holding.contains(*root)) {
+                return Ok(Some(slot.clone()));
+            }
+        }
+        Ok(None)
     }
 
     /// The current records holding any of the slots, grouped by root.

@@ -37,7 +37,7 @@ projection.
 | `kind`, `key`, `value` | what the record says; the product declares its kinds and their value shapes |
 | `author`, `via` | who wrote it and the channel it arrived on, computed by the product from the authenticated caller; no request supplies them |
 | `at` | the writer's clock in Unix milliseconds, for display and as-of reads; currency never reads it |
-| `revises` | the revisions this one revises, all of the same record |
+| `revises` | the revisions this one revises: of the same record, or of several records holding one uniqueness slot when the revision resolves their conflict |
 | `withdraws` | the revisions or roots this record withdraws |
 
 A revision is written `<root>@<rev>` (`Revision`), and a stored reference
@@ -77,8 +77,8 @@ only name records that exist.
 
 **Stored currency.** A product that keeps currency in an index (Polylogue's
 `revision_state`) recomputes, in the writing transaction, exactly the roots
-`affected_roots` returns for each new record: its own root, the roots it
-withdraws, and through withdrawals of withdrawals the roots those name. The
+`affected_roots` returns for each new record: its own root, the roots of the
+revisions it revises, the roots it withdraws, and through withdrawals of withdrawals the roots those name. The
 index is then equal to the function by construction, like an SQL index, and
 needs no rebuild or repair step.
 
@@ -92,7 +92,7 @@ A write with explicit bases (`revises`) arrives in one of two ways
 - **Fork** (markup, imports): the write is kept as another head, so the order
   of arrival cannot change the result; the fork is a visible conflict.
 
-The bases of one write must belong to one record. The product decides which
+The bases of one write must belong to one record, or to several records that hold one uniqueness slot of the write: such records are one slot's conflicting values (each written first where the other was not yet seen, as two hosts or an imported bundle do), and one revision naming every head of every one of them resolves the conflict into the first record by root. Bases of records with no shared slot are refused `BasesSpanRoots`. The product decides which
 view the check runs against: standalone, the committed links in the writing
 transaction; in Polylogue's primary mode, the applied stream position plus
 this host's unconfirmed writes.
@@ -151,8 +151,13 @@ slots decide where it goes:
   of that record (which also resolves a conflict); under `WhenHeld::Already`
   it writes nothing and answers "already" with the heads (a tag whose name and
   value are in the key);
-- several records: refused `Ambiguous`, naming them; a forking channel writes
-  a new record instead.
+- several records that all hold one of the write's slots: a conflict between
+  records; under `WhenHeld::Revise` the write revises every current head of
+  every one of them, resolving it into the first record by root, and under
+  `WhenHeld::Already` it answers "already" with all their heads;
+- several records holding different slots (a write about two sessions whose
+  titles are separate records): refused `Ambiguous`, naming them; a forking
+  channel writes a new record instead.
 
 The product finds holders through `Holders`, typically an index on
 `UniqueSlot::digest`, a 32-byte length-prefixed hash. Polylogue's components are
