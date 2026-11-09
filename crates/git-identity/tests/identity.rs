@@ -181,3 +181,27 @@ fn an_identity_serializes_with_plain_field_names() {
         serde_json::json!({"common_dir":"/r/.git","root_commits":["a"],"head":"h","branch":null,"remote":null})
     );
 }
+
+#[test]
+fn the_parts_answer_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    repo(dir.path());
+    let deadline = std::time::Instant::now() + BUDGET;
+    assert_eq!(
+        git_identity::root_commits(dir.path(), deadline),
+        Ok(Vec::new())
+    );
+    git(
+        dir.path(),
+        &["remote", "add", "origin", "https://u:p@example.invalid/r"],
+    );
+    assert_eq!(
+        git_identity::remote(dir.path(), deadline),
+        Ok(Some("https://example.invalid/r".to_owned()))
+    );
+    let root = commit(dir.path(), "a");
+    assert_eq!(
+        git_identity::root_commits(dir.path(), deadline),
+        Ok(vec![root])
+    );
+}

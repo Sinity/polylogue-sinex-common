@@ -89,20 +89,9 @@ pub fn observe(dir: &Path, deadline: Instant) -> Result<Identity, Unavailable> {
         "--git-common-dir",
     ]))?;
     let head = required(run(&["rev-parse", "--verify", "HEAD"]))?;
-    let roots = required(run(&["rev-list", "--max-parents=0", &head]))?;
-    let shallow = match run(&[
-        "rev-parse",
-        "--path-format=absolute",
-        "--git-path",
-        "shallow",
-    ]) {
-        Ok(Some(path)) => fs::read_to_string(PathBuf::from(path)).unwrap_or_default(),
-        Ok(None) => String::new(),
-        Err(reason) => return Err(reason),
-    };
-    let root_commits = root_set(&roots, &shallow);
+    let root_commits = root_commits_of(dir, &head, deadline)?;
     let branch = run(&["symbolic-ref", "--quiet", "--short", "HEAD"])?;
-    let remote = run(&["remote", "get-url", "origin"])?.map(|url| without_credentials(&url));
+    let remote = remote(dir, deadline)?;
     Ok(Identity {
         common_dir,
         root_commits,
@@ -110,6 +99,42 @@ pub fn observe(dir: &Path, deadline: Instant) -> Result<Identity, Unavailable> {
         branch,
         remote,
     })
+}
+
+/// The root commits reachable from `HEAD` in the repository holding `dir`,
+/// sorted, shallow boundaries left out. Empty when `HEAD` names no commit or
+/// the history reaches no real root.
+pub fn root_commits(dir: &Path, deadline: Instant) -> Result<Vec<String>, Unavailable> {
+    match git(dir, &["rev-parse", "--verify", "HEAD"], deadline)? {
+        Some(head) => root_commits_of(dir, &head, deadline),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// The `origin` remote of the repository holding `dir`, with credentials
+/// removed; none when there is no `origin`.
+pub fn remote(dir: &Path, deadline: Instant) -> Result<Option<String>, Unavailable> {
+    Ok(git(dir, &["remote", "get-url", "origin"], deadline)?.map(|url| without_credentials(&url)))
+}
+
+fn root_commits_of(dir: &Path, head: &str, deadline: Instant) -> Result<Vec<String>, Unavailable> {
+    let Some(roots) = git(dir, &["rev-list", "--max-parents=0", head], deadline)? else {
+        return Ok(Vec::new());
+    };
+    let shallow = match git(
+        dir,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "shallow",
+        ],
+        deadline,
+    )? {
+        Some(path) => fs::read_to_string(PathBuf::from(path)).unwrap_or_default(),
+        None => String::new(),
+    };
+    Ok(root_set(&roots, &shallow))
 }
 
 /// Reads the identity with a time budget instead of a deadline.
