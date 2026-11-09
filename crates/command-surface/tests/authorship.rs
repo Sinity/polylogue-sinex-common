@@ -215,9 +215,12 @@ fn caller_evidence_round_trips_and_refuses_unknown_fields() {
     assert!(serde_json::from_value::<CallerEvidence>(forged).is_err());
 }
 
-/// A process table for the walk up the tree: pid, executable, the harness
+/// One process for the walk up the tree: pid, executable, the harness
 /// variables of its environment, and its parent.
-fn table(rows: &[(u32, &str, &[(&str, &str)], u32)]) -> impl Fn(u32) -> Option<Process> + use<> {
+type Row<'a> = (u32, &'a str, &'a [(&'a str, &'a str)], u32);
+
+/// A process table for the walk up the tree.
+fn table(rows: &[Row<'_>]) -> impl Fn(u32) -> Option<Process> + use<> {
     let rows: BTreeMap<u32, Process> = rows
         .iter()
         .map(|(pid, executable, variables, parent)| {
