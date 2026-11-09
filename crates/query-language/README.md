@@ -374,8 +374,11 @@ known-output markers and display spellings are absent; parameter declarations
 remain part of the question.
 
 - **`query:<hash>`** is the BLAKE3 of the normal form and its declared
-  parameter types. One algorithm serves both products, and a mixed query has
-  one hash. A name or a transport option is never part of the question.
+  parameter types, written as a two-element JSON array in the canonical JSON
+  of [`canonical-json`](../canonical-json/README.md) without a tag (stored
+  names and kept results already cite these hashes). One algorithm serves
+  both products, and a mixed query has one hash. A name or a transport option
+  is never part of the question.
 - **`answer:<id>`** names one evaluation: its query, read context, computed
   author, outcome, count and exactness. The product appends the record
   after the answer is sent; a read never waits on it. `answers` and

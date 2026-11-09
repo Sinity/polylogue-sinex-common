@@ -15,6 +15,7 @@ conformance = []
 
 [dependencies]
 blake3 = "1"
+canonical-json = { path = "../canonical-json" }
 jiff = { version = "0.2", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
