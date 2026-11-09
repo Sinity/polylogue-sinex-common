@@ -1,0 +1,23 @@
+[package]
+name = "git-identity"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "The one definition of which Git repository a directory belongs to, shared by Polylogue and Sinex"
+autotests = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+
+[dev-dependencies]
+serde_json = "1"
+
+# One integration-test binary per crate: each test file is a module of
+# tests/main.rs, so the crate and its dependencies link once.
+[[test]]
+name = "main"
+path = "tests/main.rs"
