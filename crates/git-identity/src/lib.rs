@@ -89,7 +89,13 @@ pub fn observe(dir: &Path, deadline: Instant) -> Result<Identity, Unavailable> {
         "--git-common-dir",
     ]))?;
     let head = required(run(&["rev-parse", "--verify", "HEAD"]))?;
-    let root_commits = root_commits_of(dir, &head, deadline)?;
+    // The shallow file lives in the common directory, so reading it there
+    // saves a query: the session hook runs this within a 50 ms budget.
+    let shallow = fs::read_to_string(Path::new(&common_dir).join("shallow")).unwrap_or_default();
+    let root_commits = match run(&["rev-list", "--max-parents=0", &head])? {
+        Some(roots) => root_set(&roots, &shallow),
+        None => Vec::new(),
+    };
     let branch = run(&["symbolic-ref", "--quiet", "--short", "HEAD"])?;
     let remote = remote(dir, deadline)?;
     Ok(Identity {
