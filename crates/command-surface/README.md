@@ -488,6 +488,13 @@ request state of its own.
 
 ## Using the crate
 
+The default `runtime` feature holds the operation table, its transports,
+argument parsing and status measurement, and brings in Tokio. Without it
+(`default-features = false`) the crate is the wire vocabulary alone:
+envelopes, failures and their exit and HTTP table, values, authorship and
+seen marks. A product's protocol crate that must stay free of an async
+runtime depends on it that way.
+
 Declare typed values implementing serde and `JsonSchema` in a
 `DeclarationsBuilder`, finish the declarations, and bind real `Operation` or
 `StreamOperation` handlers in `OperationTable`. `declare_local` needs only

@@ -33,6 +33,7 @@ impl LatencyClass {
         Self::Search,
         Self::Aggregate,
     ];
+    #[cfg(feature = "runtime")]
     pub(crate) const fn index(self) -> usize {
         self as usize
     }
