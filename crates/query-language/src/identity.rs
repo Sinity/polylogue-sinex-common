@@ -50,7 +50,7 @@ pub fn question_id_from_normal_form(
     let mut canonical_form = json::clone(normal_form);
     normalize(&mut canonical_form);
     let canonical = (json::equal(&canonical_form, normal_form) && canonical_form.is_object())
-        .then(|| serde_json::to_vec(&(json::Deep(&canonical_form), parameters)));
+        .then(|| canonical_json::canonical_json(&(json::Deep(&canonical_form), parameters)));
     json::drop(canonical_form);
     let Some(canonical) = canonical else {
         return Err(Error::new(
@@ -63,7 +63,7 @@ pub fn question_id_from_normal_form(
     Ok(QuestionId(*blake3::hash(&canonical).as_bytes()))
 }
 
-fn serialization(error: serde_json::Error) -> Error {
+fn serialization(error: canonical_json::Error) -> Error {
     Error::new(
         ErrorKind::InvalidQuery,
         format!("question cannot be serialized: {error}"),
@@ -116,8 +116,8 @@ fn normalize(value: &mut Value) {
                 for value in fields.values_mut() {
                     normalize(value);
                 }
-                // serde_json's preserve_order feature is additive across dependents.
-                // Identity must have the same bytes in every product's feature union.
+                // Set operands below sort by their text, which must not depend on
+                // serde_json's preserve_order feature.
                 fields.sort_keys();
                 let unordered = matches!(
                     fields.get("kind").and_then(Value::as_str),

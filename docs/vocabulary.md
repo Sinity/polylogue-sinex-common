@@ -33,6 +33,7 @@ mechanic and nothing else in the shared crates.
 | catalog | a product's units or tables, their fields, closed-set values and defaults |
 | compiler | a product's translation of a parsed query into execution |
 | normal form | the canonical parsed question, with source spans removed and commutative operands ordered |
+| canonical JSON | the bytes every identity hash reads: a domain tag, a zero byte, then JSON with object keys sorted and numbers as the value holds them |
 | question identity | the BLAKE3 hash of the normal form and declared parameter types |
 | read position | a product-owned retained view that a continuation reads |
 | version binding | a schema, definition, grant or ranking version fixed for a continuation |
