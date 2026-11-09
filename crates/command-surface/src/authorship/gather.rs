@@ -1,9 +1,12 @@
 //! Gathering the caller's facts from the process tree (Linux `/proc`).
 //!
 //! A harness is recognised by the variables it sets in the processes it
-//! starts and by its executable. The nearest harness ancestor of the caller
-//! is the one that launched it, so it wins over variables a launcher
-//! forwarded from an outer harness. No job runner is recognised by name.
+//! starts and by its executable. An ancestor is a harness when its
+//! executable names one, or when its own environment lacks a harness's
+//! marker variable that the processes below it carry: it set that marker in
+//! the processes it started. The nearest harness ancestor of the caller is
+//! the one that launched it, so it wins over variables a launcher forwarded
+//! from an outer harness. No job runner is recognised by name.
 use super::{AgentSession, CallerEvidence, Harness};
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -76,7 +79,7 @@ pub fn gather_current(variable: impl Fn(&str) -> Option<OsString>) -> CallerEvid
         .into_iter()
         .filter_map(|name| variable(name).map(|value| (name.to_owned(), value)))
         .collect();
-    let ancestors = harness_ancestors(std::os::unix::process::parent_id());
+    let ancestors = harness_ancestors(std::os::unix::process::parent_id(), &environment);
     let unit = std::fs::read_to_string("/proc/self/cgroup")
         .ok()
         .and_then(|cgroup| cgroup_unit(&cgroup));
@@ -98,23 +101,12 @@ pub fn gather_peer(pid: u32) -> std::io::Result<CallerEvidence> {
         .and_then(|(_, fields)| fields.split_whitespace().nth(4))
         .and_then(|tty| tty.parse::<i64>().ok())
         .is_some_and(|tty| tty != 0);
-    let environment = std::fs::read(root.join("environ"))?
-        .split(|byte| *byte == 0)
-        .filter_map(|entry| {
-            let split = entry.iter().position(|byte| *byte == b'=')?;
-            let name = std::str::from_utf8(&entry[..split]).ok()?;
-            HARNESS_VARIABLES.contains(&name).then(|| {
-                (
-                    name.to_owned(),
-                    OsString::from_vec(entry[split + 1..].to_vec()),
-                )
-            })
-        })
-        .collect();
+    let environment = harness_variables(&std::fs::read(root.join("environ"))?);
     let unit = std::fs::read_to_string(root.join("cgroup"))
         .ok()
         .and_then(|cgroup| cgroup_unit(&cgroup));
-    let ancestors = parent_pid(&stat).map_or_else(Vec::new, harness_ancestors);
+    let ancestors =
+        parent_pid(&stat).map_or_else(Vec::new, |parent| harness_ancestors(parent, &environment));
     Ok(select(&environment, &ancestors, terminal, unit))
 }
 
@@ -143,12 +135,7 @@ pub fn select(
         tool_call_id: Option<String>,
         pid: Option<u32>,
     }
-    let mut found: Vec<Found> = HARNESSES
-        .iter()
-        .filter(|declared| match declared.marker_value {
-            Some(value) => text(declared.marker) == Some(value),
-            None => declared.session.and_then(text).is_some() || text(declared.marker).is_some(),
-        })
+    let mut found: Vec<Found> = marked(environment)
         .map(|declared| {
             let harness = Harness::new(declared.harness).expect("declared harness names are valid");
             Found {
@@ -194,21 +181,103 @@ pub fn select(
     evidence
 }
 
-/// The harness processes above `pid`, nearest first, with their IDs.
-pub fn harness_ancestors(mut pid: u32) -> Vec<(u32, Harness)> {
+/// The harnesses whose variables `environment` holds.
+fn marked(
+    environment: &BTreeMap<String, OsString>,
+) -> impl Iterator<Item = &'static HarnessVariables> {
+    let value = |name: &str| environment.get(name).and_then(|value| value.to_str());
+    let present = move |name: &str| value(name).is_some_and(|value| !value.is_empty());
+    HARNESSES
+        .iter()
+        .filter(move |declared| match declared.marker_value {
+            Some(expected) => value(declared.marker) == Some(expected),
+            None => declared.session.is_some_and(present) || present(declared.marker),
+        })
+}
+
+/// The harness variables of a `/proc/<pid>/environ` file.
+fn harness_variables(environ: &[u8]) -> BTreeMap<String, OsString> {
+    environ
+        .split(|byte| *byte == 0)
+        .filter_map(|entry| {
+            let split = entry.iter().position(|byte| *byte == b'=')?;
+            let name = std::str::from_utf8(&entry[..split]).ok()?;
+            HARNESS_VARIABLES.contains(&name).then(|| {
+                (
+                    name.to_owned(),
+                    OsString::from_vec(entry[split + 1..].to_vec()),
+                )
+            })
+        })
+        .collect()
+}
+
+/// One process as the walk up the tree reads it.
+#[derive(Debug, Clone, Default)]
+pub struct Process {
+    pub executable: Option<PathBuf>,
+    pub arguments: Option<Vec<u8>>,
+    /// Its harness variables; `None` when its environment is unreadable.
+    pub environment: Option<BTreeMap<String, OsString>>,
+    pub parent: Option<u32>,
+}
+
+impl Process {
+    /// `/proc/<pid>`, or `None` when the process is gone.
+    pub fn read(pid: u32) -> Option<Self> {
+        let root = PathBuf::from(format!("/proc/{pid}"));
+        let stat = std::fs::read_to_string(root.join("stat")).ok()?;
+        Some(Self {
+            executable: std::fs::read_link(root.join("exe")).ok(),
+            arguments: std::fs::read(root.join("cmdline")).ok(),
+            environment: std::fs::read(root.join("environ"))
+                .ok()
+                .map(|environ| harness_variables(&environ)),
+            parent: parent_pid(&stat),
+        })
+    }
+}
+
+/// The harness processes from `pid` upward, nearest first, with their IDs.
+/// `below` holds the harness variables of the process `pid` started (the
+/// caller).
+pub fn harness_ancestors(pid: u32, below: &BTreeMap<String, OsString>) -> Vec<(u32, Harness)> {
+    harness_chain(pid, below, Process::read)
+}
+
+/// [`harness_ancestors`] over any process table.
+pub fn harness_chain(
+    mut pid: u32,
+    below: &BTreeMap<String, OsString>,
+    process: impl Fn(u32) -> Option<Process>,
+) -> Vec<(u32, Harness)> {
     let mut found = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
+    let mut marked_below: Vec<&str> = marked(below).map(|declared| declared.harness).collect();
     while pid > 1 && seen.insert(pid) {
-        let root = PathBuf::from(format!("/proc/{pid}"));
-        let executable = std::fs::read_link(root.join("exe")).ok();
-        let arguments = std::fs::read(root.join("cmdline")).ok();
-        if let Some(harness) = harness_of(executable.as_deref(), arguments.as_deref()) {
+        let Some(facts) = process(pid) else {
+            break;
+        };
+        let marked_here: Option<Vec<&str>> = facts.environment.as_ref().map(|environment| {
+            marked(environment)
+                .map(|declared| declared.harness)
+                .collect()
+        });
+        let by_environment = marked_here.as_ref().and_then(|here| {
+            marked_below
+                .iter()
+                .find(|harness| !here.contains(harness))
+                .and_then(|harness| Harness::new(*harness))
+        });
+        if let Some(harness) =
+            harness_of(facts.executable.as_deref(), facts.arguments.as_deref()).or(by_environment)
+        {
             found.push((pid, harness));
         }
-        let Some(parent) = std::fs::read_to_string(root.join("stat"))
-            .ok()
-            .and_then(|stat| parent_pid(&stat))
-        else {
+        if let Some(here) = marked_here {
+            marked_below = here;
+        }
+        let Some(parent) = facts.parent else {
             break;
         };
         pid = parent;
@@ -228,7 +297,7 @@ pub fn harness_of(executable: Option<&Path>, arguments: Option<&[u8]>) -> Option
         .and_then(|value| std::str::from_utf8(value).ok())
         .unwrap_or_default();
     let harness = match name {
-        "claude" | "claude-code" => "claude-code",
+        "claude" | "claude-code" | "claude.exe" => "claude-code",
         "codex" => "codex",
         "hermes" => "hermes",
         "gemini" => "gemini-cli",

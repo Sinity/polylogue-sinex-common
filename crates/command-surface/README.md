@@ -358,7 +358,12 @@ authorship`; each product keeps its own stored columns.
   `gather_current` (the calling process) and `gather_peer` (a socket peer,
   from `/proc`) read the supported harnesses' session variables, the nearest
   harness ancestor in the process tree, the controlling terminal and the
-  cgroup unit, and keep nothing else from the environment. The transport
+  cgroup unit, and keep nothing else from the environment. An ancestor is a
+  harness when its executable names one (`claude`, `claude.exe`, `codex`,
+  `hermes`, `gemini`, or the harness's script under an interpreter), or when
+  the processes below it carry a harness's marker variable (`CLAUDECODE`,
+  `CODEX_THREAD_ID`, `HERMES_SESSION_ID`, `GEMINI_CLI=1`) that its own
+  environment lacks; the harness process ID comes from that ancestor. The transport
   adds what only it sees: whether its MCP server serves several sessions,
   and the session an MCP call names in its per-call metadata (`_meta`,
   available to operations as `RequestContext::metadata`). The server
