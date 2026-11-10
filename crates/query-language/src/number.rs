@@ -151,6 +151,20 @@ impl Decimal {
         }
     }
 
+    /// The value times `10^places` when that is a whole number inside
+    /// `i128`; `None` when it would need rounding or is out of range. For
+    /// integral fields (`1.5` milliseconds is refused) and for rates that must
+    /// stay exact.
+    pub fn exact_scaled_i128(&self, places: i64) -> Option<i128> {
+        let fractional = !self.is_zero()
+            && integer_cmp(&add_integer(&self.scale, &places.to_string()), "0") == Ordering::Less;
+        if fractional {
+            None
+        } else {
+            self.scaled_i128(places)
+        }
+    }
+
     fn absolute_cmp(&self, other: &Self) -> Ordering {
         if self.is_zero() || other.is_zero() {
             return (!self.is_zero()).cmp(&!other.is_zero());
