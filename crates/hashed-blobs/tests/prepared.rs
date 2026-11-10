@@ -417,3 +417,54 @@ fn lazy_preparations_keep_the_open_file_count_bounded_for_one_synced_group() {
     assert_eq!(group.metrics.syncs, 1);
     writer.acknowledge(&group).unwrap();
 }
+
+#[test]
+fn an_own_encoding_is_appended_after_reopening_and_a_changed_one_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = b"synthetic own preparation\n".repeat(5_000);
+    let path = dir.path().join("prepared");
+    let temporary = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+    let descriptor = Preparation::new(dir.path())
+        .unwrap()
+        .plain_into(temporary.reopen().unwrap(), input.as_slice(), 3)
+        .unwrap()
+        .descriptor();
+    temporary.persist(&path).unwrap();
+    // Reopened by name, its descriptor kept: appended as prepared.
+    let mut writer = SegmentWriter::open(dir.path(), "segment", 0, &[], 0o600).unwrap();
+    let own = Prepared::from_own_encoding(File::open(&path).unwrap(), descriptor.clone()).unwrap();
+    let group = writer
+        .append_group(std::iter::once(Ok(own)), |_| Ok(None))
+        .unwrap()
+        .wait()
+        .unwrap();
+    writer.acknowledge(&group).unwrap();
+    assert_eq!(
+        Reader::new(dir.path()).read(&group.extents, None).unwrap(),
+        input
+    );
+    // A changed length is refused when adopted.
+    let longer = dir.path().join("longer");
+    std::fs::copy(&path, &longer).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&longer)
+        .unwrap();
+    std::io::Write::write_all(&mut &file, b"x").unwrap();
+    assert!(Prepared::from_own_encoding(File::open(&longer).unwrap(), descriptor.clone()).is_err());
+    // An equal-length change passes adoption and is refused by the append's
+    // encoded digest, with no group returned.
+    let flipped = dir.path().join("flipped");
+    std::fs::copy(&path, &flipped).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&flipped)
+        .unwrap();
+    let first = std::fs::read(&path).unwrap()[0];
+    file.write_all_at(&[first ^ 1], 0).unwrap();
+    let changed = Prepared::from_own_encoding(File::open(&flipped).unwrap(), descriptor).unwrap();
+    let mut writer = SegmentWriter::open(dir.path(), "other", 0, &[], 0o600).unwrap();
+    assert!(writer
+        .append_group(std::iter::once(Ok(changed)), |_| Ok(None))
+        .is_err());
+}
