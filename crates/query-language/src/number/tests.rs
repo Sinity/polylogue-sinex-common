@@ -78,17 +78,36 @@ fn canonical_scale_crosses_machine_integer_limits_without_changing_value() {
     );
 }
 
+fn scaled(text: &str, places: i64) -> Option<i128> {
+    Decimal::parse(text)?.scaled_i128(places)
+}
+
 #[test]
-fn scaled_integer_rounding_checks_exact_signed_boundaries_and_half_ties() {
+fn scaled_matches_hand_values_and_refuses_out_of_range() {
     for (text, places, expected) in [
-        ("9223372036.854775807", 9, Some(i64::MAX)),
-        ("-9223372036.854775808", 9, Some(i64::MIN)),
-        ("9223372036.85477580749", 9, Some(i64::MAX)),
-        ("-9223372036.85477580849", 9, Some(i64::MIN)),
-        ("9223372036.8547758075", 9, None),
-        ("-9223372036.8547758085", 9, None),
-        ("9223372036.854775808", 9, None),
-        ("-9223372036.854775809", 9, None),
+        ("0.1", 9, Some(100_000_000)),
+        ("1e300", 9, None),
+        ("-1e300", 9, None),
+        ("12345678.123456789", 9, Some(12_345_678_123_456_789)),
+        (
+            "170141183460469231731687303715884105727",
+            0,
+            Some(i128::MAX),
+        ),
+        (
+            "-170141183460469231731687303715884105728",
+            0,
+            Some(i128::MIN),
+        ),
+        (
+            "170141183460469231731687303715884105727.4",
+            0,
+            Some(i128::MAX),
+        ),
+        ("170141183460469231731687303715884105727.5", 0, None),
+        ("170141183460469231731687303715884105728", 0, None),
+        ("-170141183460469231731687303715884105728.5", 0, None),
+        ("-170141183460469231731687303715884105729", 0, None),
         ("9007199.254740993", 9, Some(9_007_199_254_740_993)),
         (".0000000005", 9, Some(1)),
         ("-.0000000005", 9, Some(-1)),
@@ -97,6 +116,7 @@ fn scaled_integer_rounding_checks_exact_signed_boundaries_and_half_ties() {
         ("+12300e-3", 1, Some(123)),
         ("15", -1, Some(2)),
         ("-15", -1, Some(-2)),
+        ("1.50", 2, Some(150)),
         ("1e100000000000000000000000", 9, None),
         ("-1e100000000000000000000000", 9, None),
         ("1e-100000000000000000000000", 9, Some(0)),
@@ -107,12 +127,20 @@ fn scaled_integer_rounding_checks_exact_signed_boundaries_and_half_ties() {
         ("inf", 9, None),
         ("1e", 9, None),
     ] {
-        assert_eq!(
-            round_scaled_i64(text, places),
-            expected,
-            "{text} * 10^{places}"
-        );
+        assert_eq!(scaled(text, places), expected, "{text} * 10^{places}");
     }
+}
+
+#[test]
+fn decimals_compare_by_value_whatever_the_spelling() {
+    let parse = |text| Decimal::parse(text).unwrap();
+    assert_eq!(parse("1.50"), parse("15e-1"));
+    assert_eq!(parse("-0.0"), parse("0"));
+    assert!(!parse("-0").is_negative());
+    assert!(parse("-1e-9") < parse("0"));
+    assert!(parse("1731000000.123456789") > parse("1731000000.123456788"));
+    assert!(parse("1e3").is_integer());
+    assert!(!parse("1.5").is_integer());
 }
 
 proptest! {
@@ -124,6 +152,6 @@ proptest! {
         let magnitude = i128::from(numerator).abs();
         let rounded = (magnitude + denominator / 2) / denominator;
         let expected = if numerator < 0 { -rounded } else { rounded };
-        prop_assert_eq!(round_scaled_i64(&format!("{numerator}e-{scale}"), 0), Some(expected as i64));
+        prop_assert_eq!(scaled(&format!("{numerator}e-{scale}"), 0), Some(expected));
     }
 }

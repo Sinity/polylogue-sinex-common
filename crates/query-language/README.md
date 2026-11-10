@@ -209,6 +209,13 @@ Four operators, each with one meaning in both products:
   on their exact decimal text, with no machine-integer or float range and no
   exponent cap; the bound value keeps its original spelling. A product's
   store reports its own range errors.
+- **One decimal type.** `number::Decimal` is the only decimal arithmetic in
+  either product: query literals, JSON numbers and source timestamps parse
+  into it, compare by value (`1.50` equals `15e-1`), and convert to integers
+  with `scaled_i128(places)` (times `10^places`, half ties rounded away from
+  zero, `None` outside `i128`). A product then narrows to its own width with
+  `try_from`, so an out-of-range amount such as `1e300` dollars is refused,
+  never saturated. Money is nano-USD at 9 places.
 
 ## Transforms
 
