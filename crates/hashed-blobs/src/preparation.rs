@@ -63,6 +63,28 @@ impl Prepared {
         let descriptor = EncodedBlob::inspect(&file, limits)?;
         Self::from_encoded(file, descriptor, key, limits)
     }
+    /// Adopt an encoding this owner prepared and kept private since, reopened
+    /// from where it put it, with the descriptor its preparation returned.
+    /// Only the file's length is checked here: the segment writer checks the
+    /// whole encoded digest while appending and refuses a changed file, and
+    /// the decoded identity is the preparation's own. An encoding from
+    /// anywhere else goes through [`Prepared::from_encoded`].
+    pub fn from_own_encoding(file: File, descriptor: EncodedBlob) -> Result<Self> {
+        if file.metadata()?.len() != descriptor.stored_len {
+            return Err(Error::Refused(
+                "encoded file length differs from its descriptor".into(),
+            ));
+        }
+        Ok(Self {
+            file,
+            hash: descriptor.hash,
+            decoded_len: descriptor.decoded_len,
+            stored_len: descriptor.stored_len,
+            kind: descriptor.kind,
+            index_hash: descriptor.index_hash,
+            encoded_hash: descriptor.encoded_hash,
+        })
+    }
     /// Adopt an immutable owned encoding only after complete byte and decoded identity checks.
     /// No decoded bytes are written. The file is not copied or recompressed.
     pub fn from_encoded(
