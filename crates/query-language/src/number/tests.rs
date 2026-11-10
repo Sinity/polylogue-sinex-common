@@ -132,6 +132,18 @@ fn scaled_matches_hand_values_and_refuses_out_of_range() {
 }
 
 #[test]
+fn exact_scaling_refuses_what_would_need_rounding() {
+    let exact = |text: &str, places| Decimal::parse(text)?.exact_scaled_i128(places);
+    assert_eq!(exact("0.01875", 6), Some(18_750));
+    assert_eq!(exact("1.2300", 3), Some(1_230));
+    assert_eq!(exact("1e3", 0), Some(1_000));
+    assert_eq!(exact("0e-99", 0), Some(0));
+    assert_eq!(exact("1.5", 0), None);
+    assert_eq!(exact("0.0000000001", 9), None);
+    assert_eq!(exact("1e300", 9), None);
+}
+
+#[test]
 fn decimals_compare_by_value_whatever_the_spelling() {
     let parse = |text| Decimal::parse(text).unwrap();
     assert_eq!(parse("1.50"), parse("15e-1"));
