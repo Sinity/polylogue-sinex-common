@@ -1,4 +1,7 @@
-//! Exact decimal spellings for identity and scalar key comparison.
+//! Exact decimals: validation, identity keys, comparison and scaling to
+//! integers. Both products convert decimal text (query literals, JSON numbers
+//! under `arbitrary_precision`, source timestamps) through [`Decimal`] and no
+//! other decimal code.
 use std::cmp::Ordering;
 /// A finite decimal lexeme, including decimal fractions and scientific notation.
 /// Validation does not convert to a machine integer or float and does not bound
@@ -10,57 +13,7 @@ pub fn is_decimal(text: &str) -> bool {
 /// Whether an exact decimal lexeme represents an integer. Equivalent integral
 /// spellings such as `1.0` and `1e3` are accepted without a machine-width cap.
 pub fn is_integer(text: &str) -> bool {
-    Decimal::parse(text).is_some_and(|value| !value.scale.starts_with('-'))
-}
-
-/// Multiply an exact decimal by `10^places`, then round to the nearest i64.
-/// Half ties round away from zero. The target range is checked after rounding;
-/// an invalid decimal or an out-of-range rounded result returns `None`.
-/// Work and allocation depend on the input spelling, never its exponent value.
-/// This physical conversion does not change decimal identity or comparison.
-pub fn round_scaled_i64(text: &str, places: i64) -> Option<i64> {
-    let value = Decimal::parse(text)?;
-    if value.digits == "0" {
-        return Some(0);
-    }
-    let scale = add_integer(&value.scale, &places.to_string());
-    let width = add_integer(&scale, &value.digits.len().to_string());
-    let magnitude = match integer_cmp(&width, "0") {
-        Ordering::Less => 0,
-        Ordering::Equal => u64::from(value.digits.as_bytes()[0] >= b'5'),
-        Ordering::Greater => {
-            if integer_cmp(&width, "19") == Ordering::Greater {
-                return None;
-            }
-            let width: usize = width.parse().ok()?;
-            let mut integer = 0u64;
-            for digit in value
-                .digits
-                .bytes()
-                .chain(std::iter::repeat(b'0'))
-                .take(width)
-            {
-                integer = integer
-                    .checked_mul(10)?
-                    .checked_add(u64::from(digit - b'0'))?;
-            }
-            if value
-                .digits
-                .as_bytes()
-                .get(width)
-                .is_some_and(|digit| *digit >= b'5')
-            {
-                integer = integer.checked_add(1)?;
-            }
-            integer
-        }
-    };
-    let signed = if value.negative {
-        -i128::from(magnitude)
-    } else {
-        i128::from(magnitude)
-    };
-    signed.try_into().ok()
+    Decimal::parse(text).is_some_and(|value| value.is_integer())
 }
 
 // One lexical rule is shared by validation, identity and key comparison. The
@@ -90,23 +43,28 @@ fn parts(text: &str) -> Option<(bool, &str, &str, &str)> {
     Some((negative, whole, fraction, exponent))
 }
 
-struct Decimal {
+/// An exact finite decimal: the one decimal type of both products. It holds
+/// the significant digits and a symbolic power-of-ten scale, so parsing,
+/// comparison and scaling cost what the spelling costs, never what the
+/// exponent's value would. Equal values compare equal however they are
+/// spelled (`1.50`, `15e-1`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Decimal {
     negative: bool,
     digits: String,
     scale: String,
 }
 impl Decimal {
-    fn parse(text: &str) -> Option<Self> {
+    /// Parse a decimal lexeme: an optional sign, digits with an optional
+    /// fraction, and an optional exponent. `NaN`, infinities, whitespace and
+    /// separators are refused.
+    pub fn parse(text: &str) -> Option<Self> {
         let (negative, whole, fraction, exponent) = parts(text)?;
         let mut digits = format!("{whole}{fraction}")
             .trim_start_matches('0')
             .to_string();
         if digits.is_empty() {
-            return Some(Self {
-                negative: false,
-                digits: "0".into(),
-                scale: "0".into(),
-            });
+            return Some(Self::zero());
         }
         let trailing = digits
             .bytes()
@@ -122,9 +80,80 @@ impl Decimal {
             scale,
         })
     }
+
+    fn zero() -> Self {
+        Self {
+            negative: false,
+            digits: "0".into(),
+            scale: "0".into(),
+        }
+    }
+
+    fn is_zero(&self) -> bool {
+        self.digits == "0"
+    }
+
+    /// Whether the value is below zero. Zero is never negative, however spelled.
+    pub fn is_negative(&self) -> bool {
+        self.negative
+    }
+
+    /// Whether the value is a whole number (`1.0` and `1e3` are).
+    pub fn is_integer(&self) -> bool {
+        !self.scale.starts_with('-')
+    }
+
+    /// The value times `10^places`, rounded to the nearest integer with half
+    /// ties away from zero. `None` when the rounded result is outside `i128`.
+    /// A product converts the result to its own column width with `try_from`,
+    /// so an out-of-range value is refused rather than saturated.
+    pub fn scaled_i128(&self, places: i64) -> Option<i128> {
+        if self.is_zero() {
+            return Some(0);
+        }
+        let scale = add_integer(&self.scale, &places.to_string());
+        // The count of digits left of the decimal point after scaling.
+        let width = add_integer(&scale, &self.digits.len().to_string());
+        let magnitude = match integer_cmp(&width, "0") {
+            Ordering::Less => 0,
+            Ordering::Equal => u128::from(self.digits.as_bytes()[0] >= b'5'),
+            Ordering::Greater => {
+                if integer_cmp(&width, "39") == Ordering::Greater {
+                    return None;
+                }
+                let width: usize = width.parse().ok()?;
+                let mut integer = 0u128;
+                for digit in self
+                    .digits
+                    .bytes()
+                    .chain(std::iter::repeat(b'0'))
+                    .take(width)
+                {
+                    integer = integer
+                        .checked_mul(10)?
+                        .checked_add(u128::from(digit - b'0'))?;
+                }
+                if self
+                    .digits
+                    .as_bytes()
+                    .get(width)
+                    .is_some_and(|digit| *digit >= b'5')
+                {
+                    integer = integer.checked_add(1)?;
+                }
+                integer
+            }
+        };
+        if self.negative {
+            0i128.checked_sub_unsigned(magnitude)
+        } else {
+            i128::try_from(magnitude).ok()
+        }
+    }
+
     fn absolute_cmp(&self, other: &Self) -> Ordering {
-        if self.digits == "0" || other.digits == "0" {
-            return (self.digits != "0").cmp(&(other.digits != "0"));
+        if self.is_zero() || other.is_zero() {
+            return (!self.is_zero()).cmp(&!other.is_zero());
         }
         let magnitude = add_integer(&self.scale, &self.digits.len().to_string());
         let other_magnitude = add_integer(&other.scale, &other.digits.len().to_string());
@@ -237,7 +266,7 @@ fn subtract_digits(left: &str, right: &str) -> String {
 /// Exponents remain symbolic, without allocating in proportion to the exponent.
 pub(crate) fn canonical(text: &str) -> Option<String> {
     let value = Decimal::parse(text)?;
-    if value.digits == "0" {
+    if value.is_zero() {
         return Some("0".into());
     }
     Some(format!(
@@ -248,16 +277,25 @@ pub(crate) fn canonical(text: &str) -> Option<String> {
     ))
 }
 pub(crate) fn compare(left: &str, right: &str) -> Option<Ordering> {
-    let left = Decimal::parse(left)?;
-    let right = Decimal::parse(right)?;
-    Some(match (left.negative, right.negative) {
-        (true, false) => Ordering::Less,
-        (false, true) => Ordering::Greater,
-        (negative, _) => {
-            let order = left.absolute_cmp(&right);
-            if negative { order.reverse() } else { order }
+    Some(Decimal::parse(left)?.cmp(&Decimal::parse(right)?))
+}
+
+impl Ord for Decimal {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self.negative, other.negative) {
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            (negative, _) => {
+                let order = self.absolute_cmp(other);
+                if negative { order.reverse() } else { order }
+            }
         }
-    })
+    }
+}
+impl PartialOrd for Decimal {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 #[cfg(test)]
