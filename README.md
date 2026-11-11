@@ -15,7 +15,7 @@ Rust crates and development tooling shared by
 | [`authored`](crates/authored/README.md) | the authored-record header, currency by the descendant rule, stale-base checks, atomic requests, uniqueness slots, order keys and the shared history generator |
 | [`ranking`](crates/ranking/README.md) | the Plackett–Luce fit of judgments with intervals, judge sets, components and warm starts, and next-set selection under three rules |
 | [`references`](crates/references/README.md) | the reference grammar (global and local forms), selectors, locators with their versioned canonicalizer and catalog patterns, URL patterns, the route catalog |
-| [`signals`](crates/signals/README.md) | the signal rule schema, evaluator, route function and host policy, outcomes, follow, wait and backtest, desktop notification state, and the Inbox, Why and Signals views |
+| [`signals`](crates/signals/README.md) | the signal rule schema, evaluator, route function and host policy, outcomes, follow, wait and backtest, and desktop notification state |
 | [`signal-delivery`](crates/signal-delivery/README.md) | the one task that shows notices on the desktop or sends them to the away command |
 | [`devkit`](crates/devkit/README.md), [`devkit-macros`](crates/devkit-macros) | the core of each product's `xtask`: runs and their history, changed-package selection, test databases and NATS, fixtures, bench, coverage, fuzz and VM runners |
 

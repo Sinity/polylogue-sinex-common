@@ -19,12 +19,15 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
+      # The prebuilt cargo-fuzz is a musl binary and builds for its own
+      # target unless told otherwise; AddressSanitizer needs the dynamically
+      # linked gnu target, whose standard library the nightly toolchain has.
       - name: Fuzz for 45 minutes from the seeds
         working-directory: fuzz
         run: |
           mkdir -p corpus/query
           cp seeds/query/* corpus/query/
-          cargo +nightly fuzz run query corpus/query -- -max_total_time=2700 -timeout=30
+          cargo +nightly fuzz run --target x86_64-unknown-linux-gnu query corpus/query -- -max_total_time=2700 -timeout=30
       - name: Keep any crashing input
         if: failure()
         uses: actions/upload-artifact@v4
