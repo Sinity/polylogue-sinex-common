@@ -396,6 +396,7 @@ async fn timeout_after_commit_replays_the_atomic_result_without_applying_twice()
     let timed_out = owner.await;
     assert_eq!(kind(&timed_out), FailureKind::Timeout);
     let error = timed_out.failure().unwrap();
+    assert_eq!(error.code.as_deref(), Some(crate::DEADLINE_EXCEEDED));
     assert!(error.message.contains("rows scanned unknown"));
     assert!(!error.message.contains("after 0 rows"));
     assert_eq!(store.active.load(Ordering::SeqCst), 0);
