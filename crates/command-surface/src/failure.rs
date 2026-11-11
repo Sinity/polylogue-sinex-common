@@ -126,6 +126,11 @@ pub enum Suggestion {
     Request(RunnableRequest),
 }
 
+/// The code of a failure the operation table itself answers when a
+/// request's read deadline passes. Every table registers it as
+/// [`FailureKind::Timeout`], so products and clients name the same reason.
+pub const DEADLINE_EXCEEDED: &str = "deadline_exceeded";
+
 /// A typed failure. The structured parts a caller acts on (the suggestion, the
 /// candidates, the caret diagnostic) sit behind one box, so a `Result`
 /// carrying a failure stays small; on the wire they are ordinary fields.

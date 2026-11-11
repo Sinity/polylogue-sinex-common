@@ -905,7 +905,10 @@ impl OperationDeclarations {
                 }),
                 renderers: vec![],
                 deadlines,
-                failure_codes: BTreeMap::new(),
+                failure_codes: BTreeMap::from([(
+                    crate::DEADLINE_EXCEEDED.to_owned(),
+                    FailureKind::Timeout,
+                )]),
                 default_operation: None,
             },
         }
@@ -1760,6 +1763,7 @@ fn timeout_failure(operation: &str, progress: &Mutex<Progress>) -> Failure {
         FailureKind::Timeout,
         format!("deadline passed during {stage} for {operation} {scanned}"),
     )
+    .with_code(crate::DEADLINE_EXCEEDED)
     .with_hint("narrow the request or lift its deadline")
 }
 
