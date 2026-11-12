@@ -91,6 +91,44 @@ fn words(line: &str) -> Vec<String> {
 }
 
 #[test]
+fn structured_mcp_calls_preserve_the_canonical_request_options() {
+    let table = table();
+    for deadline in [
+        Deadline::Default,
+        Deadline::None,
+        Deadline::Milliseconds(1234),
+    ] {
+        for budget_tokens in [
+            TokenBudget::Default,
+            TokenBudget::Unlimited,
+            TokenBudget::Tokens(57),
+        ] {
+            let request = RunnableRequest {
+                deadline,
+                budget_tokens,
+                cursor: Some("opaque +/?# λ".into()),
+                fresh: true,
+                format: Format::Json,
+                ..RunnableRequest::new("read", json!({"target":"session-1"}), "accepted-child")
+            };
+            fn require_eq(_: &impl Eq) {}
+            require_eq(&request);
+            let mut arguments = serde_json::to_value(&request).unwrap();
+            // The tool has one operation, which its declaration supplies.
+            arguments.as_object_mut().unwrap().remove("operation");
+            assert_eq!(
+                table.mcp_call(&request).unwrap(),
+                json!({"name":"example_read", "arguments":arguments})
+            );
+            let text = table.follow_up(Via::Mcp, &request).unwrap();
+            let (name, body) = text.split_once(' ').unwrap();
+            assert_eq!(name, "example_read");
+            assert_eq!(serde_json::from_str::<Value>(body).unwrap(), arguments);
+        }
+    }
+}
+
+#[test]
 fn positional_words_flags_and_repeats_fill_the_request() {
     let table = table();
     let parsed = table
