@@ -3,8 +3,6 @@
 //! numbered `<request>.<n>`, uniqueness slots, and order keys. Every function
 //! is pure over links the product supplies; storage stays in each product.
 pub mod currency;
-#[cfg(feature = "generator")]
-pub mod generator;
 mod history;
 pub mod order;
 mod record;

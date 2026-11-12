@@ -16,7 +16,7 @@ The crate owns:
   together or not at all, with idempotent retries;
 - **uniqueness slots**: one function for every kind's cardinality;
 - **order keys** for ordered records;
-- the **shared history generator** that both products' property tests use.
+- the in-memory history that both products compare their stored currency with.
 
 Each product keeps its own storage and everything about its records that is
 not a rule above: Polylogue's `link` table and its stored currency index,
@@ -183,12 +183,5 @@ which only imports can produce, are ordered by record root (`SortKey`).
 `OrderKey::evenly(n)` gives `n` evenly spread keys for building a list at
 once, such as converting another ordering.
 
-## The shared history generator
-
-With the `generator` feature, `generator::history(n)` is a proptest strategy
-for histories of up to `n` records: new records, revisions, forks, conflict
-resolutions, withdrawals of revisions and of roots, and withdrawals of
-withdrawals, each naming only earlier records. `History` holds records in
-memory with the lookups above; `History::states` is the reference each
-product checks its stored currency against, after replaying a generated
-history in any order.
+The [`authored-generator`](../authored-generator/README.md) development crate
+provides shared generated histories for the products' storage conformance tests.

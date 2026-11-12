@@ -6,8 +6,7 @@
 //! Records are produced in an order in which every link names an earlier
 //! record, as a write path produces them; a test that wants another arrival
 //! order shuffles [`History::records`]. Withdrawals never form a cycle.
-use crate::record::{Header, Revision, Target};
-use crate::{History, Links};
+use authored::{Header, History, Links, Revision, Target};
 use proptest::prelude::*;
 use std::collections::BTreeSet;
 

@@ -1,0 +1,18 @@
+[package]
+name = "authored-generator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Generated authored-record histories for shared conformance tests"
+autotests = false
+
+[dependencies]
+authored = { path = "../authored" }
+proptest = "1"
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
