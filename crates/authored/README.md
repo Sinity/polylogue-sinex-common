@@ -36,9 +36,13 @@ projection.
 | `rev` | this revision's ID; equals `root` for the first revision |
 | `kind`, `key`, `value` | what the record says; the product declares its kinds and their value shapes |
 | `author`, `via` | who wrote it and the channel it arrived on, computed by the product from the authenticated caller; no request supplies them |
-| `at` | the writer's clock in Unix milliseconds, for display and as-of reads; currency never reads it |
+| `at` | recorded authored time in Unix milliseconds, or unknown (`None`); new requests use the writer's clock. Currency never reads it |
 | `revises` | the revisions this one revises: of the same record, or of several records holding one uniqueness slot when the revision resolves their conflict |
 | `withdraws` | the revisions or roots this record withdraws |
+
+Unknown authored time stays unknown when a record is restored; neither an epoch
+value nor its import time substitutes for the missing original time. Recorded
+times retain their numeric wire values, including a genuinely recorded epoch.
 
 A revision is written `<root>@<rev>` (`Revision`), and a stored reference
 `<type>:<root>@<rev>`: `assertion:<root>@<rev>` in Polylogue,
