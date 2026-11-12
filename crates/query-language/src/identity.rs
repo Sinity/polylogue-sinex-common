@@ -170,10 +170,10 @@ fn normalize(value: &mut Value) {
                             *values = kept;
                         }
                     }
-                    if matches!(kind.as_str(), "and" | "or")
+                    // Even a one-term OR changes default binding and match exposure.
+                    if kind == "and"
                         && let Some(Value::Array(conditions)) = fields.get("conditions")
                         && conditions.len() == 1
-                        && !(kind == "or" && order_bearing(&conditions[0]))
                         && let Some(inner) = conditions[0].get("kind")
                     {
                         let inner = crate::depth::json::clone(inner);
