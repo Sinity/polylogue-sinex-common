@@ -14,6 +14,42 @@ fn roundtrip(text: &str, catalog: &Catalog) {
     );
     assert_eq!(rendered, format_query(&parsed, catalog).unwrap());
 }
+
+#[test]
+fn repeated_field_disjunctions_keep_their_default_binding_boundary() {
+    let catalog = support::polylogue();
+    let leaf = parse("messages where active:false", &catalog).unwrap();
+    let leaf_id =
+        query_language::identity::question_id(&leaf, &catalog, &Default::default()).unwrap();
+    let mut previous_id = None;
+    for text in [
+        "messages where (active:false OR active:false)",
+        "messages where (active:false OR (active:false OR active:false))",
+    ] {
+        let query = parse(text, &catalog).unwrap();
+        let id =
+            query_language::identity::question_id(&query, &catalog, &Default::default()).unwrap();
+        assert_ne!(id, leaf_id, "{text}");
+        if let Some(previous) = previous_id {
+            assert_eq!(id, previous, "{text}");
+        }
+        previous_id = Some(id);
+        let rendered = format_query(&query, &catalog).unwrap();
+        let reparsed = parse(&rendered, &catalog).unwrap();
+        let bound = query_language::bind::bind(&query, &catalog).unwrap();
+        for query in [&reparsed, bound.query()] {
+            let Source::Unit {
+                condition: Some(condition),
+                ..
+            } = &query.source
+            else {
+                panic!("expected a unit condition for {text}");
+            };
+            assert!(matches!(condition.kind, ConditionKind::Or { .. }), "{text}");
+        }
+        roundtrip(text, &catalog);
+    }
+}
 /// Formatting a parsed question reparses to the
 /// same normal form, and formatting again is stable.
 #[test]
