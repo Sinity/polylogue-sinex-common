@@ -347,8 +347,8 @@ deep-work deferral are changeable settings of the deliverer's product.
 `author`, `via` and, for shipped rules, `shipped`, and set `live` when the
 query reads current state. `Rule::validate` checks deployment target and
 command names; `effective_rules` overlays authored rules on shipped defaults
-by product and name. `FIELDS` is the authored field table for help and
-schema rendering. `fires` serializes as `"on_new"`,
+by product and name. `Rule` derives JSON Schema for help and schema
+rendering. `fires` serializes as `"on_new"`,
 `{"on_change":{"what":"membership","k":null}}`,
 `{"on_threshold":{"value":10,"compare":">"}}` or `{"at":{"minute":600}}`.
 Durations accept milliseconds or strings such as `20m`; quiet hours are

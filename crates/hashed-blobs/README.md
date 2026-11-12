@@ -1,10 +1,9 @@
 # hashed-blobs
 
 Content-addressed bytes for Polylogue and Sinex: blobs named by their hash,
-stored in append-only segments, read back with their hashes checked, and
-directory captures read member by member from PAX tar blobs. Both products
-store every raw byte they keep through this crate, so the byte mechanics are
-written once.
+stored in append-only segments and read back with their hashes checked. Both
+products store every raw byte they keep through this crate, so the byte
+mechanics are written once.
 
 The crate holds no policy. When a group commits, which rows cite which
 extents, when bytes may be removed, which key seals what, and how long
@@ -125,15 +124,6 @@ chunked stream is a list of ordinary blobs.
 - Reads never block the writer: committed extents never move, so a reader
   needs no lock beyond the segment file it holds open.
 
-## PAX member access
-
-A directory capture is stored as one blob holding a POSIX PAX tar stream:
-members keep their raw byte file names (no conversion to UTF-8), mode, owner,
-nanosecond times, extended attributes, POSIX ACLs and sparse-file maps in PAX
-headers. The crate reads the member table of such a blob and returns any
-member's metadata and bytes as a range of the blob, with sparse holes read as
-zeros. A product anchors records at member offsets in the tar stream.
-
 ## Checking stored bytes
 
 There is no scheduled check. Reads check what they read, and one on-demand
@@ -209,14 +199,6 @@ plain names. Sealed frames are checked by their ciphertext digests without
 requiring keys. It returns all mismatches and opens files read only.
 `scan_checked` additionally accepts cancellation. Recorded punched extents
 are excluded from the live scan list by the product.
-
-`PaxArchive::open(reader)` indexes a tar stream without reading dense member
-bodies. `members` retains raw byte names and link names, mode, ownership,
-nanosecond timestamps, all PAX fields, xattrs, ACLs and GNU sparse maps
-(versions 0.0, 0.1 and 1.0). `read_range` and `read_range_into` expose a
-member's logical bytes, including zero-filled holes. Link entries retain
-their own payload and metadata; extraction and link policy belong to the
-product. `header_offset` and `data_offset` anchor original stream bytes.
 
 `Preparation::chunked(reader, level, ChunkSizes, key, lookup)` plans a stream
 as chunks, reading it once with at most twice the maximum chunk length in

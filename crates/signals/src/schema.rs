@@ -397,36 +397,6 @@ impl ActiveRule {
     }
 }
 
-/// The complete authored field table, used by product help and schema renderers.
-pub const FIELDS: &[(&str, &str)] = &[
-    ("name", "display label, unique per product"),
-    ("query", "watched query or saved name"),
-    ("fires", "on_new, on_change, on_threshold or at"),
-    ("for", "continuous matching duration"),
-    (
-        "min_change",
-        "minimum joins and leaves before a change report",
-    ),
-    ("deliver", "notice, value or action"),
-    ("target", "configured value target"),
-    ("command", "configured action command"),
-    (
-        "interrupt",
-        "desktop interruption, false by default for every author",
-    ),
-    ("quiet_hours", "local interval holding interrupts"),
-    (
-        "rate_limit",
-        "handoffs per window; excess goes to next brief",
-    ),
-    ("scope", "brief routing scope"),
-    (
-        "to",
-        "recipients besides the operator's inbox: session:REF, @alias or role:NAME",
-    ),
-    ("enabled", "whether this revision runs"),
-];
-
 /// Authored revisions replace shipped defaults by name, including disabled
 /// revisions; withdrawing an authored revision restores its shipped default.
 pub fn effective_rules(
