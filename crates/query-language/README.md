@@ -187,8 +187,9 @@ Four operators, each with one meaning in both products:
   false: it satisfies neither the comparison nor its `NOT`. Unknown is never
   read as zero or empty.
 - **Defaults bind once.** A unit's default filters apply at binding; after
-  that, every condition only narrows. A condition on a defaulted field, or
-  `F:*`, drops that default. A reference used as a condition means "this row"
+  that, every condition only narrows. A top-level AND condition on a defaulted
+  field, or `F:*`, drops that default. A field under OR keeps the default,
+  including an OR of repeated identical terms. A reference used as a condition means "this row"
   and drops the defaults for its own match.
 - **Filters compose.** Successive filters equal their conjunction.
 - **Grouped rows are a relation.** After `group by`, `where`, `sort`,

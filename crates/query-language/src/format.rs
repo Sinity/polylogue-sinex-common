@@ -171,12 +171,9 @@ impl Renderer<'_> {
                     terms.dedup_by(|a, b| {
                         a.0 == b.0 && (!matches!(condition.kind, ConditionKind::And { .. }) || !a.1)
                     });
-                    // A one-term OR still suppresses match exposure. The
-                    // surface's binary OR spells that wrapper with the term twice.
-                    if matches!(condition.kind, ConditionKind::Or { .. })
-                        && terms.len() == 1
-                        && terms[0].1
-                    {
+                    // OR keeps fields below the default-binding boundary and
+                    // suppresses match exposure. Binary syntax repeats its sole term.
+                    if matches!(condition.kind, ConditionKind::Or { .. }) && terms.len() == 1 {
                         terms.push(terms[0].clone());
                     }
                     format!(
