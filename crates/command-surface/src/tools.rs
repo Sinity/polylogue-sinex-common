@@ -219,7 +219,7 @@ impl Forms {
         format!("{}_{tool}", self.product)
     }
     /// The call that runs `request` on the tool its row belongs to.
-    fn tool_call(&self, request: &RunnableRequest) -> Option<String> {
+    fn tool_call(&self, request: &RunnableRequest) -> Option<(String, Value)> {
         let description = self.description(&request.operation)?;
         let tool = description.spec.tool()?;
         let several = self
@@ -261,14 +261,15 @@ impl Forms {
         if request.format == Format::Json {
             call.insert("format".into(), "json".into());
         }
-        Some(format!("{} {}", self.tool_name(tool), Value::Object(call)))
+        Some((self.tool_name(tool), Value::Object(call)))
     }
     /// A surface-ready call; absence never falls back to a different surface.
     pub(crate) fn follow_up(&self, via: Via, request: &RunnableRequest) -> Result<String, Failure> {
         if via == Via::Mcp {
-            return self
+            let (name, arguments) = self
                 .tool_call(request)
-                .ok_or_else(|| bad_request(format!("{} has no MCP surface", request.operation)));
+                .ok_or_else(|| bad_request(format!("{} has no MCP surface", request.operation)))?;
+            return Ok(format!("{name} {arguments}"));
         }
         self.cli_command(request)
     }
@@ -419,6 +420,14 @@ impl OperationDeclarations {
     /// when they can hold every field, else with `--request JSON`.
     pub fn cli_command(&self, request: &RunnableRequest) -> Result<String, Failure> {
         self.forms().cli_command(request)
+    }
+    /// Structured MCP `tools/call` parameters for the request's declared tool.
+    pub fn mcp_call(&self, request: &RunnableRequest) -> Result<Value, Failure> {
+        let (name, arguments) = self
+            .forms()
+            .tool_call(request)
+            .ok_or_else(|| bad_request(format!("{} has no MCP surface", request.operation)))?;
+        Ok(json!({ "name": name, "arguments": arguments }))
     }
     /// A follow-up as the surface of `via` writes it.
     pub fn follow_up(&self, via: Via, request: &RunnableRequest) -> Result<String, Failure> {

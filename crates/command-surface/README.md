@@ -81,6 +81,9 @@ execution remains subject to product authentication and access policy.
 `listed` controls human help/completion visibility, not transport access.
 `follow_up` fails when its requested ready-call surface is absent; MCP never
 falls back to a CLI invocation. Answer footers display that absence explicitly.
+`mcp_call` returns structured `tools/call` parameters from that same request
+and tool declaration. MCP text formatting uses the same projection; callers
+never need to parse a displayed command to execute the request.
 
 `OperationTable::new(declarations)` binds execution separately.
 `bind(name, operation)` and `bind_stream(name, stream)` require an existing

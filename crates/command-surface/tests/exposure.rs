@@ -302,6 +302,12 @@ fn absent_cli_and_mcp_are_capabilities_while_listed_only_controls_visibility() {
     assert!(table.follow_up(Via::Cli, &request("mcp")).is_err());
     assert!(table.follow_up(Via::Mcp, &request("endpoint")).is_err());
     assert!(table.follow_up(Via::Mcp, &request("cli")).is_err());
+    assert!(table.mcp_call(&request("endpoint")).is_err());
+    assert!(table.mcp_call(&request("cli")).is_err());
+    assert_eq!(
+        table.mcp_call(&request("mcp")).unwrap()["arguments"]["operation"],
+        "mcp"
+    );
     assert!(
         table
             .follow_up(Via::Mcp, &request("mcp"))
