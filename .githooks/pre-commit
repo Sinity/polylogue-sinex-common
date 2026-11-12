@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 git diff --cached --check
-formatter=(nix develop --command rustfmt)
-if [[ -n "${IN_NIX_SHELL:-}" ]] && command -v rustfmt >/dev/null; then
-    formatter=(rustfmt)
+if git diff --cached --quiet --diff-filter=ACMR -- '*.rs'; then
+    exit 0
+fi
+# Enter once for the staged set; formatting needs no compiler artifact cache.
+if [[ -z "${IN_NIX_SHELL:-}" ]] || ! command -v rustfmt >/dev/null; then
+    export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}"
+    exec nix develop --command bash "$0" "$@"
 fi
 # The edition of the package owning a path: its own `edition = "…"`, or the
 # workspace's for `edition.workspace = true` and files outside any package.
@@ -23,6 +27,6 @@ edition_of() {
 while IFS= read -r -d '' path; do
     # Format the staged blob, including when the worktree has later edits.
     # rustfmt --check on stdin does not report a formatting difference.
-    git show ":$path" | "${formatter[@]}" --edition "$(edition_of "$path")" --emit stdout |
+    git show ":$path" | rustfmt --edition "$(edition_of "$path")" --emit stdout |
         diff -u --label "staged:$path" --label "formatted:$path" <(git show ":$path") -
 done < <(git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs')

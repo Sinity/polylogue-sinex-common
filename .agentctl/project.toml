@@ -48,10 +48,10 @@ cache = "none"
 unit_properties = ["MemoryHigh=8G"]
 
 [operations.focused]
-description = "Selected shared-crate tests in the normal development queue"
+description = "Selected shared-crate tests in the source-check queue"
 exec = ["cargo", "xtask", "test", "--locked"]
 arguments = "required"
-pool = "normal"
+pool = "compile"
 result = "exit"
 timeout_seconds = 1800
 scratch = "tmpfs"
