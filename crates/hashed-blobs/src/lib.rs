@@ -10,8 +10,6 @@ pub use chunking::{ChunkSizes, Chunked, Chunker, Chunks};
 mod codec;
 mod encoded;
 pub use encoded::EncodedBlob;
-mod pax;
-pub use pax::{PaxArchive, PaxMember, PaxSparseExtent, PaxTime};
 mod preparation;
 mod reader;
 mod writer;

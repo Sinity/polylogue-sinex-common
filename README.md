@@ -6,7 +6,7 @@ Rust crates and development tooling shared by
 
 | Crate | Holds |
 |---|---|
-| [`hashed-blobs`](crates/hashed-blobs/README.md) | content-addressed blobs in an append-only segment container, content-defined chunking of rewritten streams, checked reads, PAX member access, the on-demand scan |
+| [`hashed-blobs`](crates/hashed-blobs/README.md) | content-addressed blobs in an append-only segment container, content-defined chunking of rewritten streams, checked reads, the on-demand scan |
 | [`canonical-json`](crates/canonical-json/README.md) | the one JSON encoding every identity hash reads: a domain tag, sorted object keys, numbers as spelled |
 | [`git-identity`](crates/git-identity/README.md) | which Git repository a directory belongs to: root commits without shallow boundaries, the `origin` remote without credentials |
 | [`query-language`](crates/query-language/README.md) | the one grammar and spelling, the syntax tree's meaning, order relations, the fusion of ranked lists, query objects and their hash, the federation planner's types, time expressions, the logical day, cursors, the completer and the shared conformance cases |

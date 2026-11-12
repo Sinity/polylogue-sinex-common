@@ -23,7 +23,6 @@ mechanic and nothing else in the shared crates.
 | commit | making a group's extents real, in the same transaction as the rows that cite them |
 | tail | bytes after a segment's last committed extent; truncated when the segment opens |
 | punch | releasing a committed extent's bytes with a hole punch |
-| member | one file inside a PAX tar blob, with its metadata and byte range |
 | scan | the on-demand check of every frame of every segment, which reports and repairs nothing |
 
 ## Queries
