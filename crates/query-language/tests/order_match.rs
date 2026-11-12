@@ -459,14 +459,17 @@ fn question_identity_keeps_order_occurrences_and_nonpublishing_boolean_wrappers(
         question_id(&duplicate, &catalog, &BTreeMap::new()).unwrap()
     );
     let pure = parse("events where source = outer", &catalog).unwrap();
-    for predicate in [
-        "source = outer AND source = outer",
-        "source = outer OR source = outer",
+    for (predicate, same) in [
+        ("source = outer AND source = outer", true),
+        ("source = outer OR source = outer", false),
     ] {
         let duplicate = parse(&format!("events where {predicate}"), &catalog).unwrap();
+        // OR is also a default-binding boundary for ordinary field conditions.
         assert_eq!(
-            question_id(&pure, &catalog, &BTreeMap::new()).unwrap(),
-            question_id(&duplicate, &catalog, &BTreeMap::new()).unwrap()
+            question_id(&pure, &catalog, &BTreeMap::new()).unwrap()
+                == question_id(&duplicate, &catalog, &BTreeMap::new()).unwrap(),
+            same,
+            "{predicate}"
         );
     }
 }

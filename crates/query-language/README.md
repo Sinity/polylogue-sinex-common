@@ -376,7 +376,8 @@ product supplies its lists.
   namespace, surface references and saved names resolved to stored forms,
   scalars canonicalised by field type, commutative operands sorted, spans
   and spelling dropped, and relative times kept as written (`since:7d`, not
-  the instant). Numeric-looking text stays text.
+  the instant). Numeric-looking text stays text. OR retains its default-binding
+  boundary even after identical operands reduce to one.
 The normal form has an explicit semantic encoding, independent of Rust AST
 serialization: each construct has one tag and one shape. Source spans,
 known-output markers and display spellings are absent; parameter declarations
