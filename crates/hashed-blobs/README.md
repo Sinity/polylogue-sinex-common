@@ -195,7 +195,8 @@ frames, decoded bytes, encoded bytes and index bytes.
 
 `Reader::scan` takes the product's complete list of live committed extents.
 It checks encoded digests and frame indices, decodes plain frames and checks
-plain names. Sealed frames are checked by their ciphertext digests without
+plain names. Encoded frame bytes are read once and reused for their frame and
+plain-content checks; the scan does not reread the payload after hashing it. Sealed frames are checked by their ciphertext digests without
 requiring keys. It returns all mismatches and opens files read only.
 `scan_checked` additionally accepts cancellation. Recorded punched extents
 are excluded from the live scan list by the product.

@@ -2,4 +2,5 @@
 
 mod chunking;
 mod prepared;
+mod scan_io;
 mod segments;
