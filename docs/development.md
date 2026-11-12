@@ -40,7 +40,9 @@ tools support the existing notification and browser checks.
 The shell installs this checkout's Git hooks when `core.hooksPath` is unset.
 An explicitly configured hook path is preserved. The hooks check staged
 whitespace and staged Rust formatting before a commit, with the loaded shell's
-tools when available or by entering the declared shell. There is no push hook:
+tools when available or by entering the declared shell once for the staged
+set. Formatting supplies an unused local target to skip compiler cache
+selection and seeding; an explicit target setting is preserved. There is no push hook:
 Clippy and tests remain in the native full check, which GitHub Actions runs for
 every pull request. Timezone tests use the shell's declared tzdata,
 and notification tests start their own configured private D-Bus service.
@@ -49,7 +51,9 @@ and notification tests start their own configured private D-Bus service.
 cargo-deny, mold, sqlite and jq. Coverage uses the LLVM tools from the declared
 Rust toolchain.
 
-A host may queue these commands through its own job runner.
+A host may queue these commands through its own job runner. AgentCTL routes
+focused tests and compilation through the same one-slot `compile` queue,
+so their source builds do not overlap or wait behind runtime proofs.
 
 For a change spanning common and a product, use the explicit
 [local linking command](../README.md#depending-on-this-repository).
