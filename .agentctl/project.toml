@@ -6,7 +6,7 @@ root_markers = ["Cargo.toml", "flake.nix", "xtask"]
 
 [environment]
 kind = "nix-develop"
-command = ["env", "-u", "CARGO_TARGET_DIR", "nix", "develop", "--command"]
+command = ["nix", "develop", "--command"]
 inherit = ["HOME", "USER", "PATH", "LANG", "XDG_RUNTIME_DIR"]
 unset = ["CARGO_TARGET_DIR", "DATABASE_URL", "PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "SQLX_OFFLINE"]
 
@@ -28,6 +28,7 @@ scratch = "tmpfs"
 cache = "none"
 
 [operations.fmt]
+environment = { CARGO_TARGET_DIR = "target" }
 description = "Format the workspace"
 exec = ["cargo", "fmt", "--all"]
 pool = "interactive"
