@@ -120,10 +120,10 @@ fn structured_mcp_calls_preserve_the_canonical_request_options() {
                 table.mcp_call(&request).unwrap(),
                 json!({"name":"example_read", "arguments":arguments})
             );
-            assert_eq!(
-                table.follow_up(Via::Mcp, &request).unwrap(),
-                format!("example_read {arguments}")
-            );
+            let text = table.follow_up(Via::Mcp, &request).unwrap();
+            let (name, body) = text.split_once(' ').unwrap();
+            assert_eq!(name, "example_read");
+            assert_eq!(serde_json::from_str::<Value>(body).unwrap(), arguments);
         }
     }
 }
