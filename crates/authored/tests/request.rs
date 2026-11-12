@@ -145,7 +145,7 @@ fn request_numbering() {
     for record in &planned.records {
         assert_eq!(record.header.author, "agent:claude-code:s1");
         assert_eq!(record.header.via, "mcp");
-        assert_eq!(record.header.at, 1_700_000_000_000);
+        assert_eq!(record.header.at, Some(1_700_000_000_000));
     }
     history.commit(planned);
     // A is withdrawn and B's latest revision is current, beside the

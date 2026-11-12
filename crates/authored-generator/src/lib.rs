@@ -91,7 +91,7 @@ fn build(steps: Vec<Step>) -> History {
             value: None,
             author: "operator".to_owned(),
             via: "generator".to_owned(),
-            at: index as i64,
+            at: Some(index as i64),
             revises,
             withdraws,
         };

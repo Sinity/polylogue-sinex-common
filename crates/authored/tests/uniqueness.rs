@@ -274,7 +274,7 @@ fn two_first_titles() -> History {
                 value: write.value,
                 author: "operator".into(),
                 via: "cli".into(),
-                at: 0,
+                at: Some(0),
                 revises: Default::default(),
                 withdraws: Default::default(),
             },
@@ -359,4 +359,41 @@ fn bases_of_records_holding_no_common_slot_stay_refused() {
         plan.add(both).unwrap_err().refusal,
         Refusal::BasesSpanRoots(vec![Revision::first("a"), Revision::first("b")])
     );
+}
+
+#[test]
+fn unknown_authored_times_do_not_select_a_slot_holder_or_change_its_revision_order() {
+    for times in [
+        [None, None],
+        [Some(-5), None],
+        [None, Some(i64::MAX)],
+        [Some(i64::MAX), Some(i64::MIN)],
+    ] {
+        let source = two_first_titles();
+        let mut history = History::new();
+        for (index, mut record) in source.records().iter().cloned().enumerate() {
+            record.at = times[index];
+            history.push(record, title(&["s:1"], "").unique.unwrap().slots);
+        }
+        let placed = place(
+            &mut history,
+            "c",
+            OnStale::Refuse,
+            title(&["s:1"], "Settled"),
+        );
+        assert_eq!(
+            placed,
+            Placed::Written {
+                revision: Revision::new("a", "c"),
+                revised: vec![Revision::first("a"), Revision::first("b")],
+            }
+        );
+        assert_eq!(
+            history.record(&Revision::new("a", "c")).unwrap().at,
+            Some(0)
+        );
+        let mut currency = Currency::new(&mut history);
+        assert_eq!(currency.heads("a").unwrap(), vec![Revision::new("a", "c")]);
+        assert!(currency.heads("b").unwrap().is_empty());
+    }
 }

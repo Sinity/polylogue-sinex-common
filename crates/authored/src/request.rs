@@ -294,7 +294,7 @@ impl<'a, S: Holders, B> Plan<'a, S, B> {
             value: write.value,
             author: self.arrival.author.clone(),
             via: self.arrival.via.clone(),
-            at: self.arrival.at,
+            at: Some(self.arrival.at),
             revises: revised.iter().cloned().collect(),
             withdraws: write.withdraws.into_iter().collect(),
         };

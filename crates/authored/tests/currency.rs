@@ -15,7 +15,7 @@ fn record(root: &str, rev: &str, revises: &[&Revision], withdraws: &[Target]) ->
         value: None,
         author: "operator".to_owned(),
         via: "cli".to_owned(),
-        at: 0,
+        at: Some(0),
         revises: revises.iter().map(|r| (*r).clone()).collect(),
         withdraws: withdraws.iter().cloned().collect(),
     }
@@ -180,4 +180,35 @@ fn affected_roots_follow_withdrawals_of_withdrawals() {
         roots,
         BTreeSet::from(["u", "v", "w", "x"].map(String::from))
     );
+}
+
+#[test]
+fn unknown_authored_time_is_distinct_from_a_recorded_epoch_without_changing_identity() {
+    let mut known = record("x", "x", &[], &[]);
+    let revision = known.revision();
+    assert_eq!(known.revision(), Revision::new("x", "x"));
+    // This is the complete predecessor encoding with its scalar timestamp.
+    assert_eq!(
+        serde_json::to_string(&known).unwrap(),
+        r#"{"root":"x","rev":"x","kind":"note","key":null,"value":null,"author":"operator","via":"cli","at":0,"revises":[],"withdraws":[]}"#
+    );
+    let encoded = serde_json::to_value(&known).unwrap();
+    assert_eq!(encoded["at"], serde_json::json!(0));
+    assert_eq!(
+        serde_json::from_value::<Header>(encoded.clone())
+            .unwrap()
+            .at,
+        Some(0)
+    );
+    known.at = None;
+    let mut unknown = serde_json::to_value(&known).unwrap();
+    assert!(unknown["at"].is_null());
+    let restored: Header = serde_json::from_value(unknown.clone()).unwrap();
+    assert_eq!(restored.at, None);
+    assert_eq!(restored.revision(), revision);
+    unknown.as_object_mut().unwrap().remove("at");
+    assert_eq!(serde_json::from_value::<Header>(unknown).unwrap().at, None);
+    let mut malformed = encoded;
+    malformed["at"] = serde_json::json!("unrecorded");
+    assert!(serde_json::from_value::<Header>(malformed).is_err());
 }

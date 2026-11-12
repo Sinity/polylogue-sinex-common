@@ -70,7 +70,7 @@ proptest! {
     fn currency_pure_function(
         mut generated in history(40),
         order in proptest::collection::vec(any::<u32>(), 40),
-        clock in proptest::collection::vec(any::<i64>(), 40),
+        clock in proptest::collection::vec(proptest::option::of(any::<i64>()), 40),
     ) {
         let expected = oracle(generated.records());
         prop_assert_eq!(generated.current().unwrap(), expected.clone());

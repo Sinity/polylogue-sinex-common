@@ -113,8 +113,9 @@ fn check_id(id: &str) -> Result<(), IdentityError> {
 /// Sinex's target, origin and request material) and its own storage.
 ///
 /// `author` and `via` are computed by the product from how the request
-/// arrived; no caller supplies them. `at` is the writer's clock in Unix
-/// milliseconds, for display and as-of reads only: currency never reads it.
+/// arrived; no caller supplies them. `at` is the recorded authored time in
+/// Unix milliseconds, or unknown when it was not recorded. New requests use
+/// the writer's clock. Currency never reads it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Header {
     pub root: String,
@@ -124,7 +125,7 @@ pub struct Header {
     pub value: Option<serde_json::Value>,
     pub author: String,
     pub via: String,
-    pub at: i64,
+    pub at: Option<i64>,
     pub revises: BTreeSet<Revision>,
     pub withdraws: BTreeSet<Target>,
 }
