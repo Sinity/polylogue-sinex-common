@@ -211,44 +211,7 @@ impl Reader {
                 };
                 (|| {
                     let (value, _) = OpenExtent::open(&self.root, extent, ReadLimits::default())?;
-                    let mut digest = blake3::Hasher::new();
-                    let mut at = 0;
-                    while at < extent.len {
-                        check_frame()?;
-                        let n = (extent.len - at).min(65536);
-                        digest.update(&value.at(at, n)?);
-                        at += n;
-                    }
-                    if Hash(*digest.finalize().as_bytes()) != extent.encoded_hash {
-                        return Err(Error::corrupt(
-                            extent,
-                            "encoded bytes differ from committed digest",
-                        ));
-                    }
-                    if extent.kind == Kind::Plain {
-                        let mut naming = blake3::Hasher::new();
-                        let mut stats = VerificationStats::default();
-                        for frame in 0..value.index.frames.len() {
-                            check_frame()?;
-                            naming.update(&value.decode(frame, None, &mut stats)?);
-                        }
-                        if Hash(*naming.finalize().as_bytes()) != extent.hash {
-                            return Err(Error::corrupt(
-                                extent,
-                                "decoded content differs from blob name",
-                            ));
-                        }
-                    } else {
-                        for (number, frame) in value.index.frames.iter().enumerate() {
-                            check_frame()?;
-                            if Hash::of(&value.at(value.starts[number].0, frame.stored)?)
-                                != frame.digest
-                            {
-                                return Err(Error::corrupt(extent, "sealed frame digest differs"));
-                            }
-                        }
-                    }
-                    Ok(())
+                    value.scan(&mut check_frame)
                 })()
             };
             if let Some(error) = cancelled {
@@ -460,6 +423,69 @@ impl OpenExtent {
             .map_err(|e| Error::corrupt(&self.extent, format!("cannot read extent: {e}")))?;
         Ok(bytes)
     }
+    /// Hash the encoded stream while using those same bytes to check frames.
+    /// Only the bounded index metadata was read before this pass.
+    fn scan(&self, mut check: impl FnMut() -> Result<()>) -> Result<()> {
+        let mut encoded_digest = blake3::Hasher::new();
+        let mut naming = blake3::Hasher::new();
+        let mut stats = VerificationStats::default();
+        let mut frame_error = None;
+        let mut at = 0;
+        for (number, frame) in self.index.frames.iter().enumerate() {
+            let size = usize::try_from(frame.stored)
+                .map_err(|_| Error::corrupt(&self.extent, "frame length exceeds address space"))?;
+            let mut encoded = Vec::new();
+            encoded
+                .try_reserve_exact(size)
+                .map_err(|_| Error::corrupt(&self.extent, "cannot allocate encoded frame"))?;
+            while encoded.len() < size {
+                check()?;
+                let take = (size - encoded.len()).min(65536);
+                let bytes = self.at(at, take as u64)?;
+                at += take as u64;
+                encoded_digest.update(&bytes);
+                encoded.extend_from_slice(&bytes);
+            }
+            if frame_error.is_none() {
+                if self.extent.kind == Kind::Plain {
+                    match self.decode_encoded(number, encoded, None, &mut stats) {
+                        Ok(bytes) => {
+                            naming.update(&bytes);
+                        }
+                        Err(error) => frame_error = Some(error),
+                    }
+                } else if Hash::of(&encoded) != frame.digest {
+                    frame_error = Some(Error::corrupt(&self.extent, "sealed frame digest differs"));
+                }
+            }
+        }
+        // The frame index and optional zstd seek table are part of the whole
+        // encoded digest too. Cancellation retains its existing 64 KiB cadence.
+        while at < self.extent.len {
+            check()?;
+            let take = (self.extent.len - at).min(65536);
+            encoded_digest.update(&self.at(at, take)?);
+            at += take;
+        }
+        if Hash(*encoded_digest.finalize().as_bytes()) != self.extent.encoded_hash {
+            return Err(Error::corrupt(
+                &self.extent,
+                "encoded bytes differ from committed digest",
+            ));
+        }
+        if let Some(error) = frame_error {
+            return Err(error);
+        }
+        if self.extent.kind == Kind::Plain
+            && Hash(*naming.finalize().as_bytes()) != self.extent.hash
+        {
+            return Err(Error::corrupt(
+                &self.extent,
+                "decoded content differs from blob name",
+            ));
+        }
+        Ok(())
+    }
     fn decode(
         &self,
         number: usize,
@@ -468,6 +494,16 @@ impl OpenExtent {
     ) -> Result<Vec<u8>> {
         let frame = &self.index.frames[number];
         let encoded = self.at(self.starts[number].0, frame.stored)?;
+        self.decode_encoded(number, encoded, key, stats)
+    }
+    fn decode_encoded(
+        &self,
+        number: usize,
+        encoded: Vec<u8>,
+        key: Option<&DataKey>,
+        stats: &mut VerificationStats,
+    ) -> Result<Vec<u8>> {
+        let frame = &self.index.frames[number];
         if Hash::of(&encoded) != frame.digest {
             return Err(Error::corrupt(&self.extent, "frame digest differs"));
         }
