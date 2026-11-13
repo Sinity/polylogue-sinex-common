@@ -359,7 +359,7 @@ impl Catalog {
                 self.check_kind(product, kind)?;
                 parse_object(text, product, kind, tail)
             }
-            Written::Locator => Ok(Reference::locator(Locator::parse(text)?)),
+            Written::Locator { text } => Ok(Reference::locator(Locator::parse(text)?)),
             Written::Local { kind, rest } => {
                 if let Some(home) = self.product(self.home)
                     && home.kind(kind).is_none()
@@ -401,6 +401,9 @@ impl Catalog {
     /// written form, or bare text for the product to resolve.
     pub fn read_input(&self, text: &str) -> Result<Input, ReferenceError> {
         let text = text.trim();
+        if text.starts_with('<') {
+            return self.parse(text).map(Input::Reference);
+        }
         if let Some(word) = ContextWord::from_word(text) {
             return Ok(Input::Context(word));
         }

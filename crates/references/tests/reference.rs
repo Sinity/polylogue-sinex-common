@@ -46,6 +46,157 @@ fn object(product: Product, kind: &str, id: &str, revision: Option<&str>) -> Ref
 }
 
 #[test]
+fn qualified_global_input_preserves_types_and_opaque_components() {
+    let catalog = Catalog::new(
+        Product::Polylogue,
+        vec![
+            ProductCatalog::new(
+                Product::Polylogue,
+                vec![Kind::new("message", &[]), Kind::new("git-file", &[])],
+            ),
+            sinex(),
+        ],
+    )
+    .unwrap();
+    let cases = [
+        (
+            " \t<file:host/root/docs@rev%25%23<x>>\n",
+            Reference::new(
+                Target::Locator(Locator::file("host", "root", "docs@rev%#<x>").unwrap()),
+                None,
+            ),
+        ),
+        (
+            "<sinex:ev/a<z>%40a%2540%23>",
+            object(Product::Sinex, "ev", "a<z>@a%40#", None),
+        ),
+        (
+            "<file:host/root/docs%23part#b=0-2>",
+            Reference::new(
+                Target::Locator(Locator::file("host", "root", "docs#part").unwrap()),
+                Some(Selector {
+                    text_range: Some(
+                        references::selector::TextRange::new(
+                            references::selector::TextUnit::Bytes,
+                            0,
+                            2,
+                        )
+                        .unwrap(),
+                    ),
+                    ..Selector::default()
+                }),
+            ),
+        ),
+        (
+            "<polylogue:message/codex:<file:host/root/docs%40rev>%25%23>",
+            object(
+                Product::Polylogue,
+                "message",
+                "codex:<file:host/root/docs@rev>%#",
+                None,
+            ),
+        ),
+        (
+            "<polylogue:git-file/host/root/docs%40owner@rev%23%25>",
+            object(
+                Product::Polylogue,
+                "git-file",
+                "host/root/docs@owner",
+                Some("rev#%"),
+            ),
+        ),
+    ];
+    for (text, expected) in cases {
+        assert_eq!(Reference::parse(text).unwrap(), expected, "{text}");
+        assert_eq!(catalog.parse(text).unwrap(), expected, "{text}");
+        assert_eq!(
+            catalog.read_input(text).unwrap(),
+            Input::Reference(expected.clone()),
+            "{text}"
+        );
+        let stored = serde_json::to_string(&expected).unwrap();
+        assert_eq!(stored, serde_json::to_string(&expected.global()).unwrap());
+        assert_eq!(
+            serde_json::from_str::<Reference>(&stored).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn polylogue_external_file_display_roundtrips_as_a_locator() {
+    let catalog = catalog(Product::Polylogue);
+    for (path, global, human) in [
+        ("docs", "file:host/root/docs", "<file:host/root/docs>"),
+        (
+            "docs@rev%#<x>",
+            "file:host/root/docs@rev%25%23<x>",
+            "<file:host/root/docs@rev%25%23<x>>",
+        ),
+    ] {
+        let expected = Reference::new(
+            Target::Locator(Locator::file("host", "root", path).unwrap()),
+            None,
+        );
+        assert_eq!(expected.global(), global);
+        assert_eq!(expected.written_in(Product::Polylogue), human);
+        assert_eq!(expected.written_in(Product::Sinex), global);
+        assert_eq!(catalog.parse(human).unwrap(), expected);
+        assert_eq!(
+            catalog.read_input(human).unwrap(),
+            Input::Reference(expected.clone())
+        );
+        assert_eq!(Reference::parse(global).unwrap(), expected);
+    }
+}
+
+#[test]
+fn global_qualification_never_falls_back_to_other_input_forms() {
+    let catalog = catalog(Product::Polylogue);
+    for text in [
+        "<session:claude-code:abc>",
+        "<locator:file:host/root/path>",
+        "<self>",
+        "<@1>",
+        "<https://example.test/a>",
+        "<<file:host/root/path>>",
+        "<file:host/root/path",
+        "<>",
+    ] {
+        assert!(Reference::parse(text).is_err(), "{text}");
+        assert!(catalog.parse(text).is_err(), "{text}");
+        assert!(catalog.read_input(text).is_err(), "{text}");
+    }
+    let unknown = "<sinex:undeclared/x>";
+    assert_eq!(
+        Reference::parse(unknown).unwrap(),
+        object(Product::Sinex, "undeclared", "x", None)
+    );
+    assert!(catalog.parse(unknown).is_err());
+    assert!(catalog.read_input(unknown).is_err());
+}
+
+#[test]
+fn locator_remains_an_ordinary_object_kind() {
+    let catalog = Catalog::new(
+        Product::Polylogue,
+        vec![ProductCatalog::new(
+            Product::Polylogue,
+            vec![Kind::new("locator", &[])],
+        )],
+    )
+    .unwrap();
+    let expected = object(Product::Polylogue, "locator", "file:host/root/path", None);
+    let local = "locator:file:host/root/path";
+    assert_eq!(expected.written_in(Product::Polylogue), local);
+    assert_eq!(catalog.parse(local).unwrap(), expected);
+    assert_eq!(
+        catalog.read_input(local).unwrap(),
+        Input::Reference(expected)
+    );
+}
+
+#[test]
 fn global_forms_parse_without_a_catalog() {
     let reference = Reference::parse("sinex:ev/0190a1b2").unwrap();
     assert_eq!(reference, object(Product::Sinex, "ev", "0190a1b2", None));
