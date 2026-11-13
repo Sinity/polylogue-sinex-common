@@ -454,9 +454,20 @@ impl Catalog {
                         .iter()
                         .filter(|catalog| catalog.product != self.home),
                 );
+            // Literal native identifiers keep their URL spelling, before the
+            // locator canonicalizer decodes unreserved escapes or changes case.
+            let original = url::Url::parse(text).map_err(|error| LocatorError::NotAbsoluteUrl {
+                text: text.to_owned(),
+                reason: error.to_string(),
+            })?;
             for catalog in home_first {
                 for pattern in &catalog.patterns {
-                    if let Some(written) = pattern.apply(&url)
+                    let matched_url = if pattern.has_literal_captures() {
+                        &original
+                    } else {
+                        &url
+                    };
+                    if let Some(written) = pattern.apply(matched_url)
                         && let Some((kind, rest)) = written.split_once(':')
                         && catalog.kind(kind).is_some()
                         && let Ok(reference) = parse_object(&written, catalog.product, kind, rest)

@@ -169,6 +169,15 @@ shape. Captures enter the output still percent-encoded, and the output is
 parsed as ordinary reference text, which decodes and checks it. A malformed
 pattern is refused when declared.
 
+A provider that uses the URL segment's literal spelling as its native ID
+declares `with_literal_capture("id")` on its pattern. The shared substitution
+escapes that capture before the ordinary reference parse, preserving `%2F`,
+`%25` and `@` as identity text. Other captures keep their decoded meaning.
+The declaration is refused if the pattern has no capture by that name.
+Patterns with a literal capture match the original URL, preserving escape
+spelling before locator canonicalization; other patterns keep matching the
+canonical URL. A URL fragment stays the reference's separate selector.
+
 ## The catalog
 
 `ProductCatalog` is what one product declares: its kinds with their web
