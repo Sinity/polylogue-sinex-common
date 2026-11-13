@@ -222,15 +222,26 @@ fn selector() -> impl Strategy<Value = Selector> {
             .prop_map(|(exact, prefix, suffix)| TextQuote::new(&exact, &prefix, &suffix).unwrap()),
     );
     let id = proptest::option::of("\\PC{1,10}");
-    (lines, time, rectangle, text_range, quote, id)
-        .prop_map(|(lines, time, rectangle, text_range, quote, id)| Selector {
-            lines,
-            time,
-            rectangle,
-            text_range,
-            quote,
-            id,
-        })
+    (
+        proptest::option::of(any::<u64>()),
+        lines,
+        time,
+        rectangle,
+        text_range,
+        quote,
+        id,
+    )
+        .prop_map(
+            |(ordinal, lines, time, rectangle, text_range, quote, id)| Selector {
+                ordinal,
+                lines,
+                time,
+                rectangle,
+                text_range,
+                quote,
+                id,
+            },
+        )
         .prop_filter("not empty", |selector| !selector.is_empty())
 }
 

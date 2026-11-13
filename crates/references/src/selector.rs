@@ -1,5 +1,5 @@
 //! Selectors: the part of a reference after `#` that names a place inside the
-//! thing referenced.
+//! thing referenced, including its recorded member ordinal.
 //!
 //! The parts are W3C Media Fragments (`t=` time, `xywh=` rectangle), line ranges
 //! (`L40-52`), text ranges (`b=`, `c=`, `u16=`, the W3C text position), the
@@ -17,6 +17,8 @@ use std::str::FromStr;
 /// parsed selector; a reference never holds an empty one.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Selector {
+    /// A recorded member ordinal, counted from zero; never a database row ID.
+    pub ordinal: Option<u64>,
     pub lines: Option<LineRange>,
     pub time: Option<TimeRange>,
     pub rectangle: Option<Rectangle>,
@@ -133,7 +135,7 @@ pub enum SelectorError {
     #[error("the selector is empty")]
     Empty,
     #[error(
-        "`{0}` is not a selector part; use L<line>[-<line>], t=, xywh=, b=, c=, u16=, exact=, prefix=, suffix= or id="
+        "`{0}` is not a selector part; use ordinal=, L<line>[-<line>], t=, xywh=, b=, c=, u16=, exact=, prefix=, suffix= or id="
     )]
     UnknownPart(String),
     #[error("the selector names `{0}` twice")]
@@ -472,6 +474,28 @@ impl Selector {
         self == &Self::default()
     }
 
+    /// Combine distinct selector parts without replacing either selection.
+    pub fn merge(mut self, other: Self) -> Result<Self, SelectorError> {
+        fn part<T>(
+            to: &mut Option<T>,
+            from: Option<T>,
+            name: &'static str,
+        ) -> Result<(), SelectorError> {
+            if let Some(value) = from {
+                set(to, name, value)?;
+            }
+            Ok(())
+        }
+        part(&mut self.ordinal, other.ordinal, "ordinal")?;
+        part(&mut self.lines, other.lines, "L")?;
+        part(&mut self.time, other.time, "t")?;
+        part(&mut self.rectangle, other.rectangle, "xywh")?;
+        part(&mut self.text_range, other.text_range, "text range")?;
+        part(&mut self.quote, other.quote, "exact")?;
+        part(&mut self.id, other.id, "id")?;
+        Ok(self)
+    }
+
     /// Checks every part against the known bounds. A part past a bound is
     /// invalid; nothing is clamped.
     pub fn check(&self, bounds: &Bounds) -> Result<(), SelectorError> {
@@ -593,6 +617,7 @@ impl Selector {
                 return Err(SelectorError::UnknownPart(part.to_owned()));
             };
             match name {
+                "ordinal" => set(&mut selector.ordinal, "ordinal", parse_ordinal(value)?)?,
                 "t" => set(&mut selector.time, "t", parse_time(value)?)?,
                 "xywh" => set(&mut selector.rectangle, "xywh", parse_rectangle(value)?)?,
                 "exact" => set(&mut exact, "exact", decode("exact", value)?)?,
@@ -638,6 +663,9 @@ impl FromStr for Selector {
 impl fmt::Display for Selector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut parts = Vec::new();
+        if let Some(ordinal) = self.ordinal {
+            parts.push(format!("ordinal={ordinal}"));
+        }
         if let Some(lines) = &self.lines {
             parts.push(match lines.first == lines.last {
                 true => format!("L{}", lines.first),
@@ -695,6 +723,20 @@ const TIME_EXPECTED: &str = "t=[npt:]<start>[,<end>] in seconds or h:mm:ss, with
 const RECTANGLE_EXPECTED: &str =
     "xywh=[pixel:|percent:]<x>,<y>,<width>,<height> with width and height above 0";
 const TEXT_RANGE_EXPECTED: &str = "<start>-<end> with start <= end";
+
+pub(crate) fn parse_ordinal(text: &str) -> Result<u64, SelectorError> {
+    if !text.is_empty()
+        && (text.len() == 1 || !text.starts_with('0'))
+        && let Some(value) = digits(text)
+    {
+        return Ok(value);
+    }
+    Err(malformed(
+        "ordinal",
+        text.to_owned(),
+        "a nonnegative integer without leading zeros",
+    ))
+}
 
 fn malformed(part: &'static str, value: String, expected: &'static str) -> SelectorError {
     SelectorError::Malformed {

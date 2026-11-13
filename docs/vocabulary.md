@@ -155,7 +155,8 @@ mechanic and nothing else in the shared crates.
 | kind | the word after the product that says what sort of object a reference names (`session`, `ev`) |
 | identity | the part of a reference that says which object of its kind, as its owner writes it |
 | revision | the part after `@`: one exact revision, as the owner defines it |
-| selector | the part after `#`: a place inside the thing (lines, time, rectangle, text range, quote, named place) |
+| selector | the part after `#`: a place inside the thing (recorded member ordinal, lines, time, rectangle, text range, quote, named place) |
+| ordinal | a recorded member's zero-based position within its object; never a database row ID |
 | quote | the exact text a span held, with the text before and after it, for finding the span again |
 | locator | the canonical native address of a thing outside both products' objects (`url:`, `file:`, `part:`, a catalog form) |
 | catalog form | a locator from an outside catalog's identifier (`youtube:`, `doi:`, `isbn:` …) that URLs of that catalog fold into |

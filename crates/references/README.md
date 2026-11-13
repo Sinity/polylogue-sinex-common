@@ -40,13 +40,29 @@ The global form is `<product>:<kind>/<id>[@<revision>][#<selector>]`.
 A local form is normalised to the global form at input
 (`Catalog::parse`), so everything stored holds the global form and
 `Reference::parse` reads it without a catalog. Printing for a person inside a
-product (`Reference::written_in`) gives the local form for that product's own
+product (`Catalog::written`) gives the local form for that product's own
 objects and the global form for everything else. Serde writes and reads the
 global form.
 
 A `%` that does not start an escape is a literal `%`; printing encodes it as
 `%25`. Every input therefore has one printed form, and nothing is refused for
 holding a `%`.
+
+A kind can declare its local ordinal form with `Kind::with_local_form`:
+`Ordinal` reads a literal identity followed by required `#<n>`;
+`OptionalOrdinal` permits that suffix; `RevisionOrdinal` also permits
+`@<revision>` before it. These local identity and revision fields are literal,
+including `%`, `@` and `#` where they are not the form's final delimiters.
+Ordinals are zero-based unsigned integers without leading zeros. For example,
+`block:codex:m#2` becomes `polylogue:block/codex:m#ordinal=2`, and
+`variant:root@v1#3` keeps root `root`, revision `v1` and ordinal `3` separately.
+The default `Object` local form keeps the escaped grammar above.
+
+An ordinal may accompany a text range. Human printing uses the explicitly
+qualified global form when a declared local spelling cannot express the full
+selection or would reinterpret an opaque identity. Products still validate
+which kinds and member selections their domain supports; the catalog neither
+looks up members nor invents identities.
 
 ### What a person types
 
@@ -84,6 +100,7 @@ selectors print equal text:
 
 | Part | Form | Meaning |
 |---|---|---|
+| ordinal | `ordinal=0` | a recorded member ordinal, counted from zero; its owning product defines and validates membership |
 | lines | `L40`, `L40-52` (`L40-L52` accepted) | lines counted from 1, both ends included |
 | time | `t=10,20`, `t=90.5` (`npt:`, `h:mm:ss`, `mm:ss` and `t=,20` accepted) | W3C Media Fragments time in seconds; without an end, to the end |
 | rectangle | `xywh=160,120,320,240`, `xywh=percent:0,0,50,50` (`pixel:` accepted) | W3C Media Fragments rectangle; width and height above 0 |
@@ -167,7 +184,10 @@ as the last path piece captures the rest of the path. Required query
 parameters are named; others are ignored. The scheme is not part of the
 shape. Captures enter the output still percent-encoded, and the output is
 parsed as ordinary reference text, which decodes and checks it. A malformed
-pattern is refused when declared.
+pattern is refused when declared. Output templates use the escaped object
+grammar (`result:{id}#ordinal={row}`), independently of a kind's human local
+form. A pattern's selector and the URL fragment's distinct selector parts are
+combined; a repeated part is refused rather than replacing either selection.
 
 A provider that uses the URL segment's literal spelling as its native ID
 declares `with_literal_capture("id")` on its pattern. The shared substitution

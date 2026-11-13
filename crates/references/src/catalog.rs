@@ -6,8 +6,8 @@
 //!
 //! A product's web address for an object is `/<kind>/<id>[@<revision>]`,
 //! percent-encoded once, under the product's base URL, with an optional
-//! `/<sub-view>` after it and the selector as the fragment. Nothing else is
-//! declared per kind, so the URL of any reference follows from the reference.
+//! `/<sub-view>` after it and the selector as the fragment. Local input forms
+//! do not change this route or the stored global reference.
 
 use crate::escape;
 use crate::locator::{Locator, LocatorError, LocatorKind};
@@ -23,6 +23,20 @@ use std::fmt;
 pub struct Kind {
     name: String,
     views: Vec<String>,
+    local_form: LocalForm,
+}
+
+/// The local spelling of a kind. Global object syntax is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalForm {
+    /// The escaped `<id>[@revision][#selector]` object grammar.
+    Object,
+    /// A literal identity and a required `#<ordinal>`.
+    Ordinal,
+    /// A literal identity, optionally followed by `#<ordinal>`.
+    OptionalOrdinal,
+    /// A literal root, optional `@revision` and optional `#<ordinal>`.
+    RevisionOrdinal,
 }
 
 impl Kind {
@@ -31,6 +45,7 @@ impl Kind {
         Self {
             name: name.to_owned(),
             views: views.iter().map(|view| view.to_string()).collect(),
+            local_form: LocalForm::Object,
         }
     }
     pub fn name(&self) -> &str {
@@ -38,6 +53,10 @@ impl Kind {
     }
     pub fn views(&self) -> &[String] {
         &self.views
+    }
+    pub fn with_local_form(mut self, form: LocalForm) -> Self {
+        self.local_form = form;
+        self
     }
 }
 
@@ -67,8 +86,9 @@ impl ProductCatalog {
         self
     }
 
-    /// Provider-URL patterns whose output is a reference to this product's
-    /// objects, written in its local form (`session:chatgpt:{id}`).
+    /// Provider-URL patterns whose output uses this product's escaped object
+    /// grammar (`session:chatgpt:{id}` or `result:{id}#ordinal={row}`),
+    /// independently of a kind's human local form.
     pub fn with_patterns(mut self, patterns: Vec<UrlPattern>) -> Self {
         self.patterns = patterns;
         self
@@ -380,7 +400,13 @@ impl Catalog {
                         },
                     });
                 }
-                parse_object(text, self.home, kind, rest)
+                match self
+                    .product(self.home)
+                    .and_then(|product| product.kind(kind))
+                {
+                    Some(declaration) => parse_local(text, self.home, declaration, rest),
+                    None => parse_object(text, self.home, kind, rest),
+                }
             }
         }
     }
@@ -392,6 +418,69 @@ impl Catalog {
                 kind: kind.to_owned(),
             }),
             _ => Ok(()),
+        }
+    }
+
+    /// Print local forms using the same declarations that parse them.
+    pub fn written(&self, reference: &Reference) -> String {
+        match reference.target() {
+            Target::Locator(locator)
+                if self.home == Product::Polylogue && locator.kind() == LocatorKind::File =>
+            {
+                format!("<{}>", reference.global())
+            }
+            Target::Object(object) if object.product() == self.home => {
+                let form = self
+                    .product(self.home)
+                    .and_then(|product| product.kind(object.kind()))
+                    .map_or(LocalForm::Object, |kind| kind.local_form);
+                if form == LocalForm::Object {
+                    let mut text = format!("{}:{}", object.kind(), object.written_tail());
+                    if let Some(selector) = reference.selector() {
+                        text.push('#');
+                        text.push_str(&selector.to_string());
+                    }
+                    return text;
+                }
+                let selector = reference.selector().cloned().unwrap_or_default();
+                let only_ordinal = Selector {
+                    ordinal: selector.ordinal,
+                    ..Default::default()
+                };
+                let needs_global = selector != only_ordinal
+                    || object
+                        .id()
+                        .chars()
+                        .any(|c| c.is_whitespace() || c.is_control())
+                    || object.revision().is_some_and(|revision| {
+                        revision
+                            .chars()
+                            .any(|c| c.is_whitespace() || c.is_control())
+                    })
+                    || (selector.ordinal.is_none() && object.id().contains('#'))
+                    || (form != LocalForm::RevisionOrdinal && object.revision().is_some())
+                    || (form == LocalForm::Ordinal && selector.ordinal.is_none())
+                    || (form == LocalForm::RevisionOrdinal
+                        && (object.revision().is_none() && object.id().contains('@')
+                            || object.revision().is_some_and(|revision| {
+                                revision.contains('@')
+                                    || selector.ordinal.is_none() && revision.contains('#')
+                            })));
+                if needs_global {
+                    return format!("<{}>", reference.global());
+                }
+                let mut text = format!("{}:{}", object.kind(), object.id());
+                if let Some(revision) = object.revision() {
+                    text.push('@');
+                    text.push_str(revision);
+                }
+                if let Some(ordinal) = selector.ordinal {
+                    text.push('#');
+                    text.push_str(&ordinal.to_string());
+                }
+                text
+            }
+            _ => reference.global(),
         }
     }
 
@@ -472,7 +561,14 @@ impl Catalog {
                         && catalog.kind(kind).is_some()
                         && let Ok(reference) = parse_object(&written, catalog.product, kind, rest)
                     {
-                        return Ok(reference.with_selector(located.selector.clone()));
+                        let selector = match (reference.selector(), located.selector.as_ref()) {
+                            (Some(pattern), Some(fragment)) => {
+                                Some(pattern.clone().merge(fragment.clone())?)
+                            }
+                            (Some(pattern), None) => Some(pattern.clone()),
+                            (None, fragment) => fragment.cloned(),
+                        };
+                        return Ok(reference.with_selector(selector));
                     }
                 }
             }
@@ -592,4 +688,37 @@ impl Catalog {
             parameters,
         })
     }
+}
+
+fn parse_local(
+    text: &str,
+    product: Product,
+    kind: &Kind,
+    tail: &str,
+) -> Result<Reference, ReferenceError> {
+    if kind.local_form == LocalForm::Object {
+        return parse_object(text, product, &kind.name, tail);
+    }
+    let (identity, ordinal) = match tail.rsplit_once('#') {
+        Some((identity, ordinal)) => (identity, Some(crate::selector::parse_ordinal(ordinal)?)),
+        None if kind.local_form == LocalForm::Ordinal => {
+            return Err(ReferenceError::MissingOrdinal(text.to_owned()));
+        }
+        None => (tail, None),
+    };
+    let (id, revision) = if kind.local_form == LocalForm::RevisionOrdinal {
+        match identity.rsplit_once('@') {
+            Some((id, revision)) => (id, Some(revision)),
+            None => (identity, None),
+        }
+    } else {
+        (identity, None)
+    };
+    Ok(Reference::new(
+        Target::Object(Object::new(product, &kind.name, id, revision)?),
+        Some(Selector {
+            ordinal,
+            ..Default::default()
+        }),
+    ))
 }

@@ -91,6 +91,8 @@ pub enum ReferenceError {
     EmptyId(String),
     #[error("`{0}` has `@` with no revision after it")]
     EmptyRevision(String),
+    #[error("`{0}` needs a recorded member ordinal after #")]
+    MissingOrdinal(String),
     #[error("`{text}` is a {product} reference without its kind; write {product}:<kind>/<id>")]
     NoKindAfterProduct { text: String, product: Product },
     #[error(
@@ -181,7 +183,7 @@ impl Object {
     }
 
     /// `<id>[@<revision>]` with the grammar's escapes.
-    fn written_tail(&self) -> String {
+    pub(crate) fn written_tail(&self) -> String {
         let mut text = escape::encode(&self.id, escape::plain_in_reference);
         if let Some(revision) = &self.revision {
             text.push('@');
@@ -250,30 +252,6 @@ impl Reference {
     /// The global form: what is stored and sent.
     pub fn global(&self) -> String {
         self.to_string()
-    }
-
-    /// The form a person reads inside `home`: local for its own objects,
-    /// global otherwise. External files are explicitly qualified in Polylogue
-    /// so their kind cannot be mistaken for its local Git-file spelling.
-    pub fn written_in(&self, home: Product) -> String {
-        match &self.target {
-            // Polylogue's local file spelling names a Git file at a commit.
-            // Qualify external files by their type, without changing their key.
-            Target::Locator(locator)
-                if home == Product::Polylogue && locator.kind() == LocatorKind::File =>
-            {
-                format!("<{}>", self.global())
-            }
-            Target::Object(object) if object.product == home => {
-                let mut text = format!("{}:{}", object.kind, object.written_tail());
-                if let Some(selector) = &self.selector {
-                    text.push('#');
-                    text.push_str(&selector.to_string());
-                }
-                text
-            }
-            _ => self.global(),
-        }
     }
 }
 
