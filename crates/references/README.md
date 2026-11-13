@@ -54,12 +54,27 @@ holding a `%`.
 
 | Input | Becomes |
 |---|---|
+| `<sinex:ev/e1>`, `<file:host/root/path>` | an explicitly qualified global reference; the inner text is parsed only as a global object or locator |
 | `self`, `here`, `last`, `latest` | a context word: the calling session; the caller's working-directory scope (repository, worktree, project); the product's most recent object of the kind asked for |
 | `@3`, `@3.2`, `@2-5`, `@1,4`, `@*`, `@last` | a row pick from the last list printed for this terminal or session (rows and hits count from 1) |
 | a reference in any written form | that reference, normalised to global |
 | a local form of the other product's kind (`ev:e1` in Polylogue) | refused, with the global form (`sinex:ev/e1`) as the suggestion |
 | an absolute URL | a product's own web address read back; else a product's provider-URL pattern (the reading product's first); else the canonical locator |
 | anything else | bare text: a native identity or prefix the product resolves against its data |
+
+`<global-reference>` is an input qualification. Whitespace outside the brackets
+is ignored; the inner text keeps its ordinary escaping rules. Local forms,
+context words, row picks, bare URLs and another layer of qualification are
+refused inside it, without falling back to another input interpretation.
+Use `url:` when qualifying a URL. Text beginning with `<` is reserved for
+this construct; an opaque identity containing that text remains addressable
+as the identity of its product-qualified object.
+
+Canonical stored/global text and Serde output never add the qualification.
+Human printing in Polylogue qualifies external file locators, because its
+local `file:path@commit` spelling names a Git file at a commit. Human printing
+in Sinex is unchanged. The qualification does not change a locator's
+canonical identity or canonicalizer version, and reserves no object-kind name.
 
 ## Selectors
 

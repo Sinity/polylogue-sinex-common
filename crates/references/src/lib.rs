@@ -2,6 +2,8 @@
 //!
 //! - [`Reference`]: `<product>:<kind>/<id>[@<revision>][#<selector>]` in
 //!   global form, `<kind>:<id>…` inside its own product, or a [`Locator`].
+//!   `<global-reference>` explicitly qualifies global input without changing
+//!   its canonical stored spelling.
 //! - [`Selector`]: media fragments, line ranges, text ranges, quotes and named places.
 //! - [`Locator`]: canonical native addresses, from the versioned
 //!   canonicalizer and its catalog patterns.

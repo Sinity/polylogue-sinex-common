@@ -77,6 +77,10 @@ pub struct Reference {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ReferenceError {
+    #[error(
+        "`{0}` is not a qualified global reference; use <product:kind/id> or <file:host/root/path>"
+    )]
+    BadQualification(String),
     #[error("`{0}` is not a reference: it has no `<kind>:` prefix")]
     NoKind(String),
     #[error(
@@ -230,10 +234,12 @@ impl Reference {
     /// form stored and sent between the products, so it needs no catalog. A
     /// local form is refused, since it does not say its product; input in
     /// local form goes through [`crate::Catalog::parse`].
+    /// Input may qualify that global form as `<global-reference>`; stored
+    /// and printed global text does not include the qualification.
     pub fn parse(text: &str) -> Result<Self, ReferenceError> {
         match Written::split(text)? {
             Written::Global { product, rest } => parse_global_object(text, product, rest),
-            Written::Locator => Ok(Self::locator(Locator::parse(text)?)),
+            Written::Locator { text } => Ok(Self::locator(Locator::parse(text)?)),
             Written::Local { kind, .. } => Err(ReferenceError::LocalForm {
                 text: text.to_owned(),
                 suggestion: format!("<product>:{kind}/…"),
@@ -246,10 +252,18 @@ impl Reference {
         self.to_string()
     }
 
-    /// The form a person reads inside `home`: local for `home`'s own objects,
-    /// global for everything else.
+    /// The form a person reads inside `home`: local for its own objects,
+    /// global otherwise. External files are explicitly qualified in Polylogue
+    /// so their kind cannot be mistaken for its local Git-file spelling.
     pub fn written_in(&self, home: Product) -> String {
         match &self.target {
+            // Polylogue's local file spelling names a Git file at a commit.
+            // Qualify external files by their type, without changing their key.
+            Target::Locator(locator)
+                if home == Product::Polylogue && locator.kind() == LocatorKind::File =>
+            {
+                format!("<{}>", self.global())
+            }
             Target::Object(object) if object.product == home => {
                 let mut text = format!("{}:{}", object.kind, object.written_tail());
                 if let Some(selector) = &self.selector {
@@ -308,13 +322,23 @@ pub(crate) enum Written<'a> {
     /// `<product>:<rest>`
     Global { product: Product, rest: &'a str },
     /// `<locator kind>:…`
-    Locator,
+    Locator { text: &'a str },
     /// `<kind>:<rest>`
     Local { kind: &'a str, rest: &'a str },
 }
 
 impl<'a> Written<'a> {
     pub(crate) fn split(text: &'a str) -> Result<Self, ReferenceError> {
+        let original = text;
+        let trimmed = text.trim();
+        let (text, qualified) = match trimmed.strip_prefix('<') {
+            Some(rest) => (
+                rest.strip_suffix('>')
+                    .ok_or_else(|| ReferenceError::BadQualification(original.to_owned()))?,
+                true,
+            ),
+            None => (text, false),
+        };
         let (head, rest) = text
             .split_once(':')
             .ok_or_else(|| ReferenceError::NoKind(text.to_owned()))?;
@@ -322,7 +346,12 @@ impl<'a> Written<'a> {
             return Ok(Self::Global { product, rest });
         }
         if LocatorKind::from_name(head).is_some() {
-            return Ok(Self::Locator);
+            return Ok(Self::Locator { text });
+        }
+        // Qualification commits to one global parse. It never retries a local
+        // kind, context word, row pick, URL or another layer of brackets.
+        if qualified {
+            return Err(ReferenceError::BadQualification(original.to_owned()));
         }
         if !is_kind_name(head) {
             return Err(ReferenceError::BadKind(head.to_owned()));
