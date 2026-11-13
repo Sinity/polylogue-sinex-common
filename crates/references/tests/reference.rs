@@ -139,8 +139,8 @@ fn polylogue_external_file_display_roundtrips_as_a_locator() {
             None,
         );
         assert_eq!(expected.global(), global);
-        assert_eq!(expected.written_in(Product::Polylogue), human);
-        assert_eq!(expected.written_in(Product::Sinex), global);
+        assert_eq!(catalog.written(&expected), human);
+        assert_eq!(self::catalog(Product::Sinex).written(&expected), global);
         assert_eq!(catalog.parse(human).unwrap(), expected);
         assert_eq!(
             catalog.read_input(human).unwrap(),
@@ -188,7 +188,7 @@ fn locator_remains_an_ordinary_object_kind() {
     .unwrap();
     let expected = object(Product::Polylogue, "locator", "file:host/root/path", None);
     let local = "locator:file:host/root/path";
-    assert_eq!(expected.written_in(Product::Polylogue), local);
+    assert_eq!(catalog.written(&expected), local);
     assert_eq!(catalog.parse(local).unwrap(), expected);
     assert_eq!(
         catalog.read_input(local).unwrap(),
@@ -240,7 +240,7 @@ fn local_equals_global() {
                 .parse(&format!("{home}:{}", text.replacen(':', "/", 1)))
                 .unwrap();
             assert_eq!(local, global);
-            assert_eq!(local.written_in(home), text);
+            assert_eq!(catalog.written(&local), text);
             assert_eq!(Reference::parse(&local.global()).unwrap(), local);
         }
     }
@@ -278,8 +278,11 @@ fn polylogue_only() -> ProductCatalog {
 #[test]
 fn written_in_another_product_is_global() {
     let reference = object(Product::Sinex, "ev", "e1", None);
-    assert_eq!(reference.written_in(Product::Sinex), "ev:e1");
-    assert_eq!(reference.written_in(Product::Polylogue), "sinex:ev/e1");
+    assert_eq!(catalog(Product::Sinex).written(&reference), "ev:e1");
+    assert_eq!(
+        catalog(Product::Polylogue).written(&reference),
+        "sinex:ev/e1"
+    );
 }
 
 #[test]
@@ -522,7 +525,7 @@ proptest! {
         prop_assert_eq!(Reference::parse(&global).unwrap().global(), global);
         // Written locally in its own product, it parses to the same reference.
         let home = Catalog::new(product, vec![ProductCatalog::new(product, vec![Kind::new(&kind, &[])])]).unwrap();
-        let local = reference.written_in(product);
+        let local = home.written(&reference);
         prop_assert_eq!(home.parse(&local).unwrap(), reference);
     }
 }

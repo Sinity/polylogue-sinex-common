@@ -4,7 +4,8 @@
 //!   global form, `<kind>:<id>…` inside its own product, or a [`Locator`].
 //!   `<global-reference>` explicitly qualifies global input without changing
 //!   its canonical stored spelling.
-//! - [`Selector`]: media fragments, line ranges, text ranges, quotes and named places.
+//! - [`Selector`]: recorded member ordinals, media fragments, line ranges,
+//!   text ranges, quotes and named places.
 //! - [`Locator`]: canonical native addresses, from the versioned
 //!   canonicalizer and its catalog patterns.
 //! - [`Catalog`]: each product's kinds, web address and provider-URL
@@ -21,8 +22,8 @@ pub mod selector;
 pub mod shared_cases;
 
 pub use catalog::{
-    Catalog, CatalogError, ContextWord, Input, Kind, Link, ProductCatalog, RowPick, RowSpan,
-    Unlinked, WebAddress,
+    Catalog, CatalogError, ContextWord, Input, Kind, Link, LocalForm, ProductCatalog, RowPick,
+    RowSpan, Unlinked, WebAddress,
 };
 pub use locator::{Located, Locator, LocatorError, LocatorKind};
 pub use pattern::{PatternError, UrlPattern};

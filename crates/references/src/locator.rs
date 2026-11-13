@@ -301,6 +301,7 @@ impl fmt::Display for Located {
 fn web_fragment(selector: &Selector) -> String {
     match selector {
         Selector {
+            ordinal: None,
             id: Some(id),
             lines: None,
             time: None,
