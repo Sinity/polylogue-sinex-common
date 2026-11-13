@@ -15,6 +15,7 @@
 //! declares its own provider-URL patterns in its [`crate::ProductCatalog`]
 //! with the same type.
 
+use crate::escape;
 use std::collections::BTreeMap;
 use url::Url;
 
@@ -26,6 +27,7 @@ pub struct UrlPattern {
     rest: Option<Piece>,
     query: Vec<(String, Piece)>,
     output: String,
+    literal_captures: Vec<String>,
 }
 
 /// Literal text with at most one capture inside it.
@@ -48,6 +50,8 @@ pub enum PatternError {
     RestNotLast(String),
     #[error("the output `{output}` uses `{{{name}}}`, which the pattern does not capture")]
     UncapturedOutput { output: String, name: String },
+    #[error("`{0}` is not a capture declared by this URL pattern")]
+    UnknownCapture(String),
     #[error("the pattern captures `{0}` twice")]
     CapturedTwice(String),
 }
@@ -94,9 +98,26 @@ impl UrlPattern {
             rest,
             query,
             output: output.to_owned(),
+            literal_captures: Vec::new(),
         };
         pattern.check_output()?;
         Ok(pattern)
+    }
+
+    /// Keep this capture's URL spelling as its identity, including percent
+    /// escapes. Other captures retain the ordinary decoded reference meaning.
+    pub fn with_literal_capture(mut self, name: &str) -> Result<Self, PatternError> {
+        if !self.captures().any(|capture| capture == name) {
+            return Err(PatternError::UnknownCapture(name.to_owned()));
+        }
+        if !self.literal_captures.iter().any(|capture| capture == name) {
+            self.literal_captures.push(name.to_owned());
+        }
+        Ok(self)
+    }
+
+    pub(crate) fn has_literal_captures(&self) -> bool {
+        !self.literal_captures.is_empty()
     }
 
     fn captures(&self) -> impl Iterator<Item = &String> {
@@ -175,7 +196,13 @@ impl UrlPattern {
         while let Some(open) = template.find('{') {
             let close = open + template[open..].find('}')?;
             output.push_str(&template[..open]);
-            output.push_str(captured.get(&template[open + 1..close])?);
+            let name = &template[open + 1..close];
+            let value = captured.get(name)?;
+            if self.literal_captures.iter().any(|capture| capture == name) {
+                output.push_str(&escape::encode(value, escape::unreserved));
+            } else {
+                output.push_str(value);
+            }
             template = &template[close + 1..];
         }
         output.push_str(template);

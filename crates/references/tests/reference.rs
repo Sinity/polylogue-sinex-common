@@ -396,6 +396,75 @@ fn provider_urls_become_product_references() {
 }
 
 #[test]
+fn literal_provider_captures_preserve_native_ids_through_the_catalog() {
+    let patterns = ["/c/{id}", "/g/{project}/c/{id}", "/u/{account}/c/{id}"]
+        .into_iter()
+        .map(|path| {
+            UrlPattern::new("chatgpt.com", path, &[], "session:chatgpt:{id}")
+                .unwrap()
+                .with_literal_capture("id")
+                .unwrap()
+        })
+        .collect();
+    let catalog = Catalog::new(
+        Product::Polylogue,
+        vec![polylogue().with_patterns(patterns)],
+    )
+    .unwrap();
+    for path in ["c", "g/project/c", "u/0/c"] {
+        for native in ["a%2Fb", "a%2fb", "a%61b", "a%25b", "a@b", "a%23b", "a%FFb"] {
+            let reference = catalog
+                .read_url(&format!(
+                    "https://chatgpt.com/{path}/{native}?model=x#fragment"
+                ))
+                .unwrap();
+            let Target::Object(object) = reference.target() else {
+                panic!("provider URL must name its product object");
+            };
+            assert_eq!(object.product(), Product::Polylogue);
+            assert_eq!(object.kind(), "session");
+            assert_eq!(object.id(), format!("chatgpt:{native}"));
+            assert_eq!(object.revision(), None);
+            assert_eq!(
+                reference.selector().unwrap().id.as_deref(),
+                Some("fragment")
+            );
+        }
+    }
+}
+
+#[test]
+fn default_provider_captures_keep_their_decoded_reference_meaning() {
+    let catalog = Catalog::new(Product::Polylogue, vec![polylogue()]).unwrap();
+    for (segment, expected) in [("a%2Fb", "a/b"), ("a%25b", "a%b"), ("a%40b", "a@b")] {
+        let reference = catalog
+            .read_url(&format!("https://chatgpt.com/c/{segment}?model=x#fragment"))
+            .unwrap();
+        let Target::Object(object) = reference.target() else {
+            panic!("provider URL must name its product object");
+        };
+        assert_eq!(object.id(), format!("chatgpt:{expected}"));
+        assert_eq!(object.revision(), None);
+        assert_eq!(
+            reference.selector().unwrap().id.as_deref(),
+            Some("fragment")
+        );
+    }
+}
+
+#[test]
+fn a_literal_capture_must_be_declared_by_its_pattern() {
+    let error = UrlPattern::new("chatgpt.com", "/c/{id}", &[], "session:chatgpt:{id}")
+        .unwrap()
+        .with_literal_capture("missing")
+        .unwrap_err();
+    assert_eq!(
+        error,
+        references::PatternError::UnknownCapture("missing".into())
+    );
+}
+
+#[test]
 fn row_picks_print_back() {
     for text in ["@last", "@*", "@3", "@3.2", "@2-5", "@1,4", "@1,2-3,4.5"] {
         assert_eq!(RowPick::parse(text).unwrap().to_string(), text);
