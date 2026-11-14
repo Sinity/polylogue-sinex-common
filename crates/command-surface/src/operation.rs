@@ -1333,13 +1333,9 @@ impl DeclarationsBuilder {
             crate::arguments::check(&description)?;
             crate::arguments::check_globals(&description, self.cli_globals())?;
         }
-        let mut forms = (*self.declarations.forms).clone();
-        forms.descriptions.push(description);
-        if let Some(tool) = forms.descriptions.last().and_then(|d| d.spec.tool()) {
-            // A family's schema must merge.
-            crate::tools::tool_input(&forms, tool)?;
-        }
-        self.declarations.forms = Arc::new(forms);
+        Arc::make_mut(&mut self.declarations.forms)
+            .descriptions
+            .push(description);
         self.declarations.renderers.push(renderer);
         Ok(())
     }

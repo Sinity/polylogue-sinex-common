@@ -50,6 +50,9 @@ rows. `declare::<Request, Response>(spec, render)` and
 `fn(&ValueType, TextStyle) -> String` rendering function.
 `declare_local::<Request>(spec)` declares a caller-local row.
 `finish()` returns an immutable `Arc<OperationDeclarations>`.
+The builder checks each row before appending it to its owned declarations;
+existing shared snapshots remain unchanged. A tool's merged input schema is
+constructed when its tool list is requested.
 
 The declarations alone supply CLI parsing, help, completion, schemas, MCP tool
 lists, fallible follow-up requests, read deadlines, connection budgets and

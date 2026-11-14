@@ -96,7 +96,7 @@ struct MergedField {
 /// has several); and the request options. A field two rows type differently
 /// is a choice of its types, described by the rows that use each. Each row
 /// checks its own arguments at dispatch.
-pub(crate) fn tool_input(forms: &Forms, tool: &str) -> Result<Value, Failure> {
+pub(crate) fn tool_input(forms: &Forms, tool: &str) -> Value {
     let rows: Vec<_> = forms
         .descriptions
         .iter()
@@ -187,12 +187,12 @@ pub(crate) fn tool_input(forms: &Forms, tool: &str) -> Result<Value, Failure> {
         };
         properties.insert(option.name().into(), schema);
     }
-    Ok(json!({
+    json!({
         "type": "object",
         "properties": properties,
         "required": required,
         "additionalProperties": false,
-    }))
+    })
 }
 
 #[derive(Deserialize)]
@@ -444,8 +444,7 @@ impl OperationDeclarations {
                     .find(|d| d.spec.tool() == Some(tool.name.as_str()))?
                     .spec
                     .access;
-                let input = tool_input(self.forms(), &tool.name)
-                    .expect("registration checked every tool's schema");
+                let input = tool_input(self.forms(), &tool.name);
                 Some(json!({
                     "name": self.forms().tool_name(&tool.name),
                     "description": tool.description,

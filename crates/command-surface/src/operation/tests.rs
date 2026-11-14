@@ -638,3 +638,77 @@ async fn mixed_rows_authorize_the_typed_request_before_any_write() {
     assert!(written.value().is_some(), "{written:?}");
     assert_eq!(store.count(), 1);
 }
+
+#[test]
+fn extending_declarations_preserves_existing_forms_snapshots() {
+    let mut builder = OperationDeclarations::builder("example", Deadlines::default());
+    builder
+        .declare_tool(ToolFamily {
+            name: "read".into(),
+            description: "Read synthetic values".into(),
+            open_world: false,
+            idempotent: true,
+        })
+        .unwrap();
+    builder
+        .declare::<Write, String>(
+            OperationSpec::request(
+                "first",
+                &["first"],
+                "read",
+                "Read first",
+                "Read a synthetic value",
+            ),
+            |value, _| format!("first:{value}"),
+        )
+        .unwrap();
+    let snapshot = builder.declarations.forms.clone();
+    let before = serde_json::to_value(&snapshot.descriptions).unwrap();
+    builder
+        .declare::<Write, String>(
+            OperationSpec::request(
+                "second",
+                &["second"],
+                "read",
+                "Read second",
+                "Read another synthetic value",
+            ),
+            |value, _| format!("second:{value}"),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&snapshot.descriptions).unwrap(),
+        before
+    );
+    assert_eq!(
+        snapshot
+            .descriptions
+            .iter()
+            .map(|row| row.spec.name.as_str())
+            .collect::<Vec<_>>(),
+        ["first"]
+    );
+    assert!(snapshot.description("second").is_none());
+    let declarations = builder.finish();
+    assert_eq!(
+        declarations.mcp_tools()[0]["inputSchema"]["properties"]["operation"]["enum"],
+        json!(["first", "second"])
+    );
+    assert_eq!(
+        declarations
+            .parse_cli(
+                &["second".into(), "--value".into(), "hello".into()],
+                "second-request"
+            )
+            .unwrap()
+            .request
+            .arguments,
+        json!({"value":"hello"})
+    );
+    assert_eq!(
+        declarations
+            .render_text("second", &Answer::ok(json!("hello")), TextStyle::Plain)
+            .unwrap(),
+        "second:hello"
+    );
+}
