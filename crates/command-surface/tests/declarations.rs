@@ -89,3 +89,75 @@ fn binding_uses_existing_declarations_and_rejects_schema_drift_and_duplicates() 
         declarations.descriptions()
     ));
 }
+
+#[test]
+fn rejected_rows_leave_existing_schemas_cli_tools_and_renderers_unchanged() {
+    let mut builder = OperationDeclarations::builder("example", Deadlines::default());
+    builder
+        .declare_tool(ToolFamily {
+            name: "query".into(),
+            description: "Read synthetic values".into(),
+            open_world: false,
+            idempotent: true,
+        })
+        .unwrap();
+    let spec = || {
+        OperationSpec::request(
+            "first",
+            &["first"],
+            "query",
+            "Read first",
+            "Read a synthetic value",
+        )
+    };
+    builder
+        .declare::<Input, String>(spec(), |value, _| format!("first:{value}"))
+        .unwrap();
+    let before = serde_json::to_value(builder.descriptions()).unwrap();
+    let tools = builder.mcp_tools();
+    let mut invalid = spec();
+    invalid.name = "second".into();
+    invalid.command = vec!["second".into()];
+    invalid.arguments = vec![ArgumentSpec::new(
+        "text",
+        ArgumentForm::Flag,
+        "Invalid string flag",
+    )];
+    let error = builder
+        .declare::<Input, String>(invalid, |value, _| format!("rejected:{value}"))
+        .unwrap_err();
+    assert_eq!(error.kind, FailureKind::BadRequest);
+    assert_eq!(
+        serde_json::to_value(builder.descriptions()).unwrap(),
+        before
+    );
+    assert_eq!(builder.mcp_tools(), tools);
+    assert!(builder.parse_cli(&["second".into()], "missing").is_err());
+    let second = OperationSpec::request(
+        "second",
+        &["second"],
+        "query",
+        "Read second",
+        "Read another synthetic value",
+    );
+    builder
+        .declare::<Input, String>(second, |value, _| format!("second:{value}"))
+        .unwrap();
+    let declarations = builder.finish();
+    assert_eq!(
+        declarations
+            .render_text("first", &Answer::ok(json!("one")), TextStyle::Plain)
+            .unwrap(),
+        "first:one"
+    );
+    assert_eq!(
+        declarations
+            .render_text("second", &Answer::ok(json!("two")), TextStyle::Plain)
+            .unwrap(),
+        "second:two"
+    );
+    assert_eq!(
+        declarations.mcp_tools()[0]["inputSchema"]["properties"]["operation"]["enum"],
+        json!(["first", "second"])
+    );
+}
