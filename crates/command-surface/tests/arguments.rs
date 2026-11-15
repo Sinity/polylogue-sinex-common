@@ -120,6 +120,19 @@ fn structured_mcp_calls_preserve_the_canonical_request_options() {
                 table.mcp_call(&request).unwrap(),
                 json!({"name":"example_read", "arguments":arguments})
             );
+            let call = table.mcp_call(&request).unwrap();
+            assert_eq!(
+                table
+                    .parse_mcp_call(call["name"].as_str().unwrap(), call["arguments"].clone())
+                    .unwrap(),
+                request
+            );
+            let mut explicit = call["arguments"].clone();
+            explicit["operation"] = json!("read");
+            assert_eq!(
+                table.parse_mcp_call("example_read", explicit).unwrap(),
+                request
+            );
             let text = table.follow_up(Via::Mcp, &request).unwrap();
             let (name, body) = text.split_once(' ').unwrap();
             assert_eq!(name, "example_read");
@@ -505,5 +518,86 @@ fn a_positional_array_is_one_json_value_including_empty_and_structured_lists() {
                 .parse_cli(&["batch".into(), invalid.into()], "r-invalid")
                 .is_err()
         );
+    }
+}
+
+#[test]
+fn mcp_parser_selects_only_declared_family_members_and_checks_the_envelope() {
+    let mut table = table();
+    let mut peek = read_spec();
+    peek.name = "peek".into();
+    peek.command = vec!["peek".into()];
+    peek.http_route = Some("/v1/peek".into());
+    table
+        .declare::<ReadRequest, Value>(peek, |value, _| format!("{value}\n"))
+        .unwrap();
+    let mut hidden = read_spec();
+    hidden.name = "private".into();
+    hidden.command.clear();
+    hidden.http_route = None;
+    hidden.kind = OperationKind::Request { tool: None };
+    table
+        .declare::<ReadRequest, Value>(hidden, |value, _| format!("{value}\n"))
+        .unwrap();
+    let original =
+        json!({"operation":"peek","arguments":{"target":"synthetic"},"request_id":"same retry"});
+    assert_eq!(
+        table
+            .parse_mcp_call("example_read", original.clone())
+            .unwrap(),
+        RunnableRequest::new("peek", json!({"target":"synthetic"}), "same retry")
+    );
+    for (name, call, reason) in [
+        (
+            "example_read",
+            json!({"arguments":{},"request_id":"r"}),
+            "name the operation",
+        ),
+        (
+            "example_read",
+            json!({"operation":"exec","arguments":{},"request_id":"r"}),
+            "not an operation",
+        ),
+        (
+            "example_read",
+            json!({"operation":"private","arguments":{},"request_id":"r"}),
+            "not an operation",
+        ),
+        ("other_read", original.clone(), "unknown MCP tool"),
+        ("example_private", original.clone(), "unknown MCP tool"),
+        (
+            "example_read",
+            json!({"operation":"read","request_id":"r"}),
+            "arguments",
+        ),
+        (
+            "example_read",
+            json!({"operation":"read","arguments":{}}),
+            "request_id",
+        ),
+        (
+            "example_read",
+            json!({"operation":"read","arguments":{},"request_id":"r","author":"forged"}),
+            "author",
+        ),
+        (
+            "example_read",
+            json!({"operation":"read","arguments":{},"request_id":"r","deadline":-1}),
+            "Deadline",
+        ),
+        (
+            "example_read",
+            json!({"operation":"read","arguments":{},"request_id":"r","budget_tokens":false}),
+            "TokenBudget",
+        ),
+        (
+            "example_read",
+            json!({"operation":"read","arguments":{},"request_id":"r","cursor":1}),
+            "string",
+        ),
+    ] {
+        let error = table.parse_mcp_call(name, call).unwrap_err();
+        assert_eq!(error.kind, FailureKind::BadRequest);
+        assert!(error.message.contains(reason), "{name}: {error:?}");
     }
 }
