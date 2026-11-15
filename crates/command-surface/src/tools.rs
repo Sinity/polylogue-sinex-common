@@ -484,12 +484,12 @@ impl OperationTable {
                     .iter()
                     .find(|tool| self.forms().tool_name(&tool.name) == name)
                 {
-                    Some(tool) => {
+                    Some(_) => {
                         let metadata = message["params"].get("_meta").cloned();
                         let caller = caller.for_mcp_call(metadata.as_ref());
                         Ok(self
                             .tool_result(
-                                &tool.name,
+                                name,
                                 message["params"]["arguments"].clone(),
                                 metadata,
                                 caller,
@@ -517,16 +517,11 @@ impl OperationTable {
         caller: Caller,
         cancellation: CancellationToken,
     ) -> Value {
-        let rows: Vec<&str> = self
-            .descriptions()
-            .iter()
-            .filter(|d| d.spec.tool() == Some(tool))
-            .map(|d| d.spec.name.as_str())
-            .collect();
-        let call = serde_json::from_value::<ToolCall>(arguments)
-            .map_err(|error| bad_request(error.to_string()));
-        let format = call.as_ref().map_or(Format::Text, |call| call.format);
-        let (request, answer) = match call.and_then(|call| self.tool_request(&rows, call)) {
+        let parsed = self.parse_mcp_call(tool, arguments);
+        let format = parsed
+            .as_ref()
+            .map_or(Format::Text, |request| request.format);
+        let (request, answer) = match parsed {
             Err(failure) => (None, Answer::error(failure)),
             Ok(request) => {
                 let answer = self
@@ -560,11 +555,25 @@ impl OperationTable {
 }
 
 impl OperationDeclarations {
-    /// The request a tool call makes: its row (named by `operation` when the
-    /// tool has several) and the call's options. The row's own schema checks
-    /// the arguments at dispatch.
-    fn tool_request(&self, rows: &[&str], call: ToolCall) -> Result<RunnableRequest, Failure> {
-        let operation = match (call.operation, rows) {
+    /// Parses an MCP tool's argument envelope into its canonical request.
+    /// `name` is the full tool name from `mcp_tools`; its declaration supplies
+    /// the operation only when that family has exactly one row. The row's
+    /// typed arguments and the caller's grants remain checked at dispatch.
+    pub fn parse_mcp_call(&self, name: &str, arguments: Value) -> Result<RunnableRequest, Failure> {
+        let tool = self
+            .tools()
+            .iter()
+            .find(|tool| self.forms().tool_name(&tool.name) == name)
+            .ok_or_else(|| bad_request(format!("unknown MCP tool {name}")))?;
+        let rows: Vec<&str> = self
+            .descriptions()
+            .iter()
+            .filter(|description| description.spec.tool() == Some(tool.name.as_str()))
+            .map(|description| description.spec.name.as_str())
+            .collect();
+        let call: ToolCall =
+            serde_json::from_value(arguments).map_err(|error| bad_request(error.to_string()))?;
+        let operation = match (call.operation, rows.as_slice()) {
             (Some(operation), _) if rows.contains(&operation.as_str()) => operation,
             (Some(operation), _) => {
                 return Err(bad_request(format!(

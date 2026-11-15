@@ -85,8 +85,13 @@ execution remains subject to product authentication and access policy.
 `follow_up` fails when its requested ready-call surface is absent; MCP never
 falls back to a CLI invocation. Answer footers display that absence explicitly.
 `mcp_call` returns structured `tools/call` parameters from that same request
-and tool declaration. MCP text formatting uses the same projection; callers
-never need to parse a displayed command to execute the request.
+and tool declaration. `parse_mcp_call(name, arguments)` uses that declared tool
+family to decode the canonical request: it selects only a member operation,
+infers the operation for a single-row family and preserves request identity,
+deadline, budget, cursor and format. Both the shared MCP transport and product
+proxies use this parser. Typed argument admission, caller grants and parent
+transport deadlines remain owned by dispatch. MCP text formatting uses the same
+projection; callers never need to parse a displayed command to execute the request.
 
 `OperationTable::new(declarations)` binds execution separately.
 `bind(name, operation)` and `bind_stream(name, stream)` require an existing
