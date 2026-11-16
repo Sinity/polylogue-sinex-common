@@ -24,6 +24,8 @@ pub mod seen;
 #[cfg(feature = "runtime")]
 mod status;
 #[cfg(feature = "runtime")]
+mod steps;
+#[cfg(feature = "runtime")]
 mod tools;
 #[cfg(feature = "runtime")]
 mod transport;
@@ -43,6 +45,8 @@ pub use schemars::JsonSchema;
 pub use seen::*;
 #[cfg(feature = "runtime")]
 pub use status::*;
+#[cfg(feature = "runtime")]
+pub use steps::{StepDeclaration, StepDeclarations};
 #[cfg(feature = "runtime")]
 pub use tokio_util::sync::CancellationToken;
 #[cfg(feature = "runtime")]

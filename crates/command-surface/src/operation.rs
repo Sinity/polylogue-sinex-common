@@ -676,6 +676,8 @@ pub(crate) struct Forms {
     pub(crate) tools: Vec<ToolFamily>,
     pub(crate) options: Vec<crate::RequestOption>,
     pub(crate) cli_globals: Vec<ArgumentSpec>,
+    pub(crate) tool_defaults: BTreeMap<String, String>,
+    pub(crate) steps: BTreeMap<(String, String), crate::StepDeclarations>,
 }
 impl Forms {
     pub(crate) fn description(&self, name: &str) -> Option<&OperationDescription> {
@@ -902,6 +904,8 @@ impl OperationDeclarations {
                     tools: vec![],
                     options: vec![],
                     cli_globals: vec![],
+                    tool_defaults: BTreeMap::new(),
+                    steps: BTreeMap::new(),
                 }),
                 renderers: vec![],
                 deadlines,
@@ -1109,6 +1113,19 @@ impl DeclarationsBuilder {
             return Err(bad_request(format!("tool {} is declared twice", tool.name)));
         }
         Arc::make_mut(&mut self.declarations.forms).tools.push(tool);
+        Ok(())
+    }
+    /// Select the operation used when a call to this MCP family omits it.
+    /// Both the family and its member operation must already be declared.
+    pub fn set_tool_default(&mut self, tool: &str, operation: &str) -> Result<(), Failure> {
+        if self.spec_named(operation).and_then(OperationSpec::tool) != Some(tool) {
+            return Err(bad_request(format!(
+                "{operation} is not an operation of tool {tool}"
+            )));
+        }
+        Arc::make_mut(&mut self.declarations.forms)
+            .tool_defaults
+            .insert(tool.to_owned(), operation.to_owned());
         Ok(())
     }
     /// Serve a request option on every row: tools offer it, and dispatch

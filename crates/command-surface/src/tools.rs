@@ -159,12 +159,12 @@ pub(crate) fn tool_input(forms: &Forms, tool: &str) -> Value {
         })
         .collect();
     let mut properties = Map::new();
-    let mut required = vec![json!("arguments"), json!("request_id")];
+    let mut required = vec![json!("arguments")];
     properties.insert(
         "operation".into(),
         json!({ "enum": rows.iter().map(|r| r.spec.name.clone()).collect::<Vec<_>>() }),
     );
-    if rows.len() > 1 {
+    if rows.len() > 1 && !forms.tool_defaults.contains_key(tool) {
         required.insert(0, json!("operation"));
     }
     properties.insert(
@@ -201,7 +201,8 @@ struct ToolCall {
     #[serde(default)]
     operation: Option<String>,
     arguments: Value,
-    request_id: String,
+    #[serde(default)]
+    request_id: Option<String>,
     #[serde(default)]
     deadline: Deadline,
     #[serde(default)]
@@ -517,7 +518,11 @@ impl OperationTable {
         caller: Caller,
         cancellation: CancellationToken,
     ) -> Value {
-        let parsed = self.parse_mcp_call(tool, arguments);
+        let author = caller
+            .authorship()
+            .map(|a| &a.author)
+            .unwrap_or(&crate::Author::Operator);
+        let parsed = self.parse_mcp_call_as(tool, arguments, author);
         let format = parsed
             .as_ref()
             .map_or(Format::Text, |request| request.format);
@@ -560,6 +565,16 @@ impl OperationDeclarations {
     /// the operation only when that family has exactly one row. The row's
     /// typed arguments and the caller's grants remain checked at dispatch.
     pub fn parse_mcp_call(&self, name: &str, arguments: Value) -> Result<RunnableRequest, Failure> {
+        self.parse_mcp_call_as(name, arguments, &crate::Author::Operator)
+    }
+    /// Parse with the author computed by the accepting transport. The request
+    /// cannot supply or override that author.
+    pub fn parse_mcp_call_as(
+        &self,
+        name: &str,
+        arguments: Value,
+        author: &crate::Author,
+    ) -> Result<RunnableRequest, Failure> {
         let tool = self
             .tools()
             .iter()
@@ -582,6 +597,9 @@ impl OperationDeclarations {
                 )));
             }
             (None, [only]) => (*only).to_owned(),
+            (None, _) if self.forms().tool_defaults.contains_key(&tool.name) => {
+                self.forms().tool_defaults[&tool.name].clone()
+            }
             (None, _) => {
                 return Err(bad_request(format!(
                     "name the operation: one of {}",
@@ -589,11 +607,21 @@ impl OperationDeclarations {
                 )));
             }
         };
+        let request_id = match call.request_id {
+            Some(id) => id,
+            None => canonical_json::canonical_hash(
+                "command-surface-request",
+                &(author.to_string(), name, &operation, &call.arguments),
+            )
+            .map_err(|error| bad_request(error.to_string()))?
+            .to_hex()
+            .to_string(),
+        };
         let arguments = call.arguments;
         Ok(RunnableRequest {
             operation,
             arguments,
-            request_id: call.request_id,
+            request_id,
             deadline: call.deadline,
             budget_tokens: call.budget_tokens,
             cursor: call.cursor,
