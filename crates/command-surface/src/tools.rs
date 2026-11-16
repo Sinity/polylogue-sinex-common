@@ -659,10 +659,12 @@ impl OperationDeclarations {
             .operation
             .clone()
             .ok_or_else(|| bad_request("HTTP requests name their operation"))?;
-        let description = self
-            .forms()
-            .description(&operation)
-            .ok_or_else(|| bad_request(format!("unknown operation {operation}")))?;
+        let description = self.forms().description(&operation).ok_or_else(|| {
+            Failure::new(
+                crate::FailureKind::NotFound,
+                "route does not match operation",
+            )
+        })?;
         let name = description.spec.tool().map_or_else(
             || self.product().to_owned(),
             |tool| self.forms().tool_name(tool),
