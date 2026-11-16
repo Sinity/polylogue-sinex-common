@@ -527,7 +527,8 @@ the pinned commit position.
 - **Bounds:** dates are half-open whole days; `between` two dates includes
   both days. A datetime or clock time written to the minute or second denotes
   that minute or second; `until:` includes the whole written period. A
-  fractional second denotes an instant. `since:DATE` starts at that logical day's start; `until:DATE`
+  fractional second denotes an instant. `since:DATE` starts at that logical
+  day's start; `until:DATE`
   includes that whole day; `until:INSTANT` stops at that instant. These
   select spans by overlap. An explicit comparison keeps its operator's
   meaning: `when < DATE` stops at the day's start. `since` and `until` stay

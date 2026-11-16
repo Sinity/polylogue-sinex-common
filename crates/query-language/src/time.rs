@@ -427,14 +427,17 @@ fn written_time(text: &str, at: Timestamp) -> Result<Time, Error> {
     let clock = text
         .split_once(['T', 't', ' '])
         .map_or(text, |(_, clock)| clock);
-    let width = if clock.as_bytes().get(2) != Some(&b':') {
+    let clock = clock
+        .split(['+', '-', 'Z', 'z', '['])
+        .next()
+        .unwrap_or(clock);
+    if clock.contains(['.', ',']) {
         return Ok(Time::Instant { at });
-    } else if clock.as_bytes().get(5) != Some(&b':') {
-        60
-    } else if matches!(clock.as_bytes().get(8), Some(b'.' | b',')) {
-        return Ok(Time::Instant { at });
-    } else {
-        1
+    }
+    let width = match clock.bytes().filter(u8::is_ascii_digit).count() {
+        4 => 60,
+        6 => 1,
+        _ => return Ok(Time::Instant { at }),
     };
     Ok(TimeRange::new(
         at,

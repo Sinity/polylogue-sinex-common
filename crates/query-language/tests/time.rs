@@ -501,8 +501,9 @@ fn bare_dates_are_whole_logical_days_and_datetimes_keep_their_clock_time() {
     );
     assert_eq!(
         time::resolve("2026-10-05T00:00", &c).unwrap().value,
-        time::Time::Instant {
-            at: ts("2026-10-04T22:00Z"),
+        time::Time::Span {
+            start: ts("2026-10-04T22:00Z"),
+            end: ts("2026-10-04T22:01Z"),
         }
     );
 }
@@ -614,7 +615,12 @@ fn four_digit_years_precede_basic_clock_parsing_with_explicit_clock_forms_preser
         for text in ["20:26", "T2026"] {
             assert_eq!(
                 time::resolve(text, clock).unwrap().value,
-                time::Time::Instant { at: ts(expected) },
+                time::Time::Span {
+                    start: ts(expected),
+                    end: ts(expected)
+                        .checked_add(SignedDuration::from_secs(60))
+                        .unwrap(),
+                },
                 "{text}"
             );
         }

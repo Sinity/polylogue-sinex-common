@@ -110,7 +110,9 @@ fn date_until_uses_complete_logical_day_and_instant_until_stays_exclusive() {
     assert!(ts("2026-10-25T03:00Z") >= until);
     // Explicit `when < DATE` uses day.start(), excluding the whole date.
     assert!(ts("2026-10-24T02:00Z") >= day.start());
-    let instant = time::resolve("2026-10-24T12:00Z", &clock).unwrap().value;
+    let instant = time::resolve("2026-10-24T12:00:00.000Z", &clock)
+        .unwrap()
+        .value;
     assert_eq!(instant.until_bound(), ts("2026-10-24T12:00Z"));
     assert_eq!(instant.start(), instant.until_bound());
     let span = Time::Span {
