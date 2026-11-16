@@ -104,7 +104,11 @@ mechanic and nothing else in the shared crates.
 | request row, stream row, local row | an operation the daemon answers once; one whose events the daemon sends until it ends; one the calling process runs without the daemon |
 | access level | what a row needs from its caller: `read`, `write` (attributed, undoable) or `permanent` (cannot be undone) |
 | argument form | how a request field is written on the command line: positional, words, rest, named, repeated, flag |
-| default operation | the row a command line runs when its first words name no command |
+| default operation | the row a command line runs when its first words name no command, or the declared member of an MCP family used when a call omits its operation |
+| command step | one verb and its own typed positional words and options, represented as an object with a `verb` field |
+| step declarations | the typed verbs accepted by one operation argument; shared by parsing, validation, schemas and help (`StepDeclarations`) |
+| step signature | a verb and its fields in help order, with `?` after optional fields |
+| derived request ID | BLAKE3 of a tagged canonical JSON tuple containing the computed author, tool name, resolved operation and arguments; used when an MCP or HTTP call omits its ID |
 | operation declarations | the typed list of a product's operations, their schemas, surfaces and rendering, from which the CLI, socket, HTTP and MCP are generated; usable without handlers (`OperationDeclarations`) |
 | operation table | a product's operation declarations bound to the handlers that run them (`OperationTable`) |
 | request, answer | what a caller sends, and what it gets back: an outcome and an envelope |

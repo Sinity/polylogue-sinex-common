@@ -32,7 +32,7 @@ pub struct CliArgument {
     pub choices: Vec<String>,
 }
 
-fn resolve<'a>(schema: &'a Value, root: &'a Value) -> &'a Value {
+pub(crate) fn resolve<'a>(schema: &'a Value, root: &'a Value) -> &'a Value {
     match schema
         .get("$ref")
         .and_then(Value::as_str)
@@ -174,7 +174,10 @@ fn project_argument(description: &OperationDescription, spec: ArgumentSpec) -> C
     }
 }
 
-fn projection(description: &OperationDescription, globals: &[ArgumentSpec]) -> Vec<CliArgument> {
+pub(crate) fn projection(
+    description: &OperationDescription,
+    globals: &[ArgumentSpec],
+) -> Vec<CliArgument> {
     let mut arguments: Vec<_> = description
         .spec
         .arguments
@@ -241,6 +244,13 @@ fn is_positional(form: ArgumentForm) -> bool {
 /// Reject argument declarations the request type cannot hold or the command
 /// line cannot read back unambiguously.
 pub(crate) fn check(description: &OperationDescription) -> Result<(), Failure> {
+    check_arguments(description, true)
+}
+
+pub(crate) fn check_arguments(
+    description: &OperationDescription,
+    request_options: bool,
+) -> Result<(), Failure> {
     let spec = &description.spec;
     let refuse = |message: String| Err(bad_request(format!("{}: {message}", spec.name)));
     // A field is written `--name` unless it is declared positional, so no
@@ -249,7 +259,8 @@ pub(crate) fn check(description: &OperationDescription) -> Result<(), Failure> {
         spec.argument(name)
             .is_some_and(|argument| is_positional(argument.form))
     };
-    if let Some(properties) = description.input_schema["properties"].as_object()
+    if request_options
+        && let Some(properties) = description.input_schema["properties"].as_object()
         && let Some(name) = properties.keys().find(|name| {
             !positional(name) && GLOBAL_FLAGS.contains(&name.replace('_', "-").as_str())
         })
@@ -271,7 +282,8 @@ pub(crate) fn check(description: &OperationDescription) -> Result<(), Failure> {
         {
             return refuse(format!("argument {} is declared twice", argument.name));
         }
-        if !is_positional(argument.form)
+        if request_options
+            && !is_positional(argument.form)
             && GLOBAL_FLAGS.contains(&argument.flag().trim_start_matches('-'))
         {
             return refuse(format!("{} is a flag of every row", argument.flag()));
@@ -474,6 +486,7 @@ impl OperationDeclarations {
         if request.operation != operation {
             return Err(bad_request("route does not match operation"));
         }
+        self.validate_steps(&request.operation, &request.arguments)?;
         Ok(request)
     }
     // Move recognized globals around command words behind the matched command.
@@ -560,255 +573,296 @@ impl OperationDeclarations {
         let (description, start) = self
             .command_row(args)
             .ok_or_else(|| bad_request("unknown command; use --help"))?;
-        let spec = &description.spec;
-        let mut fields = Map::new();
-        let mut calling_process = Map::new();
-        let mut request = None;
-        let mut deadline = Deadline::Default;
-        let mut budget_tokens = crate::TokenBudget::Default;
-        let mut cursor = None;
-        let mut fresh = false;
-        let mut id = request_id.into();
-        let mut json = false;
-        let positionals: Vec<&ArgumentSpec> = spec
+        let parsed = parse_arguments(
+            description,
+            args,
+            request_id,
+            ArgumentScope::Command(self, start),
+        )?;
+        self.validate_steps(&parsed.request.operation, &parsed.request.arguments)?;
+        Ok(parsed)
+    }
+}
+
+/// A command accepts request options; a step accepts its declared fields.
+pub(crate) enum ArgumentScope<'a> {
+    Command(&'a OperationDeclarations, usize),
+    Step,
+}
+
+pub(crate) fn parse_arguments(
+    description: &OperationDescription,
+    args: &[String],
+    request_id: impl Into<String>,
+    scope: ArgumentScope<'_>,
+) -> Result<ParsedCommand, Failure> {
+    let (command, start, globals) = match scope {
+        ArgumentScope::Command(command, start) => (Some(command), start, command.cli_globals()),
+        ArgumentScope::Step => (None, 0, &[][..]),
+    };
+    let spec = &description.spec;
+    let mut fields = Map::new();
+    let mut calling_process = Map::new();
+    let mut request = None;
+    let mut deadline = Deadline::Default;
+    let mut budget_tokens = crate::TokenBudget::Default;
+    let mut cursor = None;
+    let mut fresh = false;
+    let mut id = request_id.into();
+    let mut json = false;
+    let positionals: Vec<&ArgumentSpec> = spec
+        .arguments
+        .iter()
+        .filter(|a| is_positional(a.form))
+        .collect();
+    let mut positional = 0;
+    let mut words: Vec<String> = vec![];
+    let mut options_done = false;
+    let mut rest = false;
+    let mut index = start;
+    let mut first_operand = true;
+    let argument_named = |flag: &str| -> Option<ArgumentSpec> {
+        if let Some(argument) = spec
             .arguments
             .iter()
-            .filter(|a| is_positional(a.form))
-            .collect();
-        let mut positional = 0;
-        let mut words: Vec<String> = vec![];
-        let mut options_done = false;
-        let mut rest = false;
-        let mut index = start;
-        let mut first_operand = true;
-        let argument_named = |flag: &str| -> Option<ArgumentSpec> {
-            if let Some(argument) = spec
-                .arguments
-                .iter()
-                .chain(self.cli_globals())
-                .find(|a| a.flag() == flag)
-            {
-                return Some(argument.clone());
-            }
-            let name = flag.trim_start_matches("--");
-            let name = if property(description, name).is_some() {
-                name.to_owned()
-            } else {
-                name.replace('-', "_")
-            };
-            property(description, &name).map(|_| ArgumentSpec::new(name, ArgumentForm::Named, ""))
+            .chain(globals)
+            .find(|a| a.flag() == flag)
+        {
+            return (command.is_some() || !is_positional(argument.form)).then(|| argument.clone());
+        }
+        let name = flag.trim_start_matches("--");
+        let name = if property(description, name).is_some() {
+            name.to_owned()
+        } else {
+            name.replace('-', "_")
         };
-        while index < args.len() {
-            let word = &args[index];
+        if command.is_none()
+            && spec
+                .argument(&name)
+                .is_some_and(|argument| is_positional(argument.form))
+        {
+            return None;
+        }
+        property(description, &name).map(|_| ArgumentSpec::new(name, ArgumentForm::Named, ""))
+    };
+    while index < args.len() {
+        let word = &args[index];
+        index += 1;
+        if rest {
+            words.push(word.clone());
+            continue;
+        }
+        if !options_done && word == "--" {
+            options_done = true;
+            continue;
+        }
+        let flag = if options_done {
+            None
+        } else if word.starts_with("--") {
+            Some(word.clone())
+        } else {
+            word.strip_prefix('-')
+                .and_then(|short| {
+                    let mut chars = short.chars();
+                    match (chars.next(), chars.next()) {
+                        (Some(letter), None) if letter.is_ascii_alphabetic() => Some(letter),
+                        _ => None,
+                    }
+                })
+                .and_then(|letter| spec.arguments.iter().find(|a| a.short == Some(letter)))
+                .map(ArgumentSpec::flag)
+        };
+        let Some(flag) = flag else {
+            if start == 0
+                && first_operand
+                && command.is_some_and(|command| !command.accepts_default_first(word))
+            {
+                return Err(bad_request(format!(
+                    "unknown command {word:?}; use {} {} ...",
+                    command
+                        .expect("a command checks its first operand")
+                        .product(),
+                    spec.command.join(" ")
+                )));
+            }
+            first_operand = false;
+            let argument = positionals
+                .get(positional)
+                .ok_or_else(|| bad_request(format!("unexpected word {word}")))?;
+            match argument.form {
+                ArgumentForm::Positional => {
+                    let kind = match kind_of(description, &argument.name) {
+                        ValueKind::List(_) => ValueKind::Json,
+                        kind => kind,
+                    };
+                    let value = word_value(&kind, word, &argument.name)?;
+                    fields.insert(argument.name.clone(), value);
+                    positional += 1;
+                }
+                ArgumentForm::Rest => {
+                    words.push(word.clone());
+                    rest = true;
+                }
+                _ => words.push(word.clone()),
+            }
+            continue;
+        };
+        let (flag, inline) = match flag.split_once('=') {
+            Some((flag, value)) => (flag.to_owned(), Some(value.to_owned())),
+            None => (flag, None),
+        };
+        let mut value = || -> Result<String, Failure> {
+            if let Some(value) = &inline {
+                return Ok(value.clone());
+            }
+            let value = args
+                .get(index)
+                .cloned()
+                .ok_or_else(|| bad_request(format!("{flag} needs a value")))?;
             index += 1;
-            if rest {
-                words.push(word.clone());
-                continue;
+            Ok(value)
+        };
+        match flag.as_str() {
+            "--json" if command.is_some() && inline.is_none() => json = true,
+            "--deadline" if command.is_some() => {
+                let value = value()?;
+                deadline = if value == "none" {
+                    Deadline::None
+                } else {
+                    Deadline::Milliseconds(
+                        value
+                            .parse()
+                            .map_err(|_| bad_request("deadline must be milliseconds or none"))?,
+                    )
+                };
             }
-            if !options_done && word == "--" {
-                options_done = true;
-                continue;
-            }
-            let flag = if options_done {
-                None
-            } else if word.starts_with("--") {
-                Some(word.clone())
-            } else {
-                word.strip_prefix('-')
-                    .and_then(|short| {
-                        let mut chars = short.chars();
-                        match (chars.next(), chars.next()) {
-                            (Some(letter), None) if letter.is_ascii_alphabetic() => Some(letter),
-                            _ => None,
-                        }
-                    })
-                    .and_then(|letter| spec.arguments.iter().find(|a| a.short == Some(letter)))
-                    .map(ArgumentSpec::flag)
-            };
-            let Some(flag) = flag else {
-                if start == 0 && first_operand && !self.accepts_default_first(word) {
-                    return Err(bad_request(format!(
-                        "unknown command {word:?}; use {} {} ...",
-                        self.product(),
-                        spec.command.join(" ")
-                    )));
-                }
-                first_operand = false;
-                let argument = positionals
-                    .get(positional)
-                    .ok_or_else(|| bad_request(format!("unexpected word {word}")))?;
-                match argument.form {
-                    ArgumentForm::Positional => {
-                        let kind = match kind_of(description, &argument.name) {
-                            ValueKind::List(_) => ValueKind::Json,
-                            kind => kind,
-                        };
-                        let value = word_value(&kind, word, &argument.name)?;
-                        fields.insert(argument.name.clone(), value);
-                        positional += 1;
-                    }
-                    ArgumentForm::Rest => {
-                        words.push(word.clone());
-                        rest = true;
-                    }
-                    _ => words.push(word.clone()),
-                }
-                continue;
-            };
-            let (flag, inline) = match flag.split_once('=') {
-                Some((flag, value)) => (flag.to_owned(), Some(value.to_owned())),
-                None => (flag, None),
-            };
-            let mut value = || -> Result<String, Failure> {
-                if let Some(value) = &inline {
-                    return Ok(value.clone());
-                }
-                let value = args
-                    .get(index)
-                    .cloned()
-                    .ok_or_else(|| bad_request(format!("{flag} needs a value")))?;
-                index += 1;
-                Ok(value)
-            };
-            match flag.as_str() {
-                "--json" if inline.is_none() => json = true,
-                "--deadline" => {
-                    let value = value()?;
-                    deadline =
-                        if value == "none" {
-                            Deadline::None
-                        } else {
-                            Deadline::Milliseconds(value.parse().map_err(|_| {
-                                bad_request("deadline must be milliseconds or none")
-                            })?)
-                        };
-                }
-                "--request-id" => id = value()?,
-                "--cursor" => cursor = Some(value()?),
-                "--fresh" if inline.is_none() => fresh = true,
-                "--budget" => {
-                    let value = value()?;
-                    budget_tokens = if value == "none" {
+            "--request-id" if command.is_some() => id = value()?,
+            "--cursor" if command.is_some() => cursor = Some(value()?),
+            "--fresh" if command.is_some() && inline.is_none() => fresh = true,
+            "--budget" if command.is_some() => {
+                let value = value()?;
+                budget_tokens =
+                    if value == "none" {
                         crate::TokenBudget::Unlimited
                     } else {
                         crate::TokenBudget::Tokens(value.parse().map_err(|_| {
                             bad_request("budget must be a number of tokens or none")
                         })?)
                     };
-                }
-                "--request" => {
-                    if request.is_some() {
-                        return Err(bad_request("duplicate --request"));
-                    }
-                    request = Some(
-                        serde_json::from_str::<Value>(&value()?)
-                            .map_err(|e| bad_request(e.to_string()))?,
-                    );
-                }
-                _ => {
-                    let argument = argument_named(&flag)
-                        .ok_or_else(|| bad_request(format!("unknown argument {flag}")))?;
-                    let target = if argument.calling_process {
-                        &mut calling_process
-                    } else {
-                        &mut fields
-                    };
-                    let kind = argument_kind(description, &argument);
-                    match argument.form {
-                        ArgumentForm::Flag => {
-                            let value = match &inline {
-                                None => Value::Bool(true),
-                                Some(word) => word_value(&ValueKind::Boolean, word, &flag)?,
-                            };
-                            if target.insert(argument.name.clone(), value).is_some() {
-                                return Err(bad_request(format!("duplicate {flag}")));
-                            }
-                        }
-                        ArgumentForm::Repeated => {
-                            let word = value()?;
-                            let words: Vec<&str> = match argument.value_delimiter {
-                                Some(delimiter) => word.split(delimiter).collect(),
-                                None => vec![word.as_str()],
-                            };
-                            let items = words
-                                .into_iter()
-                                .map(|word| word_value(&kind, word, &flag))
-                                .collect::<Result<Vec<_>, _>>()?;
-                            target
-                                .entry(argument.name.clone())
-                                .or_insert_with(|| Value::Array(vec![]))
-                                .as_array_mut()
-                                .expect("repeated values are a list")
-                                .extend(items);
-                        }
-                        _ => {
-                            // A list written with one flag is written whole, as JSON.
-                            let kind = match kind {
-                                ValueKind::List(_) => ValueKind::Json,
-                                kind => kind,
-                            };
-                            let item = word_value(&kind, &value()?, &flag)?;
-                            if target.insert(argument.name.clone(), item).is_some() {
-                                return Err(bad_request(format!("duplicate {flag}")));
-                            }
-                        }
-                    }
-                }
             }
-        }
-        if let Some(argument) = positionals.get(positional)
-            && matches!(argument.form, ArgumentForm::Words | ArgumentForm::Rest)
-            && (!words.is_empty() || rest)
-        {
-            let value = match kind_of(description, &argument.name) {
-                ValueKind::List(item) => Value::Array(
-                    words
-                        .iter()
-                        .map(|word| word_value(&item, word, &argument.name))
-                        .collect::<Result<_, _>>()?,
-                ),
-                _ => Value::String(words.join(" ")),
-            };
-            fields.insert(argument.name.clone(), value);
-        }
-        let arguments = match request {
-            Some(_) if !fields.is_empty() => {
-                return Err(bad_request("--request cannot be mixed with named fields"));
-            }
-            Some(value) => value,
-            None => {
-                if let Some(missing) = positionals
-                    .iter()
-                    .find(|a| required(description, &a.name) && !fields.contains_key(&a.name))
-                {
-                    return Err(bad_request(format!(
-                        "missing {}",
-                        missing.name.to_uppercase()
-                    )));
+            "--request" if command.is_some() => {
+                if request.is_some() {
+                    return Err(bad_request("duplicate --request"));
                 }
-                Value::Object(fields)
+                request = Some(
+                    serde_json::from_str::<Value>(&value()?)
+                        .map_err(|e| bad_request(e.to_string()))?,
+                );
             }
-        };
-        Ok(ParsedCommand {
-            request: RunnableRequest {
-                operation: spec.name.clone(),
-                arguments,
-                request_id: id,
-                deadline,
-                budget_tokens,
-                cursor,
-                fresh,
-                format: if json && self.accepts(RequestOption::Format) {
-                    Format::Json
+            _ => {
+                let argument = argument_named(&flag)
+                    .ok_or_else(|| bad_request(format!("unknown argument {flag}")))?;
+                let target = if argument.calling_process {
+                    &mut calling_process
                 } else {
-                    Format::Text
-                },
-            },
-            kind: spec.kind.clone(),
-            json,
-            calling_process,
-        })
+                    &mut fields
+                };
+                let kind = argument_kind(description, &argument);
+                match argument.form {
+                    ArgumentForm::Flag => {
+                        let value = match &inline {
+                            None => Value::Bool(true),
+                            Some(word) => word_value(&ValueKind::Boolean, word, &flag)?,
+                        };
+                        if target.insert(argument.name.clone(), value).is_some() {
+                            return Err(bad_request(format!("duplicate {flag}")));
+                        }
+                    }
+                    ArgumentForm::Repeated => {
+                        let word = value()?;
+                        let words: Vec<&str> = match argument.value_delimiter {
+                            Some(delimiter) => word.split(delimiter).collect(),
+                            None => vec![word.as_str()],
+                        };
+                        let items = words
+                            .into_iter()
+                            .map(|word| word_value(&kind, word, &flag))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        target
+                            .entry(argument.name.clone())
+                            .or_insert_with(|| Value::Array(vec![]))
+                            .as_array_mut()
+                            .expect("repeated values are a list")
+                            .extend(items);
+                    }
+                    _ => {
+                        // A list written with one flag is written whole, as JSON.
+                        let kind = match kind {
+                            ValueKind::List(_) => ValueKind::Json,
+                            kind => kind,
+                        };
+                        let item = word_value(&kind, &value()?, &flag)?;
+                        if target.insert(argument.name.clone(), item).is_some() {
+                            return Err(bad_request(format!("duplicate {flag}")));
+                        }
+                    }
+                }
+            }
+        }
     }
+    if let Some(argument) = positionals.get(positional)
+        && matches!(argument.form, ArgumentForm::Words | ArgumentForm::Rest)
+        && (!words.is_empty() || rest)
+    {
+        let value = match kind_of(description, &argument.name) {
+            ValueKind::List(item) => Value::Array(
+                words
+                    .iter()
+                    .map(|word| word_value(&item, word, &argument.name))
+                    .collect::<Result<_, _>>()?,
+            ),
+            _ => Value::String(words.join(" ")),
+        };
+        fields.insert(argument.name.clone(), value);
+    }
+    let arguments = match request {
+        Some(_) if !fields.is_empty() => {
+            return Err(bad_request("--request cannot be mixed with named fields"));
+        }
+        Some(value) => value,
+        None => {
+            if let Some(missing) = positionals
+                .iter()
+                .find(|a| required(description, &a.name) && !fields.contains_key(&a.name))
+            {
+                return Err(bad_request(format!(
+                    "missing {}",
+                    missing.name.to_uppercase()
+                )));
+            }
+            Value::Object(fields)
+        }
+    };
+    Ok(ParsedCommand {
+        request: RunnableRequest {
+            operation: spec.name.clone(),
+            arguments,
+            request_id: id,
+            deadline,
+            budget_tokens,
+            cursor,
+            fresh,
+            format: if json && command.is_some_and(|command| command.accepts(RequestOption::Format))
+            {
+                Format::Json
+            } else {
+                Format::Text
+            },
+        },
+        kind: spec.kind.clone(),
+        json,
+        calling_process,
+    })
 }
 
 /// The usage of one row: `read REF [--view VIEW] [--fresh]`.

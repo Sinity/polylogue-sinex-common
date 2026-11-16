@@ -867,7 +867,7 @@ pub(crate) const GLOBAL_FLAGS: [&str; 7] = [
 
 /// Immutable declarations, schemas and presentation, independent of handlers.
 pub struct OperationDeclarations {
-    forms: Arc<Forms>,
+    pub(crate) forms: Arc<Forms>,
     renderers: Vec<Presentation>,
     deadlines: Deadlines,
     failure_codes: BTreeMap<String, FailureKind>,
@@ -886,7 +886,7 @@ struct Presentation {
 }
 /// Builds the declaration owner before real runtime handlers are bound.
 pub struct DeclarationsBuilder {
-    declarations: OperationDeclarations,
+    pub(crate) declarations: OperationDeclarations,
 }
 impl std::ops::Deref for DeclarationsBuilder {
     type Target = OperationDeclarations;
@@ -1537,6 +1537,7 @@ impl OperationTable {
                 format!("unknown operation {}", request.operation),
             )
         })?;
+        self.validate_steps(&request.operation, &request.arguments)?;
         if request.request_id.is_empty() {
             return Err(bad_request("request_id must not be empty"));
         }
