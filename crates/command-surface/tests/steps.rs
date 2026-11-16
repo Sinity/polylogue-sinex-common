@@ -310,7 +310,9 @@ fn double_dash_preserves_positional_words() {
     );
     let text = "a".repeat(100_000);
     assert_eq!(
-        steps.parse_step("note", &[text.clone()]).unwrap(),
+        steps
+            .parse_step("note", std::slice::from_ref(&text))
+            .unwrap(),
         json!({"verb":"note","text":text})
     );
 }
