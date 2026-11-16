@@ -421,6 +421,29 @@ pub fn duration_ms(text: &str) -> Option<i64> {
     (nanos / 1_000_000).try_into().ok()
 }
 
+/// A written minute or second denotes its whole period; fractions denote instants.
+fn written_time(text: &str, at: Timestamp) -> Result<Time, Error> {
+    let text = text.trim();
+    let clock = text
+        .split_once(['T', 't', ' '])
+        .map_or(text, |(_, clock)| clock);
+    let width = if clock.as_bytes().get(2) != Some(&b':') {
+        return Ok(Time::Instant { at });
+    } else if clock.as_bytes().get(5) != Some(&b':') {
+        60
+    } else if matches!(clock.as_bytes().get(8), Some(b'.' | b',')) {
+        return Ok(Time::Instant { at });
+    } else {
+        1
+    };
+    Ok(TimeRange::new(
+        at,
+        at.checked_add(SignedDuration::from_secs(width))
+            .map_err(bad)?,
+    )?
+    .into())
+}
+
 /// Resolve against exactly the supplied clock. Calendar periods use logical
 /// boundaries; relative units count exact elapsed time.
 pub fn resolve(text: &str, clock: &Clock) -> Result<ResolvedTime, Error> {
@@ -431,7 +454,7 @@ pub fn resolve(text: &str, clock: &Clock) -> Result<ResolvedTime, Error> {
     let mut local = |dt| -> Result<Time, Error> {
         let result = day.local(dt)?;
         notes.extend(result.notes);
-        Ok(Time::Instant { at: result.instant })
+        written_time(text, result.instant)
     };
     let value = if normalized == "now" {
         Time::Instant { at: clock.now }
@@ -458,7 +481,7 @@ pub fn resolve(text: &str, clock: &Clock) -> Result<ResolvedTime, Error> {
         );
         day.day(date)?.into()
     } else if let Ok(at) = text.trim().parse::<Timestamp>() {
-        Time::Instant { at }
+        written_time(text, at)?
     } else if let Ok(dt) = text.trim().parse::<DateTime>() {
         local(dt)?
     } else if !(normalized.len() == 4 && normalized.bytes().all(|byte| byte.is_ascii_digit()))

@@ -658,3 +658,50 @@ fn calendar_labels_have_one_spelling() {
     assert_eq!(label::week(date("2024-12-30")), "2025-W01");
     assert_eq!(label::day(Date::new(-400, 3, 1).unwrap()), "-0400-03-01");
 }
+
+#[test]
+fn datetime_expression_keeps_written_precision() {
+    let c = clock();
+    for (expression, start, end) in [
+        ("2026-10-07T10:00", "2026-10-07T08:00Z", "2026-10-07T08:01Z"),
+        (
+            "2026-10-07 10:00:30",
+            "2026-10-07T08:00:30Z",
+            "2026-10-07T08:00:31Z",
+        ),
+        (
+            "2026-10-07T10:00Z",
+            "2026-10-07T10:00Z",
+            "2026-10-07T10:01Z",
+        ),
+        (
+            "2026-10-07T10:00:30+02:00",
+            "2026-10-07T08:00:30Z",
+            "2026-10-07T08:00:31Z",
+        ),
+        ("10:00", "2026-10-07T08:00Z", "2026-10-07T08:01Z"),
+        ("10:00:30", "2026-10-07T08:00:30Z", "2026-10-07T08:00:31Z"),
+    ] {
+        let resolved = time::resolve(expression, &c).unwrap().value;
+        assert_eq!(
+            resolved,
+            time::Time::Span {
+                start: ts(start),
+                end: ts(end)
+            },
+            "{expression}"
+        );
+        assert_eq!(resolved.until_bound(), ts(end));
+    }
+    for (expression, at) in [
+        ("2026-10-07T10:00:30.123", "2026-10-07T08:00:30.123Z"),
+        ("2026-10-07T10:00:30.123Z", "2026-10-07T10:00:30.123Z"),
+        ("10:00:30.123", "2026-10-07T08:00:30.123Z"),
+    ] {
+        assert_eq!(
+            time::resolve(expression, &c).unwrap().value,
+            time::Time::Instant { at: ts(at) },
+            "{expression}"
+        );
+    }
+}
