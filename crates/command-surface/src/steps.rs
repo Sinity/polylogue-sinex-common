@@ -1,7 +1,7 @@
 //! Typed verb declarations for the steps of a product's command line.
 //! Products split lines into steps; these declarations own each step's words
 //! and options, its JSON validation, and its help signature.
-use crate::arguments::{ArgumentScope, check_arguments, parse_arguments, resolve};
+use crate::arguments::{ArgumentScope, check_arguments, parse_arguments, schema_has_type};
 use crate::{
     ArgumentForm, ArgumentSpec, DeclarationsBuilder, Failure, OperationDeclarations,
     OperationDescription, OperationKind, OperationSpec, bad_request,
@@ -204,11 +204,7 @@ impl DeclarationsBuilder {
         let field = description.input_schema["properties"]
             .get(argument)
             .ok_or_else(|| bad_request(format!("{operation} has no argument {argument}")))?;
-        let schema = resolve(field, &description.input_schema);
-        let array = schema["type"] == "array"
-            || schema["type"]
-                .as_array()
-                .is_some_and(|types| types.iter().any(|kind| kind == "array"));
+        let array = schema_has_type(field, &description.input_schema, "array");
         if !array || steps.verbs.is_empty() {
             return Err(bad_request(
                 "steps need an array argument and at least one verb",
@@ -243,6 +239,19 @@ impl OperationDeclarations {
             let Some(value) = arguments.get(argument) else {
                 continue;
             };
+            let description = self
+                .forms()
+                .description(operation)
+                .expect("declared operation");
+            if value.is_null()
+                && schema_has_type(
+                    &description.input_schema["properties"][argument],
+                    &description.input_schema,
+                    "null",
+                )
+            {
+                continue;
+            }
             let values = value
                 .as_array()
                 .ok_or_else(|| bad_request(format!("{argument} must be an array")))?;

@@ -160,7 +160,8 @@ Help lists each listed row with its usage (`read TARGET [WORDS...]`).
 ### Command steps
 
 A product can attach a `StepDeclarations` catalog to an operation's array
-argument using `declare_steps(operation, argument, steps)`. Existing request
+argument using `declare_steps(operation, argument, steps)`. When the typed
+argument is nullable, `null` carries no steps. Existing request
 types and argument forms stay unchanged. Each verb is declared once through
 `steps.declare::<Fields>(verb, arguments)`, with serde and `JsonSchema` supplying
 its types and required fields, and `ArgumentSpec` supplying its positional

@@ -1347,7 +1347,7 @@ impl DeclarationsBuilder {
             }
         }
         if !spec.command.is_empty() {
-            crate::arguments::check(&description)?;
+            crate::arguments::check_arguments(&description, true)?;
             crate::arguments::check_globals(&description, self.cli_globals())?;
         }
         Arc::make_mut(&mut self.declarations.forms)

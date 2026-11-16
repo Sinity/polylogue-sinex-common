@@ -512,3 +512,50 @@ fn step_catalog_belongs_to_an_array_argument() {
         "rows.steps has step declarations already"
     );
 }
+
+#[test]
+fn nullable_steps_preserve_null() {
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    struct OptionalRows {
+        steps: Option<Vec<Value>>,
+    }
+    let mut builder = builder();
+    builder
+        .declare::<OptionalRows, Value>(
+            OperationSpec::request(
+                "optional",
+                &["optional"],
+                "read",
+                "List rows",
+                "Accept optional steps",
+            ),
+            |value, _| value.to_string(),
+        )
+        .unwrap();
+    builder.declare_steps("optional", "steps", verbs()).unwrap();
+    let table = builder.finish();
+    for value in [Value::Null, json!([]), json!([{"verb":"read"}])] {
+        let call = json!({"operation":"optional","arguments":{"steps":value}});
+        assert_eq!(
+            table
+                .parse_mcp_call("example_read", call.clone())
+                .unwrap()
+                .arguments,
+            call["arguments"]
+        );
+        assert_eq!(
+            table
+                .parse_http_call(call.clone(), &Author::Operator)
+                .unwrap()
+                .arguments,
+            call["arguments"]
+        );
+    }
+    let failure = table
+        .parse_mcp_call(
+            "example_read",
+            json!({"operation":"optional","arguments":{"steps":false}}),
+        )
+        .unwrap_err();
+    assert_eq!(failure.message, "steps must be an array");
+}

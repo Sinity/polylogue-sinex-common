@@ -43,6 +43,22 @@ pub(crate) fn resolve<'a>(schema: &'a Value, root: &'a Value) -> &'a Value {
     }
 }
 
+/// Whether a typed field permits a JSON type, including nullable choices.
+pub(crate) fn schema_has_type(schema: &Value, root: &Value, kind: &str) -> bool {
+    let schema = resolve(schema, root);
+    schema["type"] == kind
+        || schema["type"]
+            .as_array()
+            .is_some_and(|types| types.iter().any(|value| value == kind))
+        || ["anyOf", "oneOf"].iter().any(|key| {
+            schema[*key].as_array().is_some_and(|choices| {
+                choices
+                    .iter()
+                    .any(|choice| schema_has_type(choice, root, kind))
+            })
+        })
+}
+
 fn value_kind(schema: &Value, root: &Value) -> ValueKind {
     let schema = resolve(schema, root);
     for key in ["anyOf", "oneOf"] {
@@ -243,10 +259,6 @@ fn is_positional(form: ArgumentForm) -> bool {
 
 /// Reject argument declarations the request type cannot hold or the command
 /// line cannot read back unambiguously.
-pub(crate) fn check(description: &OperationDescription) -> Result<(), Failure> {
-    check_arguments(description, true)
-}
-
 pub(crate) fn check_arguments(
     description: &OperationDescription,
     request_options: bool,
