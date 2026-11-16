@@ -166,7 +166,9 @@ required.
 With the `pg` feature, devkit provides PostgreSQL for products with
 compile-time-checked SQL, over a socket: a per-user service when one is
 running (its socket in `$XDG_RUNTIME_DIR/devkit/pg`), otherwise an owned
-throwaway cluster on tmpfs. The product's `xtask` chooses which.
+throwaway cluster on tmpfs. The product's `xtask` chooses which. Clusters and
+schema templates use UTF-8 with the C locale. The encoding enters the schema
+identity, so templates made with a different encoding are not reused.
 
 `ClusterOptions.required_extensions` names the extensions schema bootstrap
 needs. `Server::service_or_start` checks the running service's actual

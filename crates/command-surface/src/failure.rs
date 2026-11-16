@@ -28,6 +28,9 @@ pub enum FailureKind {
     NotFound,
     Conflict,
     Io,
+    /// A failure inside the product that no change to the request fixes:
+    /// stored data it cannot read, a broken invariant, a task that stopped.
+    Internal,
     /// An operation that did not finish; never reported as an answer.
     StoppedEarly,
     NotRunning,
@@ -36,7 +39,7 @@ pub enum FailureKind {
 }
 
 impl FailureKind {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::InvalidQuery,
         Self::UnknownField,
         Self::BadValue,
@@ -51,6 +54,7 @@ impl FailureKind {
         Self::NotFound,
         Self::Conflict,
         Self::Io,
+        Self::Internal,
         Self::StoppedEarly,
         Self::NotRunning,
         Self::Timeout,
@@ -71,7 +75,7 @@ impl FailureKind {
             Self::Refused => (3, Some(403)),
             Self::NotFound => (4, Some(404)),
             Self::Conflict => (4, Some(409)),
-            Self::Io => (4, Some(500)),
+            Self::Io | Self::Internal => (4, Some(500)),
             Self::StoppedEarly => (5, Some(500)),
             Self::NotRunning => (6, None),
             Self::Timeout => (7, Some(504)),
@@ -101,6 +105,7 @@ impl FailureKind {
             Self::NotFound => "not_found",
             Self::Conflict => "conflict",
             Self::Io => "io",
+            Self::Internal => "internal",
             Self::StoppedEarly => "stopped_early",
             Self::NotRunning => "not_running",
             Self::Timeout => "timeout",

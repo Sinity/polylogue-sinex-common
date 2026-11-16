@@ -152,6 +152,7 @@ impl Server {
         initdb.args([
             "--no-sync",
             "--no-locale",
+            "--encoding=UTF8",
             "--auth=trust",
             "--data-checksums",
         ]);
@@ -303,7 +304,13 @@ impl Server {
             // already there was left by a builder that was killed.
             let building = building_name(&databases.template);
             self.drop_database(&building)?;
-            self.sql("postgres", &format!("CREATE DATABASE {building}"))?;
+            self.sql(
+                "postgres",
+                &format!(
+                    "CREATE DATABASE {building} TEMPLATE template0 ENCODING 'UTF8' \
+                     LC_COLLATE 'C' LC_CTYPE 'C'"
+                ),
+            )?;
             if let Err(error) = (schema.bootstrap)(self, &building) {
                 let _ = self.drop_database(&building);
                 return Err(format!("schema bootstrap: {error}"));
@@ -823,9 +830,12 @@ impl SchemaDatabases {
 /// A hash of the files under `paths` (recursively, in name order, `target`
 /// directories skipped) and of `extra` strings such as server and extension
 /// versions. File names enter the hash relative to the path they were found
-/// under, so every checkout of the same sources gets the same hash.
+/// under, so every checkout of the same sources gets the same hash. The
+/// database encoding also enters the identity, so templates use UTF-8.
 pub fn schema_hash(paths: &[PathBuf], extra: &[&str]) -> Result<String> {
-    crate::files::hash(paths, extra, true, |path, directory| {
+    let mut extra = extra.to_vec();
+    extra.push("encoding=UTF8");
+    crate::files::hash(paths, &extra, true, |path, directory| {
         !directory || path.file_name().is_none_or(|n| n != "target")
     })
     .map(|hash| hash.to_hex().to_string())

@@ -348,6 +348,7 @@ fn one_kind_one_exit_independent_table() {
         ("not_found", 4, Some(404)),
         ("conflict", 4, Some(409)),
         ("io", 4, Some(500)),
+        ("internal", 4, Some(500)),
         ("stopped_early", 5, Some(500)),
         ("not_running", 6, None),
         ("timeout", 7, Some(504)),
@@ -359,6 +360,7 @@ fn one_kind_one_exit_independent_table() {
         assert_eq!(serde_json::to_value(kind).unwrap(), name);
         assert_eq!(kind.mapping(), (exit, http));
     }
+    assert!(!Failure::new(FailureKind::Internal, "broken invariant").retryable);
     // Outcomes are not failures: empty and degraded answers carry a value.
     assert_eq!(Answer::empty(json!([])).exit_code(), 1);
     assert_eq!(
