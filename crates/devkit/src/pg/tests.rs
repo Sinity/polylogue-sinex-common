@@ -6,6 +6,40 @@ mod lifecycle;
 mod slots;
 
 #[test]
+fn test_cluster_uses_utf8_encoding() {
+    let server = Server::start(&ClusterOptions::default()).unwrap();
+    assert_eq!(
+        server
+            .sql("postgres", "SHOW server_encoding")
+            .unwrap()
+            .trim(),
+        "UTF8"
+    );
+    server
+        .sql("postgres", "ALTER DATABASE template1 IS_TEMPLATE false")
+        .unwrap();
+    server.sql("postgres", "DROP DATABASE template1").unwrap();
+    server
+        .sql(
+            "postgres",
+            "CREATE DATABASE template1 TEMPLATE template0 ENCODING 'SQL_ASCII'",
+        )
+        .unwrap();
+    let service = Server::at(server.socket().to_owned());
+    let databases = demo_schema(&service, "encoding", "utf8");
+    let database = TestDatabase::take(
+        service.socket(),
+        &databases.template,
+        Family::Ordinary,
+        &Slots::default(),
+    )
+    .unwrap();
+    assert_eq!(database.sql("SHOW server_encoding").unwrap().trim(), "UTF8");
+    database.sql("INSERT INTO t VALUES (7)").unwrap();
+    assert_eq!(database.sql("SELECT * FROM t").unwrap().trim(), "7");
+}
+
+#[test]
 fn schema_template_and_test_clones() {
     let server = Server::start(&ClusterOptions::default()).unwrap();
     assert!(server.ready());

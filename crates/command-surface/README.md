@@ -380,10 +380,14 @@ and one HTTP status:
 | 1 | `empty` (the read succeeded and matched nothing) | 200 |
 | 2 | `invalid_query`, `unknown_field`, `bad_value`, `not_a_query`, `bad_request`, `ambiguous`, `stale_cursor`, `not_built` (an index the request needs is not built), `not_yet_available` (designed, with nothing producing it yet, or still starting: it then carries its progress), `not_configured` (the request needs something this deployment does not configure, such as the other product; the configuration key is named) | 400 (`not_built`, `not_yet_available`, `not_configured`: 501) |
 | 3 | `refused`, with the operation's stated reason | 403 |
-| 4 | `not_found`, `conflict`, `io` | 404, 409, 500 |
+| 4 | `not_found`, `conflict`, `io`, `internal` | 404, 409, 500, 500 |
 | 5 | `degraded` (rows returned, part of what was needed is missing); `stopped_early` (an operation that did not finish; never reported as ok) | 200 with the outcome; 500 |
 | 6 | `not_running` (the daemon is down) | none: the client reports it |
 | 7 | `timeout`, `cancelled` | 504; none |
+
+`internal` is a failure inside the product that no change to the request fixes:
+stored data it cannot read, a broken invariant, a task that stopped. It is
+not retryable.
 
 A failure teaches: an unknown name carries the nearest known names as
 `candidates`, and `explain` as `next`. Empty and degraded are outcomes,

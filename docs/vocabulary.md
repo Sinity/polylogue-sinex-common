@@ -114,6 +114,7 @@ mechanic and nothing else in the shared crates.
 | request, answer | what a caller sends, and what it gets back: an outcome and an envelope |
 | outcome | what kind of answer came back: `ok`, `empty`, `degraded` (with what is missing) or `error` (a failure and no value) |
 | failure, failure kind | a typed error, and its stable name on the wire |
+| internal failure | a failure inside the product that no change to the request fixes: stored data it cannot read, a broken invariant, a task that stopped |
 | failure code | a product's precise failure name, registered once against a shared failure kind |
 | caller scope | the server's authenticated identity namespace for request retries; never supplied in request JSON |
 | exit code | the CLI's process status for an answer, one per outcome and failure kind |
