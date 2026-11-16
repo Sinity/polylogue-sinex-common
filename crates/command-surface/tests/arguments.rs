@@ -572,8 +572,8 @@ fn mcp_parser_selects_only_declared_family_members_and_checks_the_envelope() {
         ),
         (
             "example_read",
-            json!({"operation":"read","arguments":{}}),
-            "request_id",
+            json!({"operation":"read","arguments":{},"request_id":42}),
+            "string",
         ),
         (
             "example_read",
