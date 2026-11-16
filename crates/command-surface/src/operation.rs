@@ -676,6 +676,8 @@ pub(crate) struct Forms {
     pub(crate) tools: Vec<ToolFamily>,
     pub(crate) options: Vec<crate::RequestOption>,
     pub(crate) cli_globals: Vec<ArgumentSpec>,
+    pub(crate) tool_defaults: BTreeMap<String, String>,
+    pub(crate) steps: BTreeMap<(String, String), crate::StepDeclarations>,
 }
 impl Forms {
     pub(crate) fn description(&self, name: &str) -> Option<&OperationDescription> {
@@ -865,7 +867,7 @@ pub(crate) const GLOBAL_FLAGS: [&str; 7] = [
 
 /// Immutable declarations, schemas and presentation, independent of handlers.
 pub struct OperationDeclarations {
-    forms: Arc<Forms>,
+    pub(crate) forms: Arc<Forms>,
     renderers: Vec<Presentation>,
     deadlines: Deadlines,
     failure_codes: BTreeMap<String, FailureKind>,
@@ -884,7 +886,7 @@ struct Presentation {
 }
 /// Builds the declaration owner before real runtime handlers are bound.
 pub struct DeclarationsBuilder {
-    declarations: OperationDeclarations,
+    pub(crate) declarations: OperationDeclarations,
 }
 impl std::ops::Deref for DeclarationsBuilder {
     type Target = OperationDeclarations;
@@ -902,6 +904,8 @@ impl OperationDeclarations {
                     tools: vec![],
                     options: vec![],
                     cli_globals: vec![],
+                    tool_defaults: BTreeMap::new(),
+                    steps: BTreeMap::new(),
                 }),
                 renderers: vec![],
                 deadlines,
@@ -1109,6 +1113,19 @@ impl DeclarationsBuilder {
             return Err(bad_request(format!("tool {} is declared twice", tool.name)));
         }
         Arc::make_mut(&mut self.declarations.forms).tools.push(tool);
+        Ok(())
+    }
+    /// Select the operation used when a call to this MCP family omits it.
+    /// Both the family and its member operation must already be declared.
+    pub fn set_tool_default(&mut self, tool: &str, operation: &str) -> Result<(), Failure> {
+        if self.spec_named(operation).and_then(OperationSpec::tool) != Some(tool) {
+            return Err(bad_request(format!(
+                "{operation} is not an operation of tool {tool}"
+            )));
+        }
+        Arc::make_mut(&mut self.declarations.forms)
+            .tool_defaults
+            .insert(tool.to_owned(), operation.to_owned());
         Ok(())
     }
     /// Serve a request option on every row: tools offer it, and dispatch
@@ -1330,7 +1347,7 @@ impl DeclarationsBuilder {
             }
         }
         if !spec.command.is_empty() {
-            crate::arguments::check(&description)?;
+            crate::arguments::check_arguments(&description, true)?;
             crate::arguments::check_globals(&description, self.cli_globals())?;
         }
         Arc::make_mut(&mut self.declarations.forms)
@@ -1520,6 +1537,7 @@ impl OperationTable {
                 format!("unknown operation {}", request.operation),
             )
         })?;
+        self.validate_steps(&request.operation, &request.arguments)?;
         if request.request_id.is_empty() {
             return Err(bad_request("request_id must not be empty"));
         }

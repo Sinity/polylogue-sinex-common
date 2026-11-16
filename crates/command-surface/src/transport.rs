@@ -77,6 +77,14 @@ impl OperationDeclarations {
                 argument.help
             ));
         }
+        for ((row, argument), steps) in &self.forms().steps {
+            if row == operation {
+                text.push_str(&format!("  {argument}:\n"));
+                for verb in steps.verbs() {
+                    text.push_str(&format!("    {}\n", verb.signature()));
+                }
+            }
+        }
         Some(text)
     }
     /// Command words of listed rows that start with `prefix`.
@@ -454,15 +462,18 @@ impl OperationTable {
                 .and_then(|h| h.split(';').next())
                 .map(str::trim);
             let envelope = match content_type {
-                Some("application/json") => {
-                    serde_json::from_slice::<RunnableRequest>(request.body())
-                        .map_err(|e| bad_request(e.to_string()))
-                }
+                Some("application/json") => serde_json::from_slice::<Value>(request.body())
+                    .map_err(|e| bad_request(e.to_string())),
                 Some("application/x-www-form-urlencoded") => decode_form_request(request.body()),
                 _ => Err(bad_request(
                     "content-type must be application/json or application/x-www-form-urlencoded",
                 )),
             };
+            let author = caller
+                .authorship()
+                .map(|a| &a.author)
+                .unwrap_or(&crate::Author::Operator);
+            let envelope = envelope.and_then(|value| self.parse_http_call(value, author));
             match envelope {
                 Err(error) => Answer::error(error),
                 Ok(envelope) => {
@@ -493,7 +504,7 @@ impl OperationTable {
 fn io_failure(error: std::io::Error) -> Failure {
     Failure::new(FailureKind::NotRunning, error.to_string())
 }
-fn decode_form_request(bytes: &[u8]) -> Result<RunnableRequest, Failure> {
+fn decode_form_request(bytes: &[u8]) -> Result<Value, Failure> {
     let text = std::str::from_utf8(bytes).map_err(|e| bad_request(e.to_string()))?;
     let mut request = None;
     for pair in text.split('&') {

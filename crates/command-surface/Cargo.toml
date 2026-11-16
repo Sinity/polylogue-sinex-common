@@ -15,11 +15,12 @@ default = ["runtime"]
 # measurement. Without it the crate is the wire vocabulary alone (envelopes,
 # failures, values, seen marks), which a product's pure protocol crate can
 # depend on without an async runtime.
-runtime = ["dep:tokio", "dep:tokio-util"]
+runtime = ["dep:tokio", "dep:tokio-util", "dep:canonical-json"]
 # TypeScript declarations of the wire types the web shell's script reads.
 typescript = ["dep:ts-rs"]
 
 [dependencies]
+canonical-json = { path = "../canonical-json", optional = true }
 http = "1"
 jiff = { version = "0.2", features = ["serde"] }
 

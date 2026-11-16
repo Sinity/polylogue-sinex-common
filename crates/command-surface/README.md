@@ -87,9 +87,14 @@ falls back to a CLI invocation. Answer footers display that absence explicitly.
 `mcp_call` returns structured `tools/call` parameters from that same request
 and tool declaration. `parse_mcp_call(name, arguments)` uses that declared tool
 family to decode the canonical request: it selects only a member operation,
-infers the operation for a single-row family and preserves request identity,
-deadline, budget, cursor and format. Both the shared MCP transport and product
-proxies use this parser. Typed argument admission, caller grants and parent
+infers the operation for a single-row family or uses an explicitly declared
+family default, and preserves deadline, budget, cursor and format. An explicit
+request ID is kept. Without one the parser derives it from the author, tool,
+operation and arguments. `parse_mcp_call_as(name, arguments, author)` accepts
+the author computed by a transport; the two-argument `parse_mcp_call` uses the
+unidentified agent, matching MCP without caller information. Authenticated
+product proxies use the author-aware form. Both the shared MCP transport and
+product proxies use this parser. Typed argument admission, caller grants and parent
 transport deadlines remain owned by dispatch. MCP text formatting uses the same
 projection; callers never need to parse a displayed command to execute the request.
 
@@ -152,6 +157,43 @@ every field can be written that way, and `--request JSON` otherwise; flags
 come before positionals, and reading the line back gives the same request.
 Help lists each listed row with its usage (`read TARGET [WORDS...]`).
 
+### Command steps
+
+A product can attach a `StepDeclarations` catalog to an operation's array
+argument using `declare_steps(operation, argument, steps)`. When the typed
+argument is nullable, `null` carries no steps. Existing request
+types and argument forms stay unchanged. Each verb is declared once through
+`steps.declare::<Fields>(verb, arguments)`, with serde and `JsonSchema` supplying
+its types and required fields, and `ArgumentSpec` supplying its positional
+words and options. Each positional consumes one shell word. Optional
+positionals follow required ones; variable-length positional forms and
+calling-process options do not belong to a step.
+
+The product splits its line using its own catalog. It passes each verb and
+its already separated words to `steps.parse_step(verb, words)`. The result is
+the same `{verb, ...fields}` JSON object used by MCP and HTTP. Options belong
+to that step; a field declared positional cannot also be passed as a named
+option. `--` ends option parsing. A field such as `stop_source` is written
+`--stop-source` on the CLI and `stop_source` in JSON. Flags, short options,
+repeated lists and delimiters use the existing argument parser.
+
+Each verb validates its own fields, types and required arguments, even when
+the request type stores steps as JSON values. An unknown or misplaced field
+is refused with the verb's signature as a hint. CLI parsing, MCP parsing,
+HTTP parsing and operation dispatch all apply these declarations before
+execution. No line splitting or product-specific access policy lives here.
+
+`StepDeclaration::signature` renders `read(view?, show?)`; `help_for` includes
+these signatures below the steps argument. Tool schemas keep only an array
+of objects with a required `verb` enum. Other item fields stay open in the
+small schema and are checked against their verb at parsing and dispatch.
+`StepDeclaration::input_schema` exposes each verb's complete typed schema.
+
+`set_tool_default(tool, operation)` selects an already declared member of a
+family. It changes MCP parsing only; the CLI's `set_default_operation` retains
+its separate first-word rule. Without an explicit family default, a call to
+a family with several operations still has to name its operation.
+
 ### MCP tools
 
 MCP tools are grouped from the operation table: one tool per **tool family**
@@ -163,8 +205,8 @@ access differs from the family's.
 
 Each tool's input schema is generated small, because a harness sends the
 whole tool list in every session: `operation` is an enum of the family's
-rows (required when there are several); `arguments` is one flat object, the
-union of the rows' top-level request fields deduplicated by name, each
+rows (required when there are several and no family default); `arguments`
+is one flat object, the union of the rows' top-level request fields deduplicated by name, each
 reduced to its shallow type (a scalar keeps its type and enum values; an
 object, a list or a choice among them is only its bare type), so a deeply
 nested request costs no more than a flat one. A field whose argument
@@ -195,8 +237,10 @@ tool. Each product lists its tools on its own interfaces page.
 ## Requests
 
 A **request** carries the operation, its typed arguments, a deadline, and a
-`request_id` chosen by the caller and reused on retry, so a write retried
-after a lost reply is applied once. Every request may also carry:
+`request_id` reused on retry, so a write retried after a lost reply is applied
+once. MCP and HTTP calls may omit the ID; parsing derives it as described
+under Retries. The command line uses the fresh ID its caller supplies. Every request may
+also carry:
 
 - `budget_tokens`: how much text the answer may hold, the one name for it on
   every surface; absence uses the operation's default, and JSON null
@@ -494,13 +538,30 @@ measurements and which states they use.
 
 ## Retries
 
-A request carries a `request_id` chosen by the caller and reused on retry.
+An explicit `request_id` is kept unchanged. When an MCP call omits it, the
+parser computes BLAKE3 from the computed author, full tool name, resolved
+operation and canonical JSON arguments. The four values are encoded as a
+canonical JSON tuple with the `command-surface-request` domain tag, keeping
+string boundaries unambiguous. Object key order at every depth does not
+change the ID; changing a value, author, tool or operation does. There is no
+time window. A deliberately repeated identical write supplies a fresh ID.
+The parser uses the existing `canonical-json` crate, so feature unification
+cannot change object ordering.
+
+`parse_http_call(value, author)` uses the same rule and tool name as MCP;
+an operation without an MCP tool uses the product name in that position.
+HTTP calls name their operation explicitly. The shared HTTP adapter uses the
+transport's author. The CLI keeps the fresh ID supplied per invocation.
+
 The product's writer records the request identity, intent and result
 atomically with its mutation, so a write retried after a lost reply, a write
 sent twice at once, and a retry after a restart are each applied once, and a
 retry with changed arguments is a conflict. On a retry the writer reads the
-current outcome rather than replaying a stale answer. The table keeps no
-request state of its own.
+current outcome for its explicit-ID retry policy. The table keeps no
+request state of its own. A product adopting derived IDs returns
+`repeat: true` with the first run's identity and time and its stored result;
+its follow-up for a deliberate repeat supplies a fresh request ID. Product
+transactions and typed replies own this storage and presentation.
 
 ## Using the crate
 

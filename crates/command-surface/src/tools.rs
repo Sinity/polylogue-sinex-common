@@ -91,9 +91,10 @@ struct MergedField {
 
 /// The input schema of `tool`: the family's rows' listed request fields
 /// merged into one flat `arguments` object, deduplicated by name, each field
-/// reduced to its shallow type (`arguments` stays open, so unlisted fields
-/// are accepted and each row checks its own at dispatch); `operation` naming the row (required when the family
-/// has several); and the request options. A field two rows type differently
+/// reduced to its shallow type (step arrays retain their verb enum).
+/// `arguments` stays open, so unlisted fields
+/// are accepted and each row checks its own at dispatch; `operation` names
+/// the row (required for several rows without a declared default); and the request options. A field two rows type differently
 /// is a choice of its types, described by the rows that use each. Each row
 /// checks its own arguments at dispatch.
 pub(crate) fn tool_input(forms: &Forms, tool: &str) -> Value {
@@ -120,7 +121,13 @@ pub(crate) fn tool_input(forms: &Forms, tool: &str) -> Value {
             {
                 continue;
             }
-            let kind = shallow(property, &definitions);
+            let kind = forms
+                .steps
+                .get(&(row.spec.name.clone(), name.clone()))
+                .map_or_else(
+                    || shallow(property, &definitions),
+                    crate::StepDeclarations::input_schema,
+                );
             let index = match fields.iter().position(|field| field.name == *name) {
                 Some(index) => index,
                 None => {
@@ -159,12 +166,12 @@ pub(crate) fn tool_input(forms: &Forms, tool: &str) -> Value {
         })
         .collect();
     let mut properties = Map::new();
-    let mut required = vec![json!("arguments"), json!("request_id")];
+    let mut required = vec![json!("arguments")];
     properties.insert(
         "operation".into(),
         json!({ "enum": rows.iter().map(|r| r.spec.name.clone()).collect::<Vec<_>>() }),
     );
-    if rows.len() > 1 {
+    if rows.len() > 1 && !forms.tool_defaults.contains_key(tool) {
         required.insert(0, json!("operation"));
     }
     properties.insert(
@@ -201,7 +208,8 @@ struct ToolCall {
     #[serde(default)]
     operation: Option<String>,
     arguments: Value,
-    request_id: String,
+    #[serde(default)]
+    request_id: Option<String>,
     #[serde(default)]
     deadline: Deadline,
     #[serde(default)]
@@ -517,7 +525,11 @@ impl OperationTable {
         caller: Caller,
         cancellation: CancellationToken,
     ) -> Value {
-        let parsed = self.parse_mcp_call(tool, arguments);
+        let author = caller
+            .authorship()
+            .map(|a| &a.author)
+            .unwrap_or(&crate::Author::UnidentifiedAgent);
+        let parsed = self.parse_mcp_call_as(tool, arguments, author);
         let format = parsed
             .as_ref()
             .map_or(Format::Text, |request| request.format);
@@ -557,9 +569,19 @@ impl OperationTable {
 impl OperationDeclarations {
     /// Parses an MCP tool's argument envelope into its canonical request.
     /// `name` is the full tool name from `mcp_tools`; its declaration supplies
-    /// the operation only when that family has exactly one row. The row's
+    /// the operation when the family has one row or declares a default. The row's
     /// typed arguments and the caller's grants remain checked at dispatch.
     pub fn parse_mcp_call(&self, name: &str, arguments: Value) -> Result<RunnableRequest, Failure> {
+        self.parse_mcp_call_as(name, arguments, &crate::Author::UnidentifiedAgent)
+    }
+    /// Parse with the author computed by the accepting transport. The request
+    /// cannot supply or override that author.
+    pub fn parse_mcp_call_as(
+        &self,
+        name: &str,
+        arguments: Value,
+        author: &crate::Author,
+    ) -> Result<RunnableRequest, Failure> {
         let tool = self
             .tools()
             .iter()
@@ -573,7 +595,7 @@ impl OperationDeclarations {
             .collect();
         let call: ToolCall =
             serde_json::from_value(arguments).map_err(|error| bad_request(error.to_string()))?;
-        let operation = match (call.operation, rows.as_slice()) {
+        let operation = match (call.operation.clone(), rows.as_slice()) {
             (Some(operation), _) if rows.contains(&operation.as_str()) => operation,
             (Some(operation), _) => {
                 return Err(bad_request(format!(
@@ -582,6 +604,9 @@ impl OperationDeclarations {
                 )));
             }
             (None, [only]) => (*only).to_owned(),
+            (None, _) if self.forms().tool_defaults.contains_key(&tool.name) => {
+                self.forms().tool_defaults[&tool.name].clone()
+            }
             (None, _) => {
                 return Err(bad_request(format!(
                     "name the operation: one of {}",
@@ -589,17 +614,62 @@ impl OperationDeclarations {
                 )));
             }
         };
+        self.request_from_call(call, name, operation, author)
+    }
+    fn request_from_call(
+        &self,
+        call: ToolCall,
+        name: &str,
+        operation: String,
+        author: &crate::Author,
+    ) -> Result<RunnableRequest, Failure> {
+        self.validate_steps(&operation, &call.arguments)?;
+        let request_id = match call.request_id {
+            Some(id) => id,
+            None => canonical_json::canonical_hash(
+                "command-surface-request",
+                &(author.to_string(), name, &operation, &call.arguments),
+            )
+            .map_err(|error| bad_request(error.to_string()))?
+            .to_hex()
+            .to_string(),
+        };
         let arguments = call.arguments;
         Ok(RunnableRequest {
             operation,
             arguments,
-            request_id: call.request_id,
+            request_id,
             deadline: call.deadline,
             budget_tokens: call.budget_tokens,
             cursor: call.cursor,
             fresh: call.fresh,
             format: call.format,
         })
+    }
+    /// Decode an HTTP request with the same identity rule as its MCP tool.
+    /// An operation without an MCP surface uses the product name as its tool.
+    pub fn parse_http_call(
+        &self,
+        arguments: Value,
+        author: &crate::Author,
+    ) -> Result<RunnableRequest, Failure> {
+        let call: ToolCall =
+            serde_json::from_value(arguments).map_err(|error| bad_request(error.to_string()))?;
+        let operation = call
+            .operation
+            .clone()
+            .ok_or_else(|| bad_request("HTTP requests name their operation"))?;
+        let description = self.forms().description(&operation).ok_or_else(|| {
+            Failure::new(
+                crate::FailureKind::NotFound,
+                "route does not match operation",
+            )
+        })?;
+        let name = description.spec.tool().map_or_else(
+            || self.product().to_owned(),
+            |tool| self.forms().tool_name(tool),
+        );
+        self.request_from_call(call, &name, operation, author)
     }
     /// The envelope's presentation, without decoding or rendering the response value.
     pub fn render_footer(&self, via: Via, answer: &Answer<Value>) -> String {
