@@ -501,8 +501,9 @@ fn bare_dates_are_whole_logical_days_and_datetimes_keep_their_clock_time() {
     );
     assert_eq!(
         time::resolve("2026-10-05T00:00", &c).unwrap().value,
-        time::Time::Instant {
-            at: ts("2026-10-04T22:00Z"),
+        time::Time::Span {
+            start: ts("2026-10-04T22:00Z"),
+            end: ts("2026-10-04T22:01Z"),
         }
     );
 }
@@ -614,7 +615,12 @@ fn four_digit_years_precede_basic_clock_parsing_with_explicit_clock_forms_preser
         for text in ["20:26", "T2026"] {
             assert_eq!(
                 time::resolve(text, clock).unwrap().value,
-                time::Time::Instant { at: ts(expected) },
+                time::Time::Span {
+                    start: ts(expected),
+                    end: ts(expected)
+                        .checked_add(SignedDuration::from_secs(60))
+                        .unwrap(),
+                },
                 "{text}"
             );
         }
@@ -657,4 +663,51 @@ fn calendar_labels_have_one_spelling() {
     assert_eq!(label::week(date("2027-01-04")), "2027-W01");
     assert_eq!(label::week(date("2024-12-30")), "2025-W01");
     assert_eq!(label::day(Date::new(-400, 3, 1).unwrap()), "-0400-03-01");
+}
+
+#[test]
+fn datetime_expression_keeps_written_precision() {
+    let c = clock();
+    for (expression, start, end) in [
+        ("2026-10-07T10:00", "2026-10-07T08:00Z", "2026-10-07T08:01Z"),
+        (
+            "2026-10-07 10:00:30",
+            "2026-10-07T08:00:30Z",
+            "2026-10-07T08:00:31Z",
+        ),
+        (
+            "2026-10-07T10:00Z",
+            "2026-10-07T10:00Z",
+            "2026-10-07T10:01Z",
+        ),
+        (
+            "2026-10-07T10:00:30+02:00",
+            "2026-10-07T08:00:30Z",
+            "2026-10-07T08:00:31Z",
+        ),
+        ("10:00", "2026-10-07T08:00Z", "2026-10-07T08:01Z"),
+        ("10:00:30", "2026-10-07T08:00:30Z", "2026-10-07T08:00:31Z"),
+    ] {
+        let resolved = time::resolve(expression, &c).unwrap().value;
+        assert_eq!(
+            resolved,
+            time::Time::Span {
+                start: ts(start),
+                end: ts(end)
+            },
+            "{expression}"
+        );
+        assert_eq!(resolved.until_bound(), ts(end));
+    }
+    for (expression, at) in [
+        ("2026-10-07T10:00:30.123", "2026-10-07T08:00:30.123Z"),
+        ("2026-10-07T10:00:30.123Z", "2026-10-07T10:00:30.123Z"),
+        ("10:00:30.123", "2026-10-07T08:00:30.123Z"),
+    ] {
+        assert_eq!(
+            time::resolve(expression, &c).unwrap().value,
+            time::Time::Instant { at: ts(at) },
+            "{expression}"
+        );
+    }
 }
