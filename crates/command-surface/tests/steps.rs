@@ -559,3 +559,121 @@ fn nullable_steps_preserve_null() {
         .unwrap_err();
     assert_eq!(failure.message, "steps must be an array");
 }
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct LineRows {
+    selection: Option<String>,
+    #[serde(default)]
+    references: Vec<String>,
+    #[serde(default)]
+    steps: Vec<Value>,
+    #[serde(default)]
+    all: bool,
+}
+fn line_table() -> Arc<OperationDeclarations> {
+    let mut builder = OperationDeclarations::builder("example", Deadlines::default());
+    builder.accept(RequestOption::Cursor);
+    builder.accept(RequestOption::BudgetTokens);
+    builder
+        .declare::<LineRows, Value>(
+            OperationSpec {
+                kind: OperationKind::Request { tool: None },
+                arguments: vec![ArgumentSpec::new(
+                    "all",
+                    ArgumentForm::Flag,
+                    "Every matched row",
+                )],
+                ..OperationSpec::request("rows", &["rows"], "", "A line", "Selected rows and verbs")
+            },
+            |value, _| value.to_string(),
+        )
+        .unwrap();
+    builder
+        .declare_steps(
+            "rows",
+            "steps",
+            verbs().cli_selection("selection", "references"),
+        )
+        .unwrap();
+    builder.finish()
+}
+#[test]
+fn line_commands_keep_step_options_and_request_options_distinct() {
+    let table = line_table();
+    let request = RunnableRequest {
+        operation: "rows".into(),
+        arguments: json!({"selection":"session:example:one", "steps":[{"verb":"read","view":"dialogue","show":["text","tool"],"include_tools":false},{"verb":"note","text":"Reader's notes", "as":"decision"}],"all":true}),
+        request_id: "page ' identity".into(),
+        deadline: Deadline::Milliseconds(500),
+        budget_tokens: TokenBudget::Tokens(200),
+        cursor: Some("opaque-next".into()),
+        fresh: true,
+        format: Format::Json,
+    };
+    assert_eq!(
+        table.cli_command(&request).unwrap(),
+        "example --all --request-id 'page '\\'' identity' --deadline 500 --budget 200 --cursor opaque-next --fresh --json -- session:example:one read --view dialogue --show text --show tool note 'Reader'\\''s notes' --as decision"
+    );
+}
+#[test]
+fn line_commands_name_reference_sets_through_standard_input() {
+    let table = line_table();
+    let request = RunnableRequest {
+        operation: "rows".into(),
+        arguments: json!({"references":["session:example:one", "session:example:two'quoted"],"steps":[{"verb":"note","text":"hello"}]}),
+        request_id: "named".into(),
+        deadline: Deadline::None,
+        budget_tokens: TokenBudget::Unlimited,
+        cursor: None,
+        fresh: false,
+        format: Format::default(),
+    };
+    assert_eq!(
+        table.cli_command(&request).unwrap(),
+        "printf '%s\\n' session:example:one 'session:example:two'\\''quoted' | example --request-id named --deadline none --budget none - note hello"
+    );
+}
+#[test]
+fn line_commands_refuse_unrepresentable_fields() {
+    let table = line_table();
+    let request = RunnableRequest {
+        operation: "rows".into(),
+        arguments: json!({"selection":"sessions","mystery":1}),
+        request_id: "invalid".into(),
+        deadline: Deadline::Default,
+        budget_tokens: TokenBudget::Default,
+        cursor: None,
+        fresh: false,
+        format: Format::default(),
+    };
+    assert_eq!(
+        table.cli_command(&request).unwrap_err().message,
+        "the line's options cannot be written as command-line arguments"
+    );
+}
+#[test]
+fn line_commands_force_literal_verb_words_and_option_words() {
+    let table = line_table();
+    for (text, expected) in [
+        (
+            "read",
+            "example --request-id literal -- sessions note -- read",
+        ),
+        (
+            "--hidden",
+            "example --request-id literal -- sessions note -- --hidden",
+        ),
+    ] {
+        let request = RunnableRequest {
+            operation: "rows".into(),
+            arguments: json!({"selection":"sessions","steps":[{"verb":"note","text":text}]}),
+            request_id: "literal".into(),
+            deadline: Deadline::Default,
+            budget_tokens: TokenBudget::Default,
+            cursor: None,
+            fresh: false,
+            format: Format::default(),
+        };
+        assert_eq!(table.cli_command(&request).unwrap(), expected);
+    }
+}
