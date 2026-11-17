@@ -659,3 +659,79 @@ fn prepared_parts_preserve_sealing_and_operation_memory_limits() {
         "a changed encoded byte must be diagnosed"
     );
 }
+
+#[test]
+fn cancellation_during_finalization_preserves_the_callers_error_and_exact_retry() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let preparation = Preparation::new(dir.path())
+        .unwrap()
+        .with_frame_size(256)
+        .unwrap();
+    let body = b"synthetic cancellation and retry".repeat(500);
+    let expected = preparation.plain(body.as_slice(), 3).unwrap();
+    let mut expected_bytes = Vec::new();
+    expected
+        .into_file()
+        .read_to_end(&mut expected_bytes)
+        .unwrap();
+    let mut writer = preparation
+        .plain_writer(tempfile::tempfile().unwrap(), 3)
+        .unwrap();
+    writer.write_all(&body).unwrap();
+    let mut calls = 0;
+    let result = writer.finish_checked(|| {
+        calls += 1;
+        if calls == 4 {
+            Err(hashed_blobs::Error::Refused(
+                "cancelled at seek table".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    });
+    assert!(
+        matches!(result, Err(hashed_blobs::Error::Refused(message)) if message == "cancelled at seek table")
+    );
+    let retry = preparation.plain(body.as_slice(), 3).unwrap();
+    let mut retry_bytes = Vec::new();
+    retry.into_file().read_to_end(&mut retry_bytes).unwrap();
+    assert_eq!(retry_bytes, expected_bytes);
+
+    let key = DataKey {
+        key_ref: "synthetic".into(),
+        key: [9; 32],
+    };
+    let mut total_calls = 0;
+    preparation
+        .sealed_checked(std::io::Cursor::new(&body), 3, &key, || {
+            total_calls += 1;
+            Ok::<_, hashed_blobs::Error>(())
+        })
+        .unwrap();
+    let mut calls = 0;
+    let result = preparation.sealed_checked(std::io::Cursor::new(&body), 3, &key, || {
+        calls += 1;
+        if calls == total_calls {
+            Err(hashed_blobs::Error::Refused(
+                "cancelled after footer".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    });
+    assert!(
+        matches!(result, Err(hashed_blobs::Error::Refused(message)) if message == "cancelled after footer")
+    );
+    let retry = preparation
+        .sealed(std::io::Cursor::new(&body), 3, &key)
+        .unwrap();
+    assert_eq!(retry.hash(), Preparation::sealed_name(&key, &body));
+    let mut decoded = Vec::new();
+    retry
+        .reader(Some(&key), ReadLimits::default())
+        .unwrap()
+        .read_to_end(&mut decoded)
+        .unwrap();
+    assert_eq!(decoded, body);
+}
