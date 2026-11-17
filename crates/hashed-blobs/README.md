@@ -112,6 +112,11 @@ chunked stream is a list of ordinary blobs.
 - A read takes extents and returns their decoded bytes, as a whole value or as
   a `Read + Seek` stream over the extents in order. Range reads decode only the
   frames the range touches.
+- A stream can mix selected stored extents and prepared encodings. Prepared
+  handles duplicate file descriptors rather than bytes, so a reader can keep
+  its exact input while admission appends the original. Reading never appends
+  a segment or requires a catalog. The same limits and cancellation checks
+  apply to both kinds of part.
 - Every frame read is checked: plain frames against their checksums and the
   blob against its name, sealed frames by authentication. A mismatch fails the
   read with an error naming the segment and the extent. Unchecked bytes are

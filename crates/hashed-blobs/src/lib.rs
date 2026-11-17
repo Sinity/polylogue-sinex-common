@@ -14,7 +14,7 @@ mod preparation;
 mod reader;
 mod writer;
 pub use preparation::{PlainWriter, Preparation, Prepared};
-pub use reader::{BlobReader, Mismatch, ReadLimits, Reader, VerificationStats};
+pub use reader::{BlobReader, Mismatch, ReadLimits, ReadPart, Reader, VerificationStats};
 pub use writer::{GroupEntry, GroupMetrics, PendingGroup, SegmentWriter, SyncedGroup};
 
 use std::{fmt, io};

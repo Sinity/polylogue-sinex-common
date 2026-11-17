@@ -468,3 +468,194 @@ fn an_own_encoding_is_appended_after_reopening_and_a_changed_one_is_refused() {
         .append_group(std::iter::once(Ok(changed)), |_| Ok(None))
         .is_err());
 }
+
+#[test]
+fn selected_prepared_and_stored_parts_keep_exact_bytes_across_admission() {
+    use hashed_blobs::ReadPart;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let preparation = Preparation::new(dir.path())
+        .unwrap()
+        .with_frame_size(32)
+        .unwrap();
+    let first = b"stored first part
+"
+    .repeat(100);
+    let second = b"prepared second part
+"
+    .repeat(100);
+    let mut writer = SegmentWriter::open(dir.path(), "segment", 0, &[], 0o600).unwrap();
+    let stored = writer
+        .append_group(
+            [Ok(preparation.plain(first.as_slice(), 3).unwrap())],
+            |_| Ok(None),
+        )
+        .unwrap()
+        .wait()
+        .unwrap();
+    writer.acknowledge(&stored).unwrap();
+    let temporary = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+    let pending = preparation
+        .plain_into(temporary.reopen().unwrap(), second.as_slice(), 3)
+        .unwrap();
+    let retained = pending.try_clone().unwrap();
+    assert_eq!(
+        pending
+            .try_clone()
+            .unwrap()
+            .into_file()
+            .metadata()
+            .unwrap()
+            .ino(),
+        retained
+            .try_clone()
+            .unwrap()
+            .into_file()
+            .metadata()
+            .unwrap()
+            .ino(),
+        "a retained preparation shares its encoded inode",
+    );
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let check = cancelled.clone();
+    let mut reader = Reader::new(dir.path())
+        .open_parts_checked_with_limits(
+            [
+                ReadPart::Stored(&stored.extents[0]),
+                ReadPart::Prepared(&retained),
+            ],
+            None,
+            ReadLimits::default(),
+            move || {
+                if check.load(Ordering::Relaxed) {
+                    Err(hashed_blobs::Error::Refused("cancelled".into()))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        Reader::new(dir.path())
+            .read_parts(
+                [
+                    ReadPart::Stored(&stored.extents[0]),
+                    ReadPart::Prepared(&retained)
+                ],
+                None,
+            )
+            .unwrap(),
+        [first.as_slice(), second.as_slice()].concat(),
+    );
+    assert!(Reader::new(dir.path())
+        .scan_parts_checked(
+            [
+                ReadPart::Stored(&stored.extents[0]),
+                ReadPart::Prepared(&retained)
+            ],
+            || Ok(()),
+        )
+        .unwrap()
+        .is_empty());
+    let mut sibling = retained.reader(None, ReadLimits::default()).unwrap();
+    sibling.seek(SeekFrom::End(-7)).unwrap();
+    let mut suffix = [0; 7];
+    sibling.read_exact(&mut suffix).unwrap();
+    assert_eq!(suffix, second[second.len() - 7..]);
+    temporary.close().unwrap(); // every open handle survives unlinking the source path
+    let committed = writer
+        .append_group([Ok(pending)], |_| Ok(None))
+        .unwrap()
+        .wait()
+        .unwrap();
+    writer.acknowledge(&committed).unwrap();
+    drop(retained);
+    let expected = [first.as_slice(), second.as_slice()].concat();
+    let mut actual = Vec::new();
+    reader.read_to_end(&mut actual).unwrap();
+    assert_eq!(actual, expected);
+    sibling.rewind().unwrap();
+    let mut prefix = [0; 9];
+    sibling.read_exact(&mut prefix).unwrap();
+    assert_eq!(prefix, second[..9]);
+    reader
+        .seek(SeekFrom::Start(first.len() as u64 - 5))
+        .unwrap();
+    let mut crossing = [0; 21];
+    reader.read_exact(&mut crossing).unwrap();
+    assert_eq!(crossing, expected[first.len() - 5..first.len() + 16]);
+    cancelled.store(true, Ordering::Relaxed);
+    assert!(reader.seek(SeekFrom::Start(0)).is_err());
+    assert!(reader.read(&mut crossing).is_err());
+}
+
+#[test]
+fn prepared_parts_preserve_sealing_and_operation_memory_limits() {
+    use hashed_blobs::ReadPart;
+    let dir = tempfile::tempdir().unwrap();
+    let preparation = Preparation::new(dir.path())
+        .unwrap()
+        .with_frame_size(32)
+        .unwrap();
+    let key = DataKey {
+        key_ref: "synthetic-key".into(),
+        key: [7; 32],
+    };
+    let bytes = b"sealed input retains its identity
+"
+    .repeat(20);
+    let prepared = preparation
+        .sealed(std::io::Cursor::new(&bytes), 3, &key)
+        .unwrap();
+    let reader = Reader::new(dir.path());
+    assert!(reader
+        .open_parts_checked_with_limits(
+            [ReadPart::Prepared(&prepared)],
+            None,
+            ReadLimits::default(),
+            || Ok(()),
+        )
+        .is_err());
+    let mut opened = reader
+        .open_parts_checked_with_limits(
+            [ReadPart::Prepared(&prepared)],
+            Some(&key),
+            ReadLimits::default(),
+            || Ok(()),
+        )
+        .unwrap();
+    let mut actual = Vec::new();
+    opened.read_to_end(&mut actual).unwrap();
+    assert_eq!(actual, bytes);
+    assert!(reader
+        .open_parts_checked_with_limits(
+            [ReadPart::Prepared(&prepared)],
+            Some(&key),
+            ReadLimits {
+                frame_bytes: 8,
+                index_bytes: usize::MAX
+            },
+            || Ok(()),
+        )
+        .is_err());
+    assert!(reader
+        .scan_parts_checked([ReadPart::Prepared(&prepared)], || Ok(()))
+        .unwrap()
+        .is_empty());
+    let file = prepared.try_clone().unwrap().into_file();
+    let mut byte = [0];
+    file.read_exact_at(&mut byte, 0).unwrap();
+    byte[0] ^= 0x80;
+    file.write_all_at(&byte, 0).unwrap();
+    let mismatches = reader
+        .scan_parts_checked([ReadPart::Prepared(&prepared)], || Ok(()))
+        .unwrap();
+    assert_eq!(
+        mismatches.len(),
+        1,
+        "a changed encoded byte must be diagnosed"
+    );
+}

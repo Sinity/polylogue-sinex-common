@@ -28,6 +28,12 @@ pub struct Prepared {
     pub(crate) encoded_hash: Hash,
 }
 impl Prepared {
+    /// Duplicate the handle to these immutable encoded bytes, without copying them.
+    /// Readers use positional I/O, so their cursors stay independent even while
+    /// the writer seeks and appends through another handle to the same inode.
+    pub fn try_clone(&self) -> Result<Self> {
+        Self::from_own_encoding(self.file.try_clone()?, self.descriptor())
+    }
     pub fn hash(&self) -> Hash {
         self.hash
     }
