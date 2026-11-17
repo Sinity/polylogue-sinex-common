@@ -180,7 +180,7 @@ impl Preparation {
         file.set_len(0)?;
         file.rewind()?;
         Ok(PlainWriter {
-            file,
+            file: EncodedFile::new(file),
             compressor: compressor(level)?,
             frame: self.frame,
             buffer: Vec::with_capacity(self.frame),
@@ -218,7 +218,7 @@ impl Preparation {
             writer.write_all(&buffer[..n]).map_err(Error::Io)?;
         }
         check()?;
-        writer.finish().map_err(E::from)
+        writer.finish_checked(check)
     }
     pub fn sealed(&self, reader: impl Read + Seek, level: i32, key: &DataKey) -> Result<Prepared> {
         self.sealed_checked(reader, level, key, || Ok(()))
@@ -252,6 +252,7 @@ impl Preparation {
     ) -> std::result::Result<Prepared, E> {
         file.set_len(0).map_err(Error::Io)?;
         file.rewind().map_err(Error::Io)?;
+        let mut file = EncodedFile::new(file);
         let start = reader.stream_position().map_err(Error::Io)?;
         let mut compressor = compressor(level).map_err(Error::Io)?;
         let mut buffer = vec![0; self.frame];
@@ -324,7 +325,7 @@ impl Preparation {
             return Err(Error::Refused("sealed input changed during preparation".into()).into());
         }
         check()?;
-        finish(file, hash, total, index).map_err(E::from)
+        finish(file, hash, total, index, check)
     }
     pub fn sealed_name(key: &DataKey, bytes: &[u8]) -> Hash {
         Hash(*blake3::keyed_hash(&codec::name_key(key), bytes).as_bytes())
@@ -333,7 +334,7 @@ impl Preparation {
 /// A bounded plain frame encoder implementing `Write` for streaming serializers.
 /// Dropping it abandons the incomplete encoding. Call `finish` before persistence.
 pub struct PlainWriter {
-    file: File,
+    file: EncodedFile,
     compressor: zstd::bulk::Compressor<'static>,
     frame: usize,
     buffer: Vec<u8>,
@@ -374,16 +375,25 @@ impl PlainWriter {
         }
         Ok(length)
     }
-    pub fn finish(mut self) -> Result<Prepared> {
+    pub fn finish(self) -> Result<Prepared> {
+        self.finish_checked(|| Ok(()))
+    }
+    /// Finish the buffered frame and index while retaining caller cancellation.
+    pub fn finish_checked<E: From<Error>>(
+        mut self,
+        mut check: impl FnMut() -> std::result::Result<(), E>,
+    ) -> std::result::Result<Prepared, E> {
+        check()?;
         if self.failed {
-            return Err(Error::Refused("plain encoder failed before finish".into()));
+            return Err(Error::Refused("plain encoder failed before finish".into()).into());
         }
-        self.emit()?;
+        self.emit().map_err(Error::Io)?;
         finish(
             self.file,
             Hash(*self.hash.finalize().as_bytes()),
             self.decoded_len,
             self.index,
+            check,
         )
     }
 }
@@ -427,66 +437,104 @@ fn read_frame(reader: &mut impl Read, buffer: &mut [u8]) -> std::io::Result<usiz
     }
     Ok(n)
 }
-fn finish(mut file: File, hash: Hash, decoded_len: u64, mut index: Index) -> Result<Prepared> {
+// Encoded output is append-only. Hash only bytes accepted by the file, so
+// finalization needs no second payload pass and no hash can precede its write.
+struct EncodedFile {
+    file: File,
+    hash: blake3::Hasher,
+    len: u64,
+}
+impl EncodedFile {
+    fn new(file: File) -> Self {
+        Self {
+            file,
+            hash: blake3::Hasher::new(),
+            len: 0,
+        }
+    }
+}
+impl Write for EncodedFile {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let n = self.file.write(bytes)?;
+        self.hash.update(&bytes[..n]);
+        self.len += n as u64;
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+fn finish<E: From<Error>>(
+    mut file: EncodedFile,
+    hash: Hash,
+    decoded_len: u64,
+    mut index: Index,
+    mut check: impl FnMut() -> std::result::Result<(), E>,
+) -> std::result::Result<Prepared, E> {
+    check()?;
     index.bind(hash);
     let encoded = index.encode();
+    check()?;
     let index_hash = Hash::of(&encoded);
     let metadata_len = encoded
         .len()
         .checked_add(16)
         .ok_or_else(|| Error::Refused("frame index length overflows".into()))?;
-    file.write_all(&codec::SKIP.to_le_bytes())?;
+    file.write_all(&codec::SKIP.to_le_bytes())
+        .map_err(Error::Io)?;
     file.write_all(
         &u32::try_from(metadata_len)
             .map_err(|_| Error::Refused("zstd index frame length overflows".into()))?
             .to_le_bytes(),
-    )?;
-    file.write_all(&encoded)?;
-    file.write_all(&(encoded.len() as u64).to_le_bytes())?;
-    file.write_all(codec::TAIL)?;
+    )
+    .map_err(Error::Io)?;
+    file.write_all(&encoded).map_err(Error::Io)?;
+    file.write_all(&(encoded.len() as u64).to_le_bytes())
+        .map_err(Error::Io)?;
+    file.write_all(codec::TAIL).map_err(Error::Io)?;
     if index.kind == Kind::Plain {
         // A standard zstd seek table includes the skippable index as a zero-byte
         // decoded frame. Stock zstd can decode the complete extent unchanged.
         let count = u32::try_from(index.frames.len() + 1)
             .map_err(|_| Error::Refused("zstd frame count overflows".into()))?;
-        file.write_all(&0x184D_2A5Eu32.to_le_bytes())?;
+        file.write_all(&0x184D_2A5Eu32.to_le_bytes())
+            .map_err(Error::Io)?;
         file.write_all(
             &(count
                 .checked_mul(8)
                 .and_then(|n| n.checked_add(9))
                 .ok_or_else(|| Error::Refused("zstd seek table overflows".into()))?)
             .to_le_bytes(),
-        )?;
+        )
+        .map_err(Error::Io)?;
         for f in &index.frames {
+            check()?;
             file.write_all(
                 &u32::try_from(f.stored)
                     .map_err(|_| Error::Refused("zstd frame length overflows".into()))?
                     .to_le_bytes(),
-            )?;
-            file.write_all(&(f.decoded as u32).to_le_bytes())?;
+            )
+            .map_err(Error::Io)?;
+            file.write_all(&(f.decoded as u32).to_le_bytes())
+                .map_err(Error::Io)?;
         }
         file.write_all(
             &u32::try_from(metadata_len + 8)
                 .map_err(|_| Error::Refused("zstd metadata length overflows".into()))?
                 .to_le_bytes(),
-        )?;
-        file.write_all(&0u32.to_le_bytes())?;
-        file.write_all(&count.to_le_bytes())?;
-        file.write_all(&[0])?;
-        file.write_all(&0x8F92_EAB1u32.to_le_bytes())?;
+        )
+        .map_err(Error::Io)?;
+        file.write_all(&0u32.to_le_bytes()).map_err(Error::Io)?;
+        file.write_all(&count.to_le_bytes()).map_err(Error::Io)?;
+        file.write_all(&[0]).map_err(Error::Io)?;
+        file.write_all(&0x8F92_EAB1u32.to_le_bytes())
+            .map_err(Error::Io)?;
     }
-    let stored_len = file.stream_position()?;
-    file.rewind()?;
-    let mut hasher = blake3::Hasher::new();
-    let mut buffer = [0; 65536];
-    loop {
-        let n = file.read(&mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buffer[..n]);
-    }
-    file.rewind()?;
+    check()?;
+    let stored_len = file.len;
+    let encoded_hash = Hash(*file.hash.finalize().as_bytes());
+    let mut file = file.file;
+    file.rewind().map_err(Error::Io)?;
     Ok(Prepared {
         file,
         hash,
@@ -494,6 +542,6 @@ fn finish(mut file: File, hash: Hash, decoded_len: u64, mut index: Index) -> Res
         stored_len,
         kind: index.kind,
         index_hash,
-        encoded_hash: Hash(*hasher.finalize().as_bytes()),
+        encoded_hash,
     })
 }

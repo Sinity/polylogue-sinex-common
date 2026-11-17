@@ -26,6 +26,8 @@ permissions:
 jobs:
   update:
     runs-on: ubuntu-24.04
+    env:
+      ADOPTION_BRANCH: update-polylogue-sinex-common
     strategy:
       fail-fast: false
       matrix:
@@ -35,6 +37,15 @@ jobs:
         with:
           repository: Sinity/${{ matrix.product }}
           token: ${{ secrets.COMMON_BUMP_TOKEN }}
+      - name: Continue the existing adoption branch
+        run: |
+          if git ls-remote --exit-code --heads origin "refs/heads/$ADOPTION_BRANCH" >/dev/null; then
+            git fetch --no-tags --depth=1 origin "refs/heads/$ADOPTION_BRANCH"
+            git checkout --detach FETCH_HEAD
+          else
+            status=$?
+            if [ "$status" -ne 2 ]; then exit "$status"; fi
+          fi
       - name: Move shared crates in every workspace lock to this commit
         id: update
         env:
@@ -66,15 +77,33 @@ jobs:
             printf '%s\n' "${locks[@]}"
             echo "LOCKS"
           } >>"$GITHUB_OUTPUT"
-      - uses: peter-evans/create-pull-request@v7
-        with:
-          token: ${{ secrets.COMMON_BUMP_TOKEN }}
-          branch: update-polylogue-sinex-common
-          add-paths: ${{ steps.update.outputs.locks }}
-          commit-message: Update polylogue-sinex-common to ${{ steps.update.outputs.short }}
-          title: Update polylogue-sinex-common to ${{ steps.update.outputs.short }}
-          body: |
-            Moves workspace lock files to Sinity/polylogue-sinex-common@${{ steps.update.outputs.commit }}.
+      - name: Publish the lock update without replacing caller changes
+        env:
+          GH_TOKEN: ${{ secrets.COMMON_BUMP_TOKEN }}
+          COMMON_COMMIT: ${{ steps.update.outputs.commit }}
+          COMMON_SHORT: ${{ steps.update.outputs.short }}
+          LOCKS: ${{ steps.update.outputs.locks }}
+        run: |
+          mapfile -t locks <<<"$LOCKS"
+          git add -- "${locks[@]}"
+          if git diff --cached --quiet; then
+            exit 0
+          else
+            status=$?
+            if [ "$status" -ne 1 ]; then exit "$status"; fi
+          fi
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m "Update polylogue-sinex-common to $COMMON_SHORT"
+          # A concurrent caller commit rejects this push instead of being replaced.
+          git push origin "HEAD:refs/heads/$ADOPTION_BRANCH"
+          existing=$(gh pr list --state open --base master --head "$ADOPTION_BRANCH" --json number --jq '.[0].number // empty')
+          if [ -z "$existing" ]; then
+            body="$RUNNER_TEMP/common-lock-update.md"
+            cat >"$body" <<EOF
+          Moves workspace lock files to Sinity/polylogue-sinex-common@$COMMON_COMMIT.
 
-            Opened by the `Update product locks` workflow in polylogue-sinex-common. Convert any callers on this branch, then run the checks before merging.
-          delete-branch: true
+          Opened by the \`Update product locks\` workflow in polylogue-sinex-common. Convert any callers on this branch, then run the checks before merging. Later updates preserve those caller commits.
+          EOF
+            gh pr create --base master --head "$ADOPTION_BRANCH" \
+              --title "Update polylogue-sinex-common to $COMMON_SHORT" --body-file "$body"
+          fi

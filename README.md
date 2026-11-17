@@ -75,6 +75,9 @@ with Contents and Pull requests read/write access to both products. Without
 it, update their locks with `cargo update` selecting the shared crates
 that product adopts and open those pull requests manually. Convert affected
 callers and run the product's checks before merging its lock update.
+Later lock updates start from the adoption branch's current tip and preserve
+its caller commits and pull request description. A concurrent push rejects
+the update; the next run starts from the new tip.
 Sinex also has `fuzz/Cargo.lock`: update it with
 `cargo update --manifest-path fuzz/Cargo.toml -p devkit -p hashed-blobs`.
 Use `--precise <commit>` to select the same revision in both locks.
