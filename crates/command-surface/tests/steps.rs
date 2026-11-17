@@ -577,6 +577,7 @@ fn line_table() -> Arc<OperationDeclarations> {
     builder
         .declare::<LineRows, Value>(
             OperationSpec {
+                kind: OperationKind::Request { tool: None },
                 arguments: vec![ArgumentSpec::new(
                     "all",
                     ArgumentForm::Flag,
