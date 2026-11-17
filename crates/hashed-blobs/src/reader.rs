@@ -41,6 +41,14 @@ pub struct Mismatch {
     pub extent: Extent,
     pub error: String,
 }
+/// One selected part of a stream: stored in a segment, or prepared for admission.
+/// Both are decoded and checked by the same reader.
+#[derive(Clone, Copy)]
+pub enum ReadPart<'a> {
+    Stored(&'a Extent),
+    Prepared(&'a crate::Prepared),
+}
+
 #[derive(Clone)]
 pub struct Reader {
     root: PathBuf,
@@ -84,15 +92,33 @@ impl Reader {
         extents: &[Extent],
         key: Option<&DataKey>,
         limits: ReadLimits,
+        check: impl FnMut() -> Result<()> + Send + 'static,
+    ) -> Result<BlobReader> {
+        self.open_parts_checked_with_limits(
+            extents.iter().map(ReadPart::Stored),
+            key,
+            limits,
+            check,
+        )
+    }
+    /// Open only the supplied parts. Prepared handles keep their owned inode;
+    /// reading them neither appends a segment nor changes any catalog.
+    pub fn open_parts_checked_with_limits<'a>(
+        &self,
+        parts: impl IntoIterator<Item = ReadPart<'a>>,
+        key: Option<&DataKey>,
+        limits: ReadLimits,
         mut check: impl FnMut() -> Result<()> + Send + 'static,
     ) -> Result<BlobReader> {
-        let mut opened = Vec::with_capacity(extents.len());
-        let mut starts = Vec::with_capacity(extents.len());
+        let parts = parts.into_iter();
+        let mut opened = Vec::with_capacity(parts.size_hint().0);
+        let mut starts = Vec::with_capacity(parts.size_hint().0);
         let mut length = 0u64;
         let mut metadata = 0;
-        for extent in extents {
+        for part in parts {
             check()?;
-            let (value, bytes) = OpenExtent::open(&self.root, extent, limits)?;
+            let (value, bytes) = part.open(&self.root, limits)?;
+            let extent = &value.extent;
             if let Kind::Sealed { key_ref } = &extent.kind {
                 let key = key.ok_or(Error::Locked(extent.hash))?;
                 if &key.key_ref != key_ref {
@@ -123,7 +149,16 @@ impl Reader {
     }
     /// A complete read verifies each blob's plain or keyed name before returning.
     pub fn read(&self, extents: &[Extent], key: Option<&DataKey>) -> Result<Vec<u8>> {
-        let mut reader = self.open(extents, key)?;
+        self.read_parts(extents.iter().map(ReadPart::Stored), key)
+    }
+    /// Read selected parts completely, verifying each plain or keyed name.
+    pub fn read_parts<'a>(
+        &self,
+        parts: impl IntoIterator<Item = ReadPart<'a>>,
+        key: Option<&DataKey>,
+    ) -> Result<Vec<u8>> {
+        let mut reader =
+            self.open_parts_checked_with_limits(parts, key, ReadLimits::default(), || Ok(()))?;
         let mut out = Vec::new();
         for index in 0..reader.extents.len() {
             let mut hasher = match &reader.extents[index].extent.kind {
@@ -195,10 +230,20 @@ impl Reader {
     pub fn scan_checked(
         &self,
         extents: &[Extent],
+        check: impl FnMut() -> Result<()>,
+    ) -> Result<Vec<Mismatch>> {
+        self.scan_parts_checked(extents.iter().map(ReadPart::Stored), check)
+    }
+    /// Inspect selected stored or prepared parts without changing their bytes.
+    /// Sealed encodings are verified without requiring their data key.
+    pub fn scan_parts_checked<'a>(
+        &self,
+        parts: impl IntoIterator<Item = ReadPart<'a>>,
         mut check: impl FnMut() -> Result<()>,
     ) -> Result<Vec<Mismatch>> {
         let mut mismatches = Vec::new();
-        for extent in extents {
+        for part in parts {
+            let extent = part.extent();
             check()?;
             let mut cancelled = None;
             let result = {
@@ -210,7 +255,7 @@ impl Reader {
                     }
                 };
                 (|| {
-                    let (value, _) = OpenExtent::open(&self.root, extent, ReadLimits::default())?;
+                    let (value, _) = part.open(&self.root, ReadLimits::default())?;
                     value.scan(&mut check_frame)
                 })()
             };
@@ -219,12 +264,35 @@ impl Reader {
             }
             if let Err(error) = result {
                 mismatches.push(Mismatch {
-                    extent: extent.clone(),
+                    extent,
                     error: error.to_string(),
                 });
             }
         }
         Ok(mismatches)
+    }
+}
+impl ReadPart<'_> {
+    fn extent(self) -> Extent {
+        match self {
+            Self::Stored(extent) => extent.clone(),
+            Self::Prepared(prepared) => prepared.descriptor().extent(),
+        }
+    }
+    fn open(self, root: &Path, limits: ReadLimits) -> Result<(OpenExtent, u64)> {
+        match self {
+            Self::Stored(extent) => OpenExtent::open(root, extent, limits),
+            Self::Prepared(prepared) => {
+                let file = prepared.file.try_clone()?;
+                let descriptor = prepared.descriptor();
+                if file.metadata()?.len() != descriptor.stored_len {
+                    return Err(Error::Refused(
+                        "encoded file length differs from its descriptor".into(),
+                    ));
+                }
+                OpenExtent::from_file(file, &descriptor.extent(), limits)
+            }
+        }
     }
 }
 pub(crate) fn open_encoded(
