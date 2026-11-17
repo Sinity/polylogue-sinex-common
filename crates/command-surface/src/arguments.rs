@@ -933,6 +933,11 @@ impl Forms {
                 request.operation
             )));
         }
+        if let Some(((_, field), steps)) = self.steps.iter().find(|((operation, _), steps)| {
+            operation == &request.operation && steps.cli_selection.is_some()
+        }) {
+            return self.cli_line(description, request, field, steps);
+        }
         let mut words = vec![quote_argument(&self.product)];
         words.extend(description.spec.command.iter().map(|s| quote_argument(s)));
         // Flags come before positionals: a positional that takes the rest of
@@ -981,6 +986,153 @@ impl Forms {
         words.extend(positionals.iter().map(|w| quote_argument(w)));
         Ok(words.join(" "))
     }
+    fn cli_line(
+        &self,
+        description: &OperationDescription,
+        request: &RunnableRequest,
+        step_field: &str,
+        steps: &crate::StepDeclarations,
+    ) -> Result<String, Failure> {
+        let (selection_field, reference_field) =
+            steps.cli_selection.as_ref().expect("declared line");
+        let mut fields = request
+            .arguments
+            .as_object()
+            .cloned()
+            .ok_or_else(|| bad_request("line arguments must be an object"))?;
+        let selection = fields
+            .remove(selection_field)
+            .filter(|value| !value.is_null());
+        let references = fields
+            .remove(reference_field)
+            .unwrap_or_else(|| Value::Array(vec![]));
+        let references = references
+            .as_array()
+            .ok_or_else(|| bad_request("line references must be an array"))?;
+        if selection.is_some() && !references.is_empty() {
+            return Err(bad_request("a line has a selection or named references"));
+        }
+        let steps_value = fields
+            .remove(step_field)
+            .unwrap_or_else(|| Value::Array(vec![]));
+        let values = steps_value
+            .as_array()
+            .ok_or_else(|| bad_request("line steps must be an array"))?;
+        omit_defaults(description, &mut fields);
+        let (flags, positional) =
+            natural_words(description, &Value::Object(fields)).ok_or_else(|| {
+                bad_request("the line's options cannot be written as command-line arguments")
+            })?;
+        if !positional.is_empty() {
+            return Err(bad_request("line options cannot take positional words"));
+        }
+        let mut words = vec![quote_argument(&self.product)];
+        // Request options precede the selection so a verb's budget or cursor
+        // cannot capture the request's own options.
+        words.extend(flags);
+        words.extend(["--request-id".into(), quote_argument(&request.request_id)]);
+        match request.deadline {
+            Deadline::Default => {}
+            Deadline::None => words.extend(["--deadline".into(), "none".into()]),
+            Deadline::Milliseconds(ms) => words.extend(["--deadline".into(), ms.to_string()]),
+        }
+        match request.budget_tokens {
+            crate::TokenBudget::Default => {}
+            crate::TokenBudget::Unlimited => words.extend(["--budget".into(), "none".into()]),
+            crate::TokenBudget::Tokens(n) => words.extend(["--budget".into(), n.to_string()]),
+        }
+        if let Some(cursor) = &request.cursor {
+            words.extend(["--cursor".into(), quote_argument(cursor)]);
+        }
+        if request.fresh {
+            words.push("--fresh".into());
+        }
+        if request.format == Format::Json {
+            words.push("--json".into());
+        }
+        if let Some(selection) = selection {
+            let selection = selection
+                .as_str()
+                .ok_or_else(|| bad_request("line selection must be text"))?;
+            words.push("--".into());
+            words.push(quote_argument(selection));
+        } else if !references.is_empty() {
+            words.push("-".into());
+        }
+        for value in values {
+            steps.validate_step(value)?;
+            let verb = value["verb"].as_str().expect("validated step");
+            let declaration = steps
+                .verbs()
+                .iter()
+                .find(|step| step.verb() == verb)
+                .expect("validated verb");
+            let mut fields = value.as_object().expect("validated step").clone();
+            fields.remove("verb");
+            omit_defaults(&declaration.description, &mut fields);
+            if fields.keys().any(|name| {
+                declaration
+                    .arguments()
+                    .iter()
+                    .any(|field| field.name == *name && !field.listed)
+            }) {
+                return Err(bad_request(format!(
+                    "{verb} has options unavailable on the command line"
+                )));
+            }
+            let (flags, positional) =
+                natural_words(&declaration.description, &Value::Object(fields)).ok_or_else(
+                    || {
+                        bad_request(format!(
+                            "{verb}'s options cannot be written as command-line arguments"
+                        ))
+                    },
+                )?;
+            words.push(quote_argument(verb));
+            let forced = positional.iter().any(|word| {
+                word.starts_with('-') || steps.verbs().iter().any(|step| step.verb() == word)
+            });
+            if forced {
+                words.extend(flags);
+                words.push("--".into());
+                words.extend(positional.iter().map(|word| quote_argument(word)));
+            } else {
+                words.extend(positional.iter().map(|word| quote_argument(word)));
+                words.extend(flags);
+            }
+        }
+        let line = words.join(" ");
+        if references.is_empty() {
+            return Ok(line);
+        }
+        let references = references
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|text| !text.is_empty() && !text.contains(['\r', '\n']))
+                    .map(quote_argument)
+                    .ok_or_else(|| bad_request("line references must be text"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(format!("printf '%s\\n' {} | {line}", references.join(" ")))
+    }
+}
+
+fn omit_defaults(description: &OperationDescription, fields: &mut Map<String, Value>) {
+    fields.retain(|name, value| {
+        let field = property(description, name);
+        if field.is_none() {
+            return true;
+        }
+        let required = description.input_schema["required"]
+            .as_array()
+            .is_some_and(|names| names.iter().any(|item| item == name));
+        if !required && (value.is_null() || value.as_array().is_some_and(Vec::is_empty)) {
+            return false;
+        }
+        field.and_then(|field| field.get("default")) != Some(&*value)
+    });
 }
 
 /// The request's fields as the row's own flags (quoted) and positional words

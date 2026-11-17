@@ -694,3 +694,13 @@ SQLite writer whose request log and mutation commit atomically (restart,
 duplicates sent together, timeout after commit); and run property tests at
 the serialization, command-line and fitter boundaries. Run
 `cargo xtask test -p command-surface`.
+
+A product whose CLI is a selection followed by verbs attaches
+`StepDeclarations::cli_selection(selection_field, references_field)` to its
+existing step declaration. `cli_command` then writes the selection and each
+verb's declared words and options, with request options before the first verb.
+Named reference sets use a quoted `printf` pipeline into the product's `-`
+selection. The product owns first-word rules and splitting the line; the shared
+step parser owns each verb's fields. Fields without a command-line form return
+a typed failure rather than a command that loses part of the request. Other
+operations retain their declared command words.

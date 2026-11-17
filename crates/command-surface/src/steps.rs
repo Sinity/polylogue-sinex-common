@@ -22,6 +22,7 @@ pub struct StepDeclaration {
 #[derive(Clone, Default)]
 pub struct StepDeclarations {
     pub(crate) verbs: Vec<StepDeclaration>,
+    pub(crate) cli_selection: Option<(String, String)>,
 }
 
 impl StepDeclaration {
@@ -40,6 +41,16 @@ impl StepDeclaration {
 }
 
 impl StepDeclarations {
+    /// Render this operation as one selection followed by its declared verbs.
+    /// The product still owns splitting the line and resolving its selection.
+    pub fn cli_selection(
+        mut self,
+        selection: impl Into<String>,
+        references: impl Into<String>,
+    ) -> Self {
+        self.cli_selection = Some((selection.into(), references.into()));
+        self
+    }
     /// The declarations in help and schema order.
     pub fn verbs(&self) -> &[StepDeclaration] {
         &self.verbs
@@ -209,6 +220,28 @@ impl DeclarationsBuilder {
             return Err(bad_request(
                 "steps need an array argument and at least one verb",
             ));
+        }
+        if let Some((selection, references)) = &steps.cli_selection {
+            let properties = &description.input_schema["properties"];
+            if selection == references
+                || selection == argument
+                || references == argument
+                || !properties.get(selection).is_some_and(|field| {
+                    schema_has_type(field, &description.input_schema, "string")
+                })
+                || !properties
+                    .get(references)
+                    .is_some_and(|field| schema_has_type(field, &description.input_schema, "array"))
+            {
+                return Err(bad_request(
+                    "a command line needs distinct selection, reference-list and step-list fields",
+                ));
+            }
+            if self.forms().steps.iter().any(|((row, _), declarations)| {
+                row == operation && declarations.cli_selection.is_some()
+            }) {
+                return Err(bad_request("an operation has one command line"));
+            }
         }
         let key = (operation.to_owned(), argument.to_owned());
         if self.forms().steps.contains_key(&key) {
