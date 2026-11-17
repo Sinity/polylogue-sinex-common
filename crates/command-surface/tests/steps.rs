@@ -612,7 +612,7 @@ fn line_commands_keep_step_options_and_request_options_distinct() {
     };
     assert_eq!(
         table.cli_command(&request).unwrap(),
-        "example --all --request-id 'page '\\'' identity' --deadline 500 --budget 200 --cursor opaque-next --fresh --json -- session:example:one read --show text --show tool --view dialogue note 'Reader'\\''s notes' --as decision"
+        "example --all --request-id 'page '\\'' identity' --deadline 500 --budget 200 --cursor opaque-next --fresh --json -- session:example:one read --view dialogue --show text --show tool note 'Reader'\\''s notes' --as decision"
     );
 }
 #[test]
