@@ -291,8 +291,8 @@ fn an_unrelated_head_discards_the_known_roots() {
     let second = commit(dir.path(), "b");
     let (identity, next) =
         observe_reusing(dir.path(), Instant::now() + BUDGET, Some(&known)).unwrap();
-    assert_eq!(identity.root_commits, [second.clone()]);
-    assert_eq!(next.root_commits, [second.clone()]);
+    assert_eq!(identity.root_commits, std::slice::from_ref(&second));
+    assert_eq!(next.root_commits, std::slice::from_ref(&second));
     assert_eq!(next.head, second);
 }
 
