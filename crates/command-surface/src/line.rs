@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::convert::Infallible;
 
 /// Shared precedence categories. Extra product selection forms come after
-/// exact references and before query text, in the order the product defines.
+/// units and row numbers and before references, in the order the product defines.
 #[derive(Debug, PartialEq, Eq)]
 pub enum FirstWord<Extra = Infallible> {
     Nothing,
@@ -61,11 +61,11 @@ pub fn classify_first<R: SelectionRules>(
     if rules.is_row_numbers(word) {
         return FirstWord::RowNumbers;
     }
-    if rules.is_reference(word) {
-        return FirstWord::Reference;
-    }
     if let Some(additional) = rules.additional(word) {
         return FirstWord::Additional(additional);
+    }
+    if rules.is_reference(word) {
+        return FirstWord::Reference;
     }
     if rules.is_query(word) {
         FirstWord::QueryText

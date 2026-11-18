@@ -166,7 +166,7 @@ impl SelectionRules for Rules {
         word == "@1"
     }
     fn is_reference(&self, word: &str) -> bool {
-        ["@1", "exact"].contains(&word)
+        ["@1", "exact", "yesterday"].contains(&word)
     }
     fn additional(&self, word: &str) -> Option<Self::Additional> {
         match word {
