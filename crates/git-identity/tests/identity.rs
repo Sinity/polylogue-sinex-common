@@ -1,8 +1,8 @@
 use std::path::Path;
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use git_identity::{Unavailable, observe_within, root_set, without_credentials};
+use git_identity::{Unavailable, observe_reusing, observe_within, root_set, without_credentials};
 
 const BUDGET: Duration = Duration::from_secs(20);
 
@@ -203,5 +203,158 @@ fn the_parts_answer_alone() {
     assert_eq!(
         git_identity::root_commits(dir.path(), deadline),
         Ok(vec![root])
+    );
+}
+
+#[test]
+fn the_same_head_reuses_roots_but_reads_current_branch_and_remote() {
+    let dir = tempfile::tempdir().unwrap();
+    repo(dir.path());
+    let root = commit(dir.path(), "a");
+    let (_, mut known) = observe_reusing(dir.path(), Instant::now() + BUDGET, None).unwrap();
+    known.root_commits.push("known-root-sentinel".into());
+    git(dir.path(), &["branch", "-m", "renamed"]);
+    git(
+        dir.path(),
+        &["remote", "add", "origin", "https://u:p@example.invalid/r"],
+    );
+    let (identity, next) =
+        observe_reusing(dir.path(), Instant::now() + BUDGET, Some(&known)).unwrap();
+    let mut expected = vec![root.clone(), "known-root-sentinel".into()];
+    expected.sort();
+    assert_eq!(identity.root_commits, expected);
+    assert_eq!(identity.head, root);
+    assert_eq!(identity.branch.as_deref(), Some("renamed"));
+    assert_eq!(
+        identity.remote.as_deref(),
+        Some("https://example.invalid/r")
+    );
+    assert_eq!(next.root_commits, identity.root_commits);
+    assert_eq!(next.head, identity.head);
+    assert!(next.shallow.is_empty());
+}
+
+#[test]
+fn a_fast_forward_with_no_new_roots_keeps_the_known_set() {
+    let dir = tempfile::tempdir().unwrap();
+    repo(dir.path());
+    let root = commit(dir.path(), "a");
+    let (_, mut known) = observe_reusing(dir.path(), Instant::now() + BUDGET, None).unwrap();
+    known.root_commits.push("known-root-sentinel".into());
+    let head = commit(dir.path(), "b");
+    let (identity, next) =
+        observe_reusing(dir.path(), Instant::now() + BUDGET, Some(&known)).unwrap();
+    let mut expected = vec![root, "known-root-sentinel".into()];
+    expected.sort();
+    assert_eq!(identity.root_commits, expected);
+    assert_eq!(identity.head, head);
+    assert_eq!(next.head, head);
+}
+
+#[test]
+fn a_fast_forward_merge_adds_only_its_new_root() {
+    let dir = tempfile::tempdir().unwrap();
+    repo(dir.path());
+    let first = commit(dir.path(), "a");
+    let (_, mut known) = observe_reusing(dir.path(), Instant::now() + BUDGET, None).unwrap();
+    known.root_commits.push("known-root-sentinel".into());
+    git(dir.path(), &["checkout", "-q", "--orphan", "other"]);
+    git(dir.path(), &["rm", "-q", "-rf", "."]);
+    let second = commit(dir.path(), "b");
+    git(dir.path(), &["checkout", "-q", "main"]);
+    git(
+        dir.path(),
+        &[
+            "merge",
+            "-q",
+            "--allow-unrelated-histories",
+            "-m",
+            "merge",
+            "other",
+        ],
+    );
+    let (identity, _) = observe_reusing(dir.path(), Instant::now() + BUDGET, Some(&known)).unwrap();
+    let mut expected = vec![first, second, "known-root-sentinel".into()];
+    expected.sort();
+    assert_eq!(identity.root_commits, expected);
+}
+
+#[test]
+fn an_unrelated_head_discards_the_known_roots() {
+    let dir = tempfile::tempdir().unwrap();
+    repo(dir.path());
+    commit(dir.path(), "a");
+    let (_, mut known) = observe_reusing(dir.path(), Instant::now() + BUDGET, None).unwrap();
+    known.root_commits.push("known-root-sentinel".into());
+    git(dir.path(), &["checkout", "-q", "--orphan", "other"]);
+    git(dir.path(), &["rm", "-q", "-rf", "."]);
+    let second = commit(dir.path(), "b");
+    let (identity, next) =
+        observe_reusing(dir.path(), Instant::now() + BUDGET, Some(&known)).unwrap();
+    assert_eq!(identity.root_commits, std::slice::from_ref(&second));
+    assert_eq!(next.root_commits, std::slice::from_ref(&second));
+    assert_eq!(next.head, second);
+}
+
+#[test]
+fn changed_shallow_boundaries_rebuild_roots_even_with_the_same_head() {
+    let origin = tempfile::tempdir().unwrap();
+    repo(origin.path());
+    let root = commit(origin.path(), "a");
+    commit(origin.path(), "b");
+    let head = commit(origin.path(), "c");
+    let clone = tempfile::tempdir().unwrap();
+    let url = format!("file://{}", origin.path().display());
+    git(clone.path(), &["clone", "-q", "--depth", "1", &url, "."]);
+    let (_, mut known) = observe_reusing(clone.path(), Instant::now() + BUDGET, None).unwrap();
+    assert!(!known.shallow.is_empty());
+    known.root_commits.push("known-root-sentinel".into());
+    git(clone.path(), &["fetch", "-q", "--deepen", "1"]);
+    let (identity, next) =
+        observe_reusing(clone.path(), Instant::now() + BUDGET, Some(&known)).unwrap();
+    assert_eq!(identity.head, head);
+    assert!(identity.root_commits.is_empty());
+    assert_ne!(next.shallow, known.shallow);
+    git(clone.path(), &["fetch", "-q", "--unshallow"]);
+    let (identity, complete) =
+        observe_reusing(clone.path(), Instant::now() + BUDGET, Some(&next)).unwrap();
+    assert_eq!(identity.head, head);
+    assert_eq!(identity.root_commits, [root]);
+    assert!(complete.shallow.is_empty());
+}
+
+#[test]
+fn legacy_grafts_do_not_change_original_roots_or_the_reused_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    repo(dir.path());
+    let root = commit(dir.path(), "a");
+    let head = commit(dir.path(), "b");
+    let (_, known) = observe_reusing(dir.path(), Instant::now() + BUDGET, None).unwrap();
+    std::fs::write(dir.path().join(".git/info/grafts"), format!("{head}\n")).unwrap();
+    assert_eq!(
+        git(dir.path(), &["rev-list", "--max-parents=0", "HEAD"]),
+        head
+    );
+    let full = observe_within(dir.path(), BUDGET).unwrap();
+    let (reused, _) = observe_reusing(dir.path(), Instant::now() + BUDGET, Some(&known)).unwrap();
+    assert_eq!(full.root_commits, [root]);
+    assert_eq!(reused, full);
+}
+
+#[test]
+fn an_incomplete_walk_is_unavailable_instead_of_an_empty_known_set() {
+    let dir = tempfile::tempdir().unwrap();
+    repo(dir.path());
+    let root = commit(dir.path(), "a");
+    commit(dir.path(), "b");
+    let object = dir
+        .path()
+        .join(".git/objects")
+        .join(&root[..2])
+        .join(&root[2..]);
+    std::fs::rename(object, dir.path().join("held-root-object")).unwrap();
+    assert_eq!(
+        observe_reusing(dir.path(), Instant::now() + BUDGET, None),
+        Err(Unavailable::Unreadable)
     );
 }
