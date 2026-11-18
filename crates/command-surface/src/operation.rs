@@ -267,6 +267,12 @@ pub trait Operation: Send + Sync + 'static {
     ) -> Access {
         declared
     }
+    /// Recognize native failure codes returned by this operation's external engine.
+    /// Registered product codes still require their registered kind, and the
+    /// operation must declare the failure kind. Other operations do not inherit this.
+    fn accepts_native_failure_code(&self, _code: &str, _kind: FailureKind) -> bool {
+        false
+    }
     /// Whether this typed request has a cancellable read phase.
     fn has_read_phase(&self, _request: &Self::Request) -> bool {
         true
@@ -337,7 +343,7 @@ impl Events {
                     .declarations
                     .spec_named(&self.context.request().operation)
                     .expect("bound stream is declared");
-                self.declarations.checked_failure(error, spec)
+                self.declarations.checked_failure(error, spec, false)
             })
         })
     }
@@ -697,6 +703,8 @@ struct Policy {
     default_read_deadline: Option<Duration>,
 }
 trait ErasedOperation: Send + Sync {
+    fn accepts_native_failure_code(&self, code: &str, kind: FailureKind) -> bool;
+
     fn policy(
         &self,
         arguments: &Value,
@@ -763,6 +771,10 @@ fn execute_operation<O: Operation>(
     })
 }
 impl<O: Operation> ErasedOperation for RequestHandler<O> {
+    fn accepts_native_failure_code(&self, code: &str, kind: FailureKind) -> bool {
+        self.0.accepts_native_failure_code(code, kind)
+    }
+
     fn policy(
         &self,
         arguments: &Value,
@@ -784,6 +796,10 @@ impl<O: Operation> ErasedOperation for RequestHandler<O> {
     }
 }
 impl<O: TransferOperation> ErasedOperation for TransferHandler<O> {
+    fn accepts_native_failure_code(&self, code: &str, kind: FailureKind) -> bool {
+        self.0.accepts_native_failure_code(code, kind)
+    }
+
     fn policy(
         &self,
         arguments: &Value,
@@ -1030,11 +1046,14 @@ impl OperationDeclarations {
             }
         }
     }
-    fn checked_failure(&self, error: Failure, spec: &OperationSpec) -> Failure {
+    fn checked_failure(&self, error: Failure, spec: &OperationSpec, native: bool) -> Failure {
         if error
             .code
             .as_ref()
-            .is_some_and(|code| self.failure_codes.get(code) != Some(&error.kind))
+            .is_some_and(|code| match self.failure_codes.get(code) {
+                Some(kind) => *kind != error.kind,
+                None => !native,
+            })
         {
             return Failure::new(
                 FailureKind::Io,
@@ -1669,7 +1688,7 @@ impl OperationTable {
         };
         drop(guard);
         match answer {
-            Ok(answer) => self.checked_answer(answer, &description.spec),
+            Ok(answer) => self.checked_answer(answer, &description.spec, operation.as_ref()),
             Err(failure) => Answer::error(failure),
         }
     }
@@ -1726,13 +1745,24 @@ impl OperationTable {
         })
     }
 
-    fn checked_answer(&self, answer: Answer<Value>, spec: &OperationSpec) -> Answer<Value> {
+    fn checked_answer(
+        &self,
+        answer: Answer<Value>,
+        spec: &OperationSpec,
+        operation: &dyn ErasedOperation,
+    ) -> Answer<Value> {
         let Answer {
             outcome,
             mut envelope,
         } = answer;
         let outcome = match outcome {
-            Outcome::Error(error) => Outcome::Error(self.checked_failure(error, spec)),
+            Outcome::Error(error) => {
+                let native = error
+                    .code
+                    .as_deref()
+                    .is_some_and(|code| operation.accepts_native_failure_code(code, error.kind));
+                Outcome::Error(self.checked_failure(error, spec, native))
+            }
             Outcome::Degraded { missing, .. } if missing.is_empty() => {
                 Outcome::Error(Failure::new(
                     FailureKind::Io,

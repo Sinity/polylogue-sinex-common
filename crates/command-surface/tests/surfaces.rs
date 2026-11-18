@@ -611,3 +611,125 @@ async fn socket_rejects_pipeline_without_running_the_second_request() {
     assert_eq!(writes.load(Ordering::SeqCst), 0);
     assert_eq!(active.load(Ordering::SeqCst), 0);
 }
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+struct EngineFailure {
+    code: String,
+    kind: FailureKind,
+}
+fn engine_failure(request: EngineFailure) -> Answer<Value> {
+    Answer::error(Failure::new(request.kind, "synthetic native error").with_code(request.code))
+}
+struct NativeError;
+impl Operation for NativeError {
+    type Request = EngineFailure;
+    type Response = Value;
+    fn accepts_native_failure_code(&self, code: &str, kind: FailureKind) -> bool {
+        (code == "42501" && kind == FailureKind::Refused) || code == "registered"
+    }
+    fn execute(
+        &self,
+        request: EngineFailure,
+        _: RequestContext,
+    ) -> OperationFuture<'_, Answer<Value>> {
+        Box::pin(async move { engine_failure(request) })
+    }
+}
+struct OrdinaryError;
+impl Operation for OrdinaryError {
+    type Request = EngineFailure;
+    type Response = Value;
+    fn execute(
+        &self,
+        request: EngineFailure,
+        _: RequestContext,
+    ) -> OperationFuture<'_, Answer<Value>> {
+        Box::pin(async move { engine_failure(request) })
+    }
+}
+#[tokio::test]
+async fn native_codes_belong_only_to_the_accepting_operation_and_static_codes_keep_their_kind() {
+    let mut declarations = declarations();
+    declarations
+        .register_failure_code("registered", FailureKind::Refused)
+        .unwrap();
+    for name in ["native-error", "ordinary-error", "native-undeclared"] {
+        let mut spec = OperationSpec::request(
+            name,
+            &[name],
+            "rows",
+            "Return an engine error",
+            "Keep native diagnostics",
+        );
+        spec.failures = if name == "native-undeclared" {
+            vec![FailureKind::BadValue]
+        } else {
+            vec![FailureKind::Refused, FailureKind::BadValue]
+        };
+        declarations
+            .declare::<EngineFailure, Value>(spec, |value, _| value.to_string())
+            .unwrap();
+    }
+    let (mut table, _, _) = table_with_declarations(declarations);
+    table.bind("native-error", NativeError).unwrap();
+    table.bind("ordinary-error", OrdinaryError).unwrap();
+    table.bind("native-undeclared", NativeError).unwrap();
+    for (operation, code, kind, expected) in [
+        (
+            "native-error",
+            "42501",
+            FailureKind::Refused,
+            FailureKind::Refused,
+        ),
+        (
+            "ordinary-error",
+            "42501",
+            FailureKind::Refused,
+            FailureKind::Io,
+        ),
+        (
+            "native-undeclared",
+            "42501",
+            FailureKind::Refused,
+            FailureKind::Io,
+        ),
+        (
+            "native-error",
+            "unknown",
+            FailureKind::Refused,
+            FailureKind::Io,
+        ),
+        (
+            "native-error",
+            "42501",
+            FailureKind::BadValue,
+            FailureKind::Io,
+        ),
+        (
+            "native-error",
+            "registered",
+            FailureKind::Refused,
+            FailureKind::Refused,
+        ),
+        (
+            "native-error",
+            "registered",
+            FailureKind::BadValue,
+            FailureKind::Io,
+        ),
+    ] {
+        let request = RunnableRequest::new(
+            operation,
+            json!({"code":code,"kind":kind}),
+            "synthetic-error",
+        );
+        let answer = table
+            .call(request, Via::Cli, CancellationToken::new())
+            .await;
+        let failure = answer.failure().unwrap();
+        assert_eq!(failure.kind, expected, "{operation}/{code}: {failure:?}");
+        if expected == kind {
+            assert_eq!(failure.code.as_deref(), Some(code));
+        }
+    }
+}

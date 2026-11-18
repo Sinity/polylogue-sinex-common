@@ -671,7 +671,11 @@ authentication and cancellation before acceptance still apply.
 `FailureKind` is closed; `register_failure_code` records each product code's
 kind once, and dispatch reports an unregistered or differently classified
 code, or a kind the operation did not declare (transport kinds excepted), as
-`io`. The server supplies `Caller::authenticated(scope, identity)` with its
+`io`. A request operation that exposes an external engine's native codes may
+recognize them in `Operation::accepts_native_failure_code`. That applies only
+to failures returned by that operation; registered product codes still require
+their registered kind, and native failures still require a declared kind.
+The server supplies `Caller::authenticated(scope, identity)` with its
 granted access and computed authorship; the identity stays a typed Rust
 value (`RequestContext::caller().identity::<T>()`). Products use a stable
 authenticated scope for retry identity across surfaces.
