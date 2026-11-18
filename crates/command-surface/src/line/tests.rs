@@ -78,10 +78,14 @@ fn literal_positionals_and_option_values_keep_their_original_positions() {
             [ArgumentWord {
                 field: "text".into(),
                 index: 2,
-                positional: true
+                positional: true,
+                literal: true,
             }]
         );
     }
+    let plain = split(&["note", "-", "read"]).unwrap();
+    assert!(!plain.argument_words[0].literal);
+    assert_eq!(plain.argument_words[0].index, 1);
     let read = split(&["read", "--view", "note", "--follow", "save"]).unwrap();
     assert_eq!(read.end, 4);
     assert_eq!(
@@ -93,7 +97,8 @@ fn literal_positionals_and_option_values_keep_their_original_positions() {
         [ArgumentWord {
             field: "view".into(),
             index: 2,
-            positional: false
+            positional: false,
+            literal: false,
         }]
     );
 }

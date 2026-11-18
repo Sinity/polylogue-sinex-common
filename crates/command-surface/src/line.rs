@@ -81,6 +81,8 @@ pub struct ArgumentWord {
     pub field: String,
     pub index: usize,
     pub positional: bool,
+    /// The word followed `--`, so process conventions such as stdin do not apply.
+    pub literal: bool,
 }
 
 #[derive(Debug)]
@@ -146,6 +148,7 @@ impl StepDeclarations {
                     field: positionals[positional].0.name.clone(),
                     index,
                     positional: true,
+                    literal: true,
                 });
                 words.push(value.clone());
                 positional += 1;
@@ -172,6 +175,7 @@ impl StepDeclarations {
                         field: field.name.clone(),
                         index,
                         positional: false,
+                        literal: false,
                     });
                     words.push(value.clone());
                 }
@@ -189,6 +193,7 @@ impl StepDeclarations {
                 field: field.name.clone(),
                 index,
                 positional: true,
+                literal: false,
             });
             words.push(word.clone());
             positional += 1;
