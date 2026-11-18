@@ -1,5 +1,5 @@
 //! Typed verb declarations for the steps of a product's command line.
-//! Products split lines into steps; these declarations own each step's words
+//! The shared line scanner splits steps; these declarations own each step's words
 //! and options, its JSON validation, and its help signature.
 use crate::arguments::{ArgumentScope, check_arguments, parse_arguments, schema_has_type};
 use crate::{
@@ -42,7 +42,7 @@ impl StepDeclaration {
 
 impl StepDeclarations {
     /// Render this operation as one selection followed by its declared verbs.
-    /// The product still owns splitting the line and resolving its selection.
+    /// Products retain selection resolution and calling-process behavior.
     pub fn cli_selection(
         mut self,
         selection: impl Into<String>,
@@ -148,7 +148,7 @@ impl StepDeclarations {
             })
     }
 
-    /// Parse words already separated from the rest of the line by the product.
+    /// Parse words separated from the line by `split_step` or another caller.
     /// Returns the MCP/HTTP object, including `verb`, after typed validation.
     pub fn parse_step(&self, verb: &str, words: &[String]) -> Result<Value, Failure> {
         let declaration = self.named(verb)?;

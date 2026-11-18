@@ -18,6 +18,8 @@ mod envelope;
 mod event;
 mod failure;
 #[cfg(feature = "runtime")]
+pub mod line;
+#[cfg(feature = "runtime")]
 mod operation;
 mod pack;
 pub mod seen;

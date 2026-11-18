@@ -112,7 +112,7 @@ fn kind_of(description: &OperationDescription, name: &str) -> ValueKind {
         value_kind(schema, &description.input_schema)
     })
 }
-fn required(description: &OperationDescription, name: &str) -> bool {
+pub(crate) fn required(description: &OperationDescription, name: &str) -> bool {
     description.input_schema["required"]
         .as_array()
         .is_some_and(|names| names.iter().any(|n| n == name))
