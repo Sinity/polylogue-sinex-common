@@ -10,6 +10,18 @@ its exit and HTTP table, who the caller is and who authored a write, the
 seen mark, latency classes and deadlines, server-sent-event framing, and the
 status format of measurements and a verdict.
 
+## Selection and step words
+
+`line::classify_first` applies the shared precedence to product-supplied catalog
+and reference predicates. Products may add ordered selection forms, such as
+time and paths, before the query-text fallback. This pure classifier does not
+open an archive or resolve evidence. `StepDeclarations::split_step` then finds
+one verb's argument boundary from its typed schema and invokes `parse_step`.
+Required positionals consume verb-looking text; optional positionals leave the
+next verb untouched, and `--` makes a positional literal. Products keep local
+flags, destinations, stdin use, terminal behavior and correction text. The
+scanner returns original argument positions for those decisions.
+
 ## Operations
 
 An operation is one row of a product's table. Its `OperationSpec` declares:
