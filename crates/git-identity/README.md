@@ -39,3 +39,16 @@ answer.
 
 `without_credentials`, `root_set` and `repository_of` are the pieces callers
 that already hold Git's output use.
+
+`observe_reusing(dir, deadline, known)` returns the current `Identity` and
+`KnownRoots` to keep for another observation. With the same HEAD and shallow
+file contents, the roots are reused without walking history. A fast-forward
+adds roots from the new history; an unrelated HEAD or changed shallow state
+reads the full root set. Branch and remote remain fresh on every observation.
+Persist only the returned roots and pass them back for the same repository.
+An unavailable walk returns no cache result, never a false empty root set.
+
+History walks use a private copy of the observed shallow boundaries, so a
+concurrent fetch cannot change their meaning mid-walk. Replacement objects
+and legacy graft files are ignored: reusable roots describe original commit
+parents, not a mutable local rewrite of them.
