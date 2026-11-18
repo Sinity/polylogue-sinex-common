@@ -116,9 +116,16 @@ impl StepDeclarations {
             .get(start)
             .and_then(|word| self.verbs().iter().find(|verb| verb.verb() == word))
             .ok_or(SplitError::UnknownVerb { index: start })?;
-        let positionals: Vec<_> = crate::arguments::projection(&declaration.description, &[])
-            .into_iter()
-            .filter(|field| field.spec.form == ArgumentForm::Positional)
+        let positionals: Vec<_> = declaration
+            .arguments()
+            .iter()
+            .filter(|field| field.form == ArgumentForm::Positional)
+            .map(|field| {
+                (
+                    field,
+                    crate::arguments::required(&declaration.description, &field.name),
+                )
+            })
             .collect();
         let mut positional = 0;
         let mut index = start + 1;
@@ -136,7 +143,7 @@ impl StepDeclarations {
                     .get(index)
                     .ok_or(SplitError::MissingValue { index: index - 1 })?;
                 argument_words.push(ArgumentWord {
-                    field: positionals[positional].spec.name.clone(),
+                    field: positionals[positional].0.name.clone(),
                     index,
                     positional: true,
                 });
@@ -172,14 +179,14 @@ impl StepDeclarations {
                 continue;
             }
             let next_verb = self.verbs().iter().any(|verb| verb.verb() == word);
-            let Some(field) = positionals
+            let Some((field, _)) = positionals
                 .get(positional)
-                .filter(|field| field.required || !next_verb)
+                .filter(|(_, required)| *required || !next_verb)
             else {
                 break;
             };
             argument_words.push(ArgumentWord {
-                field: field.spec.name.clone(),
+                field: field.name.clone(),
                 index,
                 positional: true,
             });
@@ -187,13 +194,13 @@ impl StepDeclarations {
             positional += 1;
             index += 1;
         }
-        if let Some(field) = positionals[positional..]
+        if let Some((field, _)) = positionals[positional..]
             .iter()
-            .find(|field| field.required)
+            .find(|(_, required)| *required)
         {
             return Err(SplitError::MissingArgument {
                 index,
-                name: field.spec.name.clone(),
+                name: field.name.clone(),
             });
         }
         let step = self
