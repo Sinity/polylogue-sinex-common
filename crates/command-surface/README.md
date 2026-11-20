@@ -115,8 +115,10 @@ projection; callers never need to parse a displayed command to execute the reque
 declaration with the matching row kind and request/response or event schemas;
 a second binding is refused. Operations own only execution and typed access
 policy. `required_access(request, declared, caller)` defaults to the declaration's
-access; an override may use the authenticated caller to classify the typed request. The table borrows
-all pure views from those same declarations. Product transactions, retry identity,
+access; an override may use the authenticated caller to classify the typed request.
+The request binding passes the decoded arguments from access and deadline policy
+to execution or transfer opening, while the context keeps the original request
+envelope. The table borrows all pure views from those same declarations. Product transactions, retry identity,
 cancellation and transport execution retain their existing owners.
 
 ### Access

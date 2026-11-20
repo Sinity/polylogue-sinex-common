@@ -2,7 +2,10 @@ use command_surface::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 use tokio::sync::mpsc;
@@ -10,11 +13,27 @@ use tokio::sync::mpsc;
 #[derive(Deserialize, Serialize, JsonSchema)]
 struct Input {
     events: bool,
+    #[serde(skip, default = "next_input_id")]
+    id: usize,
 }
+
+fn next_input_id() -> usize {
+    static NEXT: AtomicUsize = AtomicUsize::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 type Sender = mpsc::Sender<Result<u64, Failure>>;
 struct Probe {
     contexts: mpsc::UnboundedSender<RequestContext>,
     sender: Arc<Mutex<Option<Sender>>>,
+    admitted: Option<AtomicUsize>,
+}
+impl Probe {
+    fn check_admitted(&self, input: &Input) {
+        if let Some(admitted) = &self.admitted {
+            assert_eq!(admitted.load(Ordering::Relaxed), input.id);
+        }
+    }
 }
 impl Operation for Probe {
     type Request = Input;
@@ -24,10 +43,14 @@ impl Operation for Probe {
         request: &Input,
         declared: Option<Duration>,
     ) -> Option<Duration> {
+        if let Some(admitted) = &self.admitted {
+            admitted.store(request.id, Ordering::Relaxed);
+        }
         if request.events { None } else { declared }
     }
-    fn execute(&self, _: Input, context: RequestContext) -> OperationFuture<'_, Answer<bool>> {
+    fn execute(&self, input: Input, context: RequestContext) -> OperationFuture<'_, Answer<bool>> {
         Box::pin(async move {
+            self.check_admitted(&input);
             self.contexts.send(context).unwrap();
             std::future::pending().await
         })
@@ -38,10 +61,11 @@ impl StreamOperation for Probe {
     type Event = u64;
     fn open(
         &self,
-        _: Input,
+        input: Input,
         context: RequestContext,
     ) -> OperationFuture<'_, Result<EventReceiver<u64>, Failure>> {
         Box::pin(async move {
+            self.check_admitted(&input);
             self.contexts.send(context).unwrap();
             let (send, receive) = mpsc::channel(1);
             *self.sender.lock().unwrap() = Some(send);
@@ -100,6 +124,7 @@ fn fixture(ordinary_stream: bool) -> Fixture {
     let probe = Probe {
         contexts,
         sender: sender.clone(),
+        admitted: (!ordinary_stream).then(|| AtomicUsize::new(0)),
     };
     if ordinary_stream {
         table.bind_stream(name, probe).unwrap();
