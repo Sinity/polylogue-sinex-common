@@ -1,6 +1,33 @@
 use super::*;
 
 #[test]
+fn nextest_setup_failure_marks_the_run_failed_before_building() {
+    let fixture = tempfile::tempdir().unwrap();
+    let target = fixture.path().join("not-a-directory");
+    fs::write(&target, "").unwrap();
+    let mut run = Run::unrecorded("devkit-setup-probe", "test", &[]);
+    run.root = fixture.path().into();
+    run.target = Some(target.clone());
+    let result = run.nextest_with(
+        "test",
+        &Nextest {
+            tmpfs: true,
+            ..Nextest::default()
+        },
+        || panic!("building must wait for successful setup"),
+        &["nextest", "run"],
+    );
+    assert!(result.is_err());
+    let failure = run
+        .failure
+        .as_deref()
+        .expect("setup failure must be recorded");
+    assert!(failure.starts_with("test setup: "), "{failure}");
+    assert!(failure.contains(&target.display().to_string()), "{failure}");
+    assert_eq!(run.finish(), ExitCode::FAILURE);
+}
+
+#[test]
 fn overridden_target_records_this_runs_outcomes_and_leaves_stale_xml_alone() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path();
