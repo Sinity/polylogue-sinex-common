@@ -289,7 +289,7 @@ impl Run {
 
     /// Runs one timed step. The first failing step's message becomes the
     /// run's failure.
-    pub fn step(&mut self, name: &str, step: impl FnOnce(&mut Self) -> Result) -> Result {
+    pub fn step<T>(&mut self, name: &str, step: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         let began = Instant::now();
         let result = step(self);
         self.stages.push(Stage {
@@ -349,27 +349,40 @@ impl Run {
     ) -> Result {
         #[cfg(feature = "pg")]
         crate::pg::Server::prepare_run(&options.env);
-        let mut selection = None;
-        self.step(&format!("{name} selection"), |run| {
-            selection = Some(crate::select::nextest_args(&run.root, &options.args)?);
-            Ok(())
+        let (selected_args, unchanged) = self.step(&format!("{name} selection"), |run| {
+            Ok(crate::select::nextest_args(&run.root, &options.args)?)
         })?;
-        let (selected_args, unchanged) = selection.expect("successful selection");
         if unchanged {
             return self.step(name, |_| Ok(()));
         }
-        let temp = RunTemp::new()?;
-        // Tests keep state, such as a history store of runs they start, in a
-        // directory of their own, never the user's.
-        let state = temp.path().join("state");
-        fs::create_dir(&state).map_err(|e| format!("{}: {e}", state.display()))?;
-        let mut env = options.env.clone();
-        if options.tmpfs {
-            let durable = self.target_dir()?.join("tmp");
-            fs::create_dir_all(&durable).map_err(|e| format!("{}: {e}", durable.display()))?;
-            env.push(("TMPDIR".into(), temp.path().display().to_string()));
-            env.push(("TEST_DURABLE_TMPDIR".into(), durable.display().to_string()));
-        }
+        let (temp, state, env, junit, config) = self.step(&format!("{name} setup"), |run| {
+            let temp = RunTemp::new()?;
+            // Tests keep state, such as a history store of runs they start, in a
+            // directory of their own, never the user's.
+            let state = temp.path().join("state");
+            fs::create_dir(&state).map_err(|e| format!("{}: {e}", state.display()))?;
+            let mut env = options.env.clone();
+            if options.tmpfs {
+                let durable = run.target_dir()?.join("tmp");
+                fs::create_dir_all(&durable).map_err(|e| format!("{}: {e}", durable.display()))?;
+                env.push(("TMPDIR".into(), temp.path().display().to_string()));
+                env.push(("TEST_DURABLE_TMPDIR".into(), durable.display().to_string()));
+            }
+            // The invocation already owns this exclusive scratch child. Cargo's
+            // target lock ends before tests run, so reports and configuration must
+            // never live at shared target-directory paths.
+            let junit = temp.path().join("junit.xml");
+            let config = temp.path().join("nextest.toml");
+            // Nextest's default store is workspace-relative. Name our own absolute
+            // report path, independently of the shared compiler cache.
+            let report_path = serde_json::to_string(&junit).map_err(|e| format!("JUnit path: {e}"))?;
+            fs::write(
+                &config,
+                format!("nextest-version = \"0.9.143\"\n[profile.default.junit]\npath = {report_path}\nstore-success-output = false\nstore-failure-output = true\nreport-skipped = \"all\"\n"),
+            )
+            .map_err(|e| format!("{}: {e}", config.display()))?;
+            Ok((temp, state, env, junit, config))
+        })?;
         let args: Vec<&str> = selected_args.iter().map(String::as_str).collect();
 
         let mut build = cargo();
@@ -387,19 +400,6 @@ impl Run {
             run.capture_cargo_json(&mut build)
         })?;
 
-        // The invocation already owns this exclusive scratch child. Cargo's
-        // target lock ends before tests run, so reports and configuration must
-        // never live at shared target-directory paths.
-        let junit = temp.path().join("junit.xml");
-        let config = temp.path().join("nextest.toml");
-        // Nextest's default store is workspace-relative. Name our own absolute
-        // report path, independently of the shared compiler cache.
-        let report_path = serde_json::to_string(&junit).map_err(|e| format!("JUnit path: {e}"))?;
-        fs::write(
-            &config,
-            format!("nextest-version = \"0.9.143\"\n[profile.default.junit]\npath = {report_path}\nstore-success-output = false\nstore-failure-output = true\nreport-skipped = \"all\"\n"),
-        )
-        .map_err(|e| format!("{}: {e}", config.display()))?;
         let mut test = cargo();
         test.args(prefix)
             .arg("--no-fail-fast")
