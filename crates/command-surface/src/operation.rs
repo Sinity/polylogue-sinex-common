@@ -7,9 +7,10 @@ use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::{
-    any::Any,
+    any::{Any, TypeId},
     collections::BTreeMap,
     future::Future,
+    ops::ControlFlow,
     pin::Pin,
     sync::{Arc, Mutex},
     time::Duration,
@@ -712,12 +713,30 @@ struct PreparedAnswer<'a> {
 
 type OpenEvents<'a> = RunRequest<'a, Result<Box<dyn ErasedEvents>, Failure>>;
 
+enum RequestArguments<'a> {
+    Wire(&'a Value),
+    Decoded(Box<dyn Any + Send>),
+}
+
+impl RequestArguments<'_> {
+    fn decode<T: DeserializeOwned + Send + 'static>(self) -> Result<T, Failure> {
+        match self {
+            Self::Wire(arguments) => decode_request(arguments),
+            Self::Decoded(arguments) => arguments
+                .downcast::<T>()
+                .map(|arguments| *arguments)
+                .map_err(|_| Failure::new(FailureKind::Io, "operation argument type mismatch")),
+        }
+    }
+}
+
 trait ErasedOperation: Send + Sync {
     fn accepts_native_failure_code(&self, code: &str, kind: FailureKind) -> bool;
+    fn request_type(&self) -> TypeId;
 
     fn prepare_answer(
         &self,
-        arguments: &Value,
+        arguments: RequestArguments<'_>,
         declared: Access,
         default_read_deadline: Option<Duration>,
         caller: &Caller,
@@ -783,14 +802,18 @@ impl<O: Operation> ErasedOperation for RequestHandler<O> {
         self.0.accepts_native_failure_code(code, kind)
     }
 
+    fn request_type(&self) -> TypeId {
+        TypeId::of::<O::Request>()
+    }
+
     fn prepare_answer(
         &self,
-        arguments: &Value,
+        arguments: RequestArguments<'_>,
         declared: Access,
         default_read_deadline: Option<Duration>,
         caller: &Caller,
     ) -> Result<PreparedAnswer<'_>, Failure> {
-        let request = decode_request(arguments)?;
+        let request = arguments.decode()?;
         let policy = policy(&self.0, &request, declared, default_read_deadline, caller);
         Ok(PreparedAnswer {
             policy,
@@ -808,14 +831,18 @@ impl<O: TransferOperation> ErasedOperation for TransferHandler<O> {
         self.0.accepts_native_failure_code(code, kind)
     }
 
+    fn request_type(&self) -> TypeId {
+        TypeId::of::<<O as Operation>::Request>()
+    }
+
     fn prepare_answer(
         &self,
-        arguments: &Value,
+        arguments: RequestArguments<'_>,
         declared: Access,
         default_read_deadline: Option<Duration>,
         caller: &Caller,
     ) -> Result<PreparedAnswer<'_>, Failure> {
-        let request = decode_request(arguments)?;
+        let request = arguments.decode()?;
         let policy = policy(&self.0, &request, declared, default_read_deadline, caller);
         let run: Option<RunRequest<'_, Answer<Value>>> =
             if TransferOperation::streaming(&self.0, &request) {
@@ -1546,6 +1573,48 @@ impl OperationTable {
         self.call_with(request, via, caller, None, cancellation)
             .await
     }
+
+    /// Let an authenticated native transport inspect the same typed arguments
+    /// used for finite execution. `Break` serves the request in the transport;
+    /// `Continue` supplies its caller and effective deadline to normal dispatch.
+    /// The hook can inspect the original envelope and cannot replace its arguments.
+    pub async fn call_with_admission<A: DeserializeOwned + Send + 'static, B>(
+        &self,
+        mut request: RunnableRequest,
+        via: Via,
+        cancellation: CancellationToken,
+        admit: impl FnOnce(&A, &RunnableRequest) -> ControlFlow<B, (Caller, Deadline)>,
+    ) -> Result<ControlFlow<B, Answer<Value>>, serde_json::Error> {
+        let Some((_, Row::Request(operation))) = self.row(&request.operation) else {
+            return Ok(ControlFlow::Continue(Answer::error(bad_request(
+                "native admission requires a bound request operation",
+            ))));
+        };
+        if operation.request_type() != TypeId::of::<A>() {
+            return Ok(ControlFlow::Continue(Answer::error(Failure::new(
+                FailureKind::Io,
+                "operation argument type mismatch",
+            ))));
+        }
+        let arguments = A::deserialize(&request.arguments)?;
+        let (caller, deadline) = match admit(&arguments, &request) {
+            ControlFlow::Break(output) => return Ok(ControlFlow::Break(output)),
+            ControlFlow::Continue(admission) => admission,
+        };
+        request.deadline = deadline;
+        Ok(ControlFlow::Continue(
+            self.call_bound(
+                request,
+                via,
+                caller,
+                None,
+                cancellation,
+                Some(Box::new(arguments)),
+            )
+            .await,
+        ))
+    }
+
     pub(crate) async fn call_with(
         &self,
         request: RunnableRequest,
@@ -1554,9 +1623,22 @@ impl OperationTable {
         metadata: Option<Value>,
         cancellation: CancellationToken,
     ) -> Answer<Value> {
+        self.call_bound(request, via, caller, metadata, cancellation, None)
+            .await
+    }
+
+    async fn call_bound(
+        &self,
+        request: RunnableRequest,
+        via: Via,
+        caller: Caller,
+        metadata: Option<Value>,
+        cancellation: CancellationToken,
+        arguments: Option<Box<dyn Any + Send>>,
+    ) -> Answer<Value> {
         let authorship = caller.authorship.clone();
         let mut answer = self
-            .dispatch(request, via, caller, metadata, cancellation)
+            .dispatch(request, via, caller, metadata, cancellation, arguments)
             .await;
         if answer.envelope.caller.is_none() {
             answer.envelope.caller = authorship;
@@ -1666,6 +1748,7 @@ impl OperationTable {
         caller: Caller,
         metadata: Option<Value>,
         cancellation: CancellationToken,
+        arguments: Option<Box<dyn Any + Send>>,
     ) -> Answer<Value> {
         let (description, row) = match self.check_request(&request, &caller) {
             Ok(checked) => checked,
@@ -1677,8 +1760,12 @@ impl OperationTable {
                 _ => format!("{} runs in the calling process", request.operation),
             }));
         };
+        let arguments = arguments.map_or(
+            RequestArguments::Wire(&request.arguments),
+            RequestArguments::Decoded,
+        );
         let PreparedAnswer { policy, run } = match operation.prepare_answer(
-            &request.arguments,
+            arguments,
             description.spec.access,
             self.deadlines.get(description.spec.latency),
             &caller,

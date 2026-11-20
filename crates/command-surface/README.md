@@ -121,6 +121,12 @@ to execution or transfer opening, while the context keeps the original request
 envelope. The table borrows all pure views from those same declarations. Product transactions, retry identity,
 cancellation and transport execution retain their existing owners.
 
+`call_with_admission` lets an authenticated native transport inspect the bound
+argument type and original envelope before deciding how to reply. It can handle
+its native stream or continue through the same table dispatch with the accepted
+caller and effective deadline. The finite handler receives the decoded value the
+transport saw, with the original operation, argument JSON and request identity.
+
 ### Access
 
 Each row needs one level: **read**, **write** (attributed writes that can be
