@@ -2,6 +2,7 @@ use command_surface::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
+    ops::ControlFlow,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -26,7 +27,7 @@ type Sender = mpsc::Sender<Result<u64, Failure>>;
 struct Probe {
     contexts: mpsc::UnboundedSender<RequestContext>,
     sender: Arc<Mutex<Option<Sender>>>,
-    admitted: Option<AtomicUsize>,
+    admitted: Option<Arc<AtomicUsize>>,
 }
 impl Probe {
     fn check_admitted(&self, input: &Input) {
@@ -82,6 +83,7 @@ struct Fixture {
     table: Arc<OperationTable>,
     contexts: mpsc::UnboundedReceiver<RequestContext>,
     sender: Arc<Mutex<Option<Sender>>>,
+    admitted: Arc<AtomicUsize>,
 }
 fn fixture(ordinary_stream: bool) -> Fixture {
     let mut deadlines = Deadlines::default();
@@ -121,10 +123,11 @@ fn fixture(ordinary_stream: bool) -> Fixture {
     let mut table = OperationTable::new(declarations.finish());
     let (contexts, receive) = mpsc::unbounded_channel();
     let sender = Arc::new(Mutex::new(None));
+    let admitted = Arc::new(AtomicUsize::new(0));
     let probe = Probe {
         contexts,
         sender: sender.clone(),
-        admitted: (!ordinary_stream).then(|| AtomicUsize::new(0)),
+        admitted: (!ordinary_stream).then(|| admitted.clone()),
     };
     if ordinary_stream {
         table.bind_stream(name, probe).unwrap();
@@ -135,6 +138,7 @@ fn fixture(ordinary_stream: bool) -> Fixture {
         table: Arc::new(table),
         contexts: receive,
         sender,
+        admitted,
     }
 }
 fn request(name: &str, events: bool, deadline: Deadline) -> RunnableRequest {
@@ -144,6 +148,57 @@ fn request(name: &str, events: bool, deadline: Deadline) -> RunnableRequest {
 }
 fn failure(answer: &Answer<Value>) -> &Failure {
     answer.failure().expect("timeout or cancellation")
+}
+
+#[tokio::test(start_paused = true)]
+async fn native_admission_keeps_one_typed_input_and_the_request_envelope() {
+    let mut fixture = fixture(false);
+    let table = fixture.table.clone();
+    let original = request("read", false, Deadline::Default);
+    let cancellation = CancellationToken::new();
+    let parent = cancellation.clone();
+    let submitted = original.clone();
+    let inspected = Arc::new(AtomicUsize::new(0));
+    let inspected_in_hook = inspected.clone();
+    let running = tokio::spawn(async move {
+        let accepted = submitted.clone();
+        table
+            .call_with_admission(submitted, Via::Web, parent, |input: &Input, envelope| {
+                assert_eq!(envelope, &accepted);
+                inspected_in_hook.store(input.id, Ordering::Relaxed);
+                ControlFlow::<(), _>::Continue((Caller::default(), Deadline::None))
+            })
+            .await
+            .unwrap()
+    });
+    let context = fixture.contexts.recv().await.unwrap();
+    assert_ne!(inspected.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        inspected.load(Ordering::Relaxed),
+        fixture.admitted.load(Ordering::Relaxed)
+    );
+    assert_eq!(context.request().arguments, original.arguments);
+    assert_eq!(context.request().request_id, original.request_id);
+    assert_eq!(context.request().deadline, Deadline::None);
+    assert_eq!(context.read_deadline(), None);
+    cancellation.cancel();
+    let ControlFlow::Continue(answer) = running.await.unwrap() else {
+        panic!("expected a finite answer")
+    };
+    assert_eq!(failure(&answer).kind, FailureKind::Cancelled);
+
+    let stream = fixture
+        .table
+        .call_with_admission(
+            request("read", true, Deadline::Default),
+            Via::Web,
+            CancellationToken::new(),
+            |input: &Input, _| ControlFlow::Break(input.events),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(stream, ControlFlow::Break(true)));
+    assert!(fixture.contexts.try_recv().is_err());
 }
 
 #[tokio::test(start_paused = true)]
