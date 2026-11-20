@@ -702,55 +702,63 @@ struct Policy {
     read_phase: bool,
     default_read_deadline: Option<Duration>,
 }
+
+type RunRequest<'a, T> = Box<dyn FnOnce(RequestContext) -> OperationFuture<'a, T> + Send + 'a>;
+
+struct PreparedAnswer<'a> {
+    policy: Policy,
+    run: Option<RunRequest<'a, Answer<Value>>>,
+}
+
+type OpenEvents<'a> = RunRequest<'a, Result<Box<dyn ErasedEvents>, Failure>>;
+
 trait ErasedOperation: Send + Sync {
     fn accepts_native_failure_code(&self, code: &str, kind: FailureKind) -> bool;
 
-    fn policy(
+    fn prepare_answer(
         &self,
         arguments: &Value,
         declared: Access,
         default_read_deadline: Option<Duration>,
         caller: &Caller,
-    ) -> Result<Policy, Failure>;
+    ) -> Result<PreparedAnswer<'_>, Failure>;
     fn streaming(&self, arguments: &Value) -> Result<bool, Failure>;
-    fn execute(
+    fn prepare_stream(
         &self,
-        arguments: Value,
-        context: RequestContext,
-    ) -> OperationFuture<'_, Result<Answer<Value>, Failure>>;
-    fn open(
-        &self,
-        _arguments: Value,
-        _context: RequestContext,
-    ) -> OperationFuture<'_, Result<Box<dyn ErasedEvents>, Failure>> {
-        Box::pin(async { Err(bad_request("operation has no event delivery")) })
+        _arguments: &Value,
+        _declared: Access,
+        _default_read_deadline: Option<Duration>,
+        _caller: &Caller,
+    ) -> Result<Option<(Policy, OpenEvents<'_>)>, Failure> {
+        Ok(None)
     }
 }
 struct RequestHandler<O>(O);
 struct TransferHandler<O>(O);
+
+fn decode_request<T: DeserializeOwned>(arguments: &Value) -> Result<T, Failure> {
+    serde_json::from_value(arguments.clone()).map_err(|error| bad_request(error.to_string()))
+}
+
 fn policy<O: Operation>(
     operation: &O,
-    arguments: &Value,
+    request: &O::Request,
     declared: Access,
     default_read_deadline: Option<Duration>,
     caller: &Caller,
-) -> Result<Policy, Failure> {
-    let request = serde_json::from_value(arguments.clone())
-        .map_err(|error| bad_request(error.to_string()))?;
-    Ok(Policy {
-        access: operation.required_access(&request, declared, caller),
-        read_phase: operation.has_read_phase(&request),
-        default_read_deadline: operation.default_read_deadline(&request, default_read_deadline),
-    })
+) -> Policy {
+    Policy {
+        access: operation.required_access(request, declared, caller),
+        read_phase: operation.has_read_phase(request),
+        default_read_deadline: operation.default_read_deadline(request, default_read_deadline),
+    }
 }
-fn execute_operation<O: Operation>(
+fn answer_request<O: Operation>(
     operation: &O,
-    arguments: Value,
+    request: O::Request,
     context: RequestContext,
-) -> OperationFuture<'_, Result<Answer<Value>, Failure>> {
+) -> OperationFuture<'_, Answer<Value>> {
     Box::pin(async move {
-        let request =
-            serde_json::from_value(arguments).map_err(|error| bad_request(error.to_string()))?;
         let answer = Operation::execute(operation, request, context).await;
         let Answer { outcome, envelope } = answer;
         let outcome = match outcome.map(serde_json::to_value) {
@@ -767,7 +775,7 @@ fn execute_operation<O: Operation>(
                 value: Err(error), ..
             } => Outcome::Error(Failure::new(FailureKind::Io, error.to_string())),
         };
-        Ok(Answer { outcome, envelope })
+        Answer { outcome, envelope }
     })
 }
 impl<O: Operation> ErasedOperation for RequestHandler<O> {
@@ -775,24 +783,24 @@ impl<O: Operation> ErasedOperation for RequestHandler<O> {
         self.0.accepts_native_failure_code(code, kind)
     }
 
-    fn policy(
+    fn prepare_answer(
         &self,
         arguments: &Value,
         declared: Access,
         default_read_deadline: Option<Duration>,
         caller: &Caller,
-    ) -> Result<Policy, Failure> {
-        policy(&self.0, arguments, declared, default_read_deadline, caller)
+    ) -> Result<PreparedAnswer<'_>, Failure> {
+        let request = decode_request(arguments)?;
+        let policy = policy(&self.0, &request, declared, default_read_deadline, caller);
+        Ok(PreparedAnswer {
+            policy,
+            run: Some(Box::new(move |context| {
+                answer_request(&self.0, request, context)
+            })),
+        })
     }
     fn streaming(&self, _arguments: &Value) -> Result<bool, Failure> {
         Ok(false)
-    }
-    fn execute(
-        &self,
-        arguments: Value,
-        context: RequestContext,
-    ) -> OperationFuture<'_, Result<Answer<Value>, Failure>> {
-        execute_operation(&self.0, arguments, context)
     }
 }
 impl<O: TransferOperation> ErasedOperation for TransferHandler<O> {
@@ -800,33 +808,45 @@ impl<O: TransferOperation> ErasedOperation for TransferHandler<O> {
         self.0.accepts_native_failure_code(code, kind)
     }
 
-    fn policy(
+    fn prepare_answer(
         &self,
         arguments: &Value,
         declared: Access,
         default_read_deadline: Option<Duration>,
         caller: &Caller,
-    ) -> Result<Policy, Failure> {
-        policy(&self.0, arguments, declared, default_read_deadline, caller)
+    ) -> Result<PreparedAnswer<'_>, Failure> {
+        let request = decode_request(arguments)?;
+        let policy = policy(&self.0, &request, declared, default_read_deadline, caller);
+        let run: Option<RunRequest<'_, Answer<Value>>> =
+            if TransferOperation::streaming(&self.0, &request) {
+                None
+            } else {
+                Some(Box::new(move |context| {
+                    answer_request(&self.0, request, context)
+                }))
+            };
+        Ok(PreparedAnswer { policy, run })
     }
     fn streaming(&self, arguments: &Value) -> Result<bool, Failure> {
-        let request = serde_json::from_value(arguments.clone())
-            .map_err(|error| bad_request(error.to_string()))?;
+        let request = decode_request(arguments)?;
         Ok(TransferOperation::streaming(&self.0, &request))
     }
-    fn execute(
+    fn prepare_stream(
         &self,
-        arguments: Value,
-        context: RequestContext,
-    ) -> OperationFuture<'_, Result<Answer<Value>, Failure>> {
-        execute_operation(&self.0, arguments, context)
-    }
-    fn open(
-        &self,
-        arguments: Value,
-        context: RequestContext,
-    ) -> OperationFuture<'_, Result<Box<dyn ErasedEvents>, Failure>> {
-        open_events(&self.0, arguments, context)
+        arguments: &Value,
+        declared: Access,
+        default_read_deadline: Option<Duration>,
+        caller: &Caller,
+    ) -> Result<Option<(Policy, OpenEvents<'_>)>, Failure> {
+        let request = decode_request(arguments)?;
+        if !TransferOperation::streaming(&self.0, &request) {
+            return Ok(None);
+        }
+        let policy = policy(&self.0, &request, declared, default_read_deadline, caller);
+        Ok(Some((
+            policy,
+            Box::new(move |context| Box::pin(open_events(&self.0, request, context))),
+        )))
     }
 }
 trait ErasedStream: Send + Sync {
@@ -836,17 +856,13 @@ trait ErasedStream: Send + Sync {
         context: RequestContext,
     ) -> OperationFuture<'_, Result<Box<dyn ErasedEvents>, Failure>>;
 }
-fn open_events<S: StreamOperation>(
+async fn open_events<S: StreamOperation>(
     stream: &S,
-    arguments: Value,
+    request: S::Request,
     context: RequestContext,
-) -> OperationFuture<'_, Result<Box<dyn ErasedEvents>, Failure>> {
-    Box::pin(async move {
-        let request =
-            serde_json::from_value(arguments).map_err(|error| bad_request(error.to_string()))?;
-        let receiver = stream.open(request, context).await?;
-        Ok(Box::new(receiver) as Box<dyn ErasedEvents>)
-    })
+) -> Result<Box<dyn ErasedEvents>, Failure> {
+    let receiver = stream.open(request, context).await?;
+    Ok(Box::new(receiver))
 }
 impl<S: StreamOperation> ErasedStream for S {
     fn open(
@@ -854,7 +870,11 @@ impl<S: StreamOperation> ErasedStream for S {
         arguments: Value,
         context: RequestContext,
     ) -> OperationFuture<'_, Result<Box<dyn ErasedEvents>, Failure>> {
-        open_events(self, arguments, context)
+        Box::pin(async move {
+            let request = serde_json::from_value(arguments)
+                .map_err(|error| bad_request(error.to_string()))?;
+            open_events(self, request, context).await
+        })
     }
 }
 
@@ -1657,23 +1677,21 @@ impl OperationTable {
                 _ => format!("{} runs in the calling process", request.operation),
             }));
         };
-        let policy = match operation.policy(
+        let PreparedAnswer { policy, run } = match operation.prepare_answer(
             &request.arguments,
             description.spec.access,
             self.deadlines.get(description.spec.latency),
             &caller,
         ) {
-            Ok(policy) => policy,
+            Ok(prepared) => prepared,
             Err(failure) => return Answer::error(failure),
         };
         if policy.access > caller.access() {
             return Answer::error(access_failure(&description.spec, policy.access));
         }
-        match operation.streaming(&request.arguments) {
-            Ok(true) => return Answer::error(stream_transport_required()),
-            Err(failure) => return Answer::error(failure),
-            Ok(false) => {}
-        }
+        let Some(run) = run else {
+            return Answer::error(stream_transport_required());
+        };
         if cancellation.is_cancelled() {
             return Answer::error(Failure::new(FailureKind::Cancelled, "request cancelled"));
         }
@@ -1684,7 +1702,7 @@ impl OperationTable {
             failure = context.wait_for_read_stop() => {
                 if failure.kind == FailureKind::Timeout { Ok(timeout_answer(&request, &context.progress)) } else { Err(failure) }
             },
-            answer = operation.execute(request.arguments.clone(), context.clone()) => answer,
+            answer = run(context.clone()) => Ok(answer),
         };
         drop(guard);
         match answer {
@@ -1702,25 +1720,35 @@ impl OperationTable {
         cancellation: CancellationToken,
     ) -> Result<Events, Failure> {
         let (description, row) = self.check_request(&request, &caller)?;
-        let policy = match row {
-            Row::Stream(_) => Policy {
-                access: description.spec.access,
-                read_phase: true,
-                default_read_deadline: self.deadlines.get(description.spec.latency),
-            },
-            Row::Request(operation) if operation.streaming(&request.arguments)? => operation
-                .policy(
+        let declared_deadline = self.deadlines.get(description.spec.latency);
+        let no_event_delivery = || {
+            bad_request(format!(
+                "{} does not select event delivery",
+                request.operation
+            ))
+        };
+        let (policy, transfer) = match row {
+            Row::Stream(_) => (
+                Policy {
+                    access: description.spec.access,
+                    read_phase: true,
+                    default_read_deadline: declared_deadline,
+                },
+                None,
+            ),
+            Row::Request(operation) => {
+                let Some((policy, open)) = operation.prepare_stream(
                     &request.arguments,
                     description.spec.access,
-                    self.deadlines.get(description.spec.latency),
+                    declared_deadline,
                     &caller,
-                )?,
-            _ => {
-                return Err(bad_request(format!(
-                    "{} does not select event delivery",
-                    request.operation
-                )));
+                )?
+                else {
+                    return Err(no_event_delivery());
+                };
+                (policy, Some(open))
             }
+            Row::Local => return Err(no_event_delivery()),
         };
         if policy.access > caller.access() {
             return Err(access_failure(&description.spec, policy.access));
@@ -1730,10 +1758,10 @@ impl OperationTable {
         }
         let context = self.context(&request, via, caller, None, cancellation, &policy);
         let guard = context.cancellation.clone().drop_guard();
-        let open = match row {
-            Row::Stream(stream) => stream.open(request.arguments.clone(), context.clone()),
-            Row::Request(operation) => operation.open(request.arguments.clone(), context.clone()),
-            Row::Local => unreachable!("local row refused before opening"),
+        let open = match (row, transfer) {
+            (Row::Stream(stream), None) => stream.open(request.arguments.clone(), context.clone()),
+            (Row::Request(_), Some(open)) => open(context.clone()),
+            _ => unreachable!("opening requires event delivery"),
         };
         let events = tokio::select! { biased; failure = context.wait_for_read_stop() => Err(failure), events = open => events }?;
         Ok(Events {
