@@ -107,10 +107,16 @@ fn value_kind(schema: &Value, root: &Value) -> ValueKind {
 fn property<'a>(description: &'a OperationDescription, name: &str) -> Option<&'a Value> {
     description.input_schema["properties"].get(name)
 }
+/// Field metadata takes precedence over a directly referenced type.
+fn null_spelling<'a>(description: &'a OperationDescription, name: &str) -> Option<&'a Value> {
+    let field = property(description, name)?;
+    field
+        .get("cli_null")
+        .or_else(|| resolve(field, &description.input_schema).get("cli_null"))
+}
 /// A nullable JSON value can declare its human command-line spelling.
 fn null_word<'a>(description: &'a OperationDescription, name: &str) -> Option<&'a str> {
-    let schema = resolve(property(description, name)?, &description.input_schema);
-    schema.get("cli_null")?.as_str()
+    null_spelling(description, name)?.as_str()
 }
 fn declared_word(
     description: &OperationDescription,
@@ -302,8 +308,7 @@ pub(crate) fn check_arguments(
     }
     if let Some(properties) = description.input_schema["properties"].as_object() {
         for (name, schema) in properties {
-            let schema = resolve(schema, &description.input_schema);
-            if let Some(spelling) = schema.get("cli_null") {
+            if let Some(spelling) = null_spelling(description, name) {
                 let valid = spelling.as_str().is_some_and(|word| {
                     valid_word(word, '-')
                         && !matches!(serde_json::from_str::<Value>(word), Ok(value) if !value.is_null())

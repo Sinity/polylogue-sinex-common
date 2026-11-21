@@ -813,7 +813,7 @@ fn declared_null_word_is_retained_in_ready_line_rendering() {
     };
     assert_eq!(
         table.cli_command(&request).unwrap(),
-        "example --all --request-id 'budget identity' --deadline 500 --budget 73 --cursor 'outer cursor' --fresh --json -- session:example:one read --limit none --cursor 'page cursor' plain --limit 3"
+        "example --all --request-id 'budget identity' --deadline 500 --budget 73 --cursor 'outer cursor' --fresh --json -- session:example:one read --cursor 'page cursor' --limit none plain --limit 3"
     );
     let mut omitted = request;
     omitted.arguments["steps"][0]
@@ -874,6 +874,29 @@ fn null_spelling_can_belong_to_a_referenced_type_and_requires_nullable_json() {
         Flag(bool),
         Empty,
     }
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    struct FieldSpelling {
+        #[schemars(extend("cli_null" = "none"))]
+        limit: Scalar,
+    }
+    steps
+        .declare::<FieldSpelling>(
+            "field",
+            vec![ArgumentSpec::new("limit", ArgumentForm::Named, "A scalar")],
+        )
+        .unwrap();
+    assert_eq!(
+        steps
+            .parse_step("field", &words(&["--limit", "none"]))
+            .unwrap(),
+        json!({"verb":"field","limit":null})
+    );
+    assert_eq!(
+        steps
+            .parse_step("field", &words(&["--limit", "true"]))
+            .unwrap(),
+        json!({"verb":"field","limit":true})
+    );
     #[derive(Serialize, Deserialize, JsonSchema)]
     struct ConflictingLiteral {
         #[schemars(extend("cli_null" = "true"))]
