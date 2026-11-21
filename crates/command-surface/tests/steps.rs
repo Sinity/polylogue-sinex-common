@@ -868,6 +868,26 @@ fn null_spelling_can_belong_to_a_referenced_type_and_requires_nullable_json() {
         "invalid: limit: cli_null needs a plain word on a nullable JSON argument"
     );
     #[derive(Serialize, Deserialize, JsonSchema)]
+    #[serde(untagged)]
+    enum Scalar {
+        Count(u64),
+        Flag(bool),
+        Empty,
+    }
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    struct ConflictingLiteral {
+        #[schemars(extend("cli_null" = "true"))]
+        limit: Scalar,
+    }
+    assert!(
+        steps
+            .declare::<ConflictingLiteral>(
+                "conflicting",
+                vec![ArgumentSpec::new("limit", ArgumentForm::Named, "A scalar")]
+            )
+            .is_err()
+    );
+    #[derive(Serialize, Deserialize, JsonSchema)]
     struct InvalidWord {
         #[schemars(extend("cli_null" = "two words"))]
         limit: Option<u64>,

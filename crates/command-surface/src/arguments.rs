@@ -304,8 +304,10 @@ pub(crate) fn check_arguments(
         for (name, schema) in properties {
             let schema = resolve(schema, &description.input_schema);
             if let Some(spelling) = schema.get("cli_null") {
-                let valid = spelling.as_str().is_some_and(|word| valid_word(word, '-'))
-                    && schema_has_type(schema, &description.input_schema, "null")
+                let valid = spelling.as_str().is_some_and(|word| {
+                    valid_word(word, '-')
+                        && !matches!(serde_json::from_str::<Value>(word), Ok(value) if !value.is_null())
+                }) && schema_has_type(schema, &description.input_schema, "null")
                     && kind_of(description, name) == ValueKind::Json
                     && spec.argument(name).is_none_or(|argument| {
                         matches!(

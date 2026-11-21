@@ -92,7 +92,8 @@ on its field or referenced type. The CLI and flat HTTP query projection then
 read that exact word as JSON null, and command rendering writes it back. An
 explicit null stays present when default fields are omitted, so it remains
 distinct from an absent argument. Numeric values retain their JSON form.
-The declaration must name a plain word on one named or positional nullable
+The declaration must name a plain word that does not hide another JSON value,
+on one named or positional nullable
 JSON argument; ordinary arguments do not gain that spelling. Typed MCP and
 canonical HTTP JSON continue to use null directly.
 
