@@ -677,3 +677,207 @@ fn line_commands_force_literal_verb_words_and_option_words() {
         assert_eq!(table.cli_command(&request).unwrap(), expected);
     }
 }
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct DeclaredNullLimit {
+    #[serde(default)]
+    #[schemars(extend("cli_null" = "none"))]
+    limit: Option<u64>,
+    cursor: Option<String>,
+}
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct PlainNullLimit {
+    limit: Option<u64>,
+}
+fn null_limit_steps() -> StepDeclarations {
+    let mut steps = StepDeclarations::default();
+    steps
+        .declare::<DeclaredNullLimit>(
+            "read",
+            vec![
+                ArgumentSpec::new("limit", ArgumentForm::Named, "A count or none"),
+                ArgumentSpec::new("cursor", ArgumentForm::Named, "The next page"),
+            ],
+        )
+        .unwrap();
+    steps
+        .declare::<PlainNullLimit>(
+            "plain",
+            vec![ArgumentSpec::new("limit", ArgumentForm::Named, "A count")],
+        )
+        .unwrap();
+    steps
+}
+
+#[test]
+fn declared_null_word_preserves_explicit_null_numbers_and_absence() {
+    let steps = null_limit_steps();
+    assert_eq!(
+        steps
+            .parse_step("read", &words(&["--limit", "none"]))
+            .unwrap(),
+        json!({"verb":"read","limit":null})
+    );
+    assert_eq!(
+        steps.parse_step("read", &[]).unwrap(),
+        json!({"verb":"read"})
+    );
+    for n in [0, 1, u64::MAX] {
+        assert_eq!(
+            steps
+                .parse_step("read", &words(&["--limit", &n.to_string()]))
+                .unwrap(),
+            json!({"verb":"read","limit":n})
+        );
+    }
+    assert!(
+        steps
+            .parse_step("plain", &words(&["--limit", "none"]))
+            .is_err()
+    );
+    assert!(
+        steps
+            .parse_step("read", &words(&["--limit", "unlimited"]))
+            .is_err()
+    );
+    assert!(
+        steps
+            .parse_step("read", &words(&["--limit", "-1"]))
+            .is_err()
+    );
+    let input = words(&[
+        "read",
+        "--limit",
+        "none",
+        "--cursor",
+        "page cursor",
+        "plain",
+        "--limit",
+        "3",
+    ]);
+    let first = steps
+        .split_step(&input, 0, |_, _, _| {
+            Ok::<_, std::convert::Infallible>(false)
+        })
+        .unwrap();
+    assert_eq!(
+        first.step,
+        json!({"verb":"read","limit":null,"cursor":"page cursor"})
+    );
+    assert_eq!(first.end, 5);
+    let second = steps
+        .split_step(&input, first.end, |_, _, _| {
+            Ok::<_, std::convert::Infallible>(false)
+        })
+        .unwrap();
+    assert_eq!(second.step, json!({"verb":"plain","limit":3}));
+    assert_eq!(second.end, input.len());
+}
+
+#[test]
+fn declared_null_word_is_retained_in_ready_line_rendering() {
+    let mut builder = OperationDeclarations::builder("example", Deadlines::default());
+    builder.accept(RequestOption::Cursor);
+    builder.accept(RequestOption::BudgetTokens);
+    builder
+        .declare::<LineRows, Value>(
+            OperationSpec {
+                kind: OperationKind::Request { tool: None },
+                arguments: vec![ArgumentSpec::new(
+                    "all",
+                    ArgumentForm::Flag,
+                    "Every selected row",
+                )],
+                ..OperationSpec::request("rows", &["rows"], "", "A line", "Selected rows")
+            },
+            |value, _| value.to_string(),
+        )
+        .unwrap();
+    builder
+        .declare_steps(
+            "rows",
+            "steps",
+            null_limit_steps().cli_selection("selection", "references"),
+        )
+        .unwrap();
+    let table = builder.finish();
+    let request = RunnableRequest {
+        operation: "rows".into(),
+        arguments: json!({"selection":"session:example:one","steps":[{"verb":"read","limit":null,"cursor":"page cursor"},{"verb":"plain","limit":3}],"all":true}),
+        request_id: "budget identity".into(),
+        deadline: Deadline::Milliseconds(500),
+        budget_tokens: TokenBudget::Tokens(73),
+        cursor: Some("outer cursor".into()),
+        fresh: true,
+        format: Format::Json,
+    };
+    assert_eq!(
+        table.cli_command(&request).unwrap(),
+        "example --all --request-id 'budget identity' --deadline 500 --budget 73 --cursor 'outer cursor' --fresh --json -- session:example:one read --limit none --cursor 'page cursor' plain --limit 3"
+    );
+    let mut omitted = request;
+    omitted.arguments["steps"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("limit");
+    assert_eq!(
+        table.cli_command(&omitted).unwrap(),
+        "example --all --request-id 'budget identity' --deadline 500 --budget 73 --cursor 'outer cursor' --fresh --json -- session:example:one read --cursor 'page cursor' plain --limit 3"
+    );
+}
+
+#[test]
+fn null_spelling_can_belong_to_a_referenced_type_and_requires_nullable_json() {
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    #[serde(untagged)]
+    #[schemars(extend("cli_null" = "none"))]
+    enum Limit {
+        Number(u64),
+        Unlimited,
+    }
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    struct Referenced {
+        limit: Limit,
+    }
+    let mut steps = StepDeclarations::default();
+    steps
+        .declare::<Referenced>(
+            "typed",
+            vec![ArgumentSpec::new("limit", ArgumentForm::Named, "A limit")],
+        )
+        .unwrap();
+    assert_eq!(
+        steps
+            .parse_step("typed", &words(&["--limit", "none"]))
+            .unwrap(),
+        json!({"verb":"typed","limit":null})
+    );
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    struct Invalid {
+        #[schemars(extend("cli_null" = "none"))]
+        limit: u64,
+    }
+    assert_eq!(
+        steps
+            .declare::<Invalid>(
+                "invalid",
+                vec![ArgumentSpec::new("limit", ArgumentForm::Named, "A count")]
+            )
+            .unwrap_err()
+            .message,
+        "invalid: limit: cli_null needs a plain word on a nullable JSON argument"
+    );
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    struct InvalidWord {
+        #[schemars(extend("cli_null" = "two words"))]
+        limit: Option<u64>,
+    }
+    assert!(
+        steps
+            .declare::<InvalidWord>(
+                "invalid-word",
+                vec![ArgumentSpec::new("limit", ArgumentForm::Named, "A count")]
+            )
+            .is_err()
+    );
+}

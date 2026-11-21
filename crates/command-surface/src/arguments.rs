@@ -107,6 +107,24 @@ fn value_kind(schema: &Value, root: &Value) -> ValueKind {
 fn property<'a>(description: &'a OperationDescription, name: &str) -> Option<&'a Value> {
     description.input_schema["properties"].get(name)
 }
+/// A nullable JSON value can declare its human command-line spelling.
+fn null_word<'a>(description: &'a OperationDescription, name: &str) -> Option<&'a str> {
+    let schema = resolve(property(description, name)?, &description.input_schema);
+    schema.get("cli_null")?.as_str()
+}
+fn declared_word(
+    description: &OperationDescription,
+    name: &str,
+    kind: &ValueKind,
+    word: &str,
+    flag: &str,
+) -> Result<Value, Failure> {
+    if null_word(description, name) == Some(word) {
+        Ok(Value::Null)
+    } else {
+        word_value(kind, word, flag)
+    }
+}
 fn kind_of(description: &OperationDescription, name: &str) -> ValueKind {
     property(description, name).map_or(ValueKind::Json, |schema| {
         value_kind(schema, &description.input_schema)
@@ -281,6 +299,27 @@ pub(crate) fn check_arguments(
             "request field {name} would be written as --{}, a flag of every row",
             name.replace('_', "-")
         ));
+    }
+    if let Some(properties) = description.input_schema["properties"].as_object() {
+        for (name, schema) in properties {
+            let schema = resolve(schema, &description.input_schema);
+            if let Some(spelling) = schema.get("cli_null") {
+                let valid = spelling.as_str().is_some_and(|word| valid_word(word, '-'))
+                    && schema_has_type(schema, &description.input_schema, "null")
+                    && kind_of(description, name) == ValueKind::Json
+                    && spec.argument(name).is_none_or(|argument| {
+                        matches!(
+                            argument.form,
+                            ArgumentForm::Named | ArgumentForm::Positional
+                        )
+                    });
+                if !valid {
+                    return refuse(format!(
+                        "{name}: cli_null needs a plain word on a nullable JSON argument"
+                    ));
+                }
+            }
+        }
     }
     let mut seen_optional_positional = false;
     let mut seen_words = false;
@@ -463,7 +502,7 @@ impl OperationDeclarations {
                 let value = match kind {
                     ValueKind::Text => Value::String(text.clone()),
                     ValueKind::Boolean => Value::Bool(matches!(text.as_str(), "" | "true" | "1")),
-                    _ => word_value(&ValueKind::Json, text, key)?,
+                    _ => declared_word(description, key, &ValueKind::Json, text, key)?,
                 };
                 arguments.insert(key.clone(), value);
                 continue;
@@ -707,7 +746,8 @@ pub(crate) fn parse_arguments(
                         ValueKind::List(_) => ValueKind::Json,
                         kind => kind,
                     };
-                    let value = word_value(&kind, word, &argument.name)?;
+                    let value =
+                        declared_word(description, &argument.name, &kind, word, &argument.name)?;
                     fields.insert(argument.name.clone(), value);
                     positional += 1;
                 }
@@ -813,7 +853,8 @@ pub(crate) fn parse_arguments(
                             ValueKind::List(_) => ValueKind::Json,
                             kind => kind,
                         };
-                        let item = word_value(&kind, &value()?, &flag)?;
+                        let item =
+                            declared_word(description, &argument.name, &kind, &value()?, &flag)?;
                         if target.insert(argument.name.clone(), item).is_some() {
                             return Err(bad_request(format!("duplicate {flag}")));
                         }
@@ -1128,6 +1169,9 @@ fn omit_defaults(description: &OperationDescription, fields: &mut Map<String, Va
         let required = description.input_schema["required"]
             .as_array()
             .is_some_and(|names| names.iter().any(|item| item == name));
+        if value.is_null() && null_word(description, name).is_some() {
+            return true;
+        }
         if !required && (value.is_null() || value.as_array().is_some_and(Vec::is_empty)) {
             return false;
         }
@@ -1144,7 +1188,12 @@ fn natural_words(
 ) -> Option<(Vec<String>, Vec<String>)> {
     let object = arguments.as_object()?;
     let spec = &description.spec;
-    let word = |kind: &ValueKind, value: &Value| -> Option<String> {
+    let word = |name: &str, kind: &ValueKind, value: &Value| -> Option<String> {
+        if value.is_null()
+            && let Some(word) = null_word(description, name)
+        {
+            return Some(word.to_owned());
+        }
         match (kind, value) {
             (ValueKind::Text, Value::String(text)) => Some(text.clone()),
             (ValueKind::Boolean, Value::Bool(flag)) => Some(flag.to_string()),
@@ -1175,7 +1224,7 @@ fn natural_words(
                     ValueKind::List(_) => ValueKind::Json,
                     kind => kind,
                 };
-                flags.extend([flag, quote_argument(&word(&kind, value)?)]);
+                flags.extend([flag, quote_argument(&word(name, &kind, value)?)]);
             }
             ArgumentForm::Repeated => {
                 let ValueKind::List(item) = &kind else {
@@ -1193,7 +1242,7 @@ fn natural_words(
                     {
                         return None;
                     }
-                    flags.extend([flag.clone(), quote_argument(&word(item, item_value)?)]);
+                    flags.extend([flag.clone(), quote_argument(&word(name, item, item_value)?)]);
                 }
             }
             ArgumentForm::Positional | ArgumentForm::Words | ArgumentForm::Rest => {}
@@ -1217,10 +1266,10 @@ fn natural_words(
             (ValueKind::List(item), _) => {
                 let items = value.as_array().filter(|items| !items.is_empty())?;
                 for item_value in items {
-                    positional_words.push(word(item, item_value)?);
+                    positional_words.push(word(&argument.name, item, item_value)?);
                 }
             }
-            _ => positional_words.push(word(&kind, value)?),
+            _ => positional_words.push(word(&argument.name, &kind, value)?),
         }
     }
     Some((flags, positional_words))

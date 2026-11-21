@@ -601,3 +601,70 @@ fn mcp_parser_selects_only_declared_family_members_and_checks_the_envelope() {
         assert!(error.message.contains(reason), "{name}: {error:?}");
     }
 }
+
+#[test]
+fn declared_null_word_round_trips_cli_and_flat_http_without_changing_numeric_values() {
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    struct Limit {
+        #[serde(default)]
+        #[schemars(extend("cli_null" = "none"))]
+        limit: Option<u64>,
+    }
+    let mut builder = OperationDeclarations::builder("example", Deadlines::default());
+    builder
+        .declare::<Limit, Value>(
+            OperationSpec {
+                kind: OperationKind::Request { tool: None },
+                http_route: Some("/inspect".into()),
+                ..OperationSpec::request(
+                    "inspect",
+                    &["inspect"],
+                    "",
+                    "Inspect",
+                    "Inspect with a limit",
+                )
+            },
+            |value, _| value.to_string(),
+        )
+        .unwrap();
+    let table = builder.finish();
+    for (word, value) in [
+        ("none", Value::Null),
+        ("0", json!(0)),
+        ("18446744073709551615", json!(u64::MAX)),
+    ] {
+        let parsed = table
+            .parse_cli(
+                &["inspect".into(), "--limit".into(), word.into()],
+                "limit-id",
+            )
+            .unwrap()
+            .request;
+        assert_eq!(parsed.arguments, json!({"limit":value}));
+        assert_eq!(
+            table.cli_command(&parsed).unwrap(),
+            format!("example inspect --limit {word} --request-id limit-id")
+        );
+        let http = table
+            .parse_http_query("inspect", &[("limit".into(), word.into())], "limit-id")
+            .unwrap();
+        assert_eq!(http.arguments, parsed.arguments);
+    }
+    assert_eq!(
+        table
+            .parse_cli(&["inspect".into()], "limit-id")
+            .unwrap()
+            .request
+            .arguments,
+        json!({})
+    );
+    assert!(
+        table
+            .parse_http_query(
+                "inspect",
+                &[("limit".into(), "unlimited".into())],
+                "limit-id"
+            )
+            .is_err()
+    );
+}
