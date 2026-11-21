@@ -87,6 +87,16 @@ underscore names use hyphenated flags. Their values appear only in
 `ParsedCommand.calling_process`. A product may build help and completion from
 this projection; actual argument parsing remains in the common parser.
 
+A nullable JSON argument may declare `#[schemars(extend("cli_null" = "none"))]`
+on its field or referenced type. The CLI and flat HTTP query projection then
+read that exact word as JSON null, and command rendering writes it back. An
+explicit null stays present when default fields are omitted, so it remains
+distinct from an absent argument. Numeric values retain their JSON form.
+The declaration must name a plain word that does not hide another JSON value,
+on one named or positional nullable
+JSON argument; ordinary arguments do not gain that spelling. Typed MCP and
+canonical HTTP JSON continue to use null directly.
+
 A request with `tool: None` has no tools/list entry and cannot be selected by
 tools/call, including a forged operation name in another family. Empty CLI
 commands are absent from parsing, help, completion and ready command lines.
