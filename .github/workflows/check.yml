@@ -27,8 +27,8 @@ jobs:
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q postgresql
           echo "$(ls -d /usr/lib/postgresql/*/bin | tail -1)" >> "$GITHUB_PATH"
-          curl -sSfL https://github.com/nats-io/nats-server/releases/download/v2.10.22/nats-server-v2.10.22-linux-amd64.tar.gz | tar xz
-          sudo mv nats-server-v2.10.22-linux-amd64/nats-server /usr/local/bin/
+          curl -sSfL https://github.com/nats-io/nats-server/releases/download/v2.10.22/nats-server-v2.10.22-linux-amd64.tar.gz | tar xz -C "$RUNNER_TEMP"
+          sudo mv "$RUNNER_TEMP/nats-server-v2.10.22-linux-amd64/nats-server" /usr/local/bin/
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}

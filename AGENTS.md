@@ -69,7 +69,7 @@ conflict. Merge with `gh pr merge --auto --squash --match-head-commit <sha>`.
 Development speed comes before a perfectly green master (operator,
 2026-11-09): whoever's change breaks master fixes it next. PR descriptions are plain prose: what changed and why, the
 decisions taken, what was verified and what was not, and what each product
-must change to adopt it.
+must change to adopt it. The body ends with a line `Task: <id>` naming the task it lands.
 
 **Decide technical details yourself** from the principles here and record
 them on the task and in the PR. The operator decides product scope and intent,
