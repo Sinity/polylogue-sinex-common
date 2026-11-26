@@ -80,9 +80,9 @@ fn socket_child() {
 }
 
 #[test]
-#[ignore = "waits to be cancelled; run explicitly under AgentCTL"]
+#[ignore = "waits to be cancelled; run explicitly under a job runner that sets DEVKIT_SCRATCH"]
 fn native_cancellation_fixture() {
-    let owner = PathBuf::from(env::var_os("AGENTCTL_SCRATCH").expect("job-owned scratch required"));
+    let owner = PathBuf::from(env::var_os("DEVKIT_SCRATCH").expect("job-owned scratch required"));
     let temp = RunTemp::new().unwrap();
     assert_eq!(temp.directory.parent(), Some(owner.as_path()));
     fs::write(temp.path().join("synthetic-wal"), vec![7; 1 << 20]).unwrap();

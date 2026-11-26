@@ -171,7 +171,7 @@ fn a_changed_selection_error_fails_the_recorded_run() {
         run.nextest(
             "test",
             &Nextest {
-                args: vec!["--changed-base=does-not-exist".into()],
+                args: vec!["--base".into(), "does-not-exist".into()],
                 ..Nextest::default()
             }
         )
@@ -273,6 +273,49 @@ fn native_package_selection_builds_dependencies_without_unrelated_test_targets()
     assert_eq!(statuses(&run), selected);
     assert!(run.tests.iter().all(|test| test.binary == "selected"));
     assert!(run.stages.iter().all(|stage| stage.ok));
+    // Run-only options reach the run and not the build, which refuses them;
+    // the report is copied out even though the scratch directory goes.
+    let report = root.join("reports/selected.xml");
+    fs::create_dir(root.join("reports")).unwrap();
+    let mut run = Run::unrecorded("package-selection", "test", &[]);
+    run.root = root.into();
+    run.target = Some(target.clone());
+    run.nextest(
+        "test",
+        &Nextest {
+            args: [
+                "--offline",
+                "-p",
+                "selected",
+                "--partition",
+                "hash:1/1",
+                "--retries=1",
+                "--no-fail-fast",
+                "-j",
+                "2",
+                "--stress-count",
+                "1",
+                "--status-level",
+                "fail",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            env: vec![("CARGO_TARGET_DIR".into(), target.display().to_string())],
+            junit: Some(report.clone()),
+            ..Nextest::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        run.tests
+            .iter()
+            .any(|test| test.name == "selected_read" && test.status == TestStatus::Passed)
+    );
+    assert!(
+        fs::read_to_string(&report)
+            .unwrap()
+            .contains("selected_read")
+    );
     let (run, result) = execute(&["--workspace", "--exclude", "unrelated"]);
     result.unwrap();
     let mut workspace = expected(&[("helper_test", "passed")]);
@@ -310,7 +353,7 @@ fn native_package_selection_builds_dependencies_without_unrelated_test_targets()
     .unwrap();
     let (run, result) = execute(&[
         "--package=selected",
-        "--changed-base=HEAD",
+        "--base=HEAD",
         "-E",
         "test(selected_read)",
     ]);
@@ -480,4 +523,20 @@ fn concurrent_report_child() {
     if label == "one" {
         wait("two.written");
     }
+}
+
+#[test]
+fn run_only_options_stay_out_of_the_build() {
+    let words = |text: &str| text.split(' ').map(str::to_owned).collect::<Vec<_>>();
+    assert_eq!(
+        split_run_options(&words(
+            "-p a --partition hash:1/3 --retries=2 -j4 --test-threads 8 --no-fail-fast -E test(x) --stress-count 3 --features f -- --exact x"
+        )),
+        (
+            words("-p a -E test(x) --features f -- --exact x"),
+            words(
+                "--partition hash:1/3 --retries=2 -j4 --test-threads 8 --no-fail-fast --stress-count 3"
+            ),
+        )
+    );
 }

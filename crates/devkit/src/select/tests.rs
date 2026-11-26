@@ -2,22 +2,50 @@ use super::*;
 
 fn packages() -> Vec<Package> {
     vec![
-        Package {
-            name: "model".into(),
-            directory: PathBuf::from("/w/crates/model"),
-            tests: vec![],
-        },
-        Package {
-            name: "store".into(),
-            directory: PathBuf::from("/w/crates/store"),
-            tests: vec![],
-        },
-        Package {
-            name: "xtask".into(),
-            directory: PathBuf::from("/w/xtask"),
-            tests: vec![],
-        },
+        package("model", "/w/crates/model", &[]),
+        package("store", "/w/crates/store", &["model"]),
+        package("xtask", "/w/xtask", &[]),
     ]
+}
+
+fn package(name: &str, directory: &str, dependencies: &[&str]) -> Package {
+    Package {
+        name: name.into(),
+        directory: PathBuf::from(directory),
+        tests: vec![],
+        roots: vec![PathBuf::from(directory).join("src/lib.rs")],
+        dependencies: dependencies.iter().map(|d| (*d).to_owned()).collect(),
+        read_by_tests: vec![],
+    }
+}
+
+fn no_functions(_: &str, _: &Package) -> Option<BTreeSet<String>> {
+    None
+}
+
+fn tests(
+    with_dependents: &[&str],
+    packages: &[&str],
+    binaries: &[(&str, &str)],
+    functions: &[(&str, &[&str])],
+) -> Selection {
+    Selection::Tests(Tests {
+        with_dependents: with_dependents.iter().map(|p| (*p).to_owned()).collect(),
+        packages: packages.iter().map(|p| (*p).to_owned()).collect(),
+        binaries: binaries
+            .iter()
+            .map(|(p, b)| ((*p).to_owned(), (*b).to_owned()))
+            .collect(),
+        functions: functions
+            .iter()
+            .map(|(p, names)| {
+                (
+                    (*p).to_owned(),
+                    names.iter().map(|n| (*n).to_owned()).collect(),
+                )
+            })
+            .collect(),
+    })
 }
 
 fn files(names: &[&str]) -> Vec<String> {
@@ -31,11 +59,9 @@ fn changed_files_map_to_their_packages() {
         root,
         &files(&["crates/store/src/lib.rs", "crates/model/README.md"]),
         &packages(),
+        no_functions,
     );
-    assert_eq!(
-        selection,
-        Selection::Packages(vec!["model".into(), "store".into()])
-    );
+    assert_eq!(selection, tests(&["model", "store"], &[], &[], &[]));
     assert_eq!(
         selection.filterset().unwrap(),
         "rdeps(=model) | rdeps(=store)"
@@ -49,16 +75,22 @@ fn a_file_outside_every_package_selects_the_workspace() {
         select(
             root,
             &files(&["crates/store/src/lib.rs", "flake.nix"]),
-            &packages()
+            &packages(),
+            no_functions
         ),
         Selection::Workspace
     );
     assert_eq!(
-        select(root, &files(&["docs/development.md"]), &packages()),
+        select(
+            root,
+            &files(&["docs/development.md"]),
+            &packages(),
+            no_functions
+        ),
         Selection::Workspace
     );
     assert_eq!(
-        select(root, &files(&["README.md"]), &packages()),
+        select(root, &files(&["README.md"]), &packages(), no_functions),
         Selection::Workspace
     );
 }
@@ -74,6 +106,7 @@ fn integration_test_changes_narrow_to_the_declared_binary() {
         Path::new("/w"),
         &files(&["crates/store/tests/reads.rs"]),
         &packages,
+        no_functions,
     );
     assert_eq!(
         selected.filterset().unwrap(),
@@ -83,28 +116,32 @@ fn integration_test_changes_narrow_to_the_declared_binary() {
         select(
             Path::new("/w"),
             &files(&["crates/store/tests/reads.rs", "crates/model/src/lib.rs"]),
-            &packages
+            &packages,
+            no_functions
         )
         .filterset()
         .unwrap(),
         "rdeps(=model) | (package(=store) & binary(=reads))"
     );
-    // A shared test helper may be read by several binaries.
+    // A shared test helper may be read by several of the package's
+    // binaries, and by no dependent.
     assert_eq!(
         select(
             Path::new("/w"),
             &files(&["crates/store/tests/common.rs"]),
-            &packages
+            &packages,
+            no_functions
         ),
-        Selection::Packages(vec!["store".into()])
+        tests(&[], &["store"], &[], &[])
     );
     assert_eq!(
         select(
             Path::new("/w"),
             &files(&["crates/store/tests/reads.rs", "crates/store/src/lib.rs"]),
-            &packages
+            &packages,
+            no_functions
         ),
-        Selection::Packages(vec!["store".into()])
+        tests(&["store"], &[], &[], &[])
     );
 }
 
@@ -170,7 +207,7 @@ fn diff_includes_commits_index_working_files_untracked_and_both_sides_of_renames
         ],
     );
     git_ok(root, &["branch", "baseline"]);
-    assert_eq!(changed(root, "baseline").unwrap(), Selection::Nothing);
+    assert!(changed(root, "baseline").unwrap().is_empty());
     std::fs::write(root.join("base/src/lib.rs"), "pub fn changed() {}\n").unwrap();
     git_ok(root, &["add", "base/src/lib.rs"]);
     git_ok(
@@ -187,7 +224,7 @@ fn diff_includes_commits_index_working_files_untracked_and_both_sides_of_renames
     );
     assert_eq!(
         changed(root, "baseline").unwrap(),
-        Selection::Packages(vec!["base".into()])
+        tests(&["base"], &[], &[], &[])
     );
     git_ok(root, &["branch", "current"]);
     std::fs::write(root.join("base/src/main.rs"), "fn main() {}\n").unwrap();
@@ -207,7 +244,7 @@ fn diff_includes_commits_index_working_files_untracked_and_both_sides_of_renames
     );
     assert_eq!(
         changed(root, "current").unwrap(),
-        Selection::Packages(vec!["base".into(), "other".into()])
+        tests(&["base", "other"], &[], &[], &[])
     );
     std::fs::write(root.join("new config\nfile.nix"), "{}\n").unwrap();
     assert_eq!(changed(root, "current").unwrap(), Selection::Workspace);
@@ -259,7 +296,7 @@ fn git_diff_narrows_test_bodies_but_keeps_helpers_at_package_scope() {
         changed(root, "HEAD").unwrap()
     );
     let (args, unchanged) =
-        nextest_args(root, &files(&["--changed-base=HEAD", "-E", "test(reads)"])).unwrap();
+        nextest_args(root, &files(&["--base=HEAD", "-E", "test(reads)"])).unwrap();
     assert!(!unchanged);
     assert_eq!(
         args,
@@ -268,6 +305,11 @@ fn git_diff_narrows_test_bodies_but_keeps_helpers_at_package_scope() {
             "(test(reads)) & ((package(=test-selection) & (test(reads))))"
         ])
     );
+    assert_eq!(
+        nextest_args(root, &files(&["--base", "HEAD", "-E", "test(reads)"])).unwrap(),
+        (args, false)
+    );
+    assert!(nextest_args(root, &files(&["--base"])).is_err());
     std::fs::write(
         root.join("src/lib.rs"),
         source.replace("u8 { 1 }", "u8 { 2 }"),
@@ -275,7 +317,7 @@ fn git_diff_narrows_test_bodies_but_keeps_helpers_at_package_scope() {
     .unwrap();
     assert_eq!(
         changed(root, "HEAD").unwrap(),
-        Selection::Packages(vec!["test-selection".into()])
+        tests(&["test-selection"], &[], &[], &[])
     );
 }
 
@@ -309,17 +351,13 @@ fn calls_to_a_changed_test_keep_the_package_and_its_dependents() {
     std::fs::write(root.join("src/lib.rs"), source.replace("1, 1", "2, 2")).unwrap();
     assert_eq!(
         changed(root, "HEAD").unwrap(),
-        Selection::Packages(vec!["test-calls".into()])
+        tests(&["test-calls"], &[], &[], &[])
     );
 }
 
 #[test]
 fn workspace_settings_select_everything_even_when_a_package_lives_at_the_root() {
-    let packages = vec![Package {
-        name: "root".into(),
-        directory: PathBuf::from("/w"),
-        tests: vec![],
-    }];
+    let packages = vec![package("root", "/w", &[])];
     for file in [
         "Cargo.toml",
         "Cargo.lock",
@@ -327,12 +365,103 @@ fn workspace_settings_select_everything_even_when_a_package_lives_at_the_root() 
         "flake.lock",
         ".config/nextest.toml",
         ".cargo/config.toml",
-        ".agentctl/project.toml",
     ] {
         assert_eq!(
-            select(Path::new("/w"), &files(&[file]), &packages),
+            select(Path::new("/w"), &files(&[file]), &packages, no_functions),
             Selection::Workspace,
             "{file}"
         );
     }
+}
+
+#[test]
+fn test_only_modules_select_their_package_without_dependents() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    for (name, dependencies) in [("core", ""), ("user", "core = { path = '../core' }")] {
+        std::fs::create_dir_all(root.join(name).join("src")).unwrap();
+        std::fs::write(
+            root.join(name).join("Cargo.toml"),
+            format!("[package]\nname = '{name}'\nversion = '0.1.0'\nedition = '2024'\n[dependencies]\n{dependencies}\n"),
+        )
+        .unwrap();
+        std::fs::write(root.join(name).join("src/lib.rs"), "\n").unwrap();
+    }
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = ['core', 'user']\nresolver = '3'\n",
+    )
+    .unwrap();
+    let write = |file: &str, text: &str| {
+        let path = root.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write(
+        "core/src/lib.rs",
+        "pub mod parse;\nmod moved;\n#[cfg(all(test, unix))]\nmod tests;\n",
+    );
+    write("core/src/tests.rs", "fn helper() {}\n");
+    write(
+        "core/src/parse.rs",
+        "pub fn parse() {}\n#[cfg(test)]\nmod tests;\n",
+    );
+    write("core/src/parse/tests.rs", "mod cases;\n");
+    write("core/src/parse/tests/cases.rs", "fn case() {}\n");
+    write(
+        "core/src/moved.rs",
+        "#[cfg(test)]\n#[path = \"elsewhere.rs\"]\nmod tests;\n",
+    );
+    write("core/src/moved/tests.rs", "fn unused() {}\n");
+    write("core/src/elsewhere.rs", "fn shared() {}\n");
+    git_ok(root, &["init", "-b", "master"]);
+    git_ok(root, &["add", "."]);
+    git_ok(
+        root,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "initial",
+        ],
+    );
+    let after_change = |file: &str| {
+        let path = root.join(file);
+        let original = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, format!("{original}fn added() {{}}\n")).unwrap();
+        let selected = changed(root, "HEAD").unwrap();
+        std::fs::write(&path, original).unwrap();
+        selected
+    };
+    for file in [
+        "core/src/tests.rs",
+        "core/src/parse/tests.rs",
+        "core/src/parse/tests/cases.rs",
+    ] {
+        assert_eq!(
+            after_change(file),
+            tests(&[], &["core"], &[], &[]),
+            "{file}"
+        );
+    }
+    // Production code, and a file reached through `#[path]`, reach dependents.
+    for file in ["core/src/parse.rs", "core/src/elsewhere.rs"] {
+        assert_eq!(
+            after_change(file),
+            tests(&["core"], &[], &[], &[]),
+            "{file}"
+        );
+    }
+    let workspace = Workspace::read(root).unwrap();
+    assert_eq!(
+        workspace.packages_to_build(&after_change("core/src/tests.rs")),
+        Some(["core".to_owned()].into())
+    );
+    assert_eq!(
+        workspace.packages_to_build(&after_change("core/src/parse.rs")),
+        Some(["core".to_owned(), "user".to_owned()].into())
+    );
 }

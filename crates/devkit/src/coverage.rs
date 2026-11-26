@@ -1,4 +1,5 @@
 //! LLVM coverage with explicit scope and separate instrumentation output.
+//! cargo llvm-cov computes the totals and applies the line threshold.
 use crate::{Nextest, Run, cargo_command};
 use serde_json::{Value, json};
 use std::{fs, path::PathBuf};
@@ -9,37 +10,13 @@ pub struct Coverage {
     pub output: PathBuf,
     #[arg(long, value_parser = ["html", "lcov", "json"], default_value = "json")]
     pub format: String,
+    /// Fail when total line coverage is below this percentage; cargo
+    /// llvm-cov's `--fail-under-lines` decides.
     #[arg(long)]
     pub threshold: Option<f64>,
     /// Package and test selection, including devkit's changed-file selection.
     #[arg(last = true)]
     pub args: Vec<String>,
-}
-
-pub fn percentage(report: &Value) -> Result<f64, String> {
-    let data = report["data"].as_array().ok_or("coverage data missing")?;
-    let mut count = 0u64;
-    let mut covered = 0u64;
-    for entry in data {
-        let lines = &entry["totals"]["lines"];
-        if lines["covered"]
-            .as_u64()
-            .zip(lines["count"].as_u64())
-            .is_some_and(|(covered, count)| covered > count)
-        {
-            return Err("covered lines exceed line count".into());
-        }
-        count = count
-            .checked_add(lines["count"].as_u64().ok_or("line count missing")?)
-            .ok_or("line count overflow")?;
-        covered = covered
-            .checked_add(lines["covered"].as_u64().ok_or("covered lines missing")?)
-            .ok_or("covered lines overflow")?;
-    }
-    if count == 0 || covered > count {
-        return Err("coverage has no lines or invalid totals".into());
-    }
-    Ok(100.0 * covered as f64 / count as f64)
 }
 
 pub fn execute(run: &mut Run, options: &Coverage, env: &[(String, String)]) -> Result<(), String> {
@@ -119,7 +96,10 @@ fn execute_with(
     let report: Value =
         serde_json::from_slice(&fs::read(&summary).map_err(|e| format!("coverage report: {e}"))?)
             .map_err(|e| e.to_string())?;
-    let percent = percentage(&report)?;
+    // llvm-cov's export carries its own totals; devkit only reports them.
+    let percent = report["data"][0]["totals"]["lines"]["percent"]
+        .as_f64()
+        .ok_or("coverage report has no line total")?;
     if options.format != "json" {
         let mut command = cargo();
         command
@@ -153,10 +133,15 @@ fn execute_with(
     )
     .map_err(|e| e.to_string())?;
     println!("{metadata}");
-    if options.threshold.is_some_and(|t| percent < t) {
-        return Err(format!(
-            "line coverage {percent:.2}% below requested threshold"
-        ));
+    if let Some(threshold) = options.threshold {
+        let mut command = cargo();
+        command
+            .args(["llvm-cov", "report", "--summary-only", "--fail-under-lines"])
+            .arg(threshold.to_string())
+            .args(report_args(&options.args)?)
+            .envs(env.iter().cloned());
+        run.command("coverage threshold", &mut command)
+            .map_err(|_| format!("line coverage {percent:.2}% below {threshold}%"))?;
     }
     Ok(())
 }

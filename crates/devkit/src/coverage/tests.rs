@@ -1,17 +1,5 @@
 use super::*;
 #[test]
-fn totals_are_weighted_and_missing_values_fail() {
-    assert_eq!(percentage(&json!({"data":[{"totals":{"lines":{"count":10,"covered":5}}},{"totals":{"lines":{"count":90,"covered":90}}}]})).unwrap(),95.0);
-    for report in [
-        json!({}),
-        json!({"data":[]}),
-        json!({"data":[{"totals":{"lines":{"count":1,"covered":2}}}]}),
-        json!({"data":[{"totals":{"lines":{"count":1}}}]}),
-    ] {
-        assert!(percentage(&report).is_err());
-    }
-}
-#[test]
 fn regions_use_the_functions_own_file_indices() {
     let report = json!({"data":[{"functions":[{"filenames":["second.rs","first.rs"],"regions":[[1,2,3,4,5,1,0,0]]}]}]});
     let mapped = regions(&report).unwrap();
@@ -128,8 +116,13 @@ fn failed_missing_and_malformed_reports_never_succeed() {
     assert!(fake_report(script, "json", None).1.is_err());
 }
 #[test]
-fn threshold_and_output_checks_use_actual_report() {
-    let script = r#"while [ "$#" -gt 0 ]; do if [ "$1" = --output-path ]; then shift; printf '%s' '{"data":[{"totals":{"lines":{"count":10,"covered":5}},"functions":[{"filenames":["synthetic.rs"],"regions":[[1,1,10,1,5,0,0,0]]}]}]}' > "$1"; fi; shift; done"#;
+fn coverage_below_threshold_fails() {
+    // The fake tool writes a report with a 50% line total and, like cargo
+    // llvm-cov, fails a threshold above that total.
+    let script = r#"case " $* " in *' --fail-under-lines '*)
+        for argument in "$@"; do threshold_next=$found; [ "$argument" = --fail-under-lines ] && found=yes; [ "$threshold_next" = yes ] && { [ "${argument%.*}" -le 50 ]; exit $?; }; done;;
+    esac
+    while [ "$#" -gt 0 ]; do if [ "$1" = --output-path ]; then shift; printf '%s' '{"data":[{"totals":{"lines":{"count":10,"covered":5,"percent":50.0}},"functions":[{"filenames":["synthetic.rs"],"regions":[[1,1,10,1,5,0,0,0]]}]}]}' > "$1"; fi; shift; done"#;
     let (dir, result, run) = fake_report(script, "json", Some(40.0));
     assert!(result.is_ok(), "{result:?}");
     assert_eq!(run.tests.len(), 1);
@@ -152,10 +145,16 @@ fn threshold_and_output_checks_use_actual_report() {
     assert_eq!(summary["args"][1], "selected");
     assert_eq!(summary["line_percent"], 50.0);
     assert!(
-        fake_report(script, "json", Some(60.0))
-            .1
-            .unwrap_err()
-            .contains("below")
+        run.stages
+            .iter()
+            .any(|item| item.name == "coverage threshold" && item.ok)
+    );
+    let (_, result, run) = fake_report(script, "json", Some(60.0));
+    assert_eq!(result.unwrap_err(), "line coverage 50.00% below 60%");
+    assert!(
+        run.stages
+            .iter()
+            .any(|item| item.name == "coverage threshold" && !item.ok)
     );
     assert!(
         fake_report(script, "html", None)

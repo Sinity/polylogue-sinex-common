@@ -635,7 +635,7 @@ fn every_test_run_reaps_without_building_a_schema() {
             run.nextest(
                 "test",
                 &crate::Nextest {
-                    args: vec!["--changed-base=missing-ref".into()],
+                    args: vec!["--base=missing-ref".into()],
                     env: server.test_env(&databases.template),
                     ..crate::Nextest::default()
                 }

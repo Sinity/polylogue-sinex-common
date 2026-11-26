@@ -1,8 +1,25 @@
 //! Queries across recorded runs of one project, limited to the checkouts the
 //! caller names.
-use super::Store;
+use super::{Store, outcomes};
 use rusqlite::params;
 use serde_json::{Value, json};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// A run header as the cross-run queries report it; `status` is as recorded.
+struct ScopeRun {
+    id: i64,
+    checkout: String,
+    head: Option<String>,
+    dirty: Option<String>,
+    git_tree: Option<String>,
+    observation_error: Option<String>,
+    command: String,
+    args: String,
+    status: String,
+    started_ms: i64,
+    toolchain: Option<String>,
+    host: Option<String>,
+}
 
 fn paths(checkouts: &[String]) -> String {
     serde_json::to_string(checkouts).expect("strings serialize")
@@ -11,40 +28,105 @@ fn paths(checkouts: &[String]) -> String {
 impl Store {
     /// Tests that passed in one run and failed in another at the same Git
     /// tree and the same uncommitted changes. Runs whose checkout could not be
-    /// read are left out and counted.
+    /// read are left out and their results counted.
     pub fn intermittent(&self, project: &str, checkouts: &[String]) -> rusqlite::Result<Value> {
-        let selected = paths(checkouts);
-        let mut statement = self.conn.prepare(
-            "SELECT r.git_tree, r.dirty, t.binary, t.name,
-                    json_group_array(json_object('run', r.id, 'checkout', r.checkout,
-                        'head', r.head, 'command', r.command, 'args', r.args,
-                        'run_status', r.status, 'test_status', t.status,
-                        'started_ms', r.started_ms, 'toolchain', r.toolchain, 'host', r.host))
-             FROM runs r JOIN tests t ON t.run = r.id
-             WHERE r.project = ?1 AND r.checkout IN (SELECT value FROM json_each(?2))
-               AND r.git_tree IS NOT NULL AND r.observation_error IS NULL
-             GROUP BY r.git_tree, r.dirty, t.binary, t.name
-             HAVING count(DISTINCT CASE WHEN t.status = 'passed' THEN r.id END) > 0
-                AND count(DISTINCT CASE WHEN t.status = 'failed' THEN r.id END) > 0
-                AND count(DISTINCT CASE WHEN t.status IN ('passed','failed') THEN r.id END) > 1
-             ORDER BY r.git_tree, r.dirty, t.binary, t.name",
-        )?;
-        let tests = statement
-            .query_map(params![project, selected], |row| {
-                let runs: String = row.get(4)?;
-                Ok(json!({"git_tree": row.get::<_, String>(0)?,
-                    "dirty_hash": row.get::<_, Option<String>>(1)?,
-                    "binary": row.get::<_, String>(2)?, "name": row.get::<_, String>(3)?,
-                    "runs": decode_json(&runs)?}))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let unreadable: i64 = self.conn.query_row(
-            "SELECT count(*) FROM runs r JOIN tests t ON t.run = r.id
-             WHERE r.project = ?1 AND r.checkout IN (SELECT value FROM json_each(?2))
-               AND (r.git_tree IS NULL OR r.observation_error IS NOT NULL)",
-            params![project, selected],
-            |row| row.get(0),
-        )?;
+        let runs = self.scope_runs(project, checkouts)?;
+        let mut unreadable = 0;
+        // (git tree, dirty hash) of each run that has a tree.
+        let mut keys: BTreeMap<i64, (String, Option<String>)> = BTreeMap::new();
+        for run in &runs {
+            match &run.git_tree {
+                Some(tree) if run.observation_error.is_none() => {
+                    keys.insert(run.id, (tree.clone(), run.dirty.clone()));
+                }
+                _ => unreadable += outcomes::outcomes(&self.conn, run.id)?.len(),
+            }
+        }
+        // Only a test that failed somewhere can be intermittent, and only
+        // runs at the tree it failed at need their sets read.
+        let mut candidates: BTreeMap<(String, Option<String>, i64, i64), Vec<(i64, &'static str)>> =
+            BTreeMap::new();
+        {
+            let mut statement = self.conn.prepare(
+                "SELECT t.run, t.binary, t.name FROM test_results t JOIN runs r ON r.id = t.run
+                 WHERE r.project = ?1 AND r.checkout IN (SELECT value FROM json_each(?2))
+                   AND t.status = 'failed'",
+            )?;
+            let failed = statement.query_map(params![project, paths(checkouts)], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?;
+            for row in failed {
+                let (run, binary, name) = row?;
+                if let Some((tree, dirty)) = keys.get(&run) {
+                    candidates.insert((tree.clone(), dirty.clone(), binary, name), Vec::new());
+                }
+            }
+        }
+        let trees: BTreeSet<(String, Option<String>)> = candidates
+            .keys()
+            .map(|(tree, dirty, ..)| (tree.clone(), dirty.clone()))
+            .collect();
+        for run in &runs {
+            let Some(key) = keys.get(&run.id).filter(|key| trees.contains(key)) else {
+                continue;
+            };
+            for outcome in outcomes::outcomes(&self.conn, run.id)? {
+                if let Some(results) = candidates.get_mut(&(
+                    key.0.clone(),
+                    key.1.clone(),
+                    outcome.binary,
+                    outcome.name,
+                )) {
+                    results.push((run.id, outcome.status));
+                }
+            }
+        }
+        let names = outcomes::Names::load(&self.conn)?;
+        let by_id: BTreeMap<i64, &ScopeRun> = runs.iter().map(|run| (run.id, run)).collect();
+        let mut tests = Vec::new();
+        for ((tree, dirty, binary, name), mut results) in candidates {
+            let runs_with = |statuses: &[&str]| {
+                results
+                    .iter()
+                    .filter(|(_, status)| statuses.contains(status))
+                    .map(|(run, _)| *run)
+                    .collect::<BTreeSet<_>>()
+            };
+            if runs_with(&["passed"]).is_empty()
+                || runs_with(&["failed"]).is_empty()
+                || runs_with(&["passed", "failed"]).len() < 2
+            {
+                continue;
+            }
+            results.sort();
+            let runs: Vec<Value> = results
+                .iter()
+                .map(|(id, status)| {
+                    let run = by_id[id];
+                    json!({"run": run.id, "checkout": run.checkout, "head": run.head,
+                        "command": run.command, "args": run.args, "run_status": run.status,
+                        "test_status": status, "started_ms": run.started_ms,
+                        "toolchain": run.toolchain, "host": run.host})
+                })
+                .collect();
+            tests.push(json!({"git_tree": tree, "dirty_hash": dirty,
+                "binary": names.binary(binary), "name": names.name(name), "runs": runs}));
+        }
+        tests.sort_by(|a, b| {
+            let key = |test: &Value| {
+                (
+                    test["git_tree"].as_str().map(str::to_owned),
+                    test["dirty_hash"].as_str().map(str::to_owned),
+                    test["binary"].as_str().map(str::to_owned),
+                    test["name"].as_str().map(str::to_owned),
+                )
+            };
+            key(a).cmp(&key(b))
+        });
         Ok(json!({"project": project, "checkouts": checkouts,
             "results_without_tree": unreadable, "tests": tests}))
     }
@@ -59,37 +141,33 @@ impl Store {
         binary: &str,
         name: &str,
     ) -> rusqlite::Result<Value> {
-        let mut statement = self.conn.prepare(
-            "SELECT r.id, r.checkout, r.head, r.dirty, r.started_ms, r.command,
-                    r.args, r.status, t.status, r.observation_error, r.git_tree
-             FROM runs r JOIN tests t ON t.run = r.id
-             WHERE r.project = ?1 AND r.checkout IN (SELECT value FROM json_each(?2))
-               AND t.binary = ?3 AND t.name = ?4
-             ORDER BY r.started_ms, r.id, t.status",
-        )?;
-        let results = statement
-            .query_map(params![project, paths(checkouts), binary, name], |row| {
-                let head: Option<String> = row.get(2)?;
-                let dirty: Option<String> = row.get(3)?;
-                let observation_error: Option<String> = row.get(9)?;
-                let revision = if head.is_none() || observation_error.is_some() {
-                    "unknown"
-                } else if dirty.is_some() {
-                    "uncommitted changes"
-                } else {
-                    "clean HEAD"
-                };
-                Ok(
-                    json!({"run": row.get::<_, i64>(0)?, "checkout": row.get::<_, String>(1)?,
-                    "head": head, "dirty_hash": dirty, "revision": revision,
-                    "observation_error": observation_error,
-                    "git_tree": row.get::<_, Option<String>>(10)?,
-                    "started_ms": row.get::<_, i64>(4)?, "command": row.get::<_, String>(5)?,
-                    "args": row.get::<_, String>(6)?, "run_status": row.get::<_, String>(7)?,
-                    "test_status": row.get::<_, String>(8)?}),
-                )
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut results = Vec::new();
+        if let Some((binary_id, name_id)) = outcomes::test_id(&self.conn, binary, name)? {
+            for run in self.scope_runs(project, checkouts)? {
+                let mut statuses: Vec<&str> = outcomes::outcomes(&self.conn, run.id)?
+                    .into_iter()
+                    .filter(|outcome| outcome.binary == binary_id && outcome.name == name_id)
+                    .map(|outcome| outcome.status)
+                    .collect();
+                statuses.sort_unstable();
+                for status in statuses {
+                    let revision = if run.head.is_none() || run.observation_error.is_some() {
+                        "unknown"
+                    } else if run.dirty.is_some() {
+                        "uncommitted changes"
+                    } else {
+                        "clean HEAD"
+                    };
+                    results.push(json!({"run": run.id, "checkout": run.checkout,
+                        "head": run.head, "dirty_hash": run.dirty, "revision": revision,
+                        "observation_error": run.observation_error,
+                        "git_tree": run.git_tree,
+                        "started_ms": run.started_ms, "command": run.command,
+                        "args": run.args, "run_status": run.status,
+                        "test_status": status}));
+                }
+            }
+        }
         let first = results
             .iter()
             .find(|row| matches!(row["test_status"].as_str(), Some("failed" | "flaky")));
@@ -97,6 +175,34 @@ impl Store {
             json!({"project": project, "checkouts": checkouts, "binary": binary,
             "name": name, "first_failure": first, "results": results}),
         )
+    }
+
+    /// The runs of the named checkouts of a project, in start order.
+    fn scope_runs(&self, project: &str, checkouts: &[String]) -> rusqlite::Result<Vec<ScopeRun>> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, checkout, head, dirty, git_tree, observation_error, command, args,
+                    status, started_ms, toolchain, host
+             FROM runs WHERE project = ?1 AND checkout IN (SELECT value FROM json_each(?2))
+             ORDER BY started_ms, id",
+        )?;
+        statement
+            .query_map(params![project, paths(checkouts)], |row| {
+                Ok(ScopeRun {
+                    id: row.get(0)?,
+                    checkout: row.get(1)?,
+                    head: row.get(2)?,
+                    dirty: row.get(3)?,
+                    git_tree: row.get(4)?,
+                    observation_error: row.get(5)?,
+                    command: row.get(6)?,
+                    args: row.get(7)?,
+                    status: row.get(8)?,
+                    started_ms: row.get(9)?,
+                    toolchain: row.get(10)?,
+                    host: row.get(11)?,
+                })
+            })?
+            .collect()
     }
 
     /// Durations of passed runs of an exact command and argument list, or of

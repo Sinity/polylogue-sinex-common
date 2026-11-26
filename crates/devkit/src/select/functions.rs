@@ -1,5 +1,6 @@
 //! Changes confined to test functions need only those tests. Every changed
-//! line must belong to a test in both versions; helpers select the package.
+//! line must belong to a test in both versions; helpers keep the file's
+//! ordinary selection.
 use super::*;
 use syn::spanned::Spanned;
 
@@ -105,120 +106,93 @@ fn names_for_diff(before: &str, after: &str, diff: &str) -> Option<BTreeSet<Stri
     (!names.is_empty()).then_some(names)
 }
 
-pub(super) fn narrow(
+/// The tests a change to `file` is confined to, when every changed line is
+/// inside a test in both versions and no test's name has another use in the
+/// package. `None` keeps the file's ordinary selection.
+pub(super) fn changed_tests(
     root: &Path,
     base: &str,
-    files: &[String],
-    packages: &[Package],
-) -> Result<Selection, String> {
-    let mut filters = BTreeSet::new();
-    let mut narrowed = false;
-    for file in files {
-        let path = root.join(file);
-        let Some(package) = packages
-            .iter()
-            .filter(|p| path.starts_with(&p.directory))
-            .max_by_key(|p| p.directory.components().count())
-        else {
-            continue;
-        };
-        if let Some((binary, _)) = package.tests.iter().find(|(_, source)| *source == path) {
-            filters.insert(format!("(package(={}) & binary(={binary}))", package.name));
-            continue;
-        }
-        let names = if path.extension().is_some_and(|extension| extension == "rs") {
-            let before = git(root, &["show", &format!("{base}:{file}")]);
-            let after = std::fs::read_to_string(&path);
-            let diff = git(
-                root,
-                &[
-                    "diff",
-                    "--no-ext-diff",
-                    "--no-textconv",
-                    "--no-renames",
-                    "--unified=0",
-                    base,
-                    "--",
-                    file,
-                ],
-            )?;
-            match (before, after) {
-                (Ok(before), Ok(after)) => names_for_diff(&before, &after, &diff),
-                _ => None,
-            }
-        } else {
-            None
-        };
-        if let Some(names) = names
-            .filter(|names| used_only_in_declarations(&package.directory, names).unwrap_or(false))
-        {
-            narrowed = true;
-            filters.insert(format!(
-                "(package(={}) & ({}))",
-                package.name,
-                names
-                    .iter()
-                    .map(|name| format!("test({name})"))
-                    .collect::<Vec<_>>()
-                    .join(" | ")
-            ));
-        } else {
-            filters.insert(format!("rdeps(={})", package.name));
+    file: &str,
+    package: &Package,
+) -> Option<BTreeSet<String>> {
+    let path = root.join(file);
+    if path.extension().is_none_or(|extension| extension != "rs") {
+        return None;
+    }
+    let before = git(root, &["show", &format!("{base}:{file}")]).ok()?;
+    let after = std::fs::read_to_string(&path).ok()?;
+    let diff = git(
+        root,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--unified=0",
+            base,
+            "--",
+            file,
+        ],
+    )
+    .ok()?;
+    names_for_diff(&before, &after, &diff)
+        .filter(|names| used_only_in_declarations(&package.directory, names).unwrap_or(false))
+}
+
+/// Calls `visit` with every token, groups' contents included.
+pub(super) fn each_token(
+    tokens: proc_macro2::TokenStream,
+    visit: &mut impl FnMut(&proc_macro2::TokenTree),
+) {
+    for token in tokens {
+        visit(&token);
+        if let proc_macro2::TokenTree::Group(group) = &token {
+            each_token(group.stream(), visit);
         }
     }
-    if !narrowed {
-        return Ok(select(root, files, packages));
+}
+
+/// Calls `visit` with the tokens of every Rust source under `directory`,
+/// skipping `target` and `.git`. `None` when a source cannot be read or
+/// tokenized, or a symlink is found.
+pub(super) fn each_source(
+    directory: &Path,
+    visit: &mut impl FnMut(proc_macro2::TokenStream),
+) -> Option<()> {
+    for entry in std::fs::read_dir(directory).ok()? {
+        let entry = entry.ok()?;
+        if entry.file_name() == "target" || entry.file_name() == ".git" {
+            continue;
+        }
+        let path = entry.path();
+        let kind = entry.file_type().ok()?;
+        if kind.is_symlink() {
+            return None;
+        }
+        if kind.is_dir() {
+            each_source(&path, visit)?;
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            let source = std::fs::read_to_string(path).ok()?;
+            visit(source.parse::<proc_macro2::TokenStream>().ok()?);
+        }
     }
-    Ok(Selection::Filter(
-        filters.into_iter().collect::<Vec<_>>().join(" | "),
-    ))
+    Some(())
 }
 
 // A test can call another test. Any other use of its name keeps package
 // scope, including references from another module or a macro argument.
 fn used_only_in_declarations(directory: &Path, names: &BTreeSet<String>) -> Option<bool> {
-    fn count_tokens(
-        tokens: proc_macro2::TokenStream,
-        counts: &mut std::collections::BTreeMap<String, usize>,
-    ) {
-        for token in tokens {
-            match token {
-                proc_macro2::TokenTree::Group(group) => count_tokens(group.stream(), counts),
-                proc_macro2::TokenTree::Ident(name) => {
-                    if let Some(count) = counts.get_mut(name.to_string().trim_start_matches("r#")) {
-                        *count += 1;
-                    }
-                }
-                _ => {}
+    let mut counts: std::collections::BTreeMap<String, usize> =
+        names.iter().map(|name| (name.clone(), 0)).collect();
+    each_source(directory, &mut |tokens| {
+        each_token(tokens, &mut |token| {
+            if let proc_macro2::TokenTree::Ident(name) = token
+                && let Some(count) = counts.get_mut(name.to_string().trim_start_matches("r#"))
+            {
+                *count += 1;
             }
-        }
-    }
-    fn walk(
-        directory: &Path,
-        counts: &mut std::collections::BTreeMap<String, usize>,
-    ) -> Option<()> {
-        for entry in std::fs::read_dir(directory).ok()? {
-            let entry = entry.ok()?;
-            if entry.file_name() == "target" || entry.file_name() == ".git" {
-                continue;
-            }
-            let path = entry.path();
-            let kind = entry.file_type().ok()?;
-            if kind.is_symlink() {
-                return None;
-            }
-            if kind.is_dir() {
-                walk(&path, counts)?;
-            } else if path.extension().is_some_and(|extension| extension == "rs") {
-                let source = std::fs::read_to_string(path).ok()?;
-                let tokens = source.parse::<proc_macro2::TokenStream>().ok()?;
-                count_tokens(tokens, counts);
-            }
-        }
-        Some(())
-    }
-    let mut counts = names.iter().map(|name| (name.clone(), 0)).collect();
-    walk(directory, &mut counts)?;
+        });
+    })?;
     Some(counts.values().all(|count| *count == 1))
 }
 

@@ -291,7 +291,7 @@ fn incomplete_source_observation_keeps_bench_revision_unknown() {
     let observed = crate::Tree::observe(root);
     assert!(observed.head.is_some());
     assert!(observed.observation_error.is_some());
-    let store = Store::open_at(&root.join("history.db")).unwrap();
+    let store = Store::open_at(&root.join("runs.db")).unwrap();
     let load = load::LoadInterval::new(HostLoad {
         load1: None,
         cpus: None,
