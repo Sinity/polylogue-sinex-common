@@ -33,6 +33,8 @@ tokio-util = { version = "0.7", features = ["rt"], optional = true }
 ts-rs = { version = "11", optional = true, features = ["serde-compat", "no-serde-warnings"] }
 
 [dev-dependencies]
+# Request rendering tests read argument objects in their written order.
+serde_json = { version = "1", features = ["preserve_order"] }
 rusqlite = { version = ">=0.32, <0.41", features = ["bundled"] }
 tempfile = "3"
 proptest = "1"

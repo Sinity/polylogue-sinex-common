@@ -131,6 +131,32 @@ pub enum Suggestion {
     Request(RunnableRequest),
 }
 
+/// Why a request was refused, as the product that refused it declares it:
+/// the reason's stable name and the values it names. The product owns the
+/// closed set of reasons; this crate carries one without knowing it. A
+/// caller compares `name` and reads `fields`; the failure's `message` stays
+/// the sentence a person reads.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FailureReason {
+    pub name: String,
+    #[serde(default)]
+    pub fields: serde_json::Map<String, serde_json::Value>,
+}
+
+impl FailureReason {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            fields: serde_json::Map::new(),
+        }
+    }
+    pub fn with_field(mut self, name: impl Into<String>, value: serde_json::Value) -> Self {
+        self.fields.insert(name.into(), value);
+        self
+    }
+}
+
 /// The code of a failure the operation table itself answers when a
 /// request's read deadline passes. Every table registers it as
 /// [`FailureKind::Timeout`], so products and clients name the same reason.
@@ -156,6 +182,7 @@ struct Detail {
     suggestion: Option<Suggestion>,
     candidates: Vec<String>,
     caret: Option<String>,
+    reason: Option<FailureReason>,
 }
 
 impl Failure {
@@ -209,6 +236,14 @@ impl Failure {
     pub fn at(mut self, input: &str, span: InputSpan) -> Self {
         self.position = Some(span);
         self.detail_mut().caret = Some(caret(input, span));
+        self
+    }
+    /// The product's typed reason for the refusal, when it declares one.
+    pub fn reason(&self) -> Option<&FailureReason> {
+        self.detail.as_ref()?.reason.as_ref()
+    }
+    pub fn with_reason(mut self, reason: FailureReason) -> Self {
+        self.detail_mut().reason = Some(reason);
         self
     }
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
@@ -278,7 +313,7 @@ impl std::fmt::Display for Failure {
 impl std::error::Error for Failure {}
 
 /// The wire form: the QL shape `{kind, message, position, caret, suggestion,
-/// candidates, hint, retryable}`, plus the product's code.
+/// candidates, hint, retryable}`, plus the product's code and reason.
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(rename = "Failure")]
@@ -298,6 +333,8 @@ struct FailureWire {
     candidates: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    reason: Option<FailureReason>,
     retryable: bool,
 }
 
@@ -313,6 +350,7 @@ impl Serialize for Failure {
             suggestion: detail.suggestion,
             candidates: detail.candidates,
             hint: self.hint.clone(),
+            reason: detail.reason,
             retryable: self.retryable,
         }
         .serialize(serializer)
@@ -332,6 +370,7 @@ impl<'de> Deserialize<'de> for Failure {
                 suggestion: wire.suggestion,
                 candidates: wire.candidates,
                 caret: wire.caret,
+                reason: wire.reason,
             })),
         }
         .tidy())

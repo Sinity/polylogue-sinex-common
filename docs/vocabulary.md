@@ -116,6 +116,7 @@ mechanic and nothing else in the shared crates.
 | failure, failure kind | a typed error, and its stable name on the wire |
 | internal failure | a failure inside the product that no change to the request fixes: stored data it cannot read, a broken invariant, a task that stopped |
 | failure code | a product's precise failure name, registered once against a shared failure kind |
+| failure reason | a product's typed cause of a refusal on the wire: its name from the product's closed set and the fields it names |
 | caller scope | the server's authenticated identity namespace for request retries; never supplied in request JSON |
 | exit code | the CLI's process status for an answer, one per outcome and failure kind |
 | caret | the failing input line with a marker under the failing span |

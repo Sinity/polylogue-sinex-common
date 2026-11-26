@@ -67,6 +67,16 @@ impl Operation for Sample {
             if request.text == "invalid" {
                 return Answer::error(Failure::new(FailureKind::BadValue, "synthetic bad value"));
             }
+            if request.text == "reasoned" {
+                return Answer::error(
+                    Failure::new(FailureKind::BadValue, "the window is wider than 30 days")
+                        .with_reason(
+                            FailureReason::new("window_too_wide")
+                                .with_field("limit_days", json!(30))
+                                .with_field("asked", json!("90d")),
+                        ),
+                );
+            }
             if request.text == "product-error" {
                 let mut error = Failure::new(FailureKind::BadValue, "synthetic product error");
                 error.code = Some("invalid_sample".into());
@@ -202,7 +212,7 @@ async fn mcp(table: &OperationTable, request: &RunnableRequest) -> Value {
 #[tokio::test]
 async fn surface_parity_and_typed_output_schema() {
     let (table, _, _) = table();
-    for text in ["hello", "invalid", "001", "empty", "degraded"] {
+    for text in ["hello", "invalid", "reasoned", "001", "empty", "degraded"] {
         let request = request(text);
         let expected = table
             .call(request.clone(), Via::Cli, CancellationToken::new())
@@ -243,6 +253,48 @@ async fn surface_parity_and_typed_output_schema() {
             .is_some()
     );
     assert_eq!(table.complete("re"), vec!["read", "record"]);
+}
+
+#[tokio::test]
+async fn a_failure_carries_its_reason_on_every_surface_and_its_sentence_in_text() {
+    let (table, _, _) = table();
+    let reason = json!({"name": "window_too_wide", "fields": {"limit_days": 30, "asked": "90d"}});
+    let json_cli = table
+        .cli(
+            &["read", "--text", "reasoned", "--json"].map(str::to_string),
+            "r-1",
+            CancellationToken::new(),
+        )
+        .await;
+    let printed: Value = serde_json::from_str(&json_cli.stdout).unwrap();
+    assert_eq!(printed["error"]["reason"], reason);
+    assert_eq!(
+        printed["error"]["message"],
+        "the window is wider than 30 days"
+    );
+    let request = request("reasoned");
+    let over_socket = serde_json::to_value(socket(&table, &request).await).unwrap();
+    assert_eq!(over_socket["error"]["reason"], reason);
+    let over_http: Value = serde_json::from_slice(http(&table, &request).await.body()).unwrap();
+    assert_eq!(over_http["error"]["reason"], reason);
+    let over_mcp = mcp(&table, &request).await;
+    assert_eq!(
+        over_mcp["result"]["structuredContent"]["error"]["reason"],
+        reason
+    );
+    let text_cli = table
+        .cli(
+            &["read", "--text", "reasoned"].map(str::to_string),
+            "r-1",
+            CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(
+        text_cli.stderr,
+        "error (bad_value): the window is wider than 30 days\n"
+    );
+    let unreasoned = serde_json::to_value(Failure::new(FailureKind::BadValue, "plain")).unwrap();
+    assert!(unreasoned.get("reason").is_none(), "{unreasoned}");
 }
 
 #[tokio::test(start_paused = true)]
