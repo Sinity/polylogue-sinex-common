@@ -400,8 +400,12 @@ A `Failure` carries `kind`, `message`, `code`, `position` where the input
 has one, `caret` (the input line with a marker under that span),
 `suggestion` (a corrected query, or a whole request, that runs as given,
 whenever one can be formed), `hint`, `candidates` (what the input could have meant: an ambiguous
-reference's matches, or known names close to an unknown one) and
-`retryable`. One table maps every kind to one exit code
+reference's matches, or known names close to an unknown one),
+`reason` and `retryable`. A `reason` is the product's typed cause of a
+refusal, `{name, fields}`: a stable name from the product's own closed set
+and the values it names as a JSON object. This crate carries it without
+knowing the set; it is present only when the product gives one, and the
+text renderers show the `message`, which stays the reason's sentence. One table maps every kind to one exit code
 and one HTTP status:
 
 | Exit | Kinds | HTTP |
