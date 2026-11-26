@@ -184,29 +184,37 @@ pub fn select(all: &[Candidate], target: u64, seed: u64) -> Vec<Candidate> {
         let per = groups.len().div_ceil(bands);
         let remaining = share.saturating_sub(used);
         let rest_bytes: u64 = groups.iter().map(|u| u.size).sum::<u64>().max(1);
+        // What a band leaves unused, or overdraws, carries to the next, so
+        // bands whose groups are each larger than their quota still add up
+        // to the stratum's share.
+        let mut carried: i128 = 0;
         for band in groups.chunks(per) {
             let band_bytes: u64 = band.iter().map(|u| u.size).sum();
-            let quota =
-                (u128::from(remaining) * u128::from(band_bytes) / u128::from(rest_bytes)) as u64;
+            let quota = (u128::from(remaining) * u128::from(band_bytes) / u128::from(rest_bytes))
+                as i128
+                + carried;
             let mut order: Vec<&&Unit<'_>> = band.iter().collect();
             order.sort_by_key(|u| rank(seed, u));
-            let mut got = 0u64;
+            let mut got: i128 = 0;
             for unit in order {
                 if got >= quota {
                     break;
                 }
+                let size = i128::from(unit.size);
                 // A group bigger than the stratum's whole share would swamp
                 // the sample; the representativeness report shows its absence.
-                if unit.size > share {
+                // Otherwise the band stays within half its quota above it.
+                if unit.size > share || got + size > quota + quota / 2 {
                     continue;
                 }
-                // Keep the band's quota within one group of its target.
-                if got > 0 && got + unit.size > quota + quota / 2 {
-                    continue;
-                }
-                got += unit.size;
+                got += size;
                 chosen.push(unit);
             }
+            carried = quota - got;
+        }
+        if !chosen.iter().any(|u| u.stratum == groups[0].stratum) {
+            // Every stratum is exercised, by its smallest group at least.
+            chosen.push(groups[0]);
         }
     }
     let mut files: Vec<Candidate> = chosen

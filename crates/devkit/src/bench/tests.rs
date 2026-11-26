@@ -435,7 +435,16 @@ fn a_run_under_memory_max_reports_peak_memory_and_io_from_the_unit() {
         assert!(a.not_applied.is_none());
         assert!(a.memory_peak_bytes.is_some_and(|b| b >= 64 << 20), "{a:?}");
         assert!(a.cpu_seconds.is_some_and(|s| s > 0.0), "{a:?}");
-        assert!(a.read_bytes.is_some() && a.written_bytes.is_some(), "{a:?}");
+        // Bytes are attributed only where the user manager was delegated the
+        // io controller; elsewhere they stay unknown, never zero.
+        // SAFETY: getuid has no preconditions.
+        let uid = unsafe { libc::getuid() };
+        let io = fs::read_to_string(format!(
+            "/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/cgroup.subtree_control"
+        ))
+        .is_ok_and(|c| c.split_whitespace().any(|name| name == "io"));
+        assert_eq!(a.read_bytes.is_some(), io, "{a:?}");
+        assert_eq!(a.written_bytes.is_some(), io, "{a:?}");
         // Past its limit the same process is killed, and the outcome says so.
         let killed = measure(&child(1 << 30, &file), &Limit::memory("128M")).unwrap();
         assert_eq!(killed.outcome, "oom-kill", "{killed:?}");
