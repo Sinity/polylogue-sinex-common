@@ -451,9 +451,10 @@ impl Run {
             Ok((temp, state, env, junit, config))
         })?;
         let (build_args, run_args) = split_run_options(&selected_args);
-        let fail_fast = run_args
-            .iter()
-            .any(|arg| arg == "--fail-fast" || arg.starts_with("--max-fail"));
+        // The caller's own fail-fast choice, either way, replaces devkit's.
+        let fail_fast_chosen = run_args.iter().any(|arg| {
+            arg == "--fail-fast" || arg == "--no-fail-fast" || arg.starts_with("--max-fail")
+        });
         let run_args: Vec<String> = build_args
             .iter()
             .take_while(|arg| arg.as_str() != "--")
@@ -479,7 +480,7 @@ impl Run {
 
         let mut test = cargo();
         test.args(prefix);
-        if !fail_fast {
+        if !fail_fast_chosen {
             test.arg("--no-fail-fast");
         }
         test.arg(if options.allow_no_tests {

@@ -69,7 +69,7 @@ fn changed_files_map_to_their_packages() {
 }
 
 #[test]
-fn a_file_outside_every_package_selects_the_workspace() {
+fn files_outside_packages_select_the_workspace_except_markdown() {
     let root = Path::new("/w");
     assert_eq!(
         select(
@@ -83,16 +83,77 @@ fn a_file_outside_every_package_selects_the_workspace() {
     assert_eq!(
         select(
             root,
-            &files(&["docs/development.md"]),
+            &files(&["scripts/setup.sh"]),
             &packages(),
             no_functions
         ),
         Selection::Workspace
     );
-    assert_eq!(
-        select(root, &files(&["README.md"]), &packages(), no_functions),
-        Selection::Workspace
+    let nothing = select(
+        root,
+        &files(&["docs/development.md", "README.md"]),
+        &packages(),
+        no_functions,
     );
+    assert!(nothing.is_empty());
+    assert_eq!(nothing.filterset().unwrap(), "none()");
+}
+
+#[test]
+fn a_file_declared_read_by_tests_selects_those_tests() {
+    let root = Path::new("/w");
+    let mut packages = packages();
+    packages[1].read_by_tests.push((
+        lexical(Path::new("/w/crates/store/../../README.md")),
+        ["readme_examples".to_owned()].into(),
+    ));
+    let selected = select(
+        root,
+        &files(&["README.md", "docs/testing.md"]),
+        &packages,
+        no_functions,
+    );
+    assert_eq!(
+        selected,
+        tests(&[], &[], &[], &[("store", &["readme_examples"])])
+    );
+    assert_eq!(
+        selected.filterset().unwrap(),
+        "(package(=store) & (test(readme_examples)))"
+    );
+}
+
+#[test]
+fn packages_to_build_follow_reverse_dependencies_only_for_production_changes() {
+    let workspace = Workspace {
+        root: PathBuf::from("/w"),
+        packages: vec![
+            package("model", "/w/crates/model", &[]),
+            package("store", "/w/crates/store", &["model"]),
+            package("daemon", "/w/crates/daemon", &["store"]),
+            package("other", "/w/crates/other", &[]),
+        ],
+    };
+    let built = |selection: Selection| {
+        workspace
+            .packages_to_build(&selection)
+            .map(|set| set.into_iter().collect::<Vec<_>>())
+    };
+    assert_eq!(
+        built(tests(&["model"], &[], &[], &[])),
+        Some(vec!["daemon".into(), "model".into(), "store".into()])
+    );
+    assert_eq!(
+        built(tests(
+            &[],
+            &["store"],
+            &[("other", "reads")],
+            &[("model", &["a"])]
+        )),
+        Some(vec!["model".into(), "other".into(), "store".into()])
+    );
+    assert_eq!(built(tests(&[], &[], &[], &[])), Some(vec![]));
+    assert_eq!(built(Selection::Workspace), None);
 }
 
 #[test]
@@ -122,17 +183,6 @@ fn integration_test_changes_narrow_to_the_declared_binary() {
         .filterset()
         .unwrap(),
         "rdeps(=model) | (package(=store) & binary(=reads))"
-    );
-    // A shared test helper may be read by several of the package's
-    // binaries, and by no dependent.
-    assert_eq!(
-        select(
-            Path::new("/w"),
-            &files(&["crates/store/tests/common.rs"]),
-            &packages,
-            no_functions
-        ),
-        tests(&[], &["store"], &[], &[])
     );
     assert_eq!(
         select(
@@ -414,6 +464,7 @@ fn test_only_modules_select_their_package_without_dependents() {
     );
     write("core/src/moved/tests.rs", "fn unused() {}\n");
     write("core/src/elsewhere.rs", "fn shared() {}\n");
+    write("core/tests/support/helpers.rs", "pub fn helper() {}\n");
     git_ok(root, &["init", "-b", "master"]);
     git_ok(root, &["add", "."]);
     git_ok(
@@ -440,6 +491,8 @@ fn test_only_modules_select_their_package_without_dependents() {
         "core/src/tests.rs",
         "core/src/parse/tests.rs",
         "core/src/parse/tests/cases.rs",
+        // A shared helper of the package's integration tests.
+        "core/tests/support/helpers.rs",
     ] {
         assert_eq!(
             after_change(file),
