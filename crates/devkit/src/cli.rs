@@ -165,8 +165,8 @@ pub enum Bench {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
-    /// Metric changes against the previous quiet run on the same sample and
-    /// storage (default: the latest run).
+    /// Metric changes against the previous run on the same sample and
+    /// storage, with both runs' host load (default: the latest run).
     Compare { run: Option<i64> },
 }
 

@@ -140,10 +140,7 @@ pub(super) fn changed_tests(
 }
 
 /// Calls `visit` with every token, groups' contents included.
-pub(super) fn each_token(
-    tokens: proc_macro2::TokenStream,
-    visit: &mut impl FnMut(&proc_macro2::TokenTree),
-) {
+fn each_token(tokens: proc_macro2::TokenStream, visit: &mut impl FnMut(&proc_macro2::TokenTree)) {
     for token in tokens {
         visit(&token);
         if let proc_macro2::TokenTree::Group(group) = &token {

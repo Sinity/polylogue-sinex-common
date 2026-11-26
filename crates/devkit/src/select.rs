@@ -292,8 +292,9 @@ fn select(
 /// Whether `path` is compiled only into its package's own tests, so no
 /// dependent can see it: a file under the package's `tests/` directory, or a
 /// Rust module whose declaration, or an enclosing module's, carries
-/// `cfg(test)` (or the file says `#![cfg(test)]`). A module reached through
-/// `#[path]`, or any source naming the file in a string, is not recognised.
+/// `cfg(test)` (or the file says `#![cfg(test)]`). A file whose name a
+/// `#[path]` value or an `include!` names anywhere in the package is not
+/// recognised, since its includer may be production code.
 fn test_only(package: &Package, path: &Path) -> bool {
     if path.extension().is_none_or(|extension| extension != "rs") {
         return false;
@@ -397,20 +398,50 @@ fn cfg_test(attrs: &[syn::Attribute]) -> bool {
     })
 }
 
-/// Whether any Rust source of the package has a string literal ending in
-/// `file_name`, as `#[path = "..."]` and `include!("...")` do. `None` when a
-/// source cannot be read.
+/// Whether any Rust source of the package names `file_name` at the end of a
+/// `path = "..."` attribute value or in an `include!`, `include_str!` or
+/// `include_bytes!` argument. `None` when a source cannot be read.
 fn named_in_strings(directory: &Path, file_name: &str) -> Option<bool> {
+    use proc_macro2::{TokenStream, TokenTree};
+    fn names(literal: &TokenTree, file_name: &str) -> bool {
+        let TokenTree::Literal(literal) = literal else {
+            return false;
+        };
+        let text = literal.to_string();
+        text.contains('"')
+            && text
+                .trim_end_matches('#')
+                .trim_end_matches('"')
+                .ends_with(file_name)
+    }
+    fn any_literal(tokens: TokenStream, file_name: &str) -> bool {
+        tokens.into_iter().any(|token| match &token {
+            TokenTree::Group(group) => any_literal(group.stream(), file_name),
+            other => names(other, file_name),
+        })
+    }
+    fn walk(tokens: TokenStream, file_name: &str) -> bool {
+        let tokens: Vec<TokenTree> = tokens.into_iter().collect();
+        tokens.iter().enumerate().any(|(index, token)| match token {
+            TokenTree::Group(group) => walk(group.stream(), file_name),
+            TokenTree::Ident(ident) if ident == "path" => {
+                matches!(tokens.get(index + 1), Some(TokenTree::Punct(p)) if p.as_char() == '=')
+                    && tokens
+                        .get(index + 2)
+                        .is_some_and(|value| names(value, file_name))
+            }
+            TokenTree::Ident(ident)
+                if ident == "include" || ident == "include_str" || ident == "include_bytes" =>
+            {
+                matches!(tokens.get(index + 1), Some(TokenTree::Punct(p)) if p.as_char() == '!')
+                    && matches!(tokens.get(index + 2), Some(TokenTree::Group(group)) if any_literal(group.stream(), file_name))
+            }
+            _ => false,
+        })
+    }
     let mut found = false;
     functions::each_source(directory, &mut |tokens| {
-        functions::each_token(tokens, &mut |token| {
-            if let proc_macro2::TokenTree::Literal(literal) = token {
-                let text = literal.to_string();
-                if text.trim_end_matches('"').ends_with(file_name) && text.contains('"') {
-                    found = true;
-                }
-            }
-        });
+        found |= walk(tokens, file_name);
     })?;
     Some(found)
 }

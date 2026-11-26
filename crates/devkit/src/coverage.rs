@@ -176,7 +176,7 @@ fn report_args(args: &[String]) -> Result<Vec<String>, String> {
 }
 
 /// LLVM function regions use that function's file table, never the report's file order.
-pub fn regions(report: &Value) -> Result<Vec<Value>, String> {
+fn regions(report: &Value) -> Result<Vec<Value>, String> {
     let mut out = Vec::new();
     for data in report["data"].as_array().ok_or("coverage data missing")? {
         let functions = data["functions"]
