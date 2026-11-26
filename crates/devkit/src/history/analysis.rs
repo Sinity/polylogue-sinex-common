@@ -1,5 +1,6 @@
-//! Comparisons over recorded stages and tests. Native queue and resource costs stay with AgentCTL.
-use super::Store;
+//! Comparisons over recorded stages and tests. Queue wait and resource use
+//! belong to the job runner, linked through the recorded job ID.
+use super::{Store, outcomes};
 use rusqlite::params;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -12,9 +13,9 @@ impl Store {
             .filter(|run| run.project == project)
             .ok_or("run not found in this project")?;
         let mut header = self.conn.query_row(
-            "SELECT host,toolchain,agentctl_job,dirty FROM runs WHERE id=?1",
+            "SELECT host,toolchain,job_id,dirty FROM runs WHERE id=?1",
             [id],
-            |row| Ok(json!({"host":row.get::<_,Option<String>>(0)?,"toolchain":row.get::<_,Option<String>>(1)?,"agentctl_job":row.get::<_,Option<String>>(2)?,"dirty_hash":row.get::<_,Option<String>>(3)?})),
+            |row| Ok(json!({"host":row.get::<_,Option<String>>(0)?,"toolchain":row.get::<_,Option<String>>(1)?,"job_id":row.get::<_,Option<String>>(2)?,"dirty_hash":row.get::<_,Option<String>>(3)?})),
         ).map_err(|error| error.to_string())?;
         header["command"] = json!(observed.command);
         header["args"] = json!(observed.args);
@@ -32,11 +33,25 @@ impl Store {
         ).map_err(|error| error.to_string())?;
         let stages = statement.query_map([id], |row| Ok(json!({"name":row.get::<_,String>(0)?,"duration_ms":row.get::<_,i64>(1)?,"ok":row.get::<_,bool>(2)?})))
             .map_err(|error| error.to_string())?.collect::<rusqlite::Result<Vec<_>>>().map_err(|error| error.to_string())?;
-        let mut statement = self.conn.prepare(
-            "SELECT binary,name,status,duration_ms FROM tests WHERE run=?1 ORDER BY duration_ms DESC,binary,name",
-        ).map_err(|error| error.to_string())?;
-        let tests = statement.query_map([id], |row| Ok(json!({"binary":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,"status":row.get::<_,String>(2)?,"duration_ms":row.get::<_,i64>(3)?})))
-            .map_err(|error| error.to_string())?.collect::<rusqlite::Result<Vec<_>>>().map_err(|error| error.to_string())?;
+        let names = outcomes::Names::load(&self.conn).map_err(|error| error.to_string())?;
+        let mut tests: Vec<(i64, &str, &str, &str)> = self
+            .outcomes(id)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|test| {
+                (
+                    test.duration_ms,
+                    names.binary(test.binary),
+                    names.name(test.name),
+                    test.status,
+                )
+            })
+            .collect();
+        tests.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| (a.1, a.2).cmp(&(b.1, b.2))));
+        let tests: Vec<Value> = tests
+            .into_iter()
+            .map(|(duration, binary, name, status)| json!({"binary":binary,"name":name,"status":status,"duration_ms":duration}))
+            .collect();
         let counted = tests
             .iter()
             .filter(|test| matches!(test["status"].as_str(), Some("passed" | "failed" | "flaky")))
@@ -47,16 +62,16 @@ impl Store {
             .count();
         let pass_rate = (counted > 0).then(|| 100.0 * passed as f64 / counted as f64);
         let mut statement = self.conn.prepare(
-            "SELECT other.id,other.project,other.command,other.agentctl_job,
+            "SELECT other.id,other.project,other.command,other.job_id,
                     min(target.started_ms+target.duration_ms,other.started_ms+other.duration_ms)-max(target.started_ms,other.started_ms)
              FROM runs target JOIN runs other ON other.id!=target.id AND other.host=target.host
              WHERE target.id=?1 AND other.started_ms < target.started_ms+target.duration_ms
                AND target.started_ms < other.started_ms+other.duration_ms ORDER BY other.id",
         ).map_err(|error| error.to_string())?;
-        let overlaps = statement.query_map([id], |row| Ok(json!({"run":row.get::<_,i64>(0)?,"project":row.get::<_,String>(1)?,"command":row.get::<_,String>(2)?,"agentctl_job":row.get::<_,Option<String>>(3)?,"overlap_ms":row.get::<_,i64>(4)?})))
+        let overlaps = statement.query_map([id], |row| Ok(json!({"run":row.get::<_,i64>(0)?,"project":row.get::<_,String>(1)?,"command":row.get::<_,String>(2)?,"job_id":row.get::<_,Option<String>>(3)?,"overlap_ms":row.get::<_,i64>(4)?})))
             .map_err(|error| error.to_string())?.collect::<rusqlite::Result<Vec<_>>>().map_err(|error| error.to_string())?;
         Ok(
-            json!({"run":id,"header":header,"stages":stages,"tests_slowest_first":tests,"pass_rate_percent":pass_rate,"overlaps":overlaps,"queue_ms":null,"resources":null,"resource_note":"native job timing and resources belong to AgentCTL; overlap does not establish contention"}),
+            json!({"run":id,"header":header,"stages":stages,"tests_slowest_first":tests,"pass_rate_percent":pass_rate,"overlaps":overlaps,"queue_ms":null,"resources":null,"resource_note":"queue wait and resource use belong to the job runner named by job_id; overlap does not establish contention"}),
         )
     }
 

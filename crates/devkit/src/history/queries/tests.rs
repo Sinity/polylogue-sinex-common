@@ -14,13 +14,7 @@ fn run(store: &Store, id: i64, project: &str, checkout: &str, tree: Option<&str>
 }
 
 fn test(store: &Store, id: i64, binary: &str, name: &str, status: &str) {
-    store
-        .conn
-        .execute(
-            "INSERT INTO tests (run,binary,name,status,duration_ms) VALUES (?1,?2,?3,?4,1)",
-            params![id, binary, name, status],
-        )
-        .unwrap();
+    crate::history::tests::record_tests(store, id, &[(binary, name, status, 1)]);
 }
 
 fn selected() -> Vec<String> {

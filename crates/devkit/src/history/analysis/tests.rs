@@ -51,9 +51,35 @@ fn comparisons_preserve_scope_and_unknowns() {
 #[test]
 fn pass_rates_stages_and_overlap_do_not_sum_parallel_test_time() {
     let s = store();
-    s.conn.execute_batch("INSERT INTO tests VALUES(1,'suite','a','passed',90,NULL),(1,'suite','b','failed',80,NULL),(1,'suite','c','filtered',0,NULL);INSERT INTO stages VALUES(1,0,'database',10,1),(1,1,'test',90,1);").unwrap();
+    crate::history::tests::record_tests(
+        &s,
+        1,
+        &[
+            ("suite", "a", "passed", 90),
+            ("suite", "b", "failed", 80),
+            ("suite", "c", "filtered", 0),
+        ],
+    );
+    s.conn
+        .execute_batch("INSERT INTO stages VALUES(1,0,'database',10,1),(1,1,'test',90,1);")
+        .unwrap();
     let report = s.explain("demo", 1).unwrap();
     assert_eq!(report["pass_rate_percent"], 50.0);
+    let slowest: Vec<_> = report["tests_slowest_first"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|test| {
+            (
+                test["name"].as_str().unwrap(),
+                test["status"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        slowest,
+        [("a", "passed"), ("b", "failed"), ("c", "filtered")]
+    );
     assert_eq!(report["stages"][0]["name"], "database");
     assert_eq!(report["overlaps"][0]["overlap_ms"], 50);
     assert!(report["queue_ms"].is_null());

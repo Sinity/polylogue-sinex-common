@@ -145,7 +145,7 @@ fn materializes_once_cuts_growing_files_and_grows_them_back() {
 }
 
 #[test]
-fn compares_only_quiet_runs_on_the_same_sample() {
+fn compares_with_the_previous_run_and_reports_both_loads() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open_at(&dir.path().join("h.db")).unwrap();
     let quiet_reading = HostLoad {
@@ -202,22 +202,28 @@ fn compares_only_quiet_runs_on_the_same_sample() {
     let cmp = compare(&store, b).unwrap();
     assert_eq!(cmp["against"], json!(a));
     assert!((cmp["changes"]["seconds"]["change"].as_f64().unwrap() + 0.2).abs() < 1e-9);
-    assert_eq!(compare(&store, c).unwrap()["status"], "not_compared");
     assert_eq!(cmp["status"], "compared");
-    assert!(cmp.get("reliable").is_none());
-    // A busy run is never the baseline.
-    let d = record(
+    // A busy host is recorded beside the comparison, not a reason to skip it.
+    let busy = compare(&store, c).unwrap();
+    assert_eq!(busy["against"], json!(b));
+    assert_eq!(busy["load_checks_passed"], false);
+    assert_eq!(busy["against_load_checks_passed"], true);
+    assert_eq!(busy["changes"]["seconds"]["change"], 2.75);
+    let other_sample = record(
         &store,
         out,
         "p",
         "build",
-        "s1",
+        "s2",
         out,
         &quiet,
         &json!({"seconds": 70.0}),
     )
     .unwrap();
-    assert_eq!(compare(&store, d).unwrap()["against"], b);
+    assert_eq!(
+        compare(&store, other_sample).unwrap()["status"],
+        "no_previous_run"
+    );
 }
 
 #[test]
@@ -291,7 +297,7 @@ fn incomplete_source_observation_keeps_bench_revision_unknown() {
     let observed = crate::Tree::observe(root);
     assert!(observed.head.is_some());
     assert!(observed.observation_error.is_some());
-    let store = Store::open_at(&root.join("history.db")).unwrap();
+    let store = Store::open_at(&root.join("runs.db")).unwrap();
     let load = load::LoadInterval::new(HostLoad {
         load1: None,
         cpus: None,

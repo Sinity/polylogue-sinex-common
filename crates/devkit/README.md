@@ -30,11 +30,16 @@ separately before checking and testing every feature together.
 A run is one `xtask` invocation. It adds steps (`cargo` commands with
 captured diagnostics, a nextest run with each test's outcome, the product's
 own checks), prints a short summary and records itself in one machine-wide
-SQLite store at `$XDG_STATE_HOME/devkit/history.db`. History is data, never a
-gate: a store that cannot be opened is reported and the run continues.
+SQLite store at `$XDG_STATE_HOME/devkit/runs.db` (`XDG_STATE_HOME` defaults
+to `~/.local/state`, and setting it moves the store). History is data, never
+a gate: a store that cannot be opened is reported and the run continues.
 
-Passing tests keep no output and each diagnostic text is stored once, so the
-store stays small without deleting anything.
+The store stays small without deleting anything: a run's passed, ignored and
+filtered tests are one compressed set of interned test IDs with their
+durations, only failed, flaky and skipped tests are rows with their output,
+and each test name, binary ID and diagnostic text is stored once. A thousand
+runs of three thousand passing tests take under 20 MB. Run IDs are never
+reused. The store has one format; `history.rs` documents its tables.
 
 A run records its process ID, the process's start time and the kernel's
 boot ID. A run still marked running reads as `interrupted` once the machine
@@ -57,7 +62,13 @@ Nested Cargo commands use `devkit::cargo_command()`, which drops the parent's
 invalidate build-script fingerprints.
 
 `Run::nextest` passes Cargo's package selection unchanged to both the build
-and execution commands. Use `-p <package>` to compile that package's test
+and execution commands. Options that only running takes (`--partition`,
+`--retries`, `--stress-count`, `--test-threads`, fail-fast and reporter
+options) go to the run and never to its `--no-run` build. Every selected test
+runs unless the arguments ask for `--fail-fast` or `--max-fail`.
+`Nextest::junit` names a path the run's JUnit report is copied to after the
+run, also when tests fail; a changed-file selection that selects nothing
+builds and reports nothing. Use `-p <package>` to compile that package's test
 targets and its dependencies. A nextest `-E 'package(...)'` filter selects
 execution within the Cargo build scope; it does not replace `-p`. A product
 keeps its full-workspace defaults for `check` and unscoped `test` runs, and
@@ -87,21 +98,49 @@ the original-lock backups remain available for unlinking.
 `Run::nextest` accepts `--changed` (for example `cargo xtask test
 --changed`); `xtask changed` prints the same selection as a nextest
 filterset. The diff is taken against the merge base with `origin/master`, or
-`--changed-base=<ref>`, and includes committed, staged, unstaged and
-untracked files.
+with `--base REF` (also `--base=REF`, which implies `--changed`), and
+includes committed, staged, unstaged and untracked files. Each changed file
+selects by the narrowest rule that holds for it:
 
-- Production changes select the owning packages and their reverse
-  dependencies through nextest's `rdeps`.
-- Changes confined to test functions select those tests within their package:
-  every changed line must be inside a test in both versions, and the test's
-  name must have no other use in the package's Rust sources. Calls between
-  tests and partial overlaps keep package scope.
-- A change to a Cargo-declared integration test file selects that package's
-  test binary.
-- Shared helpers and other package files select the package and its reverse
-  dependencies; files outside packages select the workspace, except Markdown.
-- Explicit `-E` filtersets intersect the selection. An unchanged tree succeeds
-  without building tests.
+- `Cargo.toml`, `Cargo.lock`, `flake.nix`, `flake.lock`, `.config/` and
+  `.cargo/` select the workspace.
+- A file a package declares as read by some of its tests selects those
+  tests by name:
+
+  ```toml
+  [package.metadata.devkit.read-by-tests]
+  "../../README.md" = ["readme_examples_run"]
+  ```
+
+  Paths are relative to the package directory; names match as nextest's
+  `test(name)`.
+- Other Markdown outside packages selects nothing; any other file outside
+  packages selects the workspace.
+- A Cargo-declared integration-test file selects that package's test binary.
+- A change confined to test functions selects those tests within their
+  package: every changed line must be inside a test in both versions, and
+  the test's name must have no other use in the package's Rust sources.
+  Calls between tests and partial overlaps fall to the next rule.
+- A change to test-only source selects the package's own tests and not its
+  reverse dependencies, which cannot see it: a file under the package's
+  `tests/` directory, or a module whose declaration (`#[cfg(test)] mod
+  tests;`), or an enclosing module's, carries `cfg(test)` or
+  `cfg(all(test, ...))`, or that says `#![cfg(test)]` itself. A file whose name
+  ends a `#[path = "..."]` value or an `include!`, `include_str!` or
+  `include_bytes!` argument anywhere in the package falls to the next rule.
+- Any other package file selects the package and its reverse dependencies
+  through nextest's `rdeps`.
+
+Explicit `-E` filtersets intersect the selection. A selection of nothing
+succeeds without building tests.
+
+`devkit::select::Workspace::read(root)` reads the members and their
+dependencies on each other; `changed(base)` returns a `Selection`, which is
+`Workspace` or `Tests` with the packages selected with their dependents, the
+packages selected alone, the binaries and the named tests.
+`packages_to_build(&selection)` gives the packages whose test targets must be
+built to run it (`None` for all), so a caller can pass them to Cargo as
+`-p`; `filterset()` gives the nextest expression.
 
 ## History
 
@@ -127,7 +166,7 @@ records why in `observation_error` and has no tree.
 | `durations COMMAND [--args-json ARGS] [--stage NAME]` | minimum, median and maximum over passed runs of the command with exactly these arguments (default none), or over the successful stage. Every selected run is listed; one left out of the summary says why (`run not passed`, `stage not recorded`, `stage failed`, `duration not recorded`) |
 | `diagnostic-groups [--level error\|warning]` | compiler messages grouped by text across worktrees, each occurrence with its run, checkout, HEAD, command, package and location |
 | `compare BEFORE AFTER` | two passed runs with identical command, arguments, host and toolchain: checkout and Git identity, signed duration changes per run and stage, and slower, faster or stable trends. A stage on one side only shows its duration and an unknown change; a percentage against zero stays null; different scopes or a source observation error are refused |
-| `explain RUN` | every test by duration, pass rate over passed, failed and flaky outcomes, stages, and the recorded runs that overlapped it on the same host. Parallel test durations are never added into wall time, and overlap alone is not reported as contention. The job runner's queue wait is linked through the recorded `DEVKIT_JOB_ID`, not measured here |
+| `explain RUN` | every test by duration, pass rate over passed, failed and flaky outcomes, stages, and the recorded runs that overlapped it on the same host. Parallel test durations are never added into wall time, and overlap alone is not reported as contention. The job runner's queue wait is linked through the `job_id` recorded from `DEVKIT_JOB_ID`, not measured here |
 | `compare-days DAY DAY` | this checkout's runs on two UTC days, grouped by exact command, arguments, host and toolchain: run and pass counts and mean passed-run durations. A group present on one day only keeps that day's figures with null changes; failed source observations and invalid durations are left out of means |
 
 Load and cache state at the time of a run are not recorded, so durations are
@@ -255,9 +294,11 @@ server and a unique subject prefix, or a server of its own when run outside
 
 **Bench** (`bench` feature). Draws a stratified sample of a corpus, written
 down in a manifest; records each run with its metrics and the host load,
-sampled every second; and compares a run with the previous quiet run on the
-same sample and storage. A run is quiet when every load reading was below the
-thresholds and none was more than two seconds late. Products report the
+sampled every second; and compares a run with the previous run on the same
+sample and storage, reporting both runs' load beside the changes. Whether
+every load reading was below the thresholds and none more than two seconds
+late is recorded as `load_checks_passed`; it does not decide whether runs are
+compared. Products report the
 hardware-independent figures (bytes, syncs and rows per input, stage
 utilisation) beside absolute rates, as paired runs. `linear_estimate` scales a
 sample's time to the whole corpus by input bytes and labels itself
@@ -265,9 +306,10 @@ uncalibrated.
 
 **Coverage.** Runs cargo-llvm-cov through `Run::nextest` with the caller's
 package and test selection, separate instrumentation output, full LLVM JSON
-and an optional HTML or LCOV report. It checks weighted line totals, report
-existence and a caller-chosen threshold, and records the exact selection and
-the line regions mapped through each function's file table. Build
+and an optional HTML or LCOV report. It reports llvm-cov's own line total,
+checks that each report exists, passes a caller-chosen line threshold to
+`cargo llvm-cov report --fail-under-lines`, and records the exact selection
+and the line regions mapped through each function's file table. Build
 diagnostics, stages and test outcomes enter the same history as ordinary
 runs. An empty test selection fails. The instrumentation directory is created
 exclusively before any build, so concurrent coverage invocations cannot share

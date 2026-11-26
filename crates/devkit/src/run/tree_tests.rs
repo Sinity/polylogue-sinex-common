@@ -149,7 +149,7 @@ fn untracked_symlink_target_and_raw_filename_are_observed_without_following_the_
 fn a_changed_checkout_invalidates_recorded_tree_identity_at_finish() {
     let repo = repository();
     let database = tempfile::tempdir().unwrap();
-    let path = database.path().join("history.db");
+    let path = database.path().join("runs.db");
     let store = crate::history::Store::open_at(&path).unwrap();
     let mut run = super::Run::unrecorded("demo", "test", &[]);
     run.root = repo.path().to_path_buf();

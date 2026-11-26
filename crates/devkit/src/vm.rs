@@ -14,7 +14,7 @@ pub struct Vm {
     #[arg(long)]
     pub output: PathBuf,
 }
-pub fn select(requested: &[String], exported: &[String]) -> Result<Vec<String>, String> {
+fn select(requested: &[String], exported: &[String]) -> Result<Vec<String>, String> {
     if requested.is_empty() {
         return Err("no VM scenarios requested".into());
     }

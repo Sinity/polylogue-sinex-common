@@ -202,6 +202,69 @@ pub struct Nextest {
     /// Succeed when the arguments select no tests. By default that fails,
     /// so a typo in a filter cannot pass silently.
     pub allow_no_tests: bool,
+    /// Where to copy the run's JUnit report, also when tests fail.
+    pub junit: Option<PathBuf>,
+}
+
+/// Nextest options that apply to running tests and that its `--no-run`
+/// build refuses or ignores, with whether each takes a value.
+const RUN_OPTIONS: &[(&str, bool)] = &[
+    ("--partition", true),
+    ("-j", true),
+    ("--test-threads", true),
+    ("--retries", true),
+    ("--flaky-result", true),
+    ("--fail-fast", false),
+    ("--no-fail-fast", false),
+    ("--max-fail", true),
+    ("--debugger", true),
+    ("--tracer", true),
+    ("--no-tests", true),
+    ("--no-capture", false),
+    ("--nocapture", false),
+    ("--stress-count", true),
+    ("--stress-duration", true),
+    ("--failure-output", true),
+    ("--success-output", true),
+    ("--status-level", true),
+    ("--final-status-level", true),
+    ("--no-output-indent", false),
+    ("--show-progress", true),
+    ("--hide-progress-bar", false),
+    ("--no-input-handler", false),
+    ("--max-progress-running", true),
+    ("--message-format", true),
+    ("--message-format-version", true),
+];
+
+/// Splits nextest arguments into those the build takes and those only the
+/// run takes. Arguments after `--` go to both, as nextest passes them on.
+fn split_run_options(args: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut build = Vec::new();
+    let mut run = Vec::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            build.push(arg.clone());
+            build.extend(args.cloned());
+            break;
+        }
+        let option = RUN_OPTIONS.iter().find(|(name, _)| {
+            arg == name
+                || arg.strip_prefix(name).is_some_and(|rest| {
+                    rest.starts_with('=') || (*name == "-j" && !rest.is_empty())
+                })
+        });
+        match option {
+            Some((name, true)) if arg == name => {
+                run.push(arg.clone());
+                run.extend(args.next().cloned());
+            }
+            Some(_) => run.push(arg.clone()),
+            None => build.push(arg.clone()),
+        }
+    }
+    (build, run)
 }
 
 /// One xtask invocation: its steps, test outcomes and diagnostics.
@@ -334,8 +397,12 @@ impl Run {
     }
 
     /// Builds the tests (stage `<name> build`), then runs them under nextest
-    /// (stage `<name>`), keeping each test's outcome. Every selected test runs:
-    /// there is no fail-fast, and selecting no tests fails unless allowed.
+    /// (stage `<name>`), keeping each test's outcome. Every selected test runs
+    /// unless the arguments ask for `--fail-fast` or `--max-fail`, and
+    /// selecting no tests fails unless allowed. Options that only the run
+    /// takes (partition, retries, stress, threads, reporter) stay out of the
+    /// build; a changed-file selection that selects nothing succeeds without
+    /// building.
     pub fn nextest(&mut self, name: &str, options: &Nextest) -> Result {
         self.nextest_with(name, options, crate::cargo_command, &["nextest", "run"])
     }
@@ -383,7 +450,18 @@ impl Run {
             .map_err(|e| format!("{}: {e}", config.display()))?;
             Ok((temp, state, env, junit, config))
         })?;
-        let args: Vec<&str> = selected_args.iter().map(String::as_str).collect();
+        let (build_args, run_args) = split_run_options(&selected_args);
+        // The caller's own fail-fast choice, either way, replaces devkit's.
+        let fail_fast_chosen = run_args.iter().any(|arg| {
+            arg == "--fail-fast" || arg == "--no-fail-fast" || arg.starts_with("--max-fail")
+        });
+        let run_args: Vec<String> = build_args
+            .iter()
+            .take_while(|arg| arg.as_str() != "--")
+            .chain(&run_args)
+            .chain(build_args.iter().skip_while(|arg| arg.as_str() != "--"))
+            .cloned()
+            .collect();
 
         let mut build = cargo();
         build
@@ -393,7 +471,7 @@ impl Run {
                 "--cargo-message-format",
                 "json-diagnostic-rendered-ansi",
             ])
-            .args(&args)
+            .args(&build_args)
             .envs(env.iter().cloned());
         self.step(&format!("{name} build"), |run| {
             build.current_dir(&run.root);
@@ -401,18 +479,20 @@ impl Run {
         })?;
 
         let mut test = cargo();
-        test.args(prefix)
-            .arg("--no-fail-fast")
-            .arg(if options.allow_no_tests {
-                "--no-tests=pass"
-            } else {
-                "--no-tests=fail"
-            })
-            .arg("--tool-config-file")
-            .arg(format!("devkit:{}", config.display()))
-            .args(&args)
-            .envs(env.iter().cloned())
-            .env("XDG_STATE_HOME", &state);
+        test.args(prefix);
+        if !fail_fast_chosen {
+            test.arg("--no-fail-fast");
+        }
+        test.arg(if options.allow_no_tests {
+            "--no-tests=pass"
+        } else {
+            "--no-tests=fail"
+        })
+        .arg("--tool-config-file")
+        .arg(format!("devkit:{}", config.display()))
+        .args(&run_args)
+        .envs(env.iter().cloned())
+        .env("XDG_STATE_HOME", &state);
         let result = self.step(name, |run| {
             test.current_dir(&run.root);
             status(&mut test)
@@ -420,6 +500,9 @@ impl Run {
         let report = self.step(&format!("{name} report"), |run| {
             let xml = fs::read_to_string(&junit)
                 .map_err(|error| format!("no test report at {}: {error}", junit.display()))?;
+            if let Some(copy) = &options.junit {
+                fs::write(copy, &xml).map_err(|error| format!("{}: {error}", copy.display()))?;
+            }
             let outcomes = junit::outcomes(&xml)
                 .map_err(|error| format!("invalid test report at {}: {error}", junit.display()))?;
             run.tests.extend(outcomes);
@@ -658,8 +741,8 @@ pub(crate) fn strip_ansi(text: &str) -> String {
     out
 }
 
-/// Owns only its exclusive child, never the inherited job scratch parent.
-/// AgentCTL can remove that child after native cancellation without Rust Drop.
+/// Owns only its exclusive child, never the inherited job scratch parent,
+/// which the job runner removes after the job, even one killed before Drop.
 struct RunTemp {
     directory: PathBuf,
     visible: PathBuf,
@@ -671,7 +754,7 @@ impl RunTemp {
     fn new() -> Result<Self> {
         Self::with_roots(
             &env::temp_dir(),
-            env::var_os("AGENTCTL_SCRATCH").as_deref().map(Path::new),
+            env::var_os("DEVKIT_SCRATCH").as_deref().map(Path::new),
         )
     }
 
@@ -682,7 +765,7 @@ impl RunTemp {
             let metadata = fs::symlink_metadata(job)
                 .map_err(|error| format!("job scratch {}: {error}", job.display()))?;
             if !job.is_absolute() || !metadata.is_dir() || metadata.file_type().is_symlink() {
-                return Err("AGENTCTL_SCRATCH must name an existing absolute directory".into());
+                return Err("DEVKIT_SCRATCH must name an existing absolute directory".into());
             }
             job
         } else if Path::new("/dev/shm").is_dir() {

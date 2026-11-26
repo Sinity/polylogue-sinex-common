@@ -9,8 +9,8 @@
 //! once into a bench directory, and reused until the manifest changes.
 //!
 //! A bench run records the host load, sampled every second, with its
-//! metrics. [`compare`] shows metric changes against an earlier quiet run on
-//! the same sample and storage. [`linear_estimate`] scales a sample's time to
+//! metrics. [`compare`] shows metric changes against the previous run on
+//! the same sample and storage, with both runs' load beside them. [`linear_estimate`] scales a sample's time to
 //! the whole corpus by input bytes, and says so.
 use crate::history::Store;
 use rusqlite::{OptionalExtension, params};
@@ -590,8 +590,9 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BenchRun> {
     })
 }
 
-/// Metric changes against the latest earlier quiet run on the same sample and
-/// storage. A quiet host makes the numbers comparable; it does not say what
+/// Metric changes against the latest earlier run on the same sample and
+/// storage. Both runs' host load is reported beside the changes as data;
+/// it does not decide whether runs are compared, and it does not say what
 /// caused a change.
 pub fn compare(store: &Store, run: i64) -> rusqlite::Result<Value> {
     let conn = store.connection();
@@ -605,18 +606,11 @@ pub fn compare(store: &Store, run: i64) -> rusqlite::Result<Value> {
     else {
         return Ok(json!({"error": format!("no bench run {run}")}));
     };
-    if !this.load_checks_passed {
-        return Ok(
-            json!({"run": run, "status": "not_compared", "load_checks_passed": false,
-            "load": this.load,
-            "note": "The host was busy during this run, or its load could not be read."}),
-        );
-    }
     let before = conn
         .query_row(
             &format!(
                 "{select} WHERE project = ?1 AND bench = ?2 AND sample = ?3 AND storage = ?4
-                 AND quiet = 1 AND id < ?5 ORDER BY id DESC LIMIT 1"
+                 AND id < ?5 ORDER BY id DESC LIMIT 1"
             ),
             params![this.project, this.bench, this.sample, this.storage, run],
             row,
@@ -624,9 +618,9 @@ pub fn compare(store: &Store, run: i64) -> rusqlite::Result<Value> {
         .optional()?;
     let Some(before) = before else {
         return Ok(
-            json!({"run": run, "status": "no_previous_run", "load_checks_passed": true,
-            "load": this.load,
-            "note": "No earlier quiet run on this sample and storage."}),
+            json!({"run": run, "status": "no_previous_run", "load": this.load,
+            "load_checks_passed": this.load_checks_passed,
+            "note": "No earlier run on this sample and storage."}),
         );
     };
     let old = flatten(&before.metrics);
@@ -642,7 +636,8 @@ pub fn compare(store: &Store, run: i64) -> rusqlite::Result<Value> {
     }
     Ok(
         json!({"run": run, "against": before.id, "status": "compared",
-        "load_checks_passed": true, "load": this.load, "against_load": before.load,
+        "load": this.load, "load_checks_passed": this.load_checks_passed,
+        "against_load": before.load, "against_load_checks_passed": before.load_checks_passed,
         "head": this.head, "against_head": before.head, "changes": changes}),
     )
 }
