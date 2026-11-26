@@ -160,14 +160,14 @@ fn query_output(value: serde_json::Value, json: bool) -> Result<(), String> {
 #[cfg(feature = "bench")]
 #[derive(Debug, clap::Subcommand)]
 pub enum Bench {
-    /// Recent bench runs of this project, newest first.
+    /// Recent bench results of this project, newest first, one line each.
     Runs {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
-    /// Metric changes against the previous run on the same sample and
-    /// storage, with both runs' host load (default: the latest run).
-    Compare { run: Option<i64> },
+    /// One recorded result in full: its repetitions, their unit accounting
+    /// and host load, and the comparison (default: the latest result).
+    Show { result: Option<i64> },
 }
 
 /// Runs a [`Bench`] command; a project embeds [`Bench`] in its own `bench`
@@ -176,27 +176,34 @@ pub enum Bench {
 pub fn bench(project: &str, command: Bench) -> ExitCode {
     let result = match command {
         Bench::Runs { limit } => with_store(|store| {
-            for r in crate::bench::runs(store, project, limit).map_err(|e| e.to_string())? {
+            for r in crate::bench::results(store, project, limit).map_err(|e| e.to_string())? {
                 println!(
                     "{}",
                     json!({"id": r.id, "bench": r.bench, "sample": r.sample,
-                           "storage": r.storage, "head": r.head, "load_checks_passed": r.load_checks_passed,
-                           "load": r.load, "metrics": r.metrics})
+                           "storage": r.storage, "head": r.head, "recorded_ms": r.recorded_ms,
+                           "headline": r.result.get("headline")})
                 );
             }
             Ok(())
         }),
-        Bench::Compare { run } => with_store(|store| {
-            let id = match run {
-                Some(id) => id,
-                None => crate::bench::runs(store, project, 1)
+        Bench::Show { result } => with_store(|store| {
+            let found = match result {
+                Some(id) => crate::bench::result(store, project, id).map_err(|e| e.to_string())?,
+                None => crate::bench::results(store, project, 1)
                     .map_err(|e| e.to_string())?
-                    .first()
-                    .map(|r| r.id)
-                    .ok_or("no bench runs recorded")?,
-            };
-            let out = crate::bench::compare(store, id).map_err(|e| e.to_string())?;
-            println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+                    .into_iter()
+                    .next(),
+            }
+            .ok_or("no such bench result")?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "id": found.id, "bench": found.bench, "sample": found.sample,
+                    "storage": found.storage, "head": found.head,
+                    "recorded_ms": found.recorded_ms, "result": found.result,
+                }))
+                .unwrap_or_default()
+            );
             Ok(())
         }),
     };
