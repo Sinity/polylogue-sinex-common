@@ -5,6 +5,10 @@ use rusqlite::params;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// A test at one Git tree and uncommitted-changes hash: tree, dirty hash,
+/// binary ID, name ID.
+type TestAtTree = (String, Option<String>, i64, i64);
+
 /// A run header as the cross-run queries report it; `status` is as recorded.
 struct ScopeRun {
     id: i64,
@@ -44,8 +48,7 @@ impl Store {
         }
         // Only a test that failed somewhere can be intermittent, and only
         // runs at the tree it failed at need their sets read.
-        let mut candidates: BTreeMap<(String, Option<String>, i64, i64), Vec<(i64, &'static str)>> =
-            BTreeMap::new();
+        let mut candidates: BTreeMap<TestAtTree, Vec<(i64, &'static str)>> = BTreeMap::new();
         {
             let mut statement = self.conn.prepare(
                 "SELECT t.run, t.binary, t.name FROM test_results t JOIN runs r ON r.id = t.run
