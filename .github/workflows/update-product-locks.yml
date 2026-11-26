@@ -73,8 +73,12 @@ jobs:
           done
           echo "Sinex master ${sinex:0:9} pins polylogue-sinex-common ${common:0:9}; Polylogue resolves ${current:0:9}"
           order=$(gh api "repos/Sinity/polylogue-sinex-common/compare/$current...$common" --jq .status)
-          if [ "$order" != ahead ]; then
-            echo "Sinex master's commit is $order relative to Polylogue's; Polylogue stays where it is"
+          if [ "$order" = identical ]; then
+            echo "Polylogue already resolves the commit Sinex master pins; nothing to move"
+            echo "move=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          elif [ "$order" != ahead ]; then
+            echo "the commit Sinex master pins is not newer than Polylogue's (compare: $order); Polylogue stays where it is"
             echo "move=false" >>"$GITHUB_OUTPUT"
             exit 0
           fi
