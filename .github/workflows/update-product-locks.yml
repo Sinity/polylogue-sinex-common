@@ -104,10 +104,18 @@ jobs:
               | select(((.source // "") | split("#")[0]) == "git+https://github.com/Sinity/polylogue-sinex-common?branch=master")
               | .name] | unique | .[]' <<<"$metadata")
             [ "${#crates[@]}" -gt 0 ] || continue
+            locks+=("$lock")
+            # `cargo update --precise` re-resolves the selected crates' registry
+            # dependencies even at the commit already pinned, and can then pick
+            # other versions of them; a lock already at the commit is left alone.
+            pinned=$(grep -oE 'git\+https://github.com/Sinity/polylogue-sinex-common\?branch=master#[0-9a-f]{40}' "$lock" | cut -d'#' -f2 | sort -u)
+            if [ "$pinned" = "$COMMON_COMMIT" ]; then
+              echo "$lock already pins ${COMMON_COMMIT:0:9}"
+              continue
+            fi
             args=()
             for crate in "${crates[@]}"; do args+=(-p "$crate"); done
             cargo update --manifest-path "$manifest" "${args[@]}" --precise "$COMMON_COMMIT"
-            locks+=("$lock")
           done < <(git ls-files -z -- Cargo.lock '**/Cargo.lock')
           if [ "${#locks[@]}" -eq 0 ]; then
             echo "no workspace follows polylogue-sinex-common's master branch" >&2
