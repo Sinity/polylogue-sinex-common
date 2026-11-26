@@ -1,10 +1,16 @@
-# Opens or updates a pull request in Sinex that moves its Cargo.lock to the
-# newest commit of this repository's master branch.
+# Opens or updates the pull request in each product that moves it to newer
+# polylogue-sinex-common commits, on the product's `update-polylogue-sinex-common`
+# branch.
 #
-# Polylogue is not updated here: it pins Sinex by revision, and that Sinex
-# revision's own common dependencies must resolve against the same common
-# commit. Polylogue moves its Sinex revision and its common lock together,
-# by hand, after Sinex has adopted the common commit (see README.md).
+# Sinex moves every workspace lock to this repository's newest master commit.
+#
+# Polylogue pins Sinex by revision, and one Cargo.lock resolves Sinex's common
+# dependencies and Polylogue's own to the same common commit. So Polylogue
+# moves only once Sinex's master has adopted a newer common commit: its Sinex
+# revision moves to Sinex's master and its common lock to the commit that
+# master pins, in one pull request. Sinex's `Update Polylogue` workflow starts
+# this workflow when Sinex's master lock changes; a push here or a manual run
+# also moves Polylogue when Sinex has adopted a commit it has not.
 #
 # Needs the repository secret COMMON_BUMP_TOKEN: a fine-grained token for
 # Sinity/polylogue and Sinity/sinex with Contents and Pull requests set to
@@ -31,7 +37,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        product: [sinex]
+        product: [sinex, polylogue]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -46,11 +52,48 @@ jobs:
             status=$?
             if [ "$status" -ne 2 ]; then exit "$status"; fi
           fi
-      - name: Move shared crates in every workspace lock to this commit
+      - name: Choose the commits to move to
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCT: ${{ matrix.product }}
+        run: |
+          if [ "$PRODUCT" = sinex ]; then
+            echo "common=$GITHUB_SHA" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          pinned() {
+            grep -oE 'git\+https://github.com/Sinity/polylogue-sinex-common\?branch=master#[0-9a-f]{40}' | cut -d'#' -f2 | sort -u
+          }
+          sinex=$(git ls-remote --exit-code https://github.com/Sinity/sinex refs/heads/master | cut -f1)
+          common=$(curl -sSfL "https://raw.githubusercontent.com/Sinity/sinex/$sinex/Cargo.lock" | pinned)
+          current=$(pinned <Cargo.lock)
+          for commit in "$common" "$current"; do
+            [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo "a lock pins polylogue-sinex-common at more than one commit: $commit" >&2; exit 1; }
+          done
+          echo "Sinex master ${sinex:0:9} pins polylogue-sinex-common ${common:0:9}; Polylogue resolves ${current:0:9}"
+          order=$(gh api "repos/Sinity/polylogue-sinex-common/compare/$current...$common" --jq .status)
+          if [ "$order" = identical ]; then
+            echo "Polylogue already resolves the commit Sinex master pins; nothing to move"
+            echo "move=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          elif [ "$order" != ahead ]; then
+            echo "the commit Sinex master pins is not newer than Polylogue's (compare: $order); Polylogue stays where it is"
+            echo "move=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git ls-files -z -- Cargo.toml '**/Cargo.toml' | xargs -0 sed -i -E \
+            "s#(git = \"https://github.com/Sinity/sinex\", rev = \")[0-9a-f]{40}\"#\\1$sinex\"#"
+          {
+            echo "common=$common"
+            echo "sinex=$sinex"
+          } >>"$GITHUB_OUTPUT"
+      - name: Move shared crates in every workspace lock to the chosen commit
         id: update
+        if: steps.target.outputs.move != 'false'
         env:
           GIT_TERMINAL_PROMPT: "0"
-          COMMON_COMMIT: ${{ github.sha }}
+          COMMON_COMMIT: ${{ steps.target.outputs.common }}
         run: |
           locks=()
           while IFS= read -r -d '' lock; do
@@ -73,37 +116,43 @@ jobs:
           {
             echo "commit=$COMMON_COMMIT"
             echo "short=${COMMON_COMMIT:0:9}"
-            echo "locks<<LOCKS"
-            printf '%s\n' "${locks[@]}"
-            echo "LOCKS"
           } >>"$GITHUB_OUTPUT"
-      - name: Publish the lock update without replacing caller changes
+      - name: Publish the update without replacing caller changes
+        if: steps.target.outputs.move != 'false'
         env:
           GH_TOKEN: ${{ secrets.COMMON_BUMP_TOKEN }}
           COMMON_COMMIT: ${{ steps.update.outputs.commit }}
           COMMON_SHORT: ${{ steps.update.outputs.short }}
-          LOCKS: ${{ steps.update.outputs.locks }}
+          SINEX_COMMIT: ${{ steps.target.outputs.sinex }}
+          PRODUCT: ${{ matrix.product }}
         run: |
-          mapfile -t locks <<<"$LOCKS"
-          git add -- "${locks[@]}"
+          # The checkout is fresh: its only changes are the moved revisions and locks.
+          git add -u
           if git diff --cached --quiet; then
+            echo "$PRODUCT already pins these commits; nothing to publish"
             exit 0
           else
             status=$?
             if [ "$status" -ne 1 ]; then exit "$status"; fi
           fi
+          title="Update polylogue-sinex-common to $COMMON_SHORT"
+          moved="workspace lock files to Sinity/polylogue-sinex-common@$COMMON_COMMIT"
+          if [ -n "$SINEX_COMMIT" ]; then
+            title="Update Sinex to ${SINEX_COMMIT:0:9} and polylogue-sinex-common to $COMMON_SHORT"
+            moved="the Sinex revision to Sinity/sinex@$SINEX_COMMIT and $moved, the commit that Sinex revision pins"
+          fi
           git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-            commit -m "Update polylogue-sinex-common to $COMMON_SHORT"
+            commit -m "$title"
           # A concurrent caller commit rejects this push instead of being replaced.
           git push origin "HEAD:refs/heads/$ADOPTION_BRANCH"
           existing=$(gh pr list --state open --base master --head "$ADOPTION_BRANCH" --json number --jq '.[0].number // empty')
           if [ -z "$existing" ]; then
             body="$RUNNER_TEMP/common-lock-update.md"
             cat >"$body" <<EOF
-          Moves workspace lock files to Sinity/polylogue-sinex-common@$COMMON_COMMIT.
+          Moves $moved.
 
           Opened by the \`Update product locks\` workflow in polylogue-sinex-common. Convert any callers on this branch, then run the checks before merging. Later updates preserve those caller commits.
           EOF
             gh pr create --base master --head "$ADOPTION_BRANCH" \
-              --title "Update polylogue-sinex-common to $COMMON_SHORT" --body-file "$body"
+              --title "$title" --body-file "$body"
           fi

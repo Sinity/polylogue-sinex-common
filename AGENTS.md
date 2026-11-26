@@ -152,9 +152,9 @@ Polylogue and Sinex follow this repository's `master`, and their Cargo.lock
 pins the commit. To change a crate here together with its callers, check
 the product out beside this repository (a cloud session includes both) and
 run `cargo xtask link-common` in the product, which builds it against this
-checkout. Merge the pull request here first. The `Update product locks`
-workflow then opens a pull request in Sinex that moves its lock to the new
-master; the callers are converted on that branch. Polylogue follows after
-Sinex has adopted the commit, in one pull request that moves its Sinex
-revision and its common lock together (README.md, "Depending on this
-repository").
+checkout. The pull request's `products` jobs run both products' checks
+against its head. Merge the pull request here first; the `Update product
+locks` workflow then opens the update pull request in Sinex, and after Sinex
+merges it, the one in Polylogue that moves its Sinex revision and common lock
+together. Callers are converted on those branches (README.md, "Depending on
+this repository").
