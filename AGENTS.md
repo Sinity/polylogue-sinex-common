@@ -65,7 +65,10 @@ the fixes changed. Then verify scoped to the change.
 messages whose body says why, stage explicit paths. A pull request is
 verified by GitHub Actions; master requires the `check` status on the pull
 request's head, branches need not be up to date, so rebase only to resolve a
-conflict. Merge with `gh pr merge --auto --squash --match-head-commit <sha>`.
+conflict. Land with `dev/land <n>`: it waits for `check` on the head, and when master
+has since changed a package the pull request changes it merges master into the
+branch and waits again; then it squash-merges the tested head.
+`dev/land --dry-run <n>` says whether a green result is still current.
 Development speed comes before a perfectly green master (operator,
 2026-11-09): whoever's change breaks master fixes it next. PR descriptions are plain prose: what changed and why, the
 decisions taken, what was verified and what was not, and what each product
