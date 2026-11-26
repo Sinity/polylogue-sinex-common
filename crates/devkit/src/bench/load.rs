@@ -1,4 +1,6 @@
 //! Host-load observations during a benchmark, summarized in constant memory.
+//! They are recorded beside each measurement as data; nothing is refused or
+//! skipped because the host was busy.
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -8,7 +10,6 @@ use std::{
 };
 
 const PERIOD: Duration = Duration::from_secs(1);
-const MAX_GAP_SECONDS: f64 = 2.0;
 
 /// One host-load reading.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -52,26 +53,9 @@ impl HostLoad {
         }
     }
 
-    /// Whether this reading is below the comparison thresholds. Missing
-    /// readings are unknown, never evidence of an idle host.
-    pub fn quiet(&self) -> bool {
-        let (Some(load), Some(cpus), Some(io), Some(memory)) =
-            (self.load1, self.cpus, self.io_full, self.memory_full)
-        else {
-            return false;
-        };
-        cpus > 0
-            && [load, io, memory]
-                .iter()
-                .all(|v| v.is_finite() && *v >= 0.0)
-            && io < 10.0
-            && memory < 5.0
-            && load < cpus as f64 / 2.0
-    }
-
     pub fn to_json(self) -> Value {
         json!({"load1": self.load1, "cpus": self.cpus, "io_full": self.io_full,
-               "memory_full": self.memory_full, "quiet": self.quiet()})
+               "memory_full": self.memory_full})
     }
 }
 
@@ -83,7 +67,6 @@ pub struct LoadInterval {
     peak: HostLoad,
     samples: u64,
     unknown: u64,
-    busy: u64,
     elapsed: Duration,
     max_gap: Duration,
 }
@@ -96,7 +79,6 @@ impl LoadInterval {
             peak: reading,
             samples: 0,
             unknown: 0,
-            busy: 0,
             elapsed: Duration::ZERO,
             max_gap: Duration::ZERO,
         };
@@ -115,8 +97,6 @@ impl LoadInterval {
                 .all(|value| value.is_some_and(|v| v.is_finite() && v >= 0.0));
         if !known {
             self.unknown += 1;
-        } else if !reading.quiet() {
-            self.busy += 1;
         }
         fn maximum(a: Option<f64>, b: Option<f64>) -> Option<f64> {
             match (a, b) {
@@ -129,23 +109,12 @@ impl LoadInterval {
         self.peak.memory_full = maximum(self.peak.memory_full, reading.memory_full);
     }
 
-    /// Every reading was below the thresholds and no gap between readings
-    /// exceeded two periods.
-    pub fn checks_passed(&self) -> bool {
-        self.samples >= 2
-            && self.unknown == 0
-            && self.busy == 0
-            && self.max_gap.as_secs_f64() <= MAX_GAP_SECONDS
-    }
-
     pub fn to_json(&self) -> Value {
         json!({
             "sampling": "periodic", "period_seconds": PERIOD.as_secs_f64(),
             "sample_count": self.samples, "elapsed_seconds": self.elapsed.as_secs_f64(),
             "max_gap_seconds": self.max_gap.as_secs_f64(),
-            "maximum_gap_limit_seconds": MAX_GAP_SECONDS,
-            "unknown_samples": self.unknown, "busy_samples": self.busy,
-            "checks_passed": self.checks_passed(),
+            "unknown_samples": self.unknown,
             "start": self.start.to_json(), "end": self.end.to_json(),
             "peak": {"load1": self.peak.load1, "io_full": self.peak.io_full,
                      "memory_full": self.peak.memory_full},

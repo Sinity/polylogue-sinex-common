@@ -292,17 +292,35 @@ server and a unique subject prefix, or a server of its own when run outside
 
 ## Runners
 
-**Bench** (`bench` feature). Draws a stratified sample of a corpus, written
-down in a manifest; records each run with its metrics and the host load,
-sampled every second; and compares a run with the previous run on the same
-sample and storage, reporting both runs' load beside the changes. Whether
-every load reading was below the thresholds and none more than two seconds
-late is recorded as `load_checks_passed`; it does not decide whether runs are
-compared. Products report the
-hardware-independent figures (bytes, syncs and rows per input, stage
-utilisation) beside absolute rates, as paired runs. `linear_estimate` scales a
-sample's time to the whole corpus by input bytes and labels itself
-uncalibrated.
+**Bench** (`bench` feature). Compares two builds on the same inputs. A
+product lists its corpus as candidate files, each with a stratum and the group
+it is drawn with (a session with its subagents and tool results), and the
+draw takes about a target size, keeping each stratum's share of bytes and
+spread of sizes and each group whole. The sample is written down in a
+manifest (paths, sizes, BLAKE3), copied once, and reused as a fixed corpus
+until it is drawn again.
+
+Each measured process runs as a transient service of the systemd user
+manager (`systemd-run --user`) with the caller's `MemoryMax`, no swap, and
+memory, CPU and I/O accounting; its peak memory, CPU time, block-device bytes
+read and written and wall time come from the unit after it exits, and a
+process killed at the limit is recorded with the outcome `oom-kill`. The
+unit is placed in the slice of the unit that started it and bound to it, so
+a cancelled job stops its measurement and the measured memory counts in the
+same budget; a job runner's own unit cannot be read instead, since it also
+holds the build and every other repetition. Without a user manager (a hosted
+runner, a cloud session) the process runs directly and the record says no
+limit was applied and why.
+
+Builds run in turn, A B A B, for the requested rounds. The result lists each
+figure, work before time: work is what the build did (CPU-seconds, bytes
+written per input byte, syncs, peak memory), time is wall seconds on this
+host. For two builds each figure gives both medians and ranges and either
+"no difference", when the ranges overlap, or the ratio of medians with the
+range the ratio can take. A figure with any unknown reading is unknown. Host
+load, sampled every second, is recorded with every repetition and decides
+nothing. Results go into the history store's `bench_results` table;
+`bench runs` lists them and `bench show` prints one.
 
 **Coverage.** Runs cargo-llvm-cov through `Run::nextest` with the caller's
 package and test selection, separate instrumentation output, full LLVM JSON

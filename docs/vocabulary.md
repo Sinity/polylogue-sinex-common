@@ -262,8 +262,10 @@ mechanic and nothing else in the shared crates.
 | schema database, template | the read-only database compile-time SQL checks use, and the database tests clone |
 | slot | one of a fixed number of test database names per project on a server, held through a file lock while a test uses it |
 | kept failed database | one of a fixed number of names a failed test's database is renamed to for inspection, replacing the oldest |
-| sample | corpus files drawn for a benchmark, written down in a manifest |
-| quiet run | a bench run during which every host-load reading was below the thresholds |
+| sample | corpus files drawn for a benchmark, whole groups at a time, written down in a manifest |
+| repetition | one measured run of one build in a bench comparison |
+| figure | one named reading of a repetition: work (what the build did) or time (elapsed on this host) |
+| no difference | a figure whose ranges over two builds' repetitions overlap |
 | scenario | one exported NixOS check selected for a VM run |
 | corpus | the input files a fuzz target starts with and grows |
 | region | a source span and execution count reported by LLVM coverage |

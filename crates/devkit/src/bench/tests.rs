@@ -6,7 +6,7 @@ fn cand(stratum: &str, rel: &str, size: u64) -> Candidate {
         rel: PathBuf::from(rel),
         stratum: stratum.into(),
         size,
-        grows: false,
+        group: None,
     }
 }
 
@@ -97,32 +97,31 @@ fn spread_reports_quantiles() {
 }
 
 #[test]
-fn materializes_once_cuts_growing_files_and_grows_them_back() {
+fn materializes_once_and_the_manifest_reads_back_equal() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src");
     fs::create_dir_all(src.join("x")).unwrap();
-    let grow_path = src.join("x/log.jsonl");
-    fs::write(&grow_path, "one\ntwo\nthree\nfour\n").unwrap();
-    let fixed = src.join("doc.json");
-    fs::write(&fixed, "{}").unwrap();
+    let log = src.join("x/log.jsonl");
+    fs::write(&log, "one\ntwo\n").unwrap();
+    let doc = src.join("doc.json");
+    fs::write(&doc, "{}").unwrap();
     let cands = vec![
         Candidate {
-            path: grow_path.clone(),
+            path: log.clone(),
             rel: "x/log.jsonl".into(),
             stratum: "log".into(),
-            size: 19,
-            grows: true,
+            size: 8,
+            group: Some("x".into()),
         },
         Candidate {
-            path: fixed,
+            path: doc,
             rel: "doc.json".into(),
             stratum: "doc".into(),
             size: 2,
-            grows: false,
+            group: None,
         },
     ];
-    let m = Manifest::build("p", &cands, &cands, 21, 0, 0.6).unwrap();
-    assert_eq!(m.entries[0].cut, Some(8));
+    let m = Manifest::build("p", &cands, &cands, 10, 0).unwrap();
     let dest = dir.path().join("bench/sample");
     assert!(m.materialize(&dest).unwrap());
     assert!(!m.materialize(&dest).unwrap(), "already materialized");
@@ -130,110 +129,45 @@ fn materializes_once_cuts_growing_files_and_grows_them_back() {
         fs::read_to_string(dest.join("x/log.jsonl")).unwrap(),
         "one\ntwo\n"
     );
-    assert_eq!(m.grow(&dest).unwrap(), 11);
-    assert_eq!(
-        fs::read_to_string(dest.join("x/log.jsonl")).unwrap(),
-        "one\ntwo\nthree\nfour\n"
-    );
-    // After growing, the next materialize starts over from the sample.
-    assert!(m.materialize(&dest).unwrap());
     let path = dir.path().join("m.json");
     m.write(&path).unwrap();
     let back = Manifest::read(&path).unwrap();
     assert_eq!(back.entries, m.entries);
     assert_eq!(back.id(), m.id());
+    // A source that changed after the draw is refused, not copied.
+    fs::write(&log, "one\ntwo\nthree\n").unwrap();
+    fs::remove_dir_all(&dest).unwrap();
+    assert!(m.materialize(&dest).is_err());
 }
 
 #[test]
-fn compares_with_the_previous_run_and_reports_both_loads() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open_at(&dir.path().join("h.db")).unwrap();
-    let quiet_reading = HostLoad {
-        load1: Some(0.1),
-        cpus: Some(16),
-        io_full: Some(0.0),
-        memory_full: Some(0.0),
-    };
-    let mut quiet = load::LoadInterval::new(quiet_reading);
-    quiet.observe(std::time::Duration::from_millis(1), quiet_reading);
-    let mut loaded = load::LoadInterval::new(quiet_reading);
-    loaded.observe(
-        std::time::Duration::from_secs(1),
-        HostLoad {
-            io_full: Some(60.0),
-            ..quiet_reading
-        },
-    );
-    loaded.observe(std::time::Duration::from_secs(2), quiet_reading);
-    let out = dir.path();
-    let a = record(
-        &store,
-        out,
-        "p",
-        "build",
-        "s1",
-        out,
-        &quiet,
-        &json!({"seconds": 100.0}),
-    )
-    .unwrap();
-    let b = record(
-        &store,
-        out,
-        "p",
-        "build",
-        "s1",
-        out,
-        &quiet,
-        &json!({"seconds": 80.0}),
-    )
-    .unwrap();
-    let c = record(
-        &store,
-        out,
-        "p",
-        "build",
-        "s1",
-        out,
-        &loaded,
-        &json!({"seconds": 300.0}),
-    )
-    .unwrap();
-    let cmp = compare(&store, b).unwrap();
-    assert_eq!(cmp["against"], json!(a));
-    assert!((cmp["changes"]["seconds"]["change"].as_f64().unwrap() + 0.2).abs() < 1e-9);
-    assert_eq!(cmp["status"], "compared");
-    // A busy host is recorded beside the comparison, not a reason to skip it.
-    let busy = compare(&store, c).unwrap();
-    assert_eq!(busy["against"], json!(b));
-    assert_eq!(busy["load_checks_passed"], false);
-    assert_eq!(busy["against_load_checks_passed"], true);
-    assert_eq!(busy["changes"]["seconds"]["change"], 2.75);
-    let other_sample = record(
-        &store,
-        out,
-        "p",
-        "build",
-        "s2",
-        out,
-        &quiet,
-        &json!({"seconds": 70.0}),
-    )
-    .unwrap();
-    assert_eq!(
-        compare(&store, other_sample).unwrap()["status"],
-        "no_previous_run"
-    );
-}
-
-#[test]
-fn labels_linear_estimates_as_uncalibrated() {
-    let stages = BTreeMap::from([("parse".to_owned(), 10.0)]);
-    let p = linear_estimate(Some(60.0), &stages, Some(20.0));
-    assert_eq!(p["estimate"]["seconds"], json!(1200.0));
-    assert_eq!(p["calibrated"], false);
-    assert_eq!(p["method"], "linear_in_input_bytes");
-    assert_eq!(p["estimate"]["stages"]["parse"], json!(200.0));
+fn a_drawn_group_includes_every_file_of_it() {
+    // Ten sessions of a main file, two subagents and a tool result, each
+    // about 1,000 bytes; the target is about three sessions.
+    let mut all = Vec::new();
+    for s in 0..10u64 {
+        for (name, size) in [("main", 600), ("sub-1", 200), ("sub-2", 150), ("tool", 50)] {
+            all.push(Candidate {
+                path: PathBuf::from(format!("s{s}/{name}")),
+                rel: PathBuf::from(format!("s{s}/{name}")),
+                stratum: "sessions".into(),
+                size: size + s,
+                group: Some(format!("s{s}")),
+            });
+        }
+    }
+    let chosen = select(&all, 3_000, 5);
+    let sessions: std::collections::BTreeSet<_> =
+        chosen.iter().map(|c| c.group.clone().unwrap()).collect();
+    assert!(!sessions.is_empty() && sessions.len() < 10, "{sessions:?}");
+    for session in &sessions {
+        let members = chosen
+            .iter()
+            .filter(|c| c.group.as_ref() == Some(session))
+            .count();
+        assert_eq!(members, 4, "{session} is drawn whole");
+    }
+    assert_eq!(chosen.len(), sessions.len() * 4);
 }
 
 #[test]
@@ -244,25 +178,6 @@ fn never_takes_a_file_bigger_than_its_strata_share() {
     let chosen = select(&all, 1_000_000, 2);
     assert!(!chosen.iter().any(|c| c.rel == Path::new("db/huge")));
     assert!(chosen.iter().any(|c| c.stratum == "db"));
-}
-
-#[test]
-fn missing_invalid_or_overflowing_values_have_no_estimate() {
-    for (seconds, scale) in [
-        (None, Some(2.0)),
-        (Some(1.0), None),
-        (Some(-1.0), Some(2.0)),
-        (Some(1.0), Some(0.0)),
-        (Some(f64::INFINITY), Some(2.0)),
-        (Some(f64::MAX), Some(2.0)),
-    ] {
-        let value = linear_estimate(seconds, &BTreeMap::new(), scale);
-        assert!(value["estimate"].is_null(), "{value}");
-        assert_eq!(value["calibrated"], false);
-        assert!(value["reason"].is_string());
-    }
-    let stages = BTreeMap::from([("decode".into(), -1.0)]);
-    assert!(linear_estimate(Some(1.0), &stages, Some(2.0))["estimate"].is_null());
 }
 
 #[test]
@@ -298,12 +213,6 @@ fn incomplete_source_observation_keeps_bench_revision_unknown() {
     assert!(observed.head.is_some());
     assert!(observed.observation_error.is_some());
     let store = Store::open_at(&root.join("runs.db")).unwrap();
-    let load = load::LoadInterval::new(HostLoad {
-        load1: None,
-        cpus: None,
-        io_full: None,
-        memory_full: None,
-    });
     let id = record(
         &store,
         root,
@@ -311,15 +220,239 @@ fn incomplete_source_observation_keeps_bench_revision_unknown() {
         "build",
         "sample",
         root,
-        &load,
-        &json!({"seconds":1}),
+        &json!({"seconds": 1}),
     )
     .unwrap();
-    let head: Option<String> = store
-        .connection()
-        .query_row("SELECT head FROM bench_runs WHERE id=?1", [id], |row| {
-            row.get(0)
-        })
+    assert!(result(&store, "demo", id).unwrap().unwrap().head.is_none());
+}
+
+fn repetition(arm: usize, round: u32, cpu: f64, wall: f64) -> Repetition {
+    Repetition {
+        arm,
+        round,
+        // Time first, so the report's ordering is what puts work first.
+        figures: vec![
+            Figure::time("wall_seconds", Some(wall)),
+            Figure::work("cpu_seconds", Some(cpu)),
+        ],
+        record: json!({}),
+    }
+}
+
+fn verdict(result: &Value, figure: &str) -> Value {
+    result["comparison"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["figure"] == figure)
+        .unwrap()
+        .clone()
+}
+
+fn arms(a: &str, b: &str) -> [Arm; 2] {
+    [
+        Arm {
+            label: a.into(),
+            build: json!(a),
+        },
+        Arm {
+            label: b.into(),
+            build: json!(b),
+        },
+    ]
+}
+
+#[test]
+fn compare_reports_no_difference_when_ranges_overlap() {
+    let mut base = [(10.0, 100.0), (10.4, 104.0), (9.8, 99.0)].into_iter();
+    let mut same = [(10.2, 98.0), (9.9, 103.0), (10.6, 101.0)].into_iter();
+    let repetitions = interleave(2, 3, |arm, round| {
+        let (cpu, wall) = if arm == 0 { base.next() } else { same.next() }.unwrap();
+        Ok(repetition(arm, round, cpu, wall))
+    })
+    .unwrap();
+    assert_eq!(
+        repetitions
+            .iter()
+            .map(|r| (r.arm, r.round))
+            .collect::<Vec<_>>(),
+        [(0, 0), (1, 0), (0, 1), (1, 1), (0, 2), (1, 2)],
+        "A B A B order"
+    );
+    let result = report(
+        json!({"id": "s"}),
+        &Limit::memory("1G"),
+        &arms("base", "same"),
+        &repetitions,
+    );
+    let figures: Vec<&str> = result["comparison"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["figure"].as_str().unwrap())
+        .collect();
+    assert_eq!(figures, ["cpu_seconds", "wall_seconds"], "work before time");
+    let cpu = verdict(&result, "cpu_seconds");
+    assert_eq!(cpu["verdict"], "no difference");
+    assert_eq!(cpu["a"]["median"], 10.0);
+    assert_eq!(cpu["b"]["median"], 10.2);
+    assert_eq!(verdict(&result, "wall_seconds")["verdict"], "no difference");
+    assert_eq!(result["limit"]["memory_max"], "1G");
+    assert_eq!(result["repetitions"].as_array().unwrap().len(), 6);
+}
+
+#[test]
+fn compare_reports_a_ratio_when_ranges_do_not_overlap() {
+    let repetitions = vec![
+        repetition(0, 0, 10.0, 100.0),
+        repetition(1, 0, 15.0, 100.0),
+        repetition(0, 1, 11.0, 100.0),
+        repetition(1, 1, 16.0, 100.0),
+        repetition(0, 2, 12.0, 100.0),
+        repetition(1, 2, 18.0, 100.0),
+    ];
+    let result = report(
+        json!({}),
+        &Limit::default(),
+        &arms("base", "slow"),
+        &repetitions,
+    );
+    let cpu = verdict(&result, "cpu_seconds");
+    // Medians 11 and 16; the ratio lies between 15/12 and 18/10.
+    assert_eq!(cpu["ratio"], 16.0 / 11.0);
+    assert_eq!(cpu["ratio_range"], json!([15.0 / 12.0, 18.0 / 10.0]));
+    assert_eq!(cpu["verdict"], "1.455x (1.250 to 1.800)");
+    assert_eq!(verdict(&result, "wall_seconds")["verdict"], "no difference");
+    assert_eq!(
+        result["headline"][0],
+        "cpu_seconds (work): 1.455x (1.250 to 1.800)"
+    );
+}
+
+#[test]
+fn an_unknown_reading_leaves_its_figure_unknown() {
+    let mut missing = repetition(1, 0, 1.0, 1.0);
+    missing.figures[1].value = None;
+    let repetitions = vec![repetition(0, 0, 1.0, 1.0), missing];
+    let result = report(json!({}), &Limit::default(), &arms("a", "b"), &repetitions);
+    assert_eq!(verdict(&result, "cpu_seconds")["verdict"], "unknown");
+    assert_eq!(verdict(&result, "cpu_seconds")["b"]["unknown"], 1);
+}
+
+#[test]
+fn a_result_reads_back_equal() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_at(&dir.path().join("h.db")).unwrap();
+    let only = [Arm {
+        label: "only".into(),
+        build: json!("x"),
+    }];
+    let repetitions = vec![repetition(0, 0, 2.0, 3.0), repetition(0, 1, 4.0, 5.0)];
+    let document = report(json!({"id": "s1"}), &Limit::default(), &only, &repetitions);
+    assert_eq!(
+        document["summary"][0]["figures"][0]["figure"],
+        "cpu_seconds"
+    );
+    assert_eq!(document["summary"][0]["figures"][0]["median"], 3.0);
+    let id = record(
+        &store,
+        dir.path(),
+        "p",
+        "build",
+        "s1",
+        dir.path(),
+        &document,
+    )
+    .unwrap();
+    let back = result(&store, "p", id).unwrap().unwrap();
+    assert_eq!(back.result, document);
+    assert_eq!((back.bench.as_str(), back.sample.as_str()), ("build", "s1"));
+    assert_eq!(results(&store, "p", 5).unwrap().len(), 1);
+    assert!(result(&store, "other", id).unwrap().is_none());
+}
+
+/// The measured child: allocates and touches `DEVKIT_MEASURE_ALLOCATE`
+/// bytes, writes and syncs `DEVKIT_MEASURE_WRITE` bytes to
+/// `DEVKIT_MEASURE_FILE`, and prints a line.
+#[test]
+#[ignore = "child of the measurement test, which launches it with its environment"]
+fn measured_child() {
+    let Some(bytes) = std::env::var_os("DEVKIT_MEASURE_ALLOCATE") else {
+        return;
+    };
+    let bytes: usize = bytes.to_str().unwrap().parse().unwrap();
+    let mut memory = vec![0u8; bytes];
+    for i in (0..bytes).step_by(4096) {
+        memory[i] = 1;
+    }
+    let written: usize = std::env::var("DEVKIT_MEASURE_WRITE")
+        .unwrap()
+        .parse()
         .unwrap();
-    assert!(head.is_none());
+    let path = PathBuf::from(std::env::var_os("DEVKIT_MEASURE_FILE").unwrap());
+    let mut file = fs::File::create(&path).unwrap();
+    io::Write::write_all(&mut file, &vec![7u8; written]).unwrap();
+    file.sync_all().unwrap();
+    println!(
+        "touched {}",
+        memory.iter().map(|b| *b as usize).sum::<usize>()
+    );
+}
+
+fn child(allocate: usize, file: &Path) -> Process {
+    Process::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "bench::tests::measured_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("DEVKIT_MEASURE_ALLOCATE", allocate.to_string())
+        .env("DEVKIT_MEASURE_WRITE", (8usize << 20).to_string())
+        .env("DEVKIT_MEASURE_FILE", file)
+}
+
+fn systemd_user_manager() -> bool {
+    Command::new("systemctl")
+        .args(["--user", "show-environment"])
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+#[test]
+fn a_run_under_memory_max_reports_peak_memory_and_io_from_the_unit() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("written");
+    let measured = measure(&child(64 << 20, &file), &Limit::memory("512M")).unwrap();
+    assert!(measured.succeeded(), "{measured:?}");
+    assert!(String::from_utf8_lossy(&measured.stdout).contains("touched"));
+    assert_eq!(fs::metadata(&file).unwrap().len(), 8 << 20);
+    let a = &measured.accounting;
+    assert!(a.wall_seconds.is_some_and(|s| s > 0.0), "{a:?}");
+    if systemd_user_manager() {
+        assert!(a.unit.is_some());
+        assert_eq!(a.memory_max.as_deref(), Some("512M"));
+        assert!(a.not_applied.is_none());
+        assert!(a.memory_peak_bytes.is_some_and(|b| b >= 64 << 20), "{a:?}");
+        assert!(a.cpu_seconds.is_some_and(|s| s > 0.0), "{a:?}");
+        assert!(a.read_bytes.is_some() && a.written_bytes.is_some(), "{a:?}");
+        // Past its limit the same process is killed, and the outcome says so.
+        let killed = measure(&child(1 << 30, &file), &Limit::memory("128M")).unwrap();
+        assert_eq!(killed.outcome, "oom-kill", "{killed:?}");
+        assert!(
+            killed
+                .accounting
+                .memory_peak_bytes
+                .is_some_and(|b| b <= 128 << 20),
+            "{killed:?}"
+        );
+    } else {
+        // Off systemd the run still happens and says no limit was applied.
+        assert!(a.unit.is_none() && a.memory_max.is_none());
+        assert!(
+            a.not_applied
+                .as_deref()
+                .is_some_and(|r| r.contains("systemd"))
+        );
+    }
 }
