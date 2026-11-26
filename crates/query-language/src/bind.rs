@@ -1,4 +1,4 @@
-//! Binding syntax to immutable, caller-derived saved/result output schemas.
+//! Binding a syntax tree to immutable, caller-derived saved/result output schemas.
 //! Products expand saved definitions or read kept column declarations first,
 //! supply their typed outputs in the catalog, then bind before execution.
 use crate::{Error, ErrorKind, ast::*, catalog::Catalog};
@@ -26,19 +26,20 @@ impl BoundQuery {
         self.query
     }
 }
-/// Validate every source and suffix against the supplied immutable output
-/// snapshot. Rendering and reparsing reuse the parser's one field/type checker;
-/// output markers supplied by an incoming syntax tree are never trusted.
+/// Type `query` against the supplied immutable output snapshots: every
+/// source, condition and transform is checked by the same rules the parser
+/// applies while reading text, over the tree as given. Output markers
+/// supplied by an incoming syntax tree are never trusted; each source's
+/// columns are looked up again.
 pub fn bind(query: &Query, catalog: &Catalog) -> Result<BoundQuery, Error> {
     check_catalog(catalog)?;
-    let text = crate::format::render_query(query, catalog)?;
-    let parsed = crate::parse::parse_typed(&text, catalog)
-        .map_err(|error| crate::parse::parse(&text, catalog).err().unwrap_or(error))?;
-    check_query(&parsed.query, catalog)?;
-    Ok(BoundQuery {
-        query: parsed.query,
-        typing: parsed.typing,
-    })
+    let mut query = query.clone();
+    let mut checker = crate::check::Checker::for_tree(catalog);
+    checker.query(&mut query, None)?;
+    crate::check::ranking::check_ranking(&query, None)?;
+    check_query(&query, catalog)?;
+    let typing = crate::check::typing::project(&checker, &query);
+    Ok(BoundQuery { query, typing })
 }
 /// Check a tree the parser just constructed without formatting or reparsing it.
 /// Correction chaining owns its intermediate text; only its final tree is checked.
@@ -207,3 +208,5 @@ fn check_arguments(arguments: &[ExtensionArgument], catalog: &Catalog) -> Result
         Ok(())
     })
 }
+#[cfg(test)]
+mod tests;

@@ -524,9 +524,10 @@ fn matched_time_selectors_are_explicit_and_round_trip() {
         let decoded: Query = serde_json::from_value(encoded).unwrap();
         let rendered = query_language::format::format_query(&decoded, &catalog).unwrap();
         assert!(rendered.contains(&format!(" at {word}")));
+        // Binding keeps the tree it is given (README, "Before execution a
+        // product binds the parsed tree").
         let bound = query_language::bind::bind(&decoded, &catalog).unwrap();
-        let reparsed = parse(&rendered, &catalog).unwrap();
-        assert_eq!(bound.query().transforms, reparsed.transforms);
+        assert_eq!(bound.query().transforms, decoded.transforms);
         let upper = parse(&text.to_uppercase(), &catalog).unwrap();
         let TransformKind::Join {
             on: JoinOn::Order {
