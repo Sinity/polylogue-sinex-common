@@ -306,6 +306,16 @@ impl<'a> Checker<'a> {
     pub fn reads_as_value(&self, scope: &Scope, word: &str, place: Place) -> bool {
         !self.field_known(scope, word) && (place == Place::Argument || is_literal(word))
     }
+    /// A word the catalog declares a reference reads as that reference;
+    /// `field:value` does so only when the scope has no such field or the
+    /// reference form overrides it.
+    pub fn reads_as_reference(&self, scope: &Scope, word: &str) -> bool {
+        self.catalog.is_reference(word)
+            && word.split_once(':').is_none_or(|(field, _)| {
+                self.scope_field(scope, field).is_none()
+                    || self.catalog.reference_overrides_field(word)
+            })
+    }
     pub fn check_field(&self, scope: &Scope, field: &str, position: usize) -> Result<(), Error> {
         if self.field_known(scope, field) {
             return Ok(());

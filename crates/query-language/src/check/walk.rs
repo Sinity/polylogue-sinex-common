@@ -2,8 +2,11 @@
 //! applies them to text. The tree is checked as given, with the parser's
 //! elaborations that depend on the rows in scope applied again now that every
 //! source's output is known: a word that is not a field reads as a value, a
-//! value takes its field's canonical spelling, a time bound names the scope's
-//! main time and a sequence steps through the scope's sequence unit.
+//! word the catalog declares a reference reads as that reference, a value
+//! takes its field's canonical spelling, a time bound names the scope's main
+//! time and a sequence steps through the scope's sequence unit. A product
+//! that substitutes values into a tree it parsed gets the nodes the parser
+//! would have built from the substituted text.
 use super::*;
 
 impl Checker<'_> {
@@ -316,6 +319,14 @@ impl Checker<'_> {
                 }
                 ConditionKind::Extension { arguments, .. } => {
                     self.arguments(arguments, scope, start)?
+                }
+                ConditionKind::Text {
+                    text,
+                    mode: TextMode::Word,
+                } if self.reads_as_reference(scope, text) => {
+                    *kind = ConditionKind::Reference {
+                        reference: std::mem::take(text),
+                    };
                 }
                 _ => {}
             }

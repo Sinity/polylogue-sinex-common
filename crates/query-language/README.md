@@ -413,9 +413,12 @@ Binding returns the typing of every scope, before and after each transform,
 so a compiler never reconstructs types from names. The parser and binding
 apply one checker: the parser runs each rule on a node as it builds it, and
 binding runs the same rules over the tree it is given, never formatting and
-parsing it again. The bound tree is that tree, with the elaborations that
-depend on a source's columns made again now that they are known: a word
-that is not a field reads as a value, a value takes its field's canonical
+parsing it again. The bound tree is that tree, with the parser's
+elaborations of words and values made again now that every source's columns
+are known, so a tree a product filled with parameter values gets the nodes
+the parser would have built from that text: a word
+that is not a field reads as a value, a word the catalog declares a
+reference reads as that reference, a value takes its field's canonical
 spelling, a time bound names the main time and a sequence steps through the
 scope's sequence unit. Its spans stay those of the text it was parsed from;
 a refusal from binding is placed at the start of the condition, transform or

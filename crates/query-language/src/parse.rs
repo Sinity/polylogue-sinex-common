@@ -862,7 +862,7 @@ impl Parser<'_> {
                     start,
                 ));
             }
-            if self.catalog.is_reference(&token.text) {
+            if self.check.reads_as_reference(scope, &token.text) {
                 return Ok(self.cond(
                     start,
                     ConditionKind::Reference {
@@ -1005,10 +1005,7 @@ impl Parser<'_> {
             .filter(|value| value.quoted)
             .map(|value| format!("{field}:{}", value.text));
         let reference = quoted_reference.as_deref().unwrap_or(&token.text);
-        if self.catalog.is_reference(reference)
-            && (self.check.scope_field(scope, field).is_none()
-                || self.catalog.reference_overrides_field(reference))
-        {
+        if self.check.reads_as_reference(scope, reference) {
             let reference = reference.to_owned();
             if quoted_reference.is_some() {
                 self.at += 1;
