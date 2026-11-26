@@ -64,23 +64,31 @@ Both products follow this repository's `master` branch; each workspace's
 hashed-blobs = { git = "https://github.com/Sinity/polylogue-sinex-common", branch = "master" }
 ```
 
-When `master` moves, a workflow here opens a pull request in Sinex that updates
-all its workspace locks to the new commit; Sinex's own checks decide when to
-take it. Polylogue also pins Sinex by revision, and that Sinex revision's own
-common dependencies must resolve against the same common commit, so the order
-is: common merges, Sinex adopts that commit, then one Polylogue pull request
-moves its Sinex revision and its common lock together and converts the
-callers. The workflow needs the repository secret `COMMON_BUMP_TOKEN`,
-with Contents and Pull requests read/write access to both products. Without
-it, update their locks with `cargo update` selecting the shared crates
-that product adopts and open those pull requests manually. Convert affected
-callers and run the product's checks before merging its lock update.
-Later lock updates start from the adoption branch's current tip and preserve
-its caller commits and pull request description. A concurrent push rejects
-the update; the next run starts from the new tip.
-Sinex also has `fuzz/Cargo.lock`: update it with
-`cargo update --manifest-path fuzz/Cargo.toml -p devkit -p hashed-blobs`.
-Use `--precise <commit>` to select the same revision in both locks.
+A pull request here shows, beside the required `check`, whether each
+product still passes against its head: the `products` workflow checks out
+Polylogue's and Sinex's `master`, links each to the pull request's head as
+`cargo xtask link-common` does, and runs that product's formatting, Clippy and
+tests, both products at once. Its jobs inform and are not required. A job's
+summary also gives the product's own check of the same master commit, so a
+product that was already failing is not mistaken for this change's fault.
+
+When `master` moves, the `Update product locks` workflow opens or updates a
+pull request in Sinex on its `update-polylogue-sinex-common` branch that
+moves every workspace lock to the new commit (Sinex's `fuzz/Cargo.lock`
+included). Polylogue also pins Sinex by revision, and its one lock must
+resolve that Sinex revision's common dependencies and its own to the same
+common commit, so Polylogue moves after Sinex: when Sinex's master lock
+changes, Sinex's `Update Polylogue` workflow starts `Update product locks`
+again, which opens or updates the pull request on Polylogue's
+`update-polylogue-sinex-common` branch that moves its Sinex revision to Sinex's
+master and its common lock to the commit that master pins. Each product's own
+checks decide when to merge. Convert affected callers on the update branch;
+later updates start from the branch's current tip and keep its caller commits
+and pull request description, and a concurrent push rejects the update until
+the next run starts from the new tip. The workflow here needs the repository
+secret `COMMON_BUMP_TOKEN` with Contents and Pull requests read/write access to
+both products; Sinex's workflow needs a secret of the same name with Actions
+read/write access to this repository.
 
 To work on this repository and a product together, check both out side by
 side and run `cargo xtask link-common` in the product: it writes a git-ignored
@@ -90,8 +98,9 @@ by argument, then `POLYLOGUE_SINEX_COMMON`, then `../polylogue-sinex-common`.
 `cargo xtask unlink-common` restores the original workspace locks.
 `devkit::local_link::LocalLink` owns patching, lock backups and error rollback;
 each product supplies its checkout discovery and workspace paths.
-A cross-repository change is two pull requests: merge the change here, then take the lock update
-in the product, converting every caller in that pull request.
+A cross-repository change merges here first, after its `products` jobs show
+what each product needs; the callers are then converted on the update
+branches the workflow opens.
 
 Tags mark releases only; nothing depends on them.
 

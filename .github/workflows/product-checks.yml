@@ -1,0 +1,95 @@
+# Builds each product's master against this pull request's head and runs that
+# product's own checks, both products at once, so a pull request shows whether
+# it breaks Polylogue or Sinex before it merges. The product is linked to the
+# head the way `cargo xtask link-common <path>` links a local checkout. These
+# jobs inform; `check` stays the one required status.
+#
+# There is no saved build: a product's build cache belongs to its own
+# repository, so every run compiles the product from nothing.
+name: products
+
+on:
+  pull_request:
+
+concurrency:
+  group: products-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  product:
+    name: ${{ matrix.product }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Polylogue's hosted check without its Nix job, which checks only
+          # Polylogue's Nix inputs: `fast` (formatting, workspace-hack and
+          # Clippy) and every test.
+          - product: polylogue
+            lint: fast
+            shell: ''
+          # Sinex's hosted check: `check` (formatting, dependency boundaries
+          # and Clippy against the schema database) and every test, in its
+          # development shell.
+          - product: sinex
+            lint: check
+            shell: nix develop --command
+    env:
+      COMMON_HEAD: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: Sinity/${{ matrix.product }}
+          ref: master
+      # Outside the product's tree, so nothing in the product sees it as its own.
+      - name: This pull request's head
+        run: |
+          COMMON="$RUNNER_TEMP/polylogue-sinex-common"
+          echo "COMMON=$COMMON" >>"$GITHUB_ENV"
+          git init -q "$COMMON"
+          git -C "$COMMON" fetch -q --no-tags --depth=1 "https://github.com/$GITHUB_REPOSITORY" "$COMMON_HEAD"
+          git -C "$COMMON" checkout -q --detach FETCH_HEAD
+      - name: Polylogue's job setup
+        if: matrix.product == 'polylogue'
+        uses: ./.github/actions/rust
+      - name: Sinex's job setup
+        if: matrix.product == 'sinex'
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc
+          sudo nohup rm -rf /usr/local/lib/android /opt/hostedtoolcache/CodeQL >/dev/null 2>&1 &
+      - if: matrix.product == 'sinex'
+        uses: cachix/install-nix-action@v31
+      - if: matrix.product == 'sinex'
+        uses: DeterminateSystems/magic-nix-cache-action@v8
+      - name: Link the product to this pull request's head
+        id: link
+        run: ${{ matrix.shell }} cargo xtask link-common "$COMMON"
+      - name: cargo xtask ${{ matrix.lint }}
+        run: ${{ matrix.shell }} cargo xtask ${{ matrix.lint }}
+      - name: cargo xtask test
+        if: ${{ !cancelled() && steps.link.outcome == 'success' }}
+        run: ${{ matrix.shell }} cargo xtask test
+      - name: Report the product's own check of the same master commit
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCT: ${{ matrix.product }}
+          OUTCOME: ${{ job.status }}
+        run: |
+          commit=$(git rev-parse HEAD)
+          own=$(gh run list -R "Sinity/$PRODUCT" --workflow check.yml --commit "$commit" --json status,conclusion,url \
+            --jq '.[0] // empty | "\(if .conclusion == "" then .status else .conclusion end) \(.url)"')
+          {
+            echo "Sinity/$PRODUCT master at \`${commit:0:9}\`, built against this pull request's head \`${COMMON_HEAD:0:9}\`: **$OUTCOME**."
+            echo
+            echo "Sinity/$PRODUCT's own check of that master commit: ${own:-no run recorded}."
+          } >>"$GITHUB_STEP_SUMMARY"
+          if [ "${own%% *}" = failure ]; then
+            echo "::warning::Sinity/$PRODUCT master ${commit:0:9} already fails its own check (${own#* }); a failure here need not come from this pull request."
+          fi
