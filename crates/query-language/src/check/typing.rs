@@ -1,16 +1,17 @@
-//! Capture the parser's scopes. Walking the returned tree assigns addresses;
+//! Capture the checker's scopes. Walking the returned tree assigns addresses;
 //! it never reconstructs group, projection, or aggregate transitions.
 use super::*;
+use crate::parse::is_money;
 use crate::scope::{
     FieldInfo, NodePath, Origin, QueryScope, TransformScope, TypeRule, TypedOperand, Typing,
 };
 
-pub(super) struct Capture {
+pub(crate) struct Capture {
     pub source: Scope,
     pub transforms: Vec<(Scope, Scope)>,
 }
-impl Parser<'_> {
-    pub(super) fn transform_path(&self) -> NodePath {
+impl Checker<'_> {
+    pub(crate) fn transform_path(&self) -> NodePath {
         let (query, transform) = self
             .query_stack
             .last()
@@ -23,7 +24,7 @@ impl Parser<'_> {
             .index(transform)
             .field("kind")
     }
-    pub(super) fn field_info(&self, scope: &Scope, name: &str) -> FieldInfo {
+    pub(crate) fn field_info(&self, scope: &Scope, name: &str) -> FieldInfo {
         let field = self
             .scope_field(scope, name)
             .cloned()
@@ -46,7 +47,7 @@ impl Parser<'_> {
         });
         FieldInfo { field, origin }
     }
-    pub(super) fn expression_info(&self, scope: &Scope, expression: &Expression) -> FieldInfo {
+    pub(crate) fn expression_info(&self, scope: &Scope, expression: &Expression) -> FieldInfo {
         crate::depth::deeper(|| match expression {
             Expression::Field { name } => self.field_info(scope, name),
             Expression::Value { value } => FieldInfo {
@@ -141,7 +142,7 @@ impl Parser<'_> {
             }
         })
     }
-    pub(super) fn aggregate_info(
+    pub(crate) fn aggregate_info(
         &self,
         aggregate: &Aggregate,
         inputs: Vec<FieldInfo>,
@@ -179,7 +180,7 @@ impl Parser<'_> {
         }
     }
     /// The fields a scope shows, each with its declaration and origin.
-    pub(super) fn visible(&self, scope: &Scope) -> Vec<FieldInfo> {
+    pub(crate) fn visible(&self, scope: &Scope) -> Vec<FieldInfo> {
         let mut names: BTreeSet<_> = if let Some(columns) = &scope.columns {
             columns.clone()
         } else if let Some(output) = &scope.output {
@@ -206,7 +207,7 @@ impl Parser<'_> {
             .map(|name| self.field_info(scope, name))
             .collect()
     }
-    fn snapshot(&self, scope: &Scope) -> crate::scope::Scope {
+    pub(crate) fn snapshot(&self, scope: &Scope) -> crate::scope::Scope {
         crate::scope::Scope {
             unit: scope
                 .row_domain
@@ -221,7 +222,7 @@ impl Parser<'_> {
 /// The kind of one operand of a comparison or an addition, read against the
 /// other operand: a bare number beside money is money (`cost - 2.90`), so
 /// money needs no unit suffix in an expression.
-pub(super) fn operand_kind(expression: &Expression, other: &FieldKind) -> FieldKind {
+pub(crate) fn operand_kind(expression: &Expression, other: &FieldKind) -> FieldKind {
     // The formatter quotes every scalar it renders, so a comparison's literal
     // is typed by its text whether or not it was quoted.
     let kind = match expression {
@@ -242,7 +243,7 @@ pub(super) fn operand_kind(expression: &Expression, other: &FieldKind) -> FieldK
 }
 /// `operand_kind` inside arithmetic: only `+` and `-` read a bare number as
 /// money; `cost * 2` and `cost / 2` scale money by a plain number.
-pub(super) fn operand_kind_in(
+pub(crate) fn operand_kind_in(
     operator: Arithmetic,
     expression: &Expression,
     kind: &FieldKind,
@@ -261,7 +262,7 @@ pub(super) fn operand_kind_in(
 /// literal, which the catalog's own value checks govern; numbers, money,
 /// durations and times compare only within their dimension. A time compares
 /// with text, the spelling of dates and relative times.
-pub(super) fn comparable(left: &FieldKind, right: &FieldKind) -> bool {
+pub(crate) fn comparable(left: &FieldKind, right: &FieldKind) -> bool {
     use FieldKind::*;
     let dimension = |kind: &FieldKind| match kind {
         Integer | Number => Some(0),
@@ -278,7 +279,7 @@ pub(super) fn comparable(left: &FieldKind, right: &FieldKind) -> bool {
     }
 }
 /// The kind of an unquoted or quoted literal in an expression.
-pub(super) fn literal_kind(value: &Value) -> FieldKind {
+pub(crate) fn literal_kind(value: &Value) -> FieldKind {
     match value {
         Value::Scalar {
             text,
@@ -300,7 +301,7 @@ pub(super) fn literal_kind(value: &Value) -> FieldKind {
     }
 }
 
-pub(super) fn project(parser: &Parser<'_>, query: &Query) -> Typing {
+pub(crate) fn project(parser: &Checker<'_>, query: &Query) -> Typing {
     let mut walker = Walker {
         parser,
         next_query: 0,
@@ -329,7 +330,7 @@ pub(super) fn project(parser: &Parser<'_>, query: &Query) -> Typing {
     walker.typing
 }
 struct Walker<'a, 'b> {
-    parser: &'a Parser<'b>,
+    parser: &'a Checker<'b>,
     next_query: usize,
     typing: Typing,
     /// The address of the node being walked. Each level pushes its steps and
@@ -571,7 +572,7 @@ impl Walker<'_, '_> {
                 self.at(&[F("query")], |w| w.query(query));
                 if let MatchChoice::FirstBy { keys } = pick {
                     let parser = self.parser;
-                    let inner = &parser.inner_scopes[&condition.span.start];
+                    let inner = &parser.inner_scopes[&parser.order_key(condition)];
                     let candidate = parser.match_scope(inner, within.as_ref());
                     for (index, key) in keys.iter().enumerate() {
                         self.at(&[F("pick"), F("keys"), I(index), F("expression")], |w| {

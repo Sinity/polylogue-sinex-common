@@ -1,7 +1,10 @@
 //! Pure query mechanics shared by product-owned catalogs and compilers.
+#[cfg(test)]
+extern crate self as query_language;
 pub mod ast;
 pub mod bind;
 pub mod catalog;
+mod check;
 #[cfg(feature = "conformance")]
 pub mod compiler_cases;
 pub mod complete;
