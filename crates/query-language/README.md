@@ -149,7 +149,9 @@ Four operators, each with one meaning in both products:
 - `F:unknown` is true where the value is unknown and `F:known` where it is
   known. Both are two-valued, so they select exactly the rows three-valued
   conditions skip.
-- **Times.** `since:T` and `until:T` act on the unit's main time by overlap;
+- **Times.** `since:T` and `until:T` act on the unit's main time by overlap.
+  On a unit without a main time, a field named `since` or `until` can declare
+  a closed set of values and uses its ordinary matching rule for that set.
   `F in RANGE` acts on any named time field (`when in last week`);
   `F between A and B` takes two endpoints. A bare duration compared with `<`
   or `>` (`when > 7d`) is refused, naming the two correct forms, because it

@@ -2,6 +2,7 @@ use crate::support;
 use jiff::{Timestamp, civil::Time as CivilTime, tz::TimeZone};
 use query_language::{
     ast::{ConditionKind, Query, Source, Value},
+    catalog::{Catalog, Field, FieldKind, Unit},
     format::format_query,
     identity::{normal_form, question_id},
     parse::parse,
@@ -61,6 +62,39 @@ fn both_catalogs_preserve_keyword_and_colon_bounds_as_typed_nodes() {
             }
         }
     }
+}
+
+#[test]
+fn a_declared_time_word_matches_its_closed_values_without_a_main_time() {
+    let mut catalog = Catalog::new("changes");
+    catalog.units.push(Unit {
+        name: "changes".into(),
+        fields: [("since", "seen"), ("until", "finished")]
+            .map(|(name, value)| Field {
+                name: name.into(),
+                kind: FieldKind::Exact,
+                values: vec![value.into()],
+                ..Field::default()
+            })
+            .into(),
+        ..Unit::default()
+    });
+    for (field, value) in [("since", "seen"), ("until", "finished")] {
+        let query = parse(&format!("changes where {field}:{value}"), &catalog).unwrap();
+        let expected = ConditionKind::Match {
+            field: field.into(),
+            value: Value::scalar(value),
+        };
+        assert_eq!(condition(&query), &expected);
+        let rendered = format_query(&query, &catalog).unwrap();
+        assert_eq!(
+            normal_form(&parse(&rendered, &catalog).unwrap(), &catalog).unwrap(),
+            normal_form(&query, &catalog).unwrap()
+        );
+    }
+    let error = parse("changes where since:7d", &catalog).unwrap_err();
+    assert_eq!(error.kind, query_language::ErrorKind::BadValue);
+    assert_eq!(error.candidates, ["seen"]);
 }
 
 #[test]
