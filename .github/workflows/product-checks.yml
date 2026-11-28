@@ -30,11 +30,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # `warm` is Clippy and the test build; `fast` would also verify the
-          # workspace-hack crate, whose configuration names devkit's Git
-          # source and so cannot resolve while linked. Formatting does not
-          # depend on the linked head.
-          - { product: polylogue, part: lint, run: cargo xtask warm }
+          # Polylogue's linked lint runs formatting and both Clippy configurations.
+          # The pinned workspace-hack graph is checked in Polylogue's own CI.
+          - { product: polylogue, part: lint, run: cargo xtask fast }
           - { product: polylogue, part: tests 1/3, run: cargo xtask test --partition hash:1/3 }
           - { product: polylogue, part: tests 2/3, run: cargo xtask test --partition hash:2/3 }
           - { product: polylogue, part: tests 3/3, run: cargo xtask test --partition hash:3/3 }
