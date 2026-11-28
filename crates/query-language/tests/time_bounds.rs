@@ -65,14 +65,15 @@ fn both_catalogs_preserve_keyword_and_colon_bounds_as_typed_nodes() {
 }
 
 #[test]
-fn a_declared_time_word_matches_its_field_on_a_unit_without_a_main_time() {
+fn a_declared_time_word_matches_its_closed_values_without_a_main_time() {
     let mut catalog = Catalog::new("changes");
     catalog.units.push(Unit {
         name: "changes".into(),
-        fields: ["since", "until"]
-            .map(|name| Field {
+        fields: [("since", "seen"), ("until", "finished")]
+            .map(|(name, value)| Field {
                 name: name.into(),
                 kind: FieldKind::Exact,
+                values: vec![value.into()],
                 ..Field::default()
             })
             .into(),
@@ -86,8 +87,14 @@ fn a_declared_time_word_matches_its_field_on_a_unit_without_a_main_time() {
         };
         assert_eq!(condition(&query), &expected);
         let rendered = format_query(&query, &catalog).unwrap();
-        assert_eq!(condition(&parse(&rendered, &catalog).unwrap()), &expected);
+        assert_eq!(
+            normal_form(&parse(&rendered, &catalog).unwrap(), &catalog).unwrap(),
+            normal_form(&query, &catalog).unwrap()
+        );
     }
+    let error = parse("changes where since:7d", &catalog).unwrap_err();
+    assert_eq!(error.kind, query_language::ErrorKind::BadValue);
+    assert_eq!(error.candidates, ["seen"]);
 }
 
 #[test]
