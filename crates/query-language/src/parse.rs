@@ -1015,10 +1015,9 @@ impl Parser<'_> {
         let list = RankList::ALL
             .into_iter()
             .find(|list| field.eq_ignore_ascii_case(list.name()));
-        let keyword = list.is_some()
-            || ["in", "since", "until"]
-                .iter()
-                .any(|name| field.eq_ignore_ascii_case(name));
+        let until = field.eq_ignore_ascii_case("until");
+        let time_word = until || field.eq_ignore_ascii_case("since");
+        let keyword = list.is_some() || time_word || field.eq_ignore_ascii_case("in");
         if !keyword {
             self.check.check_field(scope, field, start)?;
         }
@@ -1055,13 +1054,10 @@ impl Parser<'_> {
                 },
             ));
         }
-        if field.eq_ignore_ascii_case("since") || field.eq_ignore_ascii_case("until") {
-            let kind = self.check.time_bound(
-                scope,
-                field.eq_ignore_ascii_case("until"),
-                value,
-                self.pos(),
-            )?;
+        if time_word
+            && (self.check.main_time(scope).is_some() || !self.check.field_known(scope, field))
+        {
+            let kind = self.check.time_bound(scope, until, value, self.pos())?;
             return Ok(self.cond(start, kind));
         }
         self.check.check_match(scope, field, &mut value, start)?;

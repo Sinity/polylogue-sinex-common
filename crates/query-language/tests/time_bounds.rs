@@ -2,6 +2,7 @@ use crate::support;
 use jiff::{Timestamp, civil::Time as CivilTime, tz::TimeZone};
 use query_language::{
     ast::{ConditionKind, Query, Source, Value},
+    catalog::{Catalog, Field, FieldKind, Unit},
     format::format_query,
     identity::{normal_form, question_id},
     parse::parse,
@@ -60,6 +61,32 @@ fn both_catalogs_preserve_keyword_and_colon_bounds_as_typed_nodes() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn a_declared_time_word_matches_its_field_on_a_unit_without_a_main_time() {
+    let mut catalog = Catalog::new("changes");
+    catalog.units.push(Unit {
+        name: "changes".into(),
+        fields: ["since", "until"]
+            .map(|name| Field {
+                name: name.into(),
+                kind: FieldKind::Exact,
+                ..Field::default()
+            })
+            .into(),
+        ..Unit::default()
+    });
+    for (field, value) in [("since", "seen"), ("until", "finished")] {
+        let query = parse(&format!("changes where {field}:{value}"), &catalog).unwrap();
+        let expected = ConditionKind::Match {
+            field: field.into(),
+            value: Value::scalar(value),
+        };
+        assert_eq!(condition(&query), &expected);
+        let rendered = format_query(&query, &catalog).unwrap();
+        assert_eq!(condition(&parse(&rendered, &catalog).unwrap()), &expected);
     }
 }
 
